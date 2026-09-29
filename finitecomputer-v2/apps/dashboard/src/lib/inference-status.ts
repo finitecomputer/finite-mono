@@ -44,10 +44,6 @@ export function classifyLegacyProvider(provider: string): InferenceRoute {
   }
 }
 
-export function hasCapability(status: AgentConnectionsStatus, name: string): boolean {
-  return status.capabilities?.includes(name) ?? false;
-}
-
 export function inferenceView(status: AgentConnectionsStatus): InferenceView {
   const capabilities = new Set(status.capabilities ?? []);
   const v2 = capabilities.has("inference.status.v2");

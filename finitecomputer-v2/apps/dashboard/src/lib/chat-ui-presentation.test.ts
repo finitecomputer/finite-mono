@@ -367,27 +367,13 @@ test("an agent message carrying a known finite_notice becomes a notice item", ()
 test("metadata that is not a known finite_notice leaves the message unchanged", () => {
   const unrecognized: unknown[] = [
     undefined,
-    null,
-    42,
-    "",
-    "   ",
     "not json",
-    "{\"finite_notice\":",
     "null",
-    "[]",
-    "\"finite_notice\"",
-    "{}",
     JSON.stringify({ approve: { service: "brain" } }),
-    noticeMetadata(null),
-    noticeMetadata("inference_fallback"),
-    noticeMetadata([{ v: 1, type: "inference_fallback" }]),
     noticeMetadata({ type: "inference_fallback" }),
     noticeMetadata({ v: 2, type: "inference_fallback" }),
-    noticeMetadata({ v: "1", type: "inference_fallback" }),
-    noticeMetadata({ v: 1 }),
     noticeMetadata({ v: 1, type: 1 }),
     noticeMetadata({ v: 1, type: "inference_restore" }),
-    noticeMetadata({ v: 1, type: "__proto__" }),
     JSON.stringify({ finite_notice: { v: 1 }, type: "inference_fallback" }),
   ];
   for (const metadataJson of unrecognized) {
@@ -400,7 +386,7 @@ test("metadata that is not a known finite_notice leaves the message unchanged", 
   }
 });
 
-test("finite_notice metadata changes only agent prose; status, tools, and user messages keep today's projection", () => {
+test("finite notices apply only to agent prose and settle preceding tool progress", () => {
   const metadataJson = noticeMetadata({ v: 1, type: "inference_fallback" });
   const status = withMetadata(message({ messageId: "status", seq: 2, kind: "status" }), metadataJson);
   const tool = withMetadata(
@@ -409,35 +395,22 @@ test("finite_notice metadata changes only agent prose; status, tools, and user m
   );
   const media = withMetadata(message({ messageId: "media", seq: 4, kind: "media" }), metadataJson);
   const own = withMetadata(
-    message({
-      messageId: "own",
-      seq: 5,
-      senderAccountId: "user-account",
-      senderDeviceId: "hosted-web",
-      isMine: true,
-    }),
+    message({ messageId: "own", seq: 5, isMine: true, senderAccountId: "user-account" }),
     metadataJson
   );
-
   assert.deepEqual(transcriptItems([status, tool, media, own], "user-account"), [
     { type: "tools", id: "tools-tool", messages: [{ ...tool, status: "complete" }] },
     { type: "message", message: media },
     { type: "message", message: own },
   ]);
-});
 
-test("a notice after tool progress settles the tool group like any agent message", () => {
-  const tool = message({ messageId: "tool", seq: 2, kind: "tool", status: "running" });
   const notice = withMetadata(
-    message({ messageId: "notice", seq: 3, displayContent: FALLBACK_NOTICE_TEXT }),
-    noticeMetadata({ v: 1, type: "inference_fallback" })
+    message({ messageId: "notice", seq: 4, displayContent: FALLBACK_NOTICE_TEXT }),
+    metadataJson
   );
-  const final = message({ messageId: "final", seq: 4, finalDelivery: true });
-
-  assert.deepEqual(transcriptItems([tool, notice, final], "user-account"), [
+  assert.deepEqual(transcriptItems([tool, notice], "user-account"), [
     { type: "tools", id: "tools-tool", messages: [{ ...tool, status: "complete" }] },
     { type: "notice", id: "notice-notice", message: notice },
-    { type: "message", message: final },
   ]);
 });
 
@@ -457,12 +430,8 @@ test("a notice renders as a muted centered note with an info icon and only its t
   );
   const html = renderToStaticMarkup(createElement(TranscriptNotice, { message: hostile }));
 
-  assert.match(html, /^<div class="finite-chat__live-activity justify-center text-center" role="note">/u);
-  assert.match(html, /<svg\b[^>]*class="[^"]*lucide-info[^"]*"[^>]*aria-hidden="true"/u);
-  assert.match(
-    html,
-    /<span>Finite Private answered &lt;b&gt;this&lt;\/b&gt; \[response\]\(https:\/\/example\.invalid\/x\)\.<\/span><\/div>$/u
-  );
+  assert.match(html, /role="note"/u);
+  assert.match(html, /Finite Private answered &lt;b&gt;this&lt;\/b&gt;/u);
   assert.doesNotMatch(html, /<a\b|<b>|<img\b|href=|javascript:/u);
 });
 

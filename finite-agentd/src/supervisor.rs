@@ -452,13 +452,15 @@ mod tests {
             Some(sleeping_process("simplex")),
         );
         let simplex_pid = wait_for_running(&handle, "simplex", &reap).await.pid();
-        reap.track(wait_for_running(&handle, "hermes", &reap).await.pid());
+        let hermes_pid = wait_for_running(&handle, "hermes", &reap).await.pid();
         handle.restart_hermes().await.unwrap();
-        reap.track(handle.status().await.processes["hermes"].pid());
-        assert_eq!(
-            handle.status().await.processes["simplex"].pid(),
-            simplex_pid
-        );
+        let status = handle.status().await;
+        let restarted = &status.processes["hermes"];
+        reap.track(restarted.pid());
+        assert!(matches!(restarted.state, ProcessState::Running { .. }));
+        assert_eq!(restarted.restart_count, 1);
+        assert_ne!(restarted.pid(), hermes_pid);
+        assert_eq!(status.processes["simplex"].pid(), simplex_pid);
         handle.shutdown().await;
         tokio::time::timeout(WAIT, async {
             loop {
@@ -473,30 +475,6 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-
-    #[tokio::test]
-    async fn restart_hermes_waits_for_a_new_running_process() {
-        let reap = Reap::default();
-        let handle = start_supervisor(
-            sleeping_process("sidecar"),
-            sleeping_process("health"),
-            sleeping_process("hermes"),
-            None,
-        );
-        let original_pid = wait_for_running(&handle, "hermes", &reap)
-            .await
-            .pid()
-            .unwrap();
-
-        handle.restart_hermes().await.unwrap();
-
-        let restarted = handle.status().await.processes["hermes"].clone();
-        reap.track(restarted.pid());
-        assert!(matches!(restarted.state, ProcessState::Running { .. }));
-        assert_eq!(restarted.restart_count, 1);
-        assert_ne!(restarted.pid(), Some(original_pid));
-        handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -656,79 +634,54 @@ mod tests {
     }
 
     #[test]
-    fn starting_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Starting,
-                restart_count: 0,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn restarting_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Restarting,
-                restart_count: 1,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn running_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Running { pid: 4242 },
-                restart_count: 1,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn unavailable_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Unavailable {
+    fn process_status_keeps_the_published_wire_shapes() {
+        let at = 1_700_000_000_000;
+        let cases = [
+            (
+                ProcessState::Starting,
+                0,
+                r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Restarting,
+                1,
+                r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Running { pid: 4242 },
+                1,
+                r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Unavailable {
                     error: "program not found".to_owned(),
                 },
-                restart_count: 2,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn exited_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Exited {
+                2,
+                r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Exited {
                     exit: "exit status: 1".to_owned(),
                 },
-                restart_count: 3,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn stopped_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Stopped,
-                restart_count: 4,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
+                3,
+                r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Stopped,
+                4,
+                r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+        ];
+        for (state, restart_count, json) in cases {
+            assert_wire_shape(
+                ProcessStatus {
+                    state,
+                    restart_count,
+                    updated_at_ms: at,
+                },
+                json,
+            );
+        }
     }
 
     #[test]

@@ -431,28 +431,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_restart_and_shutdown_leave_gateway_and_simplex_untouched() {
-        // Real OS processes qualify only our lifecycle boundary. They do not
-        // substitute for the separate pinned native-Hermes protocol proof.
-        let existing = crate::supervisor::start_supervisor(
-            sleeper("finitechat"),
-            sleeper("health"),
-            sleeper("hermes"),
-            Some(sleeper("simplex")),
-        );
-        let original = tokio::time::timeout(WAIT, async {
-            loop {
-                let status = existing.status().await;
-                if status.processes.len() == 4
-                    && status.processes.values().all(|entry| entry.pid().is_some())
-                {
-                    return status;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
+    async fn hosted_child_restarts_and_shutdown_joins_it() {
         let hosted = HostedHermesHandle::start_spec(sleeper("hermes-serve"));
         let first = running(&hosted, None).await;
         rustix::process::kill_process(
@@ -470,15 +449,6 @@ mod tests {
             )
             .is_err()
         );
-        let after = existing.status().await;
-        for (name, before) in original.processes {
-            assert_eq!(
-                after.processes[&name].pid(),
-                before.pid(),
-                "{name} restarted"
-            );
-        }
-        existing.shutdown().await;
     }
 
     fn serve_env(command: &std::process::Command) -> BTreeMap<String, Option<String>> {

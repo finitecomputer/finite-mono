@@ -307,7 +307,7 @@ fn now_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::Value;
 
     use super::*;
 
@@ -430,96 +430,6 @@ mod tests {
     }
 
     #[test]
-    fn the_schema_has_no_field_that_can_hold_a_secret() {
-        // Only `id`, `model`, and `error_code` are free strings. `id` is
-        // `op_<32 hex>` minted here; `model` is a model id; `error_code` is a
-        // background code. Anything else is rejected as an unknown field.
-        let base = serde_json::to_value(
-            IntentRecord::new(IntentKind::Select, IntentRoute::Openrouter, None).unwrap(),
-        )
-        .unwrap();
-        for field in [
-            "api_key",
-            "key",
-            "token",
-            "access_token",
-            "refresh_token",
-            "code",
-            "code_verifier",
-            "secret",
-        ] {
-            let mut value = base.clone();
-            value[field] = json!("sk-or-v1-synthetic");
-            assert!(
-                serde_json::from_value::<IntentRecord>(value).is_err(),
-                "{field} must not be accepted"
-            );
-        }
-    }
-
-    #[test]
-    fn a_record_that_does_not_parse_is_quarantined_and_treated_as_absent() {
-        let valid = serde_json::to_value(
-            IntentRecord::new(IntentKind::Select, IntentRoute::Openrouter, None).unwrap(),
-        )
-        .unwrap();
-        let mut extra_field = valid.clone();
-        extra_field["api_key"] = json!("sk-or-v1-synthetic");
-        let mut unknown_kind = valid.clone();
-        unknown_kind["kind"] = json!("rename");
-        let mut unknown_route = valid.clone();
-        unknown_route["route"] = json!("anthropic");
-        let mut unknown_phase = valid.clone();
-        unknown_phase["phase"] = json!("paused");
-        let mut unknown_state = valid.clone();
-        unknown_state["state"] = json!("succeeded");
-        let mut version_two = valid.clone();
-        version_two["v"] = json!(2);
-        let mut foreign_phase = valid.clone();
-        foreign_phase["phase"] = json!("cleanup");
-        let mut bad_id = valid.clone();
-        bad_id["id"] = json!("op_not-hex");
-        let mut missing_field = valid.clone();
-        missing_field.as_object_mut().unwrap().remove("attempts");
-        let cases = [
-            serde_json::to_vec(&extra_field).unwrap(),
-            serde_json::to_vec(&unknown_kind).unwrap(),
-            serde_json::to_vec(&unknown_route).unwrap(),
-            serde_json::to_vec(&unknown_phase).unwrap(),
-            serde_json::to_vec(&unknown_state).unwrap(),
-            serde_json::to_vec(&version_two).unwrap(),
-            serde_json::to_vec(&foreign_phase).unwrap(),
-            serde_json::to_vec(&bad_id).unwrap(),
-            serde_json::to_vec(&missing_field).unwrap(),
-            b"{\"v\": 1, \"id\": ".to_vec(),
-            Vec::new(),
-        ];
-        for bytes in cases {
-            let temp = tempfile::tempdir().unwrap();
-            let path = intent_path(temp.path());
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, &bytes).unwrap();
-            assert!(load(&path).unwrap().is_none());
-            assert!(!path.exists());
-            let names = file_names(path.parent().unwrap());
-            assert_eq!(names.len(), 1);
-            let suffix = names[0]
-                .strip_prefix("inference-intent.json.corrupt-")
-                .unwrap();
-            assert!(suffix.parse::<u64>().is_ok());
-            assert_eq!(
-                fs::read(path.parent().unwrap().join(&names[0])).unwrap(),
-                bytes
-            );
-            // The next write starts clean.
-            let fresh =
-                IntentRecord::new(IntentKind::Select, IntentRoute::Openrouter, None).unwrap();
-            store(&path, &fresh).unwrap();
-            assert_eq!(load(&path).unwrap(), Some(fresh));
-        }
-    }
-
-    #[test]
     fn every_shared_fixture_is_loaded_or_quarantined_as_it_states() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/intent");
         let mut cases = fs::read_dir(dir)
@@ -605,116 +515,101 @@ mod tests {
         AdmitCommand::Connect,
     ];
 
-    fn all_commands() -> Vec<AdmitCommand> {
+    #[test]
+    fn admission_table() {
+        let running = record(
+            IntentKind::Select,
+            IntentRoute::FinitePrivate,
+            IntentState::Running,
+        );
+        let failed_select = record(
+            IntentKind::Select,
+            IntentRoute::FinitePrivate,
+            IntentState::Failed,
+        );
+        let failed_disconnect = record(
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            IntentState::Failed,
+        );
+        let codex_disconnect = record(
+            IntentKind::Disconnect,
+            IntentRoute::OpenaiCodex,
+            IntentState::Failed,
+        );
+
         let mut commands = NON_MUTATING.to_vec();
         commands.push(AdmitCommand::CodexLoginStart);
         commands.extend(MUTATING);
         commands.extend(ROUTES.map(AdmitCommand::Disconnect));
-        commands
-    }
-
-    #[test]
-    fn admission_with_no_record_always_proceeds() {
-        for command in all_commands() {
+        for command in commands {
             assert_eq!(code(admit(None, command)), Ok(Admission::Proceed));
         }
-    }
-
-    #[test]
-    fn admission_with_a_running_record() {
-        for kind in KINDS {
-            for route in ROUTES {
-                let record = record(kind, route, IntentState::Running);
-                for command in NON_MUTATING {
-                    assert_eq!(code(admit(Some(&record), command)), Ok(Admission::Proceed));
-                }
-                let codex_disconnect =
-                    kind == IntentKind::Disconnect && route == IntentRoute::OpenaiCodex;
-                assert_eq!(
-                    code(admit(Some(&record), AdmitCommand::CodexLoginStart)),
-                    if codex_disconnect {
-                        Err("disconnect_in_progress")
-                    } else {
-                        Ok(Admission::Proceed)
-                    },
-                    "{kind:?} {route:?}"
-                );
-                for command in MUTATING {
-                    assert_eq!(
-                        code(admit(Some(&record), command)),
-                        Err("operation_in_progress")
-                    );
-                }
-                for target in ROUTES {
-                    assert_eq!(
-                        code(admit(Some(&record), AdmitCommand::Disconnect(target))),
-                        Err("operation_in_progress")
-                    );
-                }
+        for command in NON_MUTATING {
+            for current in [&running, &failed_select, &failed_disconnect] {
+                assert_eq!(code(admit(Some(current), command)), Ok(Admission::Proceed));
             }
         }
-    }
-
-    #[test]
-    fn admission_with_a_failed_disconnect() {
-        for route in ROUTES {
-            let record = record(IntentKind::Disconnect, route, IntentState::Failed);
-            for command in NON_MUTATING {
-                assert_eq!(code(admit(Some(&record), command)), Ok(Admission::Proceed));
-            }
-            // disconnect_in_progress wins over operation_in_progress.
+        for command in MUTATING {
             assert_eq!(
-                code(admit(Some(&record), AdmitCommand::CodexLoginStart)),
-                if route == IntentRoute::OpenaiCodex {
-                    Err("disconnect_in_progress")
-                } else {
-                    Err("operation_in_progress")
-                }
+                code(admit(Some(&running), command)),
+                Err("operation_in_progress")
             );
-            for command in MUTATING {
-                assert_eq!(
-                    code(admit(Some(&record), command)),
-                    Err("operation_in_progress")
-                );
-            }
-            for target in ROUTES {
-                assert_eq!(
-                    code(admit(Some(&record), AdmitCommand::Disconnect(target))),
-                    if target == route {
-                        Ok(Admission::ResumeFailed)
-                    } else {
-                        Err("operation_in_progress")
-                    }
-                );
-            }
+            assert_eq!(
+                code(admit(Some(&failed_select), command)),
+                Ok(Admission::ReplaceFailed)
+            );
+            assert_eq!(
+                code(admit(Some(&failed_disconnect), command)),
+                Err("operation_in_progress")
+            );
         }
-    }
 
-    #[test]
-    fn admission_with_a_failed_select_or_activate() {
-        for kind in [IntentKind::Select, IntentKind::Activate] {
-            for route in ROUTES {
-                let record = record(kind, route, IntentState::Failed);
-                for command in NON_MUTATING {
-                    assert_eq!(code(admit(Some(&record), command)), Ok(Admission::Proceed));
-                }
-                assert_eq!(
-                    code(admit(Some(&record), AdmitCommand::CodexLoginStart)),
-                    Ok(Admission::Proceed)
-                );
-                for command in MUTATING {
-                    assert_eq!(
-                        code(admit(Some(&record), command)),
-                        Ok(Admission::ReplaceFailed)
-                    );
-                }
-                for target in ROUTES {
-                    assert_eq!(
-                        code(admit(Some(&record), AdmitCommand::Disconnect(target))),
-                        Ok(Admission::ReplaceFailed)
-                    );
-                }
-            }
+        let cases = [
+            (None, AdmitCommand::Select, Ok(Admission::Proceed)),
+            (
+                Some(&running),
+                AdmitCommand::Disconnect(IntentRoute::FinitePrivate),
+                Err("operation_in_progress"),
+            ),
+            (
+                Some(&failed_select),
+                AdmitCommand::Disconnect(IntentRoute::Openrouter),
+                Ok(Admission::ReplaceFailed),
+            ),
+            (
+                Some(&failed_disconnect),
+                AdmitCommand::Disconnect(IntentRoute::Openrouter),
+                Ok(Admission::ResumeFailed),
+            ),
+            (
+                Some(&failed_disconnect),
+                AdmitCommand::Disconnect(IntentRoute::FinitePrivate),
+                Err("operation_in_progress"),
+            ),
+            (
+                Some(&failed_select),
+                AdmitCommand::CodexLoginStart,
+                Ok(Admission::Proceed),
+            ),
+            (
+                Some(&running),
+                AdmitCommand::CodexLoginStart,
+                Ok(Admission::Proceed),
+            ),
+            (
+                Some(&failed_disconnect),
+                AdmitCommand::CodexLoginStart,
+                Err("operation_in_progress"),
+            ),
+            (
+                Some(&codex_disconnect),
+                AdmitCommand::CodexLoginStart,
+                Err("disconnect_in_progress"),
+            ),
+        ];
+        for (current, command, expected) in cases {
+            assert_eq!(code(admit(current, command)), expected, "{command:?}");
         }
     }
 

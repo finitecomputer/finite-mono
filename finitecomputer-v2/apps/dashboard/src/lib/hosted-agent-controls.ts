@@ -20,7 +20,6 @@ const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
 const COMMAND_FAILED_MESSAGE = "The agent could not finish that change. Try again.";
 const AGENT_UPDATE_REQUIRED_MESSAGE = "This agent needs an update for this.";
-const MODEL_NOT_AVAILABLE_MESSAGE = "That model isn't available on OpenRouter for agents. Pick one from the list.";
 const CODEX_VERIFICATION_URI = "https://auth.openai.com/codex/device";
 const MAX_TIMESTAMP = 2 ** 53;
 
@@ -107,14 +106,10 @@ export type InferenceCommandReply =
   | { changed: true; activated: false }
   | { accepted: true; operation_id: string };
 
-/**
- * Response for the inference, OpenRouter connect, and Codex login actions. Older actions still return
- * the status alone. `catalog_checked` is present when an OpenRouter model was saved.
- */
+/** Response for inference, OpenRouter connect, and Codex login actions. */
 export type AgentConnectionActionResult = {
   status: AgentConnectionsStatus;
   result: InferenceCommandReply | AgentCodexLogin | null;
-  catalog_checked?: boolean;
 };
 
 type UsageNumbers = { total?: number; daily?: number; weekly?: number; monthly?: number };
@@ -212,11 +207,6 @@ export async function dispatchAgentConnectionAction(
     return dispatchInferenceAction(context, action);
   }
   if (action.action !== "status") {
-    if (action.action === "inference" && action.profile === "openrouter" && action.model) {
-      await checkOpenRouterModel(action.model, openRouterCatalog(), async () =>
-        savedOpenRouterModel(await statusForContext(context))
-      );
-    }
     const command = commandForAction(action);
     const secret = action.action === "inference" ? action.apiKey : undefined;
     await sendCommand(context, command.command, command.schema, command.body, secret);
@@ -382,34 +372,6 @@ function codexModelName(value: unknown) {
   return model;
 }
 
-/**
- * The one catalog policy for every OpenRouter model save. A catalog member is accepted; with no
- * catalog, any syntax-valid ID is accepted and flagged unchecked; otherwise only the model the agent
- * already has saved, read from status on the server, is accepted. The saved model is read only when
- * it can change the outcome.
- */
-export async function checkOpenRouterModel(
-  model: string,
-  catalog: ReadonlySet<string> | null,
-  savedModel: () => Promise<string | null>
-): Promise<{ catalogChecked: boolean }> {
-  if (!catalog) return { catalogChecked: false };
-  if (catalog.has(model) || (await savedModel()) === model) return { catalogChecked: true };
-  throw new HostedAgentControlError(MODEL_NOT_AVAILABLE_MESSAGE, 400);
-}
-
-/** The saved OpenRouter model, or null when OpenRouter is not the saved route. */
-export function savedOpenRouterModel(status: AgentConnectionsStatus) {
-  const saved = status.capabilities?.includes("inference.status.v2") ? status.inference.saved : undefined;
-  if (saved) return saved.route === "openrouter" ? saved.model : null;
-  return status.inference.profile === "openrouter" ? status.inference.model : null;
-}
-
-/** PR1 has no server-side OpenRouter catalog, so every syntax-valid model is accepted unchecked. */
-function openRouterCatalog(): ReadonlySet<string> | null {
-  return null;
-}
-
 function isInferenceConnectionAction(action: AgentConnectionAction): action is InferenceConnectionAction {
   return (
     action.action === "inference_select" ||
@@ -424,19 +386,9 @@ async function dispatchInferenceAction(
   context: AgentCommandContext,
   action: InferenceConnectionAction
 ): Promise<AgentConnectionActionResult> {
-  // One status read gates the command on what this agent advertises, so an agent that never
-  // advertised a command never receives it, and serves the saved-model check.
+  // Never send a command that this agent did not advertise.
   const before = await statusForContext(context);
   requireCapabilities(before, capabilitiesForAction(action));
-  const model =
-    action.action === "inference_select" && action.route === "openrouter"
-      ? action.model
-      : action.action === "openrouter_connect_key"
-        ? action.activate?.model
-        : undefined;
-  const modelCheck = model
-    ? await checkOpenRouterModel(model, openRouterCatalog(), async () => savedOpenRouterModel(before))
-    : undefined;
   const command = inferenceCommandForAction(action);
   const secret = action.action === "openrouter_connect_key" ? action.apiKey : undefined;
   const response = await sendCommand(context, command.command, command.schema, command.body, secret);
@@ -447,7 +399,6 @@ async function dispatchInferenceAction(
   return {
     status: await statusForContext(context),
     result,
-    ...(modelCheck ? { catalog_checked: modelCheck.catalogChecked } : {}),
   };
 }
 

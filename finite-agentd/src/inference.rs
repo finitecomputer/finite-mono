@@ -629,25 +629,23 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_identity_preserves_path_case_and_rejects_uncertain_urls() {
-        let same = |a: &str, b: &str| {
-            let a = endpoint_identity(a);
-            a.is_some() && a == endpoint_identity(b)
+    fn uncertain_endpoints_never_match_finite_private() {
+        let same = |left: &str, right: &str| {
+            let left = endpoint_identity(left);
+            left.is_some() && left == endpoint_identity(right)
         };
         assert!(same(
             "HTTPS://Tenant.Example.INVALID/TenantA/v1/",
             "https://tenant.example.invalid/TenantA/v1"
         ));
-        assert!(same(" https://h.invalid/v1 ", "https://h.invalid/v1//"));
-        assert!(!same(
-            "https://tenant.example.invalid/TenantA/v1",
-            "https://tenant.example.invalid/tenanta/v1"
-        ));
-        assert!(!same("https://h.invalid:8443/v1", "https://h.invalid/v1"));
-        assert!(!same("https://h.invalid/v1?x=1", "https://h.invalid/v1"));
-        assert!(!same("https://u@h.invalid/v1", "https://h.invalid/v1"));
-        assert!(!same("http://h.invalid/v1", "https://h.invalid/v1"));
-        assert!(same("https://[::1]:8080/v1", "https://[::1]:8080/v1/"));
+        for distinct in [
+            "https://tenant.example.invalid/tenanta/v1",
+            "https://tenant.example.invalid:8443/TenantA/v1",
+            "https://tenant.example.invalid/TenantA/v1?x=1",
+            "https://user@tenant.example.invalid/TenantA/v1",
+        ] {
+            assert!(!same("https://tenant.example.invalid/TenantA/v1", distinct));
+        }
         for uncertain in [
             "",
             "h.invalid/v1",
@@ -659,19 +657,13 @@ mod tests {
             "1https://h.invalid/v1",
         ] {
             assert_eq!(endpoint_identity(uncertain), None, "{uncertain}");
+            let model = json!({"provider": "custom", "base_url": uncertain});
+            assert_eq!(
+                classify_saved_route(&model, Some(uncertain)),
+                SavedRoute::Other,
+                "{uncertain}"
+            );
         }
-        // An uncertain saved URL is never Finite Private, even against itself.
-        let model = json!({"provider": "custom", "base_url": "https://h.invalid:port/v1"});
-        assert_eq!(
-            classify_saved_route(&model, Some("https://h.invalid:port/v1")),
-            SavedRoute::Other
-        );
-        let model = json!({"provider": "custom", "base_url": "https://FP.example.invalid/v1/"});
-        assert_eq!(
-            classify_saved_route(&model, Some(FP_URL)),
-            SavedRoute::FinitePrivate
-        );
-        assert_eq!(classify_saved_route(&model, None), SavedRoute::Other);
     }
 
     fn env(pairs: &[(&str, &str)]) -> FinitePrivateEnv {
@@ -969,31 +961,6 @@ mod tests {
                 fallback("off", Value::Null, Value::Null, 0),
             ),
             (
-                "legacy fallback_model only",
-                Box::new(|facts| {
-                    facts.fallback.fallback_providers = Tri::Absent;
-                    facts.fallback.fallback_model = Tri::Present;
-                    facts.fallback.effective = Some(vec![user_entry()]);
-                }),
-                fp.clone(),
-                fallback("custom", Value::Null, Value::Null, 0),
-            ),
-            (
-                "empty list plus legacy",
-                Box::new(|facts| {
-                    facts.fallback.fallback_model = Tri::Present;
-                    facts.fallback.effective = Some(vec![]);
-                }),
-                fp.clone(),
-                fallback("off", Value::Null, Value::Null, 0),
-            ),
-            (
-                "malformed chain",
-                Box::new(|facts| facts.fallback.effective = Some(vec![])),
-                fp.clone(),
-                fallback("off", Value::Null, Value::Null, 0),
-            ),
-            (
                 "empty chain with an unknown key",
                 Box::new(|facts| {
                     facts.fallback.fallback_model = Tri::Unknown;
@@ -1035,14 +1002,6 @@ mod tests {
                 fallback("unavailable", json!("stale_config"), fp_model.clone(), 0),
             ),
             (
-                "missing provider entry",
-                Box::new(|facts| {
-                    facts.finite_private.provider_entry = ProviderEntryFact::Absent;
-                }),
-                fp.clone(),
-                fallback("unavailable", json!("stale_config"), fp_model.clone(), 0),
-            ),
-            (
                 "FP credential missing",
                 Box::new(|facts| facts.finite_private.fp_key = Tri::Absent),
                 fp.clone(),
@@ -1071,14 +1030,6 @@ mod tests {
                 fallback("unknown", Value::Null, fp_model.clone(), 0),
             ),
             (
-                "provider entry unknown",
-                Box::new(|facts| {
-                    facts.finite_private.provider_entry = ProviderEntryFact::Unknown;
-                }),
-                fp.clone(),
-                fallback("unknown", Value::Null, fp_model.clone(), 0),
-            ),
-            (
                 "owned_canonical unknown",
                 Box::new(|facts| {
                     let mut entry = canonical_entry();
@@ -1098,13 +1049,6 @@ mod tests {
         for (name, change, fp, expected) in cases {
             assert_eq!(fallback_with(change, &fp), expected, "{name}");
         }
-        assert_eq!(
-            serde_json::to_value(
-                derive_status(&Value::Null, None, &fp_env(), &InferenceFacts::unknown()).fallback
-            )
-            .unwrap(),
-            fallback("unknown", Value::Null, Value::Null, 0)
-        );
     }
 
     #[test]

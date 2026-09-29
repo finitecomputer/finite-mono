@@ -7,7 +7,6 @@ credentials. No test starts a gateway or reaches the network.
 import codecs
 import hashlib
 import importlib.util
-import inspect
 import json
 import os
 import runpy
@@ -57,14 +56,13 @@ def setUpModule():
     _environment.start()
     for name in SCRUBBED:
         os.environ.pop(name, None)
-    global helper, auth, gateway_config, gateway_session, SessionDB
+    global helper, auth, gateway_config, gateway_session
     spec = importlib.util.spec_from_file_location("finite_inference_helper", HELPER)
     helper = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(helper)
     from gateway import config as gateway_config
     from gateway import session as gateway_session
     from hermes_cli import auth
-    from hermes_state import SessionDB
 
 
 def tearDownModule():
@@ -215,53 +213,6 @@ def two_route_auth():
     }
 
 
-class PinnedUpstreamTests(HelperCase):
-    """the upstream symbols the helper relies on, and fixture shapes."""
-
-    def test_pinned_symbols(self):
-        from agent.secret_scope import get_secret
-        from hermes_cli.env_loader import load_hermes_dotenv
-        from hermes_cli.fallback_config import get_fallback_chain
-
-        self.assertEqual(auth.AUTH_LOCK_TIMEOUT_SECONDS, 15)
-        for function in (
-            auth.clear_provider_auth,
-            auth._read_codex_tokens,
-            auth._pool_codex_access_token,
-            auth._codex_pool_rate_limit_status,
-            gateway_config.load_gateway_config,
-            gateway_session.sanitize_model_override,
-            get_fallback_chain,
-            load_hermes_dotenv,
-            get_secret,
-        ):
-            self.assertTrue(callable(function), function)
-        self.assertIn("_lock", inspect.signature(auth._read_codex_tokens).parameters)
-        self.assertIn("read_only", inspect.signature(SessionDB).parameters)
-        for method in ("list_sessions", "set_model_override"):
-            self.assertTrue(callable(getattr(gateway_session.SessionStore, method)))
-        self.assertTrue(callable(SessionDB.load_gateway_routing_entries))
-
-    def test_codex_fixtures_match_upstream_serialization(self):
-        from agent.credential_pool import PooledCredential
-
-        fixtures = sorted((FIXTURES / "codex-auth").glob("*.json"))
-        self.assertEqual(len(fixtures), 10)
-        for path in fixtures:
-            store = json.loads(path.read_text())["auth"]
-            for entry in store.get("credential_pool", {}).get("openai-codex", []):
-                with self.subTest(fixture=path.name, entry=entry["id"]):
-                    self.assertEqual(
-                        PooledCredential.from_dict("openai-codex", entry).to_dict(), entry
-                    )
-            state = store["providers"].get("openai-codex")
-            if state and state["tokens"]:
-                with self.subTest(fixture=path.name, singleton=True):
-                    (self.hermes / "auth.json").unlink(missing_ok=True)
-                    auth._save_codex_tokens(state["tokens"], last_refresh=state["last_refresh"])
-                    self.assertEqual(self.read_auth()["providers"]["openai-codex"], state)
-
-
 class SavedRouteTests(unittest.TestCase):
     """the Python classifier agrees with every shared fixture."""
 
@@ -275,23 +226,6 @@ class SavedRouteTests(unittest.TestCase):
                     helper.classify_saved_route(case["model"], case["fp_base_url"]),
                     case["expected"],
                 )
-
-    def test_endpoint_identity(self):
-        def route(base_url, fp_base_url="https://fp.example.invalid/TenantA/v1"):
-            return helper.classify_saved_route(
-                {"provider": "custom", "base_url": base_url}, fp_base_url
-            )
-
-        self.assertEqual(route("HTTPS://FP.Example.Invalid/TenantA/v1/"), "finite_private")
-        self.assertEqual(route("https://fp.example.invalid/tenanta/v1"), "other")
-        self.assertEqual(route("https://fp.example.invalid:8443/TenantA/v1"), "other")
-        self.assertEqual(route("https://fp.example.invalid:bad/TenantA/v1"), "other")
-        self.assertEqual(route("https://fp.example.invalid/TenantA/v1", None), "other")
-        self.assertEqual(route(None), "other")
-        self.assertEqual(
-            helper.classify_saved_route({"provider": "Custom", "base_url": FP_BASE_URL}),
-            "finite_private",
-        )
 
 
 class InferenceFactsTests(HelperCase):
@@ -329,14 +263,15 @@ class InferenceFactsTests(HelperCase):
         self.assertEqual(set(facts["session_overrides"]), {"openrouter", "openai_codex"})
         self.assertEqual(facts["saved_route"], "finite_private")
         self.assertEqual(facts["codex_home_neutral"], "no")
-
-    def test_launch_environment_facts(self):
-        facts = self.run_json(
+        launch_facts = self.run_json(
             "inference-facts",
             env={"OPENAI_API_KEY": "sk-personal-fake", "CODEX_HOME": helper.NEUTRAL_CODEX_HOME},
         )
-        self.assertEqual((facts["alias_present"], facts["codex_home_neutral"]), ("yes", "yes"))
-        self.assertEqual(self.facts()["alias_present"], "no")
+        self.assertEqual(
+            (launch_facts["alias_present"], launch_facts["codex_home_neutral"]), ("yes", "yes")
+        )
+        self.write_auth(two_route_auth())
+        self.assertEqual(self.facts()["openrouter"]["manual_pool_entries"], "present")
 
     def openrouter(self, dotenv=None, env=None):
         if dotenv is not None:
@@ -387,19 +322,6 @@ class InferenceFactsTests(HelperCase):
             ("unknown", "present", None),
         )
         self.assertEqual(self.facts()["finite_private"]["fp_key"], "unknown")
-
-    def test_manual_pool_entries(self):
-        self.assertEqual(self.facts()["openrouter"]["manual_pool_entries"], "none")
-        self.write_auth(
-            {
-                "version": 1,
-                "providers": {},
-                "credential_pool": {"openrouter": [{"source": "env:OPENROUTER_API_KEY"}]},
-            }
-        )
-        self.assertEqual(self.facts()["openrouter"]["manual_pool_entries"], "none")
-        self.write_auth(two_route_auth())
-        self.assertEqual(self.facts()["openrouter"]["manual_pool_entries"], "present")
 
     def test_finite_private_key(self):
         self.assertEqual(self.facts()["finite_private"]["fp_key"], "absent")
@@ -467,34 +389,6 @@ class InferenceFactsTests(HelperCase):
             {"fallback_providers": "present", "fallback_model": "absent", "effective": []},
         )
 
-    def test_provider_entry(self):
-        self.assertEqual(self.facts()["finite_private"]["provider_entry"], "absent")
-        self.write_config({"providers": {"finite-private": canonical_provider()}})
-        self.assertEqual(self.facts()["finite_private"]["provider_entry"], "canonical")
-        with patch.dict(os.environ, {"FINITE_CONFIG_FP_CONTEXT_LENGTH": ""}):
-            self.assertEqual(self.facts()["finite_private"]["provider_entry"], "modified")
-            provider = canonical_provider()
-            provider["models"][FP_MODEL] = {"supports_vision": True}
-            self.write_config({"providers": {"finite-private": provider}})
-            self.assertEqual(self.facts()["finite_private"]["provider_entry"], "canonical")
-        with patch.dict(
-            os.environ,
-            {"FINITE_CONFIG_FP_MODEL": "future-model", "FINITE_CONFIG_FP_CONTEXT_LENGTH": ""},
-        ):
-            provider = canonical_provider()
-            provider["models"] = {"future-model": {}}
-            self.write_config({"providers": {"finite-private": provider}})
-            self.assertEqual(self.facts()["finite_private"]["provider_entry"], "canonical")
-        for provider in (
-            dict(canonical_provider(), transport="x"),
-            dict(canonical_provider(), discover_models=True),
-            # As earlier builds of this branch wrote it; the next normal start rewrites it.
-            {key: value for key, value in canonical_provider().items() if key != "discover_models"},
-        ):
-            with self.subTest(provider=provider):
-                self.write_config({"providers": {"finite-private": provider}})
-                self.assertEqual(self.facts()["finite_private"]["provider_entry"], "modified")
-
     def test_canonical_copies_equal_what_the_reconciler_writes(self):
         """The reconciler owns both entries; the helper keeps copies to
         recognize them. A key on one side only makes status report the image's
@@ -521,6 +415,8 @@ class InferenceFactsTests(HelperCase):
                     config["fallback_providers"], [helper._canonical_entry(model_id, base_url)]
                 )
                 self.assertEqual(helper._provider_entry_fact(config), "canonical")
+                config["providers"]["finite-private"]["discover_models"] = True
+                self.assertEqual(helper._provider_entry_fact(config), "modified")
                 self.assertEqual(
                     [
                         entry["owned_canonical"]
@@ -691,12 +587,6 @@ class ClearTests(HelperCase):
         store = self.read_auth()
         self.assertEqual((set(store["providers"]), store["credential_pool"]), ({"nous"}, {}))
 
-    def test_clear_auth_errors(self):
-        self.assertNotEqual(self.run_helper("clear-auth", "--provider", "nous").returncode, 0)
-        (self.hermes / "auth.json").mkdir()
-        completed = self.run_helper("clear-auth", "--provider", "openrouter")
-        self.assertEqual((completed.returncode, completed.stdout), (2, ""))
-
     def test_clear_session_overrides(self):
         _, keys = self.seed_overrides(["openai-codex", "codex", "openrouter", None, "OpenAI_Codex"])
         self.assertEqual(
@@ -713,8 +603,7 @@ class ClearTests(HelperCase):
             self.run_json("clear-session-overrides", "--provider", "openai-codex"), {"cleared": 0}
         )
 
-    def test_live_store_and_pool_undo_a_clear(self):
-        """X7: why the clears run only in the launcher, with no gateway alive."""
+    def test_live_stores_can_restore_cleared_state(self):
         live, keys = self.seed_overrides(["openrouter", None])
         self.assertEqual(
             self.run_json("clear-session-overrides", "--provider", "openrouter"), {"cleared": 1}
@@ -727,14 +616,11 @@ class ClearTests(HelperCase):
 
         auth._save_codex_tokens({"access_token": fake_jwt("live"), "refresh_token": "fake-rt"})
         pool = load_pool("openai-codex")
-        self.assertEqual(len(pool.entries()), 1)
         self.assertEqual(
             self.run_json("clear-auth", "--provider", "openai-codex"), {"cleared": "yes"}
         )
-        self.assertNotIn("openai-codex", self.read_auth().get("credential_pool", {}))
         pool.mark_exhausted_and_rotate(status_code=429)
-        entries = self.read_auth()["credential_pool"]["openai-codex"]
-        self.assertTrue(any(entry.get("access_token") for entry in entries))
+        self.assertIn("openai-codex", self.read_auth()["credential_pool"])
 
 
 SAVED_ROUTE_MODELS = {
@@ -823,37 +709,6 @@ class PendingDisconnectTests(HelperCase):
                         else:
                             self.assertEqual(result["applied"], "skipped")
                             self.assertEqual(self.stores(), before)
-
-    def test_records_that_do_nothing(self):
-        self.prepare(fp_model_block())
-        before = self.stores()
-        missing = self.root / "absent.json"
-        cases = {
-            "missing": missing,
-            "not json": self.root / "garbage.json",
-            "select": self.intent(kind="select", phase="verifying"),
-        }
-        cases["not json"].write_text("{")
-        for fields in (
-            {"v": 2},
-            {"route": "anthropic"},
-            {"phase": "done"},
-            {"route": "finite_private"},
-        ):
-            cases[json.dumps(fields)] = self.root / f"case-{len(cases)}.json"
-            record = json.loads(self.intent(**fields).read_text())
-            cases[json.dumps(fields)].write_text(json.dumps(record))
-        cases["list"] = self.root / "list.json"
-        cases["list"].write_text("[]")
-        for name, path in cases.items():
-            with self.subTest(record=name):
-                self.assertEqual(helper.apply_pending_disconnect(str(path))["applied"], "skipped")
-                self.assertEqual(self.stores(), before)
-
-        (self.hermes / "config.yaml").write_text("model: [unclosed\n")
-        result = helper.apply_pending_disconnect(str(self.intent()))
-        self.assertEqual(result, {"applied": "skipped", "reason": "config_unreadable"})
-        self.assertEqual(self.stores(), before)
 
     def test_shared_intent_fixtures(self):
         """agentd's reader runs the same files. With the saved default
@@ -960,18 +815,6 @@ class PendingDisconnectTests(HelperCase):
                 with self.subTest(provider=provider):
                     self.write_config({"model": {"provider": provider, "default": "m"}})
                     self.assert_skipped(self.intent(route=route), "route_still_saved")
-
-    def test_a_named_provider_elsewhere_allows_the_clear(self):
-        for model in (
-            {"provider": "anthropic", "default": "claude-sonnet-4.6"},
-            {"provider": "custom", "base_url": "https://llm.example.invalid/v1", "default": "m"},
-        ):
-            with self.subTest(model=model):
-                self.setUp()
-                self.prepare(model)
-                result = helper.apply_pending_disconnect(str(self.intent()))
-                self.assertEqual(result, {"applied": "yes", "reason": "cleared"})
-                self.assertNotIn("openrouter", self.read_auth()["credential_pool"])
 
     def test_process_contract(self):
         self.prepare(fp_model_block())

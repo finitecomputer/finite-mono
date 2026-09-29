@@ -81,14 +81,6 @@ owns command semantics, status facts, compatibility, and recovery guarantees.
 The inference handlers live in `src/inference_commands.rs`; the background
 executor lives in `src/executor.rs`.
 
-Agentd stores one secret-free inference intent alongside its command ledger.
-The launcher reads that same intent to clear disconnected credentials before
-Hermes starts, and refuses ambiguous state without changing user files.
-Status reads use the read-only Hermes helper; a failed read is unknown, never
-proof that a credential is absent. Configuration writers inside agentd share a
-lock, while Hermes remains an external writer: model verification and guarded
-rollback preserve changes made by that writer when they are observed.
-
 Test-only environment, never set in production:
 `FINITE_AGENTD_OPENROUTER_API_BASE` (`https://…` or
 `http://127.0.0.1:<port>` only), and `FINITE_AGENTD_INFERENCE_HELPER_PYTHON` /
@@ -99,20 +91,12 @@ helper's environment.
 
 ## E-0 host harness
 
-`examples/inference_host_harness.rs` runs the real `finite-agentd serve` in a
-scratch home under the repository's git-ignored `.local-state/e0/`. It sits
-behind a fake
-Finite Chat bridge and serves an HWD-compatible `/v1/app/runtime-commands`
-endpoint on one loopback port.
-
-- **Gateway.** `examples/harness-hermes-stub.sh` stands in for it: the real
-  reconciler and the real pending-disconnect step, then `exec sleep`.
-- **Helper facts.** They come from the packaged helper in the patched Hermes
-  env.
-- **Fakes.** OpenRouter's `/key` and Core's hosted-Hermes desired state are
-  fakes on the same port.
-- **What it never contacts.** No real gateway, provider, or production
-  service.
+`examples/inference_host_harness.rs` runs real `finite-agentd serve` in
+`.local-state/e0/`, with loopback bridge, HWD, OpenRouter and Core fakes. The
+stub gateway runs the real reconciler and packaged disconnect helper, then
+sleeps. `smoke` tests recovery and process ordering; it does not run chat turns
+or contact real gateways/providers. `serve` exposes the same runtime to the
+real dashboard through `FC_DESIGN_RUNTIME_COMMANDS_URL`.
 
 Run it from the repository root, inside the Nix dev shell (the launcher step
 needs coreutils `timeout`). It needs the patched Hermes environment in

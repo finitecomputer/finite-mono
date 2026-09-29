@@ -7,13 +7,11 @@ import test, { type TestContext } from "node:test";
 import {
   HostedAgentControlError,
   agentOwnerClaimCommand,
-  checkOpenRouterModel,
   parseAgentConnectionAction,
   parseCodexModels,
   parseConnectionsStatus,
   parseOpenRouterUsage,
   parseSimplexStatus,
-  savedOpenRouterModel,
 } from "@/lib/hosted-agent-controls";
 
 test("Connections reuses the durable successful owner claim", () => {
@@ -355,37 +353,6 @@ test("a rejected action never repeats the key it carried", () => {
   }
 });
 
-test("the OpenRouter model policy reads the saved model only when it decides the outcome", async () => {
-  let reads = 0;
-  const saved = (model: string | null) => async () => {
-    reads += 1;
-    return model;
-  };
-  const catalog = new Set(["openai/gpt-5"]);
-  assert.deepStrictEqual(await checkOpenRouterModel("openai/gpt-5", catalog, saved("x")), { catalogChecked: true });
-  assert.equal(reads, 0);
-  assert.deepStrictEqual(await checkOpenRouterModel("retired/model", catalog, saved("retired/model")), { catalogChecked: true });
-  assert.equal(reads, 1);
-  await assert.rejects(checkOpenRouterModel("retired/model", catalog, saved("openai/gpt-5")), (error: unknown) =>
-    error instanceof HostedAgentControlError &&
-    error.status === 400 &&
-    error.message === "That model isn't available on OpenRouter for agents. Pick one from the list."
-  );
-  reads = 0;
-  assert.deepStrictEqual(await checkOpenRouterModel("anything/new", null, saved(null)), { catalogChecked: false });
-  assert.equal(reads, 0);
-});
-
-test("the saved OpenRouter model comes from v2 saved, else the legacy profile", () => {
-  assert.equal(savedOpenRouterModel(parseConnectionsStatus(V2_STATUS)), "anthropic/claude-sonnet-4.6");
-  const fpSaved = { ...V2_STATUS, inference: { ...V2_INFERENCE, saved: { route: "finite_private", provider: "custom", model: "glm-5-3-flash" } } };
-  assert.equal(savedOpenRouterModel(parseConnectionsStatus(fpSaved)), null);
-  assert.equal(savedOpenRouterModel(parseConnectionsStatus(LEGACY_OPENROUTER)), "anthropic/claude-sonnet-4.6");
-  assert.equal(savedOpenRouterModel(parseConnectionsStatus(LEGACY_FINITE_PRIVATE)), null);
-  // v2 fields are trusted only with the capability.
-  assert.equal(savedOpenRouterModel(parseConnectionsStatus({ ...fpSaved, capabilities: [] })), "anthropic/claude-sonnet-4.6");
-});
-
 // --- Route harness ---------------------------------------------------------------------------------
 // Drives the real route handlers through the real session and machine-access code: a dev account, a
 // fake Core that lists only the owner's machine, and a fake hosted web device that answers runtime
@@ -517,7 +484,6 @@ test("new-action flow: claim, status gate, command, status; the reply comes back
   const payload = await response.json();
   assert.deepStrictEqual(payload.result, { accepted: true, operation_id: OPERATION_ID });
   assert.equal(payload.status.inference.operation.id, OPERATION_ID);
-  assert.equal("catalog_checked" in payload, false);
   assert.deepStrictEqual(commandNames(world), [
     "agent.owner.claim", "agent.connections.status", "agent.inference.select", "agent.connections.status",
   ]);
@@ -598,20 +564,14 @@ test("unsupported_command maps to 409 agent_update_required", async (t) => {
   assert.equal(legacy.status, 409);
 });
 
-test("agentd error codes pass through with agentd's message", async (t) => {
-  for (const code of [
-    "credential_rejected", "key_allowance_exhausted", "activation_not_recorded", "disconnect_in_progress",
-    "finite_private_unavailable", "operation_in_progress", "not_connected", "provider_unavailable", "config_invalid",
-  ]) {
-    await t.test(code, async (t) => {
-      const message = `Fixed agentd copy for ${code}.`;
-      installWorld(t, { runtime: () => ({ status: "failed", error: { code, message } }) });
-      const response = await postAction(MY_MACHINE, { action: "openrouter_connect_key", apiKey: "sk-or-v1-fake", activate: { model: "openai/gpt-5" } });
-      assert.equal(response.status, 502);
-      assert.equal(response.headers.get("cache-control"), "no-store");
-      assert.deepStrictEqual(await response.json(), { error: message, code });
-    });
-  }
+test("agentd errors preserve safe codes and messages", async (t) => {
+  await t.test("a future domain code passes through", async (t) => {
+    installWorld(t, { runtime: () => ({ status: "failed", error: { code: "facts_unavailable", message: "Try again." } }) });
+    const response = await postAction(MY_MACHINE, { action: "inference_disconnect", route: "openrouter" });
+    assert.equal(response.status, 502);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepStrictEqual(await response.json(), { error: "Try again.", code: "facts_unavailable" });
+  });
   await t.test("unauthorized stays 403", async (t) => {
     installWorld(t, { runtime: () => ({ status: "failed", error: { code: "unauthorized", message: "Not the owner." } }) });
     const response = await postAction(MY_MACHINE, { action: "inference_disconnect", route: "openrouter" });
@@ -623,40 +583,6 @@ test("agentd error codes pass through with agentd's message", async (t) => {
     const response = await postAction(MY_MACHINE, { action: "inference_disconnect", route: "openrouter" });
     assert.deepStrictEqual(await response.json(), { error: "x", code: null });
   });
-});
-
-test("a code the dashboard has no entry for, like facts_unavailable, passes through with agentd's message", async (t) => {
-  for (const [code, message] of [
-    ["facts_unavailable", "The agent couldn't check its setup right now. Try again in a moment."],
-    ["some_future_code", "A later agentd's own copy."],
-  ]) {
-    await t.test(code, async (t) => {
-      installWorld(t, { runtime: () => ({ status: "failed", error: { code, message } }) });
-      const response = await postAction(MY_MACHINE, { action: "inference_disconnect", route: "openrouter" });
-      assert.equal(response.status, 502, "the same status as every other agentd domain error");
-      assert.equal(response.headers.get("cache-control"), "no-store");
-      assert.deepStrictEqual(await response.json(), { error: message, code });
-    });
-  }
-});
-
-test("every OpenRouter model save goes through the model policy, without an extra status read in PR1", async (t) => {
-  const world = installWorld(t, { runtime: () => ({ status: "succeeded", body: { changed: false } }) });
-  const select = await (await postAction(MY_MACHINE, { action: "inference_select", route: "openrouter", model: "new/model" })).json();
-  assert.equal(select.catalog_checked, false);
-  const activate = await (await postAction(MY_MACHINE, {
-    action: "openrouter_connect_key", apiKey: "sk-or-v1-fake", activate: { model: "new/model" },
-  })).json();
-  assert.equal(activate.catalog_checked, false);
-  const storageOnly = await (await postAction(MY_MACHINE, { action: "openrouter_connect_key", apiKey: "sk-or-v1-fake" })).json();
-  assert.equal("catalog_checked" in storageOnly, false);
-  world.commands.length = 0;
-  await postAction(MY_MACHINE, { action: "inference", profile: "openrouter", model: "new/model" });
-  assert.deepStrictEqual(commandNames(world), ["agent.owner.claim", "agent.inference.apply", "agent.connections.status"]);
-  world.commands.length = 0;
-  const invalid = await postAction(MY_MACHINE, { action: "inference", profile: "openrouter", model: "two words" });
-  assert.equal(invalid.status, 400);
-  assert.deepStrictEqual(commandNames(world), []);
 });
 
 test("the usage and models routes return parsed data with no-store", async (t) => {
@@ -686,8 +612,11 @@ test("the usage and models routes return parsed data with no-store", async (t) =
   }
 });
 
-test("without the capability the usage and models routes return agent_update_required, not a 500", async (t) => {
-  for (const status of [LEGACY_FINITE_PRIVATE, { ...V2_STATUS, capabilities: ["inference.status.v2", "inference.select.v1"] }]) {
+test("without the capability the usage and models routes return agent_update_required", async (t) => {
+  for (const status of [
+    LEGACY_FINITE_PRIVATE,
+    { ...V2_STATUS, capabilities: ["inference.status.v2", "inference.select.v1"] },
+  ]) {
     const world = installWorld(t, { status });
     for (const load of [getUsage, getCodexModels]) {
       const response = await load(MY_MACHINE);
@@ -743,8 +672,31 @@ test("authorization: another account's machine is unreachable through the new ro
 test("secrets: a pasted key reaches only the runtime command, on success and every failure path", async (t) => {
   const apiKey = "sk-or-v1-FAKE-W1-SECRET-CANARY-0123456789abcdef";
   const echo = `upstream said ${apiKey} is bad`;
-  const runtimes: Array<[string, (command: string) => RuntimeReply | Response]> = [
-    ["success", () => ({ status: "succeeded", body: { accepted: true, operation_id: OPERATION_ID } })],
+  const actions = [
+    { action: "openrouter_connect_key", apiKey },
+    { action: "openrouter_connect_key", apiKey, activate: { model: "openai/gpt-5" } },
+    { action: "inference", profile: "openrouter", apiKey, model: "openai/gpt-5" },
+  ];
+  const assertSecretAbsent = (world: World, response: Response) => {
+    assert.equal([...response.headers.values()].join(" ").includes(apiKey), false, "response headers");
+    assert.equal(world.logs.join("\n").includes(apiKey), false, "logs");
+  };
+
+  await t.test("success sends each key only in the runtime command body", async (t) => {
+    const world = installWorld(t, {
+      runtime: () => ({ status: "succeeded", body: { accepted: true, operation_id: OPERATION_ID } }),
+    });
+    for (const payload of actions) {
+      const response = await postAction(MY_MACHINE, payload);
+      assert.equal((await response.text()).includes(apiKey), false);
+      assertSecretAbsent(world, response);
+    }
+    const carriers = world.fetches.filter((entry) => entry.url.includes(apiKey) || entry.body.includes(apiKey));
+    assert.equal(carriers.length, actions.length);
+    assert.ok(carriers.every((entry) => entry.url === "https://hwd.test/v1/app/runtime-commands"));
+  });
+
+  const failures: Array<[string, (command: string) => RuntimeReply | Response]> = [
     ["agentd error", () => ({ status: "failed", error: { code: "credential_rejected", message: "OpenRouter didn't accept this key." } })],
     ["agentd error echoing the key", () => ({ status: "failed", error: { code: "credential_rejected", message: echo } })],
     ["hosted device HTTP error echoing the key", () => Response.json({ error: echo }, { status: 500 })],
@@ -753,28 +705,16 @@ test("secrets: a pasted key reaches only the runtime command, on success and eve
     }],
     ["reply echoing the key", () => ({ status: "succeeded", body: { changed: true, activated: false, api_key: apiKey } })],
   ];
-  const actions = [
-    { action: "openrouter_connect_key", apiKey },
-    { action: "openrouter_connect_key", apiKey, activate: { model: "openai/gpt-5" } },
-    { action: "inference", profile: "openrouter", apiKey, model: "openai/gpt-5" },
-  ];
-  for (const [name, runtime] of runtimes) {
-    for (const payload of actions) {
-      await t.test(`${name}: ${payload.action}${"activate" in payload ? " + activate" : ""}`, async (t) => {
-        const world = installWorld(t, { runtime });
-        const response = await postAction(MY_MACHINE, payload);
-        const text = await response.text();
-        assert.equal(text.includes(apiKey), false, "response body");
-        assert.equal([...response.headers.values()].join(" ").includes(apiKey), false, "response headers");
-        assert.equal(world.logs.join("\n").includes(apiKey), false, "logs");
-        const carriers = world.fetches.filter((entry) => entry.url.includes(apiKey) || entry.body.includes(apiKey));
-        assert.equal(carriers.length, 1, "exactly one request carries the key");
-        assert.equal(carriers[0].url, "https://hwd.test/v1/app/runtime-commands");
-        assert.equal(carriers[0].url.includes(apiKey), false);
-        const sent = JSON.parse(carriers[0].body) as { command: string };
-        assert.ok(["agent.openrouter.connect", "agent.inference.apply"].includes(sent.command));
-      });
-    }
+  for (const [name, runtime] of failures) {
+    await t.test(name, async (t) => {
+      const world = installWorld(t, { runtime });
+      const response = await postAction(MY_MACHINE, actions[0]);
+      assert.equal((await response.text()).includes(apiKey), false, "response body");
+      assertSecretAbsent(world, response);
+      const carriers = world.fetches.filter((entry) => entry.url.includes(apiKey) || entry.body.includes(apiKey));
+      assert.equal(carriers.length, 1);
+      assert.equal(carriers[0].url, "https://hwd.test/v1/app/runtime-commands");
+    });
   }
   await t.test("rejected before dispatch", async (t) => {
     const world = installWorld(t, { status: LEGACY_FINITE_PRIVATE });

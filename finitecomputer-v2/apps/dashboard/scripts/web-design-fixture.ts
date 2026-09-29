@@ -317,7 +317,7 @@ async function serve(runtimeCommandsUrl: string | null) {
   console.log(
     runtimeCommandsUrl
       ? `Connections runtime commands are forwarded to ${runtimeCommandsUrl}\n`
-      : "Connections agent: node --import tsx scripts/web-design-fixture.ts set-agent pr1|legacy|full [route [unconfirmed]]"
+      : `Connections agent: node --import tsx scripts/web-design-fixture.ts set-agent ${FAKE_AGENTS.join("|")} [route [unconfirmed]]`
         + " (fail the next operation with fail-next-operation)\n"
   );
 
@@ -782,15 +782,11 @@ function shutdown(signal: NodeJS.Signals) {
 }
 }
 
-// Connections runtime-command fakes. Replies go through the dashboard's real
-// parser, so a reply that parser rejects or degrades is a bug here. Keys and codes are fake, only a
-// key's SHA-256 is kept, and nothing here logs.
-
-const FAKE_AGENTS = ["pr1", "legacy", "full"] as const;
+// Connections states exercised by the browser suite. Keys are never retained;
+// only the SHA-256 needed to render the disconnect receipt is kept.
+const FAKE_AGENTS = ["pr1", "legacy"] as const;
 const FAKE_ROUTES = ["finite_private", "openrouter", "openai_codex"] as const;
-const OPERATION_ERROR_CODES = [
-  "config_invalid", "config_conflict", "supervisor_unavailable", "helper_unavailable", "verify_failed",
-] as const;
+const OPERATION_ERROR_CODES = ["verify_failed"] as const;
 
 export type FakeAgentKind = (typeof FAKE_AGENTS)[number];
 export type FakeInferenceRoute = (typeof FAKE_ROUTES)[number];
@@ -802,62 +798,36 @@ export type FakeRuntimeReply = {
   error: { code: string; message: string } | null;
 };
 export type InferenceFakeOptions = {
-  /** `pr1` advertises the PR1 capabilities, `legacy` is today's agentd, `full` adds PR2 and PR3's. */
   agent?: FakeAgentKind;
   saved?: FakeInferenceRoute;
-  /**
-   * Status as agentd reports it when its helper read was slow or failed: Finite Private, the backup, and what
-   * Hermes holds for OpenRouter are `unknown`. A legacy agent reports no such facts, so it is unchanged.
-   */
   unconfirmed?: boolean;
-  /** How long an operation, or a Codex sign-in, stays in each phase. */
   phaseMs?: number;
   now?: () => number;
 };
 export type InferenceFake = {
   runtimeCommand(request: unknown): FakeRuntimeReply;
-  /** The next operation to run, including a resumed one, ends `failed` with this code. */
   failNextOperation(code?: OperationErrorCode): void;
 };
 
 const PR1_CAPABILITIES = ["inference.status.v2", "inference.select.v1", "inference.disconnect.v1"];
-const FULL_CAPABILITIES = [
-  ...PR1_CAPABILITIES,
-  "openrouter.connect.v1", "openrouter.usage.v1", "codex.login.v1", "codex.models.v1",
-];
 const EMPTY_REQUEST_SCHEMA = "finite.agent.empty.request.v1";
-// The supported runtime commands, with their schema and the capability that gates them. A command the agent
-// doesn't advertise gets agentd's answer to an unknown command; any other command gets `{}`, as before.
 const INFERENCE_COMMANDS = new Map<string, { schema: string; capability: string | null }>([
   ["agent.connections.status", { schema: EMPTY_REQUEST_SCHEMA, capability: null }],
   ["agent.inference.apply", { schema: "finite.agent.inference.apply.v1", capability: null }],
   ["agent.inference.select", { schema: "finite.agent.inference.select.v1", capability: "inference.select.v1" }],
   ["agent.inference.disconnect", { schema: "finite.agent.inference.disconnect.v1", capability: "inference.disconnect.v1" }],
-  ["agent.openrouter.usage", { schema: EMPTY_REQUEST_SCHEMA, capability: "openrouter.usage.v1" }],
-  ["agent.openrouter.connect", { schema: "finite.agent.openrouter.connect.v1", capability: "openrouter.connect.v1" }],
-  ["agent.codex.login.start", { schema: "finite.agent.codex.login.start.v1", capability: "codex.login.v1" }],
-  ["agent.codex.login.cancel", { schema: "finite.agent.codex.login.cancel.v1", capability: "codex.login.v1" }],
-  ["agent.codex.models", { schema: EMPTY_REQUEST_SCHEMA, capability: "codex.models.v1" }],
 ]);
 const OPERATION_PHASES = {
   select: ["accepted", "config_written", "restarting", "verifying"],
-  activate: ["accepted", "config_written", "restarting", "verifying"],
   disconnect: ["accepted", "login_cancelled", "route_switched", "credential_removed", "cleanup", "verifying"],
 } as const;
 const FAKE_FINITE_PRIVATE_MODEL = "glm-5-3-flash";
 const FAKE_OPENROUTER_MODEL = "anthropic/claude-sonnet-4.6";
-const FAKE_CODEX_MODELS = ["gpt-5.5", "gpt-5.3-codex"];
+const FAKE_CODEX_MODEL = "gpt-5.5";
 const FAKE_SEEDED_OPENROUTER_KEY = "sk-or-v1-web-design-fixture-fake-key";
-const FAKE_CODEX_USER_CODE = "FAKE-0000";
-const CODEX_VERIFICATION_URI = "https://auth.openai.com/codex/device";
-const CODEX_LOGIN_TTL_MS = 15 * 60_000;
 const LAST_RESULT_MS = 10 * 60_000;
-const FAILED_ATTEMPTS = 3;
 
 type SavedModel = { route: FakeInferenceRoute; model: string };
-// A fake key containing one of these words fails the `/key` check the way agentd reports it.
-type KeyVerdict = "ok" | "management" | "rejected" | "exhausted" | "unreachable";
-type StoredKey = { hash: string; verdict: KeyVerdict };
 type OperationKind = keyof typeof OPERATION_PHASES;
 type FakeOperation = {
   id: string;
@@ -870,15 +840,8 @@ type FakeOperation = {
   attempts: number;
   startedAtMs: number;
   updatedAtMs: number;
-  failWith: OperationErrorCode | null;
-  savedBefore: SavedModel;
+  shouldFail: boolean;
 };
-type FakeCodexLogin = {
-  attemptId: string;
-  state: "pending" | "committing" | "approved" | "canceled" | "expired" | "interrupted";
-  startedAtMs: number;
-};
-type Admission = "proceed" | "replace_failed" | "resume_failed";
 
 class FakeCommandError extends Error {
   constructor(readonly code: string, message: string) {
@@ -890,22 +853,17 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
   const agent = options.agent ?? "pr1";
   const phaseMs = Math.max(0, options.phaseMs ?? 2_000);
   const now = options.now ?? Date.now;
-  const capabilities = agent === "full" ? FULL_CAPABILITIES : agent === "pr1" ? PR1_CAPABILITIES : [];
+  const capabilities = agent === "pr1" ? PR1_CAPABILITIES : [];
   const seeded = options.saved ?? "finite_private";
   const unconfirmed = options.unconfirmed ?? false;
   let saved: SavedModel = {
     route: seeded,
-    model: seeded === "openrouter" ? FAKE_OPENROUTER_MODEL : seeded === "openai_codex" ? FAKE_CODEX_MODELS[0] : FAKE_FINITE_PRIVATE_MODEL,
+    model: seeded === "openrouter" ? FAKE_OPENROUTER_MODEL : seeded === "openai_codex" ? FAKE_CODEX_MODEL : FAKE_FINITE_PRIVATE_MODEL,
   };
-  let openrouterKey = seeded === "openrouter" ? storedKey(FAKE_SEEDED_OPENROUTER_KEY) : null;
-  let codexSignedIn = seeded === "openai_codex";
-  let codexLogin: FakeCodexLogin | null = null;
-  // The intent record while running or failed, then the last result.
+  let openrouterKeyHash = seeded === "openrouter" ? sha256(FAKE_SEEDED_OPENROUTER_KEY) : null;
   let operation: FakeOperation | null = null;
-  let failNext: OperationErrorCode | null = null;
+  let failNext = false;
   let replies = 0;
-  // OAuth attempts already exchanged: the reply to repeat, or null when the attempt failed.
-  const oauthAttempts = new Map<string, unknown>();
 
   function runtimeCommand(request: unknown): FakeRuntimeReply {
     const record = isRecord(request) ? request : {};
@@ -940,40 +898,13 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
         return select(body);
       case "agent.inference.disconnect":
         return disconnect(body);
-      case "agent.openrouter.usage":
-        return usage();
-      case "agent.openrouter.connect":
-        return connect(body);
-      case "agent.codex.login.start":
-        bodyRecord(body, []);
-        admit("codex_login_start");
-        codexLogin = { attemptId: `cxl_${randomBytes(16).toString("hex")}`, state: "pending", startedAtMs: now() };
-        return codexLoginStatus();
-      case "agent.codex.login.cancel":
-        return cancelCodexLogin(body);
-      case "agent.codex.models":
-        return codexSignedIn
-          ? { state: "live", models: FAKE_CODEX_MODELS, reason: null }
-          : { state: "unavailable", models: [], reason: "not_signed_in" };
       default:
         throw new Error(`unhandled fake command ${command}`);
     }
   }
 
-  // Operations and sign-ins move on with time, so every reply sees the state a real agent would.
   function advance() {
     const at = now();
-    if (codexLogin && (codexLogin.state === "pending" || codexLogin.state === "committing")) {
-      const elapsed = at - codexLogin.startedAtMs;
-      if (elapsed >= CODEX_LOGIN_TTL_MS) {
-        codexLogin.state = "expired";
-      } else if (elapsed >= 4 * phaseMs) {
-        codexLogin.state = "approved";
-        codexSignedIn = true;
-      } else if (elapsed >= 3 * phaseMs) {
-        codexLogin.state = "committing";
-      }
-    }
     const current = operation;
     if (!current) return;
     const phases = OPERATION_PHASES[current.kind];
@@ -983,75 +914,27 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       current.updatedAtMs = due;
       if (current.phaseIndex + 1 < phases.length) {
         current.phaseIndex += 1;
-        enterPhase(current, phases[current.phaseIndex]);
-      } else {
-        finish(current);
-      }
-    }
-  }
-
-  function enterPhase(current: FakeOperation, phase: string) {
-    switch (phase) {
-      case "config_written":
-        saved = { route: current.route, model: current.model ?? FAKE_FINITE_PRIVATE_MODEL };
-        break;
-      case "login_cancelled":
-        if (current.route === "openai_codex" && codexLogin?.state === "pending") codexLogin.state = "canceled";
-        if (current.route === "openai_codex" && codexLogin?.state === "committing") codexLogin.state = "interrupted";
-        break;
-      case "route_switched":
-        if (saved.route === current.route) saved = { route: "finite_private", model: FAKE_FINITE_PRIVATE_MODEL };
-        break;
-      case "credential_removed":
-        if (current.route === "openrouter") openrouterKey = null;
-        break;
-      case "cleanup":
-        if (current.route === "openai_codex") {
-          codexSignedIn = false;
-          codexLogin = null;
+        const phase = phases[current.phaseIndex];
+        if (phase === "config_written") {
+          saved = { route: current.route, model: current.model ?? FAKE_FINITE_PRIVATE_MODEL };
+        } else if (phase === "route_switched" && saved.route === current.route) {
+          saved = { route: "finite_private", model: FAKE_FINITE_PRIVATE_MODEL };
+        } else if (phase === "credential_removed") {
+          openrouterKeyHash = null;
         }
-        break;
-    }
-  }
-
-  function finish(current: FakeOperation) {
-    if (!current.failWith) {
-      current.state = "succeeded";
-      return;
-    }
-    current.state = "failed";
-    current.errorCode = current.failWith;
-    current.attempts = FAILED_ATTEMPTS;
-    current.failWith = null;
-    // A spawn failure after a select or activate restores the previous config.
-    if (current.errorCode === "supervisor_unavailable" && current.kind !== "disconnect") saved = current.savedBefore;
-  }
-
-  // The admission table.
-  function admit(command: "mutation" | "codex_login_start" | { disconnect: FakeInferenceRoute }): Admission {
-    const record = operation && operation.state !== "succeeded" ? operation : null;
-    if (!record) return "proceed";
-    if (command === "codex_login_start") {
-      if (record.kind === "disconnect" && record.route === "openai_codex") {
-        throw new FakeCommandError(
-          "disconnect_in_progress",
-          "ChatGPT is being removed from this agent. Wait for that to finish, or try the removal again."
-        );
+      } else {
+        current.state = current.shouldFail ? "failed" : "succeeded";
+        current.errorCode = current.shouldFail ? "verify_failed" : null;
+        current.attempts = current.shouldFail ? 3 : 0;
+        current.shouldFail = false;
       }
-      if (record.state === "failed" && record.kind === "disconnect") throw operationInProgress();
-      return "proceed";
     }
-    if (record.state === "running") throw operationInProgress();
-    if (record.kind === "disconnect") {
-      if (typeof command === "object" && command.disconnect === record.route) return "resume_failed";
-      throw operationInProgress();
-    }
-    return "replace_failed";
   }
 
-  // A command that succeeds without recording an operation drops a failed select or activate.
-  function settle(admission: Admission) {
-    if (admission === "replace_failed") operation = null;
+  function prepareMutation() {
+    if (!operation || operation.state === "succeeded") return;
+    if (operation.state === "running" || operation.kind === "disconnect") throw operationInProgress();
+    operation = null;
   }
 
   function startOperation(kind: OperationKind, route: FakeInferenceRoute, model: string | null) {
@@ -1067,16 +950,10 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
       attempts: 0,
       startedAtMs: at,
       updatedAtMs: at,
-      failWith: takeFailNext(),
-      savedBefore: saved,
+      shouldFail: failNext,
     };
+    failNext = false;
     return { accepted: true, operation_id: operation.id };
-  }
-
-  function takeFailNext() {
-    const code = failNext;
-    failNext = null;
-    return code;
   }
 
   function status() {
@@ -1097,16 +974,6 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
         routes: {
           finite_private: { state: unconfirmed ? "unknown" : "configured", reason: null },
           openrouter: openrouterStatus(),
-          ...(capabilities.includes("codex.login.v1")
-            ? {
-                openai_codex: {
-                  state: codexSignedIn ? "signed_in" : "not_signed_in",
-                  quota_reset_at_ms: null,
-                  reported_quota_reset_at_ms: null,
-                  login: codexLoginStatus(),
-                },
-              }
-            : {}),
         },
         fallback: unconfirmed
           ? { state: "unknown", reason: null, model: null, extra_entries: 0 }
@@ -1118,12 +985,11 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     };
   }
 
-  // agentd reads the saved key itself; what Hermes holds comes from the helper, so it is unknown when unconfirmed.
   function openrouterStatus() {
-    const hermes = unconfirmed ? "unknown" : openrouterKey ? "saved_key" : "none";
+    const hermes = unconfirmed ? "unknown" : openrouterKeyHash ? "saved_key" : "none";
     const pool = unconfirmed ? "unknown" : "none";
-    if (openrouterKey) {
-      return { state: "key_saved", key_source: "agent", key_hash: openrouterKey.hash, hermes_key: hermes, other_pool_keys: pool };
+    if (openrouterKeyHash) {
+      return { state: "key_saved", key_source: "agent", key_hash: openrouterKeyHash, hermes_key: hermes, other_pool_keys: pool };
     }
     return { state: unconfirmed ? "unknown" : "no_key", key_source: null, key_hash: null, hermes_key: hermes, other_pool_keys: pool };
   }
@@ -1145,44 +1011,27 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
     };
   }
 
-  function codexLoginStatus() {
-    if (!codexLogin) return null;
-    const waiting = codexLogin.state === "pending" || codexLogin.state === "committing";
-    return {
-      attempt_id: codexLogin.attemptId,
-      state: codexLogin.state,
-      user_code: waiting ? FAKE_CODEX_USER_CODE : null,
-      verification_uri: waiting ? CODEX_VERIFICATION_URI : null,
-      expires_at_ms: codexLogin.startedAtMs + CODEX_LOGIN_TTL_MS,
-      poll_interval_s: 5,
-      error_code: null,
-      retry_after_s: null,
-    };
-  }
-
-  // v1 stays synchronous and stores a key it has not validated, as today.
   function applyV1(body: unknown) {
     const request = bodyRecord(body, ["profile", "api_key", "model"]);
     const apiKey = optionalText(request.api_key, "api_key");
     const model = optionalText(request.model, "model");
-    const admission = admit("mutation");
+    prepareMutation();
     let planned: SavedModel;
-    let key = openrouterKey;
+    let keyHash = openrouterKeyHash;
     if (request.profile === "finite_private") {
       planned = { route: "finite_private", model: FAKE_FINITE_PRIVATE_MODEL };
     } else if (request.profile === "openrouter") {
-      if (apiKey?.trim()) key = storedKey(apiKey);
-      if (!key) throw invalidPayload("OpenRouter key is required");
+      if (apiKey?.trim()) keyHash = sha256(apiKey);
+      if (!keyHash) throw invalidPayload("OpenRouter key is required");
       planned = { route: "openrouter", model: modelName(model ?? FAKE_OPENROUTER_MODEL) };
     } else {
       throw invalidPayload("Inference must be Finite Private or OpenRouter");
     }
-    const unchanged = sameModel(planned, saved) && key?.hash === openrouterKey?.hash;
+    const unchanged = sameModel(planned, saved) && keyHash === openrouterKeyHash;
     if (!unchanged) {
-      openrouterKey = key;
+      openrouterKeyHash = keyHash;
       saved = planned;
     }
-    settle(admission);
     return {
       proposal_id: `web-design-proposal-${replies}`,
       path: "model",
@@ -1194,31 +1043,20 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
 
   function select(body: unknown) {
     const request = bodyRecord(body, ["route", "model"]);
-    const route = FAKE_ROUTES.find((value) => value === request.route);
+    const route = request.route === "finite_private" || request.route === "openrouter" ? request.route : null;
     if (!route) throw invalidPayload("Unknown route.");
-    if (route === "openai_codex" && !capabilities.includes("codex.login.v1")) {
-      throw invalidPayload("ChatGPT isn't available on this agent.");
-    }
     if (route === "finite_private" && request.model !== undefined && request.model !== null) {
       throw invalidPayload("Finite Private takes no model.");
     }
     const planned: SavedModel =
       route === "finite_private"
         ? { route, model: FAKE_FINITE_PRIVATE_MODEL }
-        : { route, model: route === "openrouter" ? modelName(request.model) : codexModelName(request.model) };
-    const admission = admit("mutation");
-    if (route === "openrouter") {
-      if (!openrouterKey) throw new FakeCommandError("not_connected", "Connect OpenRouter first.");
-      checkKey(openrouterKey.verdict);
-    }
-    if (route === "openai_codex") {
-      if (!codexSignedIn) throw new FakeCommandError("not_connected", "Connect ChatGPT first.");
-      if (!FAKE_CODEX_MODELS.includes(planned.model)) {
-        throw new FakeCommandError("model_unavailable", "That model isn't available for this ChatGPT account.");
-      }
+        : { route, model: modelName(request.model) };
+    prepareMutation();
+    if (route === "openrouter" && !openrouterKeyHash) {
+      throw new FakeCommandError("not_connected", "Connect OpenRouter first.");
     }
     if (sameModel(planned, saved)) {
-      settle(admission);
       return { changed: false };
     }
     return startOperation("select", route, route === "finite_private" ? null : planned.model);
@@ -1226,14 +1064,8 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
 
   function disconnect(body: unknown) {
     const request = bodyRecord(body, ["route"]);
-    const route = request.route === "openrouter" || request.route === "openai_codex" ? request.route : null;
-    if (!route) throw invalidPayload("Unknown route.");
-    if (route === "openai_codex" && !capabilities.includes("codex.login.v1")) {
-      throw invalidPayload("ChatGPT isn't available on this agent.");
-    }
-    const admission = admit({ disconnect: route });
-    // The safe-default precondition always holds: this fake's Finite Private is configured.
-    if (admission === "resume_failed" && operation) {
+    if (request.route !== "openrouter") throw invalidPayload("Unknown route.");
+    if (operation?.state === "failed" && operation.kind === "disconnect") {
       const at = now();
       Object.assign(operation, {
         state: "running",
@@ -1241,138 +1073,28 @@ export function createInferenceFake(options: InferenceFakeOptions = {}): Inferen
         attempts: 0,
         startedAtMs: at - operation.phaseIndex * phaseMs,
         updatedAtMs: at,
-        failWith: takeFailNext(),
+        shouldFail: failNext,
       });
+      failNext = false;
       return { accepted: true, operation_id: operation.id };
     }
-    const stored = route === "openrouter" ? openrouterKey !== null : codexSignedIn;
-    if (!stored && saved.route !== route) {
-      settle(admission);
+    prepareMutation();
+    if (!openrouterKeyHash && saved.route !== "openrouter") {
       return { changed: false };
     }
-    return startOperation("disconnect", route, null);
-  }
-
-  function usage() {
-    const base = {
-      fetched_at_ms: now(),
-      retry_after_s: null,
-      other_pool_keys: "none",
-      hermes_key: openrouterKey ? "saved_key" : "none",
-      key: null,
-    };
-    if (!openrouterKey) return { state: "no_key", ...base };
-    if (openrouterKey.verdict === "rejected" || openrouterKey.verdict === "management") {
-      return { state: "key_rejected", ...base };
-    }
-    if (openrouterKey.verdict === "unreachable") return { state: "unavailable", ...base };
-    return {
-      state: "ok",
-      ...base,
-      key: {
-        key_hash: openrouterKey.hash,
-        limit_usd: 25,
-        limit_remaining_usd: openrouterKey.verdict === "exhausted" ? 0 : 24.5,
-        limit_reset: "monthly",
-        include_byok_in_limit: false,
-        usage_usd: { total: 0.5, daily: 0.05, weekly: 0.2, monthly: 0.5 },
-        byok_usage_usd: { total: 0, daily: 0, weekly: 0, monthly: 0 },
-        is_free_tier: false,
-        expires_at: null,
-      },
-    };
-  }
-
-  function connect(body: unknown) {
-    const request = bodyRecord(body, ["credential", "activate"]);
-    const credential = isRecord(request.credential) ? request.credential : {};
-    const activate =
-      request.activate === undefined || request.activate === null
-        ? null
-        : modelName(bodyRecord(request.activate, ["model"]).model);
-    const admission = admit("mutation");
-    if (credential.kind === "api_key") {
-      const apiKey = bodyRecord(credential, ["kind", "api_key"]).api_key;
-      if (typeof apiKey !== "string" || apiKey.length < 8 || apiKey.length > 16 * 1024) {
-        throw invalidPayload("api_key is invalid.");
-      }
-      return connectCandidate(storedKey(apiKey), activate, admission);
-    }
-    if (credential.kind !== "oauth_code") throw invalidPayload("credential is invalid.");
-    const oauth = bodyRecord(credential, ["kind", "code", "code_verifier", "attempt_id"]);
-    if (
-      typeof oauth.code !== "string" || !/^[A-Za-z0-9._~-]{1,512}$/u.test(oauth.code)
-      || typeof oauth.code_verifier !== "string" || !/^[A-Za-z0-9._~-]{43,128}$/u.test(oauth.code_verifier)
-      || typeof oauth.attempt_id !== "string" || !/^ora_[0-9a-f]{32}$/u.test(oauth.attempt_id)
-    ) {
-      throw invalidPayload("credential is invalid.");
-    }
-    if (oauthAttempts.has(oauth.attempt_id)) {
-      const prior = oauthAttempts.get(oauth.attempt_id);
-      if (prior === null) throw new FakeCommandError("attempt_not_found", "That sign-in is no longer active. Start again.");
-      return prior;
-    }
-    try {
-      const result = connectCandidate(storedKey(`sk-or-v1-web-design-fixture-oauth-${oauth.code}`), activate, admission);
-      oauthAttempts.set(oauth.attempt_id, result);
-      return result;
-    } catch (error) {
-      oauthAttempts.set(oauth.attempt_id, null);
-      throw error;
-    }
-  }
-
-  function connectCandidate(candidate: StoredKey, activate: string | null, admission: Admission) {
-    checkKey(candidate.verdict);
-    const planned: SavedModel | null = activate ? { route: "openrouter", model: activate } : null;
-    if (candidate.hash === openrouterKey?.hash && (!planned || sameModel(planned, saved))) {
-      settle(admission);
-      return { changed: false };
-    }
-    const replaced = openrouterKey !== null && openrouterKey.hash !== candidate.hash;
-    openrouterKey = candidate;
-    if (planned) return startOperation("activate", "openrouter", planned.model);
-    if (replaced && saved.route === "openrouter") return startOperation("activate", "openrouter", saved.model);
-    settle(admission);
-    return { changed: true, activated: false };
-  }
-
-  function cancelCodexLogin(body: unknown) {
-    const attemptId = bodyRecord(body, ["attempt_id"]).attempt_id;
-    if (!codexLogin || codexLogin.attemptId !== attemptId) {
-      throw new FakeCommandError("attempt_not_found", "That sign-in is no longer active. Start again.");
-    }
-    if (codexLogin.state === "pending") codexLogin.state = "canceled";
-    return codexLoginStatus();
+    return startOperation("disconnect", "openrouter", null);
   }
 
   return {
     runtimeCommand,
-    failNextOperation(code = "verify_failed") {
-      failNext = code;
+    failNextOperation() {
+      failNext = true;
     },
   };
 }
 
-function storedKey(key: string): StoredKey {
-  const verdict = (["management", "rejected", "exhausted", "unreachable"] as const).find((word) => key.includes(word));
-  return { hash: createHash("sha256").update(key).digest("hex"), verdict: verdict ?? "ok" };
-}
-
-function checkKey(verdict: KeyVerdict) {
-  switch (verdict) {
-    case "management":
-      throw new FakeCommandError("credential_rejected", "That's an OpenRouter management key. Use an ordinary API key.");
-    case "rejected":
-      throw new FakeCommandError("credential_rejected", "OpenRouter didn't accept this key.");
-    case "exhausted":
-      throw new FakeCommandError(
-        "key_allowance_exhausted",
-        "This key has no remaining allowance. Raise its limit at openrouter.ai/keys, or use another key."
-      );
-    case "unreachable":
-      throw new FakeCommandError("provider_unavailable", "Couldn't reach OpenRouter to check this key.");
-  }
+function sha256(value: string) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function savedProvider(route: FakeInferenceRoute) {
@@ -1387,11 +1109,6 @@ function modelName(value: unknown) {
   if (typeof value !== "string" || value.length < 1 || value.length > 256 || /[\s\p{Cc}]/u.test(value)) {
     throw invalidPayload("model is invalid.");
   }
-  return value;
-}
-
-function codexModelName(value: unknown) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/u.test(value)) throw invalidPayload("model is invalid.");
   return value;
 }
 
@@ -1430,7 +1147,11 @@ export function parseInferenceChoice(
   const [agentName, route = "finite_private", facts, ...rest] = text.trim().split(/\s+/u);
   const agent = FAKE_AGENTS.find((value) => value === agentName);
   const saved = FAKE_ROUTES.find((value) => value === route);
-  if (rest.length > 0 || (facts !== undefined && facts !== "unconfirmed")) return null;
+  if (
+    rest.length > 0 ||
+    (facts !== undefined && facts !== "unconfirmed") ||
+    (saved === "openai_codex" && agent !== "legacy")
+  ) return null;
   return agent && saved ? { agent, saved, unconfirmed: facts === "unconfirmed" } : null;
 }
 

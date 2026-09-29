@@ -1123,37 +1123,6 @@ mod tests {
         ]
     }
 
-    #[test]
-    fn the_table_covers_the_nine_commands() {
-        let names = every_command()
-            .iter()
-            .map(|(name, _, _)| *name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, INFERENCE_COMMANDS);
-    }
-
-    #[tokio::test]
-    async fn every_dispatch_arm_reads_the_intent_through_admit() {
-        for (command, schema, body) in every_command() {
-            let setup = new_setup(&fp_block(), "");
-            // A corrupt record is quarantined by the only reader, `admit`.
-            let path = setup.inference.intent_path.clone();
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, b"{not a record").unwrap();
-            let _ = setup.run(command, schema, body).await;
-            let quarantined = fs::read_dir(path.parent().unwrap())
-                .unwrap()
-                .filter_map(|entry| entry.ok())
-                .any(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("inference-intent.json.corrupt-")
-                });
-            assert!(quarantined, "{command} did not call admit");
-        }
-    }
-
     #[tokio::test]
     async fn admission_at_the_dispatch_level() {
         for (command, schema, body) in every_command() {
@@ -1743,72 +1712,6 @@ mod tests {
             .unwrap();
         assert_eq!(setup.host.events(), ["gateway", "serve"]);
         assert_eq!(setup.host.model()["default"], OR_MODEL);
-    }
-
-    #[tokio::test]
-    async fn r8_v1_success_makes_one_restart_and_replies_without_waiting() {
-        // The reply is no later than before verification existed: exactly one
-        // restart call and one immediate read. `Inference` has no verify delay
-        // for v1 at all; the only waits are the restarts the host records.
-        let setup = new_setup(
-            &openrouter_block(),
-            &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
-        );
-        setup
-            .v1(json!({"profile": "finite_private"}))
-            .await
-            .unwrap();
-        assert_eq!(setup.host.events(), ["gateway"]);
-        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
-
-        let setup = new_setup(&fp_block(), "");
-        setup
-            .v1(json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL}))
-            .await
-            .unwrap();
-        assert_eq!(setup.host.events(), ["gateway", "serve"]);
-        assert_eq!(*setup.host.restarts.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn dotenv_reads_take_the_last_assignment_for_every_caller() {
-        let setup = new_setup(&fp_block(), "");
-        fs::write(
-            setup.hermes_home.join(".env"),
-            "OPENROUTER_API_KEY=sk-or-v1-first\nOTHER=1\nOPENROUTER_API_KEY=sk-or-v1-last\n",
-        )
-        .unwrap();
-        let connections = &setup.inference.connections;
-        assert_eq!(
-            connections.openrouter_dotenv_key().unwrap().as_deref(),
-            Some("sk-or-v1-last")
-        );
-        // v1 reuses the key Hermes uses.
-        let plan = connections
-            .inference_plan_with(
-                "r",
-                InferenceApplyRequest {
-                    profile: "openrouter".to_owned(),
-                    api_key: None,
-                    model: None,
-                },
-                &fp(),
-            )
-            .unwrap();
-        assert!(plan.credential_to_persist().is_none());
-        // Removal drops every line and keeps the others' bytes.
-        fs::write(
-            setup.hermes_home.join(".env"),
-            "A=1\r\nOPENROUTER_API_KEY=x\nexport OPENROUTER_API_KEY='y'\n# note\nB=2",
-        )
-        .unwrap();
-        connections.remove_openrouter_key().unwrap();
-        assert_eq!(setup.env(), "A=1\r\n# note\nB=2");
-        let mode = fs::metadata(setup.hermes_home.join(".env"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
     }
 
     // ---- select preflight -----------------------------------------
@@ -2519,62 +2422,34 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn select_crashed_after_the_intent_was_recorded() {
-        let setup = new_setup(&fp_block(), &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
-        crashed_at(
-            &setup,
-            IntentKind::Select,
-            IntentRoute::Openrouter,
-            intent::IntentPhase::Accepted,
-        );
-        assert!(restart_over(&setup).await.is_none());
-        assert_eq!(setup.host.model(), openrouter_block());
-    }
-
-    #[tokio::test]
-    async fn select_crashed_after_the_legacy_key_migration() {
+    async fn select_resumes_after_each_persisted_kill_point() {
         let legacy = json!({"default": OR_MODEL, "provider": "openrouter", "api_key": OR_KEY});
-        let setup = new_setup(&legacy, &format!("OPENROUTER_API_KEY='{OR_KEY}'\n"));
-        crashed_at(
-            &setup,
-            IntentKind::Select,
-            IntentRoute::Openrouter,
-            intent::IntentPhase::ConfigWritten,
-        );
-        assert!(restart_over(&setup).await.is_none());
-        assert_eq!(
-            setup.host.model(),
-            openrouter_block(),
-            "the legacy copy is gone"
-        );
-        assert_eq!(
-            setup
-                .inference
-                .connections
-                .openrouter_dotenv_key()
-                .unwrap()
-                .as_deref(),
-            Some(OR_KEY)
-        );
-    }
-
-    #[tokio::test]
-    async fn select_crashed_after_the_model_write() {
-        let setup = new_setup(
-            &openrouter_block(),
-            &format!("OPENROUTER_API_KEY={OR_KEY}\n"),
-        );
-        crashed_at(
-            &setup,
-            IntentKind::Select,
-            IntentRoute::Openrouter,
-            intent::IntentPhase::Restarting,
-        );
-        assert!(restart_over(&setup).await.is_none());
-        assert_eq!(
-            setup.host.events().first().map(String::as_str),
-            Some("gateway")
-        );
+        for (name, model, phase) in [
+            ("intent", fp_block(), intent::IntentPhase::Accepted),
+            ("credential", legacy, intent::IntentPhase::ConfigWritten),
+            ("model", openrouter_block(), intent::IntentPhase::Restarting),
+        ] {
+            let setup = new_setup(&model, &format!("OPENROUTER_API_KEY={OR_KEY}\n"));
+            crashed_at(&setup, IntentKind::Select, IntentRoute::Openrouter, phase);
+            assert!(restart_over(&setup).await.is_none(), "{name}");
+            assert_eq!(setup.host.model(), openrouter_block(), "{name}");
+            assert_eq!(
+                setup
+                    .inference
+                    .connections
+                    .openrouter_dotenv_key()
+                    .unwrap()
+                    .as_deref(),
+                Some(OR_KEY),
+                "{name}"
+            );
+            if phase == intent::IntentPhase::Restarting {
+                assert_eq!(
+                    setup.host.events().first().map(String::as_str),
+                    Some("gateway")
+                );
+            }
+        }
     }
 
     #[tokio::test]

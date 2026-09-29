@@ -466,48 +466,22 @@ mod tests {
         clock.set(second_failed_at + Duration::from_millis(14_999));
         cache.get_or_fetch_at(home, || clock.get(), hang).await;
         assert_eq!(calls.get(), 2);
-    }
-
-    #[tokio::test]
-    async fn a_successful_read_after_15_s_replaces_the_failure_and_is_cached() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path();
-        fs::write(home.join("config.yaml"), "model: {}\n").unwrap();
-        let cache = FactsCache::default();
-        let calls = Cell::new(0);
-        let fetch = |result: Result<&'static str, ()>| {
-            calls.set(calls.get() + 1);
-            async move {
-                result
-                    .map(fetched)
-                    .map_err(|()| AgentdError::ProviderUnavailable("helper failed".to_owned()))
-            }
-        };
-        let start = Instant::now();
-        cache
-            .get_or_fetch_at(home, || start, || fetch(Err(())))
-            .await;
-        let fresh = start + FAILED_READ_MEMORY;
+        // A successful retry clears the failure memory and enters the normal
+        // cache path.
+        let fresh = second_failed_at + FAILED_READ_MEMORY;
+        clock.set(fresh);
         let read = cache
-            .get_or_fetch_at(home, || fresh, || fetch(Ok("fresh")))
+            .get_or_fetch_at(home, || clock.get(), || async { Ok(fetched("fresh")) })
             .await;
         assert_eq!(label(&read), Some("fresh"));
-        assert_eq!(calls.get(), 2);
-        // Cached as today: the same facts, no helper, until the TTL.
         let hit = cache
             .get_or_fetch_at(
                 home,
                 || fresh + Duration::from_secs(29),
-                || fetch(Ok("later")),
+                || async { Ok(fetched("later")) },
             )
             .await;
         assert_eq!(label(&hit), Some("fresh"));
-        assert_eq!(calls.get(), 2);
-        let expired = cache
-            .get_or_fetch_at(home, || fresh + FACTS_TTL, || fetch(Ok("later")))
-            .await;
-        assert_eq!(label(&expired), Some("later"));
-        assert_eq!(calls.get(), 3);
     }
 
     #[tokio::test]

@@ -1,11 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseConnectionsStatus, type AgentConnectionsStatus } from "./hosted-agent-controls";
+import { parseConnectionsStatus } from "./hosted-agent-controls";
 import {
   backupConfiguredFor,
   classifyLegacyProvider,
-  hasCapability,
   inferenceView,
   pollDelayMs,
   routeLabel,
@@ -160,13 +159,6 @@ test("a Codex login and an operation map to camel-case views", () => {
     id: `op_${"c".repeat(32)}`, kind: "select", route: "openrouter", model: "openai/gpt-5",
     state: "running", phase: "restarting", errorCode: null, attempts: 1, updatedAtMs: 1_790_000_000_000,
   });
-});
-
-test("hasCapability reads only the advertised list", () => {
-  const status: AgentConnectionsStatus = v2Status({ capabilities: ["inference.select.v1"] });
-  assert.equal(hasCapability(status, "inference.select.v1"), true);
-  assert.equal(hasCapability(status, "inference.disconnect.v1"), false);
-  assert.equal(hasCapability(legacyStatus("custom", "glm-5-3-flash"), "inference.select.v1"), false);
 });
 
 test("backupConfiguredFor needs a configured backup and that saved route", () => {

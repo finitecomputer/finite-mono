@@ -22,10 +22,10 @@ import {
   type OperationView,
 } from "@/lib/inference-status";
 
-export const STORAGE_ONLY_COPY =
+const STORAGE_ONLY_COPY =
   "Key saved. The agent default is unchanged. OpenRouter conversations may use it.";
 /** Longer than a worst-case disconnect (5 to 7 minutes), so a normal operation finishes while watched. */
-export const POLL_LIMIT_MS = 8 * 60_000;
+const POLL_LIMIT_MS = 8 * 60_000;
 
 export type InferenceOutcome =
   | { ok: true; result: AgentConnectionActionResult["result"] }
@@ -179,7 +179,7 @@ export function InferenceConnections({
   );
 }
 
-export function FinitePrivateCard({
+function FinitePrivateCard({
   view,
   busy,
   lock,
@@ -223,7 +223,7 @@ export function FinitePrivateCard({
   );
 }
 
-export function finitePrivateCardState(view: InferenceView | null): {
+function finitePrivateCardState(view: InferenceView | null): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
   note: string | null;
@@ -252,14 +252,14 @@ export function finitePrivateCardState(view: InferenceView | null): {
   return { state: "attention", note: null, reason: reason ? `${reason[0].toUpperCase()}${reason.slice(1)}.` : null };
 }
 
-export function finitePrivateAction(view: InferenceView): AgentConnectionAction {
+function finitePrivateAction(view: InferenceView): AgentConnectionAction {
   return view.capabilities.has("inference.select.v1")
     ? { action: "inference_select", route: "finite_private" }
     : { action: "inference", profile: "finite_private" };
 }
 
 /** The `/model` hint names `openai-codex` only when the ChatGPT card is shown. */
-export function modelHintProviders(view: InferenceView | null) {
+function modelHintProviders(view: InferenceView | null) {
   return view && showCodexCard(view) ? "finite-private|openrouter|openai-codex" : "finite-private|openrouter";
 }
 
@@ -269,7 +269,7 @@ export function modelHintProviders(view: InferenceView | null) {
  * limit unlocks nothing; "Check again" and "Try again" are never locked, so the panel can't be stuck. A failed
  * select or activate locks nothing: the next change replaces it.
  */
-export function controlsLocked(view: InferenceView | null) {
+function controlsLocked(view: InferenceView | null) {
   const operation = view?.operation;
   if (operation?.state === "running") return true;
   return operation?.kind === "disconnect" && operation.state === "failed";
@@ -293,7 +293,7 @@ export function watchState(view: InferenceView | null, visible: boolean, expired
  * "Check again" reads status once, then clears the expired polling window. If that status still shows the
  * operation running, the same poll key is live again and polling resumes; if it has ended, there is nothing to poll.
  */
-export async function checkAgain(refresh: () => Promise<void>, resumePolling: () => void) {
+async function checkAgain(refresh: () => Promise<void>, resumePolling: () => void) {
   try {
     await refresh();
   } finally {
@@ -337,7 +337,7 @@ export function summaryText(view: InferenceView): ReactNode {
   );
 }
 
-export function backupLine(view: InferenceView) {
+function backupLine(view: InferenceView) {
   const { fallback } = view;
   if (backupConfiguredFor(view, view.saved.route)) {
     const base =
@@ -364,7 +364,7 @@ export function backupLine(view: InferenceView) {
   }
 }
 
-export function operationText(operation: OperationView, showDone: boolean) {
+function operationText(operation: OperationView, showDone: boolean) {
   const label = routeLabel(operation.route);
   const paused =
     operation.kind === "disconnect" && operation.state !== "succeeded"
@@ -382,7 +382,7 @@ export function operationText(operation: OperationView, showDone: boolean) {
   return `Switching to ${target} didn't finish${error ? ` (${error})` : ""}. Try again.`;
 }
 
-export function OperationLine({
+function OperationLine({
   id,
   view,
   showDone,
@@ -443,7 +443,7 @@ function retryAction(
   return null;
 }
 
-export function commandErrorText(
+function commandErrorText(
   code: string | null,
   message: string,
   route: InferenceRoute,

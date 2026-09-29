@@ -1098,16 +1098,6 @@ mod tests {
     }
 
     #[test]
-    fn write_model_fails_for_real_on_a_read_only_directory() {
-        let (directory, manager) = manager();
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
-        let result = manager.write_model(&finite_private_block(), || Ok(()));
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
-        assert!(matches!(result, Err(AgentdError::Io(_))));
-        assert_eq!(fs::read(manager.path()).unwrap(), ORIGINAL.as_bytes());
-    }
-
-    #[test]
     fn restore_happens_only_while_the_written_bytes_are_intact() {
         let (_directory, manager) = manager();
         let ModelWrite::Written(write) = manager

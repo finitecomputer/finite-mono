@@ -1701,17 +1701,9 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
                 .map(move |line| format!("{name}: {line}"))
         })
         .collect::<Vec<_>>();
-    let mut evidence = story.clone();
-    for outcome in &outcomes {
-        evidence.push(format!(
-            "launcher step {} ms, load {}",
-            field(outcome, "step_ms").unwrap_or("?"),
-            field(outcome, "load").unwrap_or("?")
-        ));
-    }
     proofs.observe(
         "P8 disconnect with a delayed launcher step, gateway starts",
-        evidence,
+        story.clone(),
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
@@ -1802,39 +1794,9 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .filter(|line| line.contains(&id) && line.contains("helper_unavailable"))
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    // Every facts read during the operation. Hung reads killed at about 10 s
-    // were status reads, at about 30 s the executor's; answered reads cannot
-    // be told apart from outside agentd.
-    let ended_at = now_ms();
-    let started_reads = run
-        .events()
-        .into_iter()
-        .filter(|(ms, line)| {
-            *ms >= before
-                && *ms <= ended_at
-                && (line.starts_with("facts-read pid=") || line.starts_with("facts-read-slow"))
-        })
-        .count();
-    let mut evidence = story.clone();
-    for ((spawned, _), outcome) in spawns.iter().zip(&outcomes) {
-        let ready = run
-            .events()
-            .into_iter()
-            .find(|(_, line)| line == outcome)
-            .map(|(ms, _)| ms.saturating_sub(*spawned));
-        evidence.push(format!(
-            "launcher start: spawn to ready {ready:?} ms, step {} ms, load {}, cut on purpose {}",
-            field(outcome, "step_ms").unwrap_or("?"),
-            field(outcome, "load").unwrap_or("?"),
-            field(outcome, "cut").unwrap_or("?"),
-        ));
-    }
-    evidence.push(format!(
-        "{started_reads} facts reads started during the operation; hung ones (pid, ms until killed): {slow_reads:?}"
-    ));
     proofs.observe(
         "P9 disconnect with cut-short steps and slow facts reads, gateway starts",
-        evidence,
+        story.clone(),
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
@@ -2079,114 +2041,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     ));
     proofs.record("P7 helper facts on real files", p7);
 
-    // Every facts read agentd made and how it ended. A read with no exit
-    // line was killed by agentd's deadline.
-    let exits = run
-        .events()
-        .into_iter()
-        .filter_map(|(_, line)| {
-            let (pid, exit) = line
-                .strip_prefix("facts-read-end pid=")?
-                .split_once(" exit=")?;
-            Some((pid.parse::<u32>().ok()?, exit.to_owned()))
-        })
-        .collect::<HashMap<_, _>>();
-    let reads = timeline.lock().unwrap().facts_reads.clone();
-    let mut answered = Vec::new();
-    let mut others = Vec::new();
-    for (pid, started, ended, hung) in &reads {
-        let lasted = ended - started;
-        match exits.get(pid).map(String::as_str) {
-            Some("0") => answered.push(lasted),
-            Some(exit) => others.push(format!(
-                "pid {pid} at {started}: exit {exit} after {lasted} ms"
-            )),
-            None => others.push(format!(
-                "pid {pid} at {started}: killed after {lasted} ms{}",
-                if *hung { " (hung on purpose, P9)" } else { "" }
-            )),
-        }
-    }
-    answered.sort_unstable();
-    let mut lines = vec![format!(
-        "{} reads; {} answered (median {} ms, slowest {} ms); {} did not",
-        reads.len(),
-        answered.len(),
-        answered
-            .get(answered.len() / 2)
-            .copied()
-            .unwrap_or_default(),
-        answered.last().copied().unwrap_or_default(),
-        others.len()
-    )];
-    lines.extend(others);
-    proofs.observe("facts reads by agentd", lines);
-    proofs.observe("launcher starts by load", launcher_table(&run.events()));
     proofs
-}
-
-/// Every gateway start's durations, by the 1-minute load when its step stage
-/// began: spawn to ready for every start, and the pending-disconnect step
-/// alone where one ran. Steps the stub cut on purpose are counted apart.
-fn launcher_table(events: &[(u64, String)]) -> Vec<String> {
-    let spawned = events
-        .iter()
-        .filter(|(_, line)| line.starts_with("gateway-spawn"))
-        .filter_map(|(ms, line)| Some((field(line, "pid")?.to_owned(), *ms)))
-        .collect::<HashMap<_, _>>();
-    let mut lines = Vec::new();
-    let mut cut = 0;
-    let bucket = |load: f64| match load {
-        load if load < 15.0 => 0,
-        load if load <= 30.0 => 1,
-        _ => 2,
-    };
-    let mut ready_ms: [Vec<u64>; 3] = Default::default();
-    let mut step_ms: [Vec<u64>; 3] = Default::default();
-    let mut limit_hits = [0; 3];
-    for (ms, line) in events
-        .iter()
-        .filter(|(_, line)| line.starts_with("gateway-ready"))
-    {
-        let Some(load) = field(line, "load").and_then(|load| load.parse::<f64>().ok()) else {
-            continue;
-        };
-        let index = bucket(load);
-        if let Some(start) = field(line, "pid").and_then(|pid| spawned.get(pid)) {
-            ready_ms[index].push(ms.saturating_sub(*start));
-        }
-        if field(line, "cut") == Some("yes") {
-            cut += 1;
-            continue;
-        }
-        if let Some(step) = field(line, "step_ms").and_then(|ms| ms.parse::<u64>().ok()) {
-            step_ms[index].push(step);
-            if line.contains("step=failed:124") {
-                limit_hits[index] += 1;
-            }
-        }
-    }
-    let summary = |values: &mut Vec<u64>| {
-        values.sort_unstable();
-        format!(
-            "n={} median={} ms slowest={} ms",
-            values.len(),
-            values.get(values.len() / 2).copied().unwrap_or_default(),
-            values.last().copied().unwrap_or_default()
-        )
-    };
-    for (index, name) in ["load < 15", "load 15-30", "load > 30"].iter().enumerate() {
-        lines.push(format!(
-            "{name}: step {} (hit the 20 s limit: {}); spawn to ready {}",
-            summary(&mut step_ms[index]),
-            limit_hits[index],
-            summary(&mut ready_ms[index])
-        ));
-    }
-    lines.push(format!(
-        "{cut} step(s) cut on purpose by the stub, not counted"
-    ));
-    lines
 }
 
 #[tokio::main]

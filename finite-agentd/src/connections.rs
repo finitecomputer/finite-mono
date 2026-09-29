@@ -1185,6 +1185,28 @@ mod tests {
     }
 
     #[test]
+    fn dotenv_last_assignment_and_removal_match_hermes() {
+        let (_temp, manager) = manager();
+        let path = manager.openrouter_env_path();
+        fs::write(
+            &path,
+            b"A=1\r\nOPENROUTER_API_KEY=first\r\nexport OPENROUTER_API_KEY='last'\n# note\nB=2",
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager.openrouter_dotenv_key().unwrap().as_deref(),
+            Some("last")
+        );
+        manager.remove_openrouter_key().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"A=1\r\n# note\nB=2");
+        assert_eq!(
+            fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn finite_private_vision_is_scoped_to_the_known_model_and_route() {
         for base_url in [
             "https://finite-private.finite.containers.tinfoil.dev/v1",

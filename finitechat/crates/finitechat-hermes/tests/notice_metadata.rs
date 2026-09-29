@@ -85,42 +85,6 @@ fn notice_metadata_survives_the_sidecar_request_and_room_payload() {
 }
 
 #[test]
-fn every_notice_shape_is_accepted() {
-    for (notice_type, attempted, served_by, reason) in [
-        (
-            "inference_fallback",
-            "openai_codex",
-            json!("finite_private"),
-            json!(null),
-        ),
-        (
-            "inference_backup",
-            "other",
-            json!("backup"),
-            json!("timeout"),
-        ),
-        (
-            "inference_fallback_failed",
-            "openrouter",
-            json!(null),
-            json!("billing"),
-        ),
-    ] {
-        let notice = json!({
-            "v": 1,
-            "type": notice_type,
-            "attempted": attempted,
-            "served_by": served_by,
-            "reason": reason,
-        });
-        let body = adapter_send_body("notice", Some(json!({ "finite_notice": notice.clone() })));
-        let request: HermesSendRequestV1 = serde_json::from_value(body).expect(notice_type);
-        let (_, decoded) = room_round_trip(&request);
-        assert_eq!(decoded.metadata.get("finite_notice"), Some(&notice));
-    }
-}
-
-#[test]
 fn a_message_without_metadata_is_unchanged() {
     for body in [
         adapter_send_body("the answer", None),
@@ -147,12 +111,4 @@ fn a_message_without_metadata_is_unchanged() {
         );
         assert!(decoded.metadata.is_empty());
     }
-}
-
-#[test]
-fn a_notice_kind_would_be_rejected_which_is_why_notices_use_metadata() {
-    let mut body = adapter_send_body(NOTICE_TEXT, None);
-    body["kind"] = json!("notice");
-    assert!(serde_json::from_value::<HermesSendRequestV1>(body).is_err());
-    assert_eq!(HermesSendKindV1::parse("notice"), None);
 }

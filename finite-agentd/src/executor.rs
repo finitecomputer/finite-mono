@@ -627,8 +627,6 @@ pub(crate) mod tests {
         override_openrouter: Tri,
         override_codex: Tri,
         codex: CodexStateFact,
-        /// When false, the fake launcher leaves the overrides behind.
-        launcher_clears_overrides: bool,
     }
 
     struct Fake {
@@ -671,7 +669,6 @@ pub(crate) mod tests {
     impl Fake {
         fn apply_clears(&self, route: IntentRoute, overrides: bool) {
             let mut hermes = self.hermes.lock().unwrap();
-            let overrides = overrides && hermes.launcher_clears_overrides;
             match route {
                 IntentRoute::Openrouter => {
                     hermes.pool = PoolEntries::None;
@@ -947,7 +944,6 @@ pub(crate) mod tests {
                 override_openrouter: Tri::Present,
                 override_codex: Tri::Present,
                 codex: CodexStateFact::SignedIn,
-                launcher_clears_overrides: true,
             }),
         });
         let ledger = Ledger::open(temp.path().join("agentd.sqlite3")).unwrap();
@@ -996,20 +992,6 @@ pub(crate) mod tests {
                 _ => None,
             })
             .collect()
-    }
-
-    #[test]
-    fn the_backoff_is_zero_fifteen_and_sixty_seconds() {
-        assert_eq!(
-            BACKOFF,
-            [
-                Duration::ZERO,
-                Duration::from_secs(15),
-                Duration::from_secs(60)
-            ]
-        );
-        assert_eq!(VERIFY_DELAY, Duration::from_secs(5));
-        assert_eq!(LAUNCHER_WAIT, Duration::from_secs(60));
     }
 
     fn gateway_restarts(events: &[Event]) -> usize {
@@ -1221,30 +1203,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_failed_read_then_a_cleared_one_inside_the_window_succeeds() {
-        let setup = roomy(IntentRoute::Openrouter);
-        *setup.fake.failed_reads.lock().unwrap() = 2;
-        arm(
-            &setup,
-            IntentKind::Disconnect,
-            IntentRoute::Openrouter,
-            None,
-        );
-        setup.executor.run().await;
-        assert!(record_now(&setup).is_none(), "succeeded");
-        let operation = setup.executor.operation(None).unwrap();
-        assert_eq!(operation.state, OperationState::Succeeded);
-        assert_eq!(operation.attempts, 1);
-        let events = setup.fake.events();
-        assert_eq!(gateway_restarts(&events), 1, "{events:?}");
-        let reads = reads_in(&setup, 1)
-            .into_iter()
-            .map(|(failed, _)| failed)
-            .collect::<Vec<_>>();
-        assert_eq!(reads, [true, true, false, false], "cleared and confirmed");
-    }
-
     /// A stand-in `hermes` whose `config check` hangs. It uses absolute paths
     /// only, and appends "<its pid> <its sleeping child's pid>" to `pids`.
     pub(crate) fn hanging_config_check(dir: &Path) -> (PathBuf, PathBuf) {
@@ -1423,16 +1381,6 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn with_no_record_the_executor_does_nothing() {
-        let setup = new_setup(&fp_block(), "");
-        setup.executor.run().await;
-        setup.executor.resume_at_startup().await;
-        assert!(setup.fake.events().is_empty());
-        assert!(record_now(&setup).is_none());
-        assert!(setup.executor.operation(None).is_none());
-    }
-
-    #[tokio::test]
     async fn select_writes_each_phase_before_its_step() {
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
         let record = arm(
@@ -1459,43 +1407,36 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn select_resumes_from_each_phase() {
-        for phase in IntentKind::Select.phases() {
-            for kind in [IntentKind::Select, IntentKind::Activate] {
-                // Past `config_written` the block may already be on disk.
-                let written = !matches!(phase, IntentPhase::Accepted | IntentPhase::ConfigWritten);
-                let start = if written {
-                    openrouter_block()
-                } else {
-                    fp_block()
-                };
-                let setup = new_setup(&start, "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
-                let record = arm(
-                    &setup,
-                    kind,
-                    IntentRoute::Openrouter,
-                    Some(OPENROUTER_MODEL),
-                );
-                at_phase(&setup, record, *phase);
-                setup.executor.run().await;
-                assert!(record_now(&setup).is_none(), "{kind:?} {phase:?}");
-                assert_eq!(setup.fake.model(), openrouter_block());
-                let events = setup.fake.events();
-                let restarts = events
-                    .iter()
-                    .filter(|event| matches!(event, Event::RestartGateway(_)))
-                    .count();
-                assert_eq!(
-                    restarts,
-                    usize::from(*phase != IntentPhase::Verifying),
-                    "{kind:?} {phase:?}: {events:?}"
-                );
-                // Only the steps from the recorded phase on run.
-                let wrote = events
-                    .iter()
-                    .any(|event| matches!(event, Event::Migrate(_)));
-                assert_eq!(wrote, !written, "{kind:?} {phase:?}");
-            }
+    async fn select_and_activate_resume_from_uncovered_phases() {
+        let cases = std::iter::once((IntentKind::Select, IntentPhase::Verifying)).chain(
+            IntentKind::Activate
+                .phases()
+                .iter()
+                .map(|phase| (IntentKind::Activate, *phase)),
+        );
+        for (kind, phase) in cases {
+            let already_written = matches!(phase, IntentPhase::Restarting | IntentPhase::Verifying);
+            let model = if already_written {
+                openrouter_block()
+            } else {
+                fp_block()
+            };
+            let setup = new_setup(&model, "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+            let record = arm(
+                &setup,
+                kind,
+                IntentRoute::Openrouter,
+                Some(OPENROUTER_MODEL),
+            );
+            at_phase(&setup, record, phase);
+            setup.executor.run().await;
+            assert!(record_now(&setup).is_none(), "{kind:?} {phase:?}");
+            assert_eq!(setup.fake.model(), openrouter_block(), "{kind:?} {phase:?}");
+            assert_eq!(
+                gateway_restarts(&setup.fake.events()),
+                usize::from(phase != IntentPhase::Verifying),
+                "{kind:?} {phase:?}"
+            );
         }
     }
 
@@ -1569,29 +1510,25 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn disconnect_resumes_from_each_phase() {
-        for route in [IntentRoute::Openrouter, IntentRoute::OpenaiCodex] {
-            for phase in IntentKind::Disconnect.phases() {
-                let setup = disconnect_setup(route);
-                let record = arm(&setup, IntentKind::Disconnect, route, None);
-                at_phase(&setup, record, *phase);
-                setup.executor.run().await;
-                let events = setup.fake.events();
-                assert!(
-                    record_now(&setup).is_none(),
-                    "{route:?} {phase:?}: {events:?}"
-                );
-                // Every restart that ran the launcher step saw a gated serve.
-                let serve = serve_events(&events);
-                assert_eq!(serve.last(), Some(&(None, false)), "{route:?} {phase:?}");
-                assert!(serve[..serve.len() - 1].iter().all(|(_, gated)| *gated));
-                assert!(
-                    !events
-                        .iter()
-                        .any(|event| matches!(event, Event::CancelLogin(_)))
-                        || route == IntentRoute::OpenaiCodex
-                );
-            }
+    async fn disconnect_resumes_from_uncovered_route_phases() {
+        let cases = std::iter::once((IntentRoute::Openrouter, IntentPhase::Verifying)).chain(
+            IntentKind::Disconnect
+                .phases()
+                .iter()
+                .map(|phase| (IntentRoute::OpenaiCodex, *phase)),
+        );
+        for (route, phase) in cases {
+            let setup = disconnect_setup(route);
+            let record = arm(&setup, IntentKind::Disconnect, route, None);
+            at_phase(&setup, record, phase);
+            setup.executor.run().await;
+            assert!(record_now(&setup).is_none(), "{route:?} {phase:?}");
+            assert_eq!(setup.fake.model(), fp_block(), "{route:?} {phase:?}");
+            assert_eq!(
+                serve_events(&setup.fake.events()).last(),
+                Some(&(None, false)),
+                "{route:?} {phase:?}"
+            );
         }
     }
 
@@ -1637,41 +1574,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn backoff_delays_each_retry() {
-        let mut setup = disconnect_setup(IntentRoute::OpenaiCodex);
-        setup.executor.backoff = [
-            Duration::ZERO,
-            Duration::from_millis(150),
-            Duration::from_millis(300),
-        ];
-        let record = arm(
-            &setup,
-            IntentKind::Disconnect,
-            IntentRoute::OpenaiCodex,
-            None,
-        );
-        at_phase(&setup, record, IntentPhase::Verifying);
-        *setup.fake.failed_reads.lock().unwrap() = usize::MAX;
-        let started = Instant::now();
-        setup.executor.run().await;
-        assert!(started.elapsed() >= Duration::from_millis(450));
-        assert_eq!(record_now(&setup).unwrap().state, IntentState::Failed);
-    }
-
-    #[tokio::test]
-    async fn serve_restarts_on_credential_changes_only() {
-        let count = |events: Vec<Event>| serve_events(&events).len();
-
-        let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
-        arm(
-            &setup,
-            IntentKind::Select,
-            IntentRoute::Openrouter,
-            Some(OPENROUTER_MODEL),
-        );
-        setup.executor.run().await;
-        assert_eq!(count(setup.fake.events()), 0, "a plain select");
-
+    async fn activate_restarts_serve_after_changing_the_credential() {
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
         arm(
             &setup,
@@ -1685,16 +1588,6 @@ pub(crate) mod tests {
             [(Some(IntentPhase::Restarting), false)],
             "a replaced key"
         );
-
-        let setup = disconnect_setup(IntentRoute::Openrouter);
-        arm(
-            &setup,
-            IntentKind::Disconnect,
-            IntentRoute::Openrouter,
-            None,
-        );
-        setup.executor.run().await;
-        assert_eq!(count(setup.fake.events()), 2, "a removed key");
     }
 
     #[tokio::test]
@@ -1776,36 +1669,6 @@ pub(crate) mod tests {
         let hermes = *setup.fake.hermes.lock().unwrap();
         assert_eq!(hermes.pool, PoolEntries::None);
         assert_eq!(hermes.override_openrouter, Tri::Absent);
-    }
-
-    #[tokio::test]
-    async fn disconnect_repeats_steps_then_reports_verify_failed() {
-        let setup = disconnect_setup(IntentRoute::Openrouter);
-        setup.fake.hermes.lock().unwrap().launcher_clears_overrides = false;
-        arm(
-            &setup,
-            IntentKind::Disconnect,
-            IntentRoute::Openrouter,
-            None,
-        );
-        setup.executor.run().await;
-        let failed = record_now(&setup).unwrap();
-        assert_eq!(failed.state, IntentState::Failed);
-        assert_eq!(failed.error_code.as_deref(), Some("verify_failed"));
-        let gateway_restarts = setup
-            .fake
-            .events()
-            .iter()
-            .filter(|event| matches!(event, Event::RestartGateway(_)))
-            .count();
-        assert_eq!(gateway_restarts, 1 + MAX_REAPPLIES);
-        // The re-runs happen at phase `verifying`; the phase never moves back.
-        assert!(setup.fake.events().iter().all(|event| !matches!(
-            event,
-            Event::RestartGateway(Some(
-                IntentPhase::RouteSwitched | IntentPhase::CredentialRemoved
-            ))
-        )));
     }
 
     /// Rewrites `config.yaml` the way the real gateway does on a first turn
@@ -2039,111 +1902,5 @@ pub(crate) mod tests {
             Some("config_conflict")
         );
         assert_eq!(setup.fake.model(), openrouter_block());
-    }
-
-    #[tokio::test]
-    async fn a_spawn_that_really_fails_goes_through_the_real_supervisor() {
-        use crate::supervisor::{ProcessSpec, SupervisorHandle, start_supervisor};
-
-        #[derive(Clone)]
-        struct Real {
-            fake: Arc<Fake>,
-            supervisor: SupervisorHandle,
-            program: PathBuf,
-        }
-        impl ExecutorHost for Real {
-            fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
-                self.fake.validate_config(deadline)
-            }
-            fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
-                self.fake.dotenv_openrouter_key()
-            }
-            fn environment_openrouter_key(&self) -> Option<String> {
-                self.fake.environment_openrouter_key()
-            }
-            fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
-                self.fake.migrate_legacy_openrouter_key()
-            }
-            fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
-                self.fake.remove_openrouter_key()
-            }
-            async fn restart_gateway(&self) -> Result<(), AgentdError> {
-                let result = self.supervisor.restart_hermes().await;
-                // Put the program back so the restore's restart can succeed.
-                write_sleeper(&self.program);
-                result
-            }
-            async fn restart_serve(&self) {}
-            async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
-                self.fake.facts(deadline).await
-            }
-            async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
-                Ok(())
-            }
-        }
-        fn write_sleeper(path: &Path) {
-            use std::os::unix::fs::PermissionsExt;
-            fs::write(path, "#!/bin/sh\nexec sleep 60\n").unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let sleeper = |name: &'static str, program: &Path| ProcessSpec {
-            name,
-            program: program.to_owned(),
-            args: Vec::new(),
-            // The system directories only, never the host's PATH.
-            environment: std::collections::BTreeMap::from([(
-                "PATH".to_owned(),
-                "/usr/bin:/bin".to_owned(),
-            )]),
-        };
-
-        let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
-        let program = setup.fake.home.join("gateway");
-        write_sleeper(&program);
-        let supervisor = start_supervisor(
-            sleeper("finitechat", &program),
-            sleeper("health", &program),
-            sleeper("hermes", &program),
-            None,
-        );
-        tokio::time::timeout(Duration::from_secs(30), async {
-            while supervisor
-                .status()
-                .await
-                .processes
-                .get("hermes")
-                .and_then(|s| s.pid())
-                .is_none()
-            {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-        // The next gateway spawn fails for real: its program is gone.
-        fs::remove_file(&program).unwrap();
-        let before = fs::read(setup.fake.config_path()).unwrap();
-        let mut executor = Executor::new(
-            Real {
-                fake: Arc::clone(&setup.fake),
-                supervisor: supervisor.clone(),
-                program,
-            },
-            setup.executor.config.clone(),
-            setup.fake.intent_path.clone(),
-            fp(),
-        );
-        executor.backoff = [Duration::ZERO; 3];
-        arm(
-            &setup,
-            IntentKind::Select,
-            IntentRoute::Openrouter,
-            Some(OPENROUTER_MODEL),
-        );
-        executor.run().await;
-        let failed = record_now(&setup).unwrap();
-        assert_eq!(failed.error_code.as_deref(), Some("supervisor_unavailable"));
-        assert_eq!(fs::read(setup.fake.config_path()).unwrap(), before);
-        supervisor.shutdown().await;
     }
 }

@@ -2162,6 +2162,7 @@ test("Connections inference flows", { timeout: 300_000 }, async () => {
       // Finite Private and OpenRouter through select; the operation line runs while the page polls.
       await testId("inference-finite-private-use").click();
       await expectTestIdText(page, "inference-operation-line", "Switching to Finite Private…");
+      assert.equal(await testId("inference-openrouter-use").isEnabled(), false);
       await expectPolling();
       await expectTestIdText(page, "inference-operation-line", "Switching to Finite Private…");
       hostedDevice.advanceInferencePhases(4);

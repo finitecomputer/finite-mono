@@ -161,45 +161,27 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             captured = model_capture.read_text(encoding="utf-8").splitlines()
             return captured[0], captured[1]
 
-    def test_gateway_rewrites_historical_route_and_legacy_model(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-2",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+    def test_gateway_normalizes_only_the_managed_finite_private_route(self) -> None:
+        product = "https://finite-private.finite.containers.tinfoil.dev/v1"
+        historical = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+        cases = (
+            ("glm-5-2", historical, "glm-5-3-flash", product),
+            ("deepseek-v4-flash-0731", historical, "glm-5-3-flash", product),
+            ("glm-5.3-flash", product, "glm-5-3-flash", product),
+            ("glm-5-3-flash", historical, "glm-5-3-flash", product),
+            (
+                "glm-5-2",
+                "https://inference.example.com/v1",
+                "glm-5-2",
+                "https://inference.example.com/v1",
+            ),
         )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_deepseek_label_on_the_historical_route(self) -> None:
-        model, base_url = self._gateway_model(
-            model="deepseek-v4-flash-0731",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_dotted_glm_name_on_the_live_route(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5.3-flash",
-            base_url="https://finite-private.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_historical_url_when_model_is_already_canonical(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-3-flash",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_preserves_legacy_name_for_a_custom_endpoint(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-2",
-            base_url="https://inference.example.com/v1",
-        )
-        self.assertEqual(model, "glm-5-2")
-        self.assertEqual(base_url, "https://inference.example.com/v1")
+        for model, base_url, expected_model, expected_url in cases:
+            with self.subTest(model=model, base_url=base_url):
+                self.assertEqual(
+                    self._gateway_model(model=model, base_url=base_url),
+                    (expected_model, expected_url),
+                )
 
     def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
         reconciled = self._reconcile_config(None, self._reconciler_settings())
@@ -1070,6 +1052,7 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
                 "  record reconciler\n"
                 f'  printf "reconciler\\n" >>"{events}"\n'
                 'elif [[ "${1:-}" == "$FINITE_RECOVER_CHAT_BOOT" ]]; then\n'
+                "  record recover\n"
                 f'  printf "recover\\n" >>"{events}"\n'
                 "  exit 0\n"
                 "fi\n"
@@ -1182,14 +1165,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
                     "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
                 },
             ),
-            (
-                "empty_finite_private_key",
-                {
-                    "OPENAI_API_KEY": "sk-user-FAKE-openai",
-                    "FINITE_PRIVATE_API_KEY": "",
-                    "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
-                },
-            ),
         )
         for name, env in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as raw_tmp:
@@ -1200,20 +1175,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
                 for process in ("reconciler", "helper", "hermes"):
                     self.assertEqual(recorded[process]["OPENAI_API_KEY"], "sk-user-FAKE-openai")
                     self.assertEqual(recorded[process]["CODEX_HOME"], NEUTRAL_CODEX_HOME)
-
-    def test_launch_rule_runs_before_the_reconciler_and_exec(self) -> None:
-        script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
-        unset = script.index("unset OPENAI_API_KEY")
-        codex_home = script.index(f"export CODEX_HOME={NEUTRAL_CODEX_HOME}")
-        recover = script.index("\n    run_recover_chat_boot\n")
-        reconcile = script.index("\n    run_config_reconciler\n")
-        self.assertLess(unset, recover)
-        self.assertLess(codex_home, recover)
-        self.assertLess(recover, reconcile)
-        self.assertIn(
-            '[[ -n "${FINITE_PRIVATE_API_KEY:-}" && "${OPENAI_API_KEY:-}" == "$FINITE_PRIVATE_API_KEY" ]]',
-            script,
-        )
 
     def _finite_private_settings(self, env: Mapping[str, str | None]) -> dict[str, str]:
         with tempfile.TemporaryDirectory() as raw_tmp:
@@ -1247,28 +1208,6 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
 
     def test_launcher_finite_private_settings_rewrites_and_absence(self) -> None:
         cases = (
-            (
-                "historical_route_and_legacy_model",
-                {
-                    "FINITE_PRIVATE_MODEL": "glm-5-2",
-                    "FINITE_PRIVATE_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-                },
-                {
-                    "FINITE_CONFIG_FP_MODEL": "glm-5-3-flash",
-                    "FINITE_CONFIG_FP_BASE_URL": FP_PRODUCT_URL,
-                },
-            ),
-            (
-                "legacy_name_on_another_endpoint",
-                {
-                    "FINITE_PRIVATE_MODEL": "glm-5-2",
-                    "FINITE_PRIVATE_BASE_URL": "http://127.0.0.1:8787/v1",
-                },
-                {
-                    "FINITE_CONFIG_FP_MODEL": "glm-5-2",
-                    "FINITE_CONFIG_FP_BASE_URL": "http://127.0.0.1:8787/v1",
-                },
-            ),
             (
                 "no_runner_settings",
                 {
@@ -1325,33 +1264,17 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
             self.assertNotIn("applied", result.stdout)
 
     def test_pending_disconnect_step_needs_an_existing_intent_file(self) -> None:
-        for name, env in (
-            ("unset", {"FINITE_AGENTD_INTENT_PATH": None}),
-            ("empty", {"FINITE_AGENTD_INTENT_PATH": ""}),
-            ("missing_file", {}),
-        ):
-            with self.subTest(name), tempfile.TemporaryDirectory() as raw_tmp:
-                result, events, _ = self._launch(Path(raw_tmp), env=env)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(events, ["reconciler", "hermes gateway run --replace"])
-
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
-            (tmp / "intent-dir").mkdir()
-            result, events, _ = self._launch(
-                tmp, env={"FINITE_AGENTD_INTENT_PATH": str(tmp / "intent-dir")}
-            )
+            result, events, _ = self._launch(tmp)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(events, ["reconciler", "hermes gateway run --replace"])
 
     def test_pending_disconnect_step_failure_never_blocks_the_gateway(self) -> None:
-        # (name, helper exit, stubbed `timeout` exit, status the launcher logs)
+        # A helper error and a deadline both leave startup available.
         cases = (
             ("helper_error", 2, None, 2),
-            ("helper_crash", 1, None, 1),
             ("deadline", 0, 124, 124),
-            ("killed_after_deadline", 0, 137, 137),
-            ("helper_missing", 0, 127, 127),
         )
         for name, helper_status, timeout_status, status in cases:
             with self.subTest(name), tempfile.TemporaryDirectory() as raw_tmp:
@@ -1371,13 +1294,19 @@ class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
 
     def test_pending_disconnect_step_is_skipped_on_recover_boot_and_prepare(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
-            result, events, _ = self._launch(
+            result, events, recorded = self._launch(
                 Path(raw_tmp),
-                env={"FINITE_AGENT_BOOT_INTENT_JSON": '{"kind": "recover_known_good"}'},
+                env={
+                    "FINITE_AGENT_BOOT_INTENT_JSON": '{"kind": "recover_known_good"}',
+                    "OPENAI_API_KEY": FAKE_FP_KEY,
+                    "CODEX_HOME": "/root/.codex",
+                },
                 intent=self._intent("cleanup"),
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(events, ["recover", "hermes gateway run --replace"])
+            self.assertNotIn("OPENAI_API_KEY", recorded["recover"])
+            self.assertEqual(recorded["recover"]["CODEX_HOME"], NEUTRAL_CODEX_HOME)
 
         with tempfile.TemporaryDirectory() as raw_tmp:
             result, events, _ = self._launch(

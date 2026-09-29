@@ -24,7 +24,7 @@ import { Input } from "@/components/ui/input";
 import type { AgentConnectionAction } from "@/lib/hosted-agent-controls";
 import type { InferenceView } from "@/lib/inference-status";
 
-export const OPENROUTER_DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
+const OPENROUTER_DEFAULT_MODEL = "anthropic/claude-sonnet-4.6";
 const KEY_HASH = /^[0-9a-f]{64}$/u;
 
 type KeySubmit = "use" | "store" | "legacy";
@@ -73,8 +73,8 @@ export function OpenRouterConnection({
     await run("openrouter", openRouterUseAction(view, nextModel), { route: "openrouter" });
   }
 
-  async function submitKey(apiKey: string, submit: KeySubmit) {
-    const outcome = await run("openrouter", openRouterKeyAction(submit, apiKey, model), {
+  async function submitKey(action: AgentConnectionAction, submit: KeySubmit) {
+    const outcome = await run("openrouter", action, {
       route: "openrouter",
       retryModel: submit === "store" ? undefined : model,
     });
@@ -248,7 +248,7 @@ export function OpenRouterConnection({
  * The pasted key is held only in this form's state. It is cleared the moment the form is submitted,
  * before the request settles, so it survives neither success nor failure.
  */
-export function OpenRouterKeyForm({
+function OpenRouterKeyForm({
   keyRequired,
   keyPlaceholder,
   connect,
@@ -271,11 +271,12 @@ export function OpenRouterKeyForm({
   busy: boolean;
   /** The operation line, for a screen reader that reaches a disabled control. */
   describedBy?: string;
-  onSubmit: (apiKey: string, submit: KeySubmit) => Promise<void>;
+  onSubmit: (action: AgentConnectionAction, submit: KeySubmit) => Promise<void>;
   onCancel: (() => void) | null;
 }) {
   const [apiKey, setApiKey] = useState("");
-  const submit = (kind: KeySubmit) => submitOpenRouterKey(apiKey, () => setApiKey(""), (key) => onSubmit(key, kind));
+  const submit = (kind: KeySubmit) =>
+    submitOpenRouterKey(apiKey, kind, model, () => setApiKey(""), (action) => onSubmit(action, kind));
   const missing = (keyRequired && !apiKey.trim()) || !model.trim();
   return (
     <form
@@ -352,15 +353,17 @@ export function OpenRouterKeyForm({
 
 export async function submitOpenRouterKey(
   apiKey: string,
+  submit: KeySubmit,
+  model: string,
   clearKey: () => void,
-  send: (apiKey: string) => Promise<void>
+  send: (action: AgentConnectionAction) => Promise<void>
 ) {
   clearKey();
-  await send(apiKey);
+  await send(openRouterKeyAction(submit, apiKey, model));
 }
 
 /** client orchestration: one call per intent, the legacy action for agents without the capability. */
-export function openRouterKeyAction(submit: KeySubmit, apiKey: string, model: string): AgentConnectionAction {
+function openRouterKeyAction(submit: KeySubmit, apiKey: string, model: string): AgentConnectionAction {
   const key = apiKey.trim();
   if (submit === "legacy") {
     return { action: "inference", profile: "openrouter", ...(key ? { apiKey: key } : {}), model: model.trim() };
@@ -370,13 +373,13 @@ export function openRouterKeyAction(submit: KeySubmit, apiKey: string, model: st
     : { action: "openrouter_connect_key", apiKey: key };
 }
 
-export function openRouterUseAction(view: InferenceView, model: string): AgentConnectionAction {
+function openRouterUseAction(view: InferenceView, model: string): AgentConnectionAction {
   return view.capabilities.has("inference.select.v1")
     ? { action: "inference_select", route: "openrouter", model: model.trim() }
     : { action: "inference", profile: "openrouter", model: model.trim() };
 }
 
-export function openRouterCardState(view: InferenceView | null): {
+function openRouterCardState(view: InferenceView | null): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
   note?: string;
@@ -394,13 +397,13 @@ export function openRouterCardState(view: InferenceView | null): {
   return { state: "unavailable", label: "Not confirmed", note: "The agent couldn't confirm its OpenRouter setup right now." };
 }
 
-export function openRouterDescription(view: InferenceView | null) {
+function openRouterDescription(view: InferenceView | null) {
   return view?.fallback.state === "configured"
     ? "Use your own OpenRouter account. Finite Private is configured as a backup."
     : "Use your own OpenRouter account.";
 }
 
-export function openRouterAccountLine(view: InferenceView) {
+function openRouterAccountLine(view: InferenceView) {
   if (!view.v2 || view.openrouter.state !== "key_saved") return null;
   switch (view.openrouter.keySource) {
     case "agent":
@@ -414,7 +417,7 @@ export function openRouterAccountLine(view: InferenceView) {
   }
 }
 
-export function openRouterDetailLines(view: InferenceView) {
+function openRouterDetailLines(view: InferenceView) {
   const lines: Array<{ testId: string; text: string }> = [];
   if (!view.v2 || view.openrouter.state !== "key_saved") return lines;
   if (view.openrouter.hermesKey === "other_key") {
@@ -432,9 +435,9 @@ export function openRouterDetailLines(view: InferenceView) {
   return lines;
 }
 
-export const OPENROUTER_DISCONNECT_TITLE = "Remove OpenRouter from this agent?";
+const OPENROUTER_DISCONNECT_TITLE = "Remove OpenRouter from this agent?";
 
-export function openRouterDisconnectCopy(view: InferenceView) {
+function openRouterDisconnectCopy(view: InferenceView) {
   return [
     "Finite deletes the key saved in this agent and the agent's other copies, and restarts the agent's model service.",
     "Programs the agent started earlier may keep a copy until they stop.",
@@ -444,13 +447,13 @@ export function openRouterDisconnectCopy(view: InferenceView) {
   ].join(" ");
 }
 
-export function openRouterKeyUrl(keyHash: string | null) {
+function openRouterKeyUrl(keyHash: string | null) {
   return keyHash && KEY_HASH.test(keyHash)
     ? `https://openrouter.ai/keys/${keyHash}`
     : "https://openrouter.ai/settings/keys";
 }
 
-export function openRouterLinks(keyHash: string | null) {
+function openRouterLinks(keyHash: string | null) {
   const hash = keyHash && KEY_HASH.test(keyHash) ? keyHash : null;
   return [
     { testId: "inference-openrouter-link-add-funds", label: "Add funds", href: "https://openrouter.ai/settings/credits" },

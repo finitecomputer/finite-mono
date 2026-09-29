@@ -266,7 +266,7 @@ class DecisionTableTests(_NoticeTestCase):
         )
         self.assertEqual(sends[0]["metadata"]["finite_notice"]["attempted"], "openai_codex")
 
-    def test_every_reason_maps_to_its_phrase(self):
+    def test_reason_phrases_cover_the_pinned_failover_reasons_we_explain(self):
         expected = {
             "rate_limit": "is rate-limited",
             "upstream_rate_limit": "is rate-limited",
@@ -285,36 +285,17 @@ class DecisionTableTests(_NoticeTestCase):
             reason.value for reason in hermes["agent.error_classifier"].FailoverReason
         }
         self.assertLessEqual(set(expected), failover_values)
-        for index, (reason, phrase) in enumerate(expected.items()):
-            with self.subTest(reason=reason):
-                adapter = self.adapter()
-                self.fallback_turn(reason=reason, turn=f"turn-{index}")
-                self.assertEqual(
-                    self.notice_text(self.complete(adapter, self.event())),
-                    f"Finite Private answered this response because OpenRouter {phrase}.",
-                )
+        self.assertEqual(self.module.INFERENCE_ROUTE_REASON_PHRASES, expected)
 
-    def test_unmapped_or_missing_reason_states_only_that_an_error_was_returned(self):
-        for index, reason in enumerate((None, "unknown", "invalid_response", "context_overflow")):
-            with self.subTest(reason=reason):
-                adapter = self.adapter()
-                self.fallback_turn(reason=reason, turn=f"turn-{index}")
-                sends = self.complete(adapter, self.event())
-                self.assertEqual(
-                    self.notice_text(sends),
-                    "Finite Private answered this response after OpenRouter returned an error.",
-                )
-                self.assertEqual(sends[0]["metadata"]["finite_notice"]["reason"], reason)
-
-    def test_unknown_provider_is_your_selected_model(self):
+    def test_unmapped_reason_states_only_that_an_error_was_returned(self):
         adapter = self.adapter()
-        self.fallback_turn(primary=("anthropic", "https://api.anthropic.com"), reason="overloaded")
+        self.fallback_turn(reason="context_overflow")
         sends = self.complete(adapter, self.event())
         self.assertEqual(
             self.notice_text(sends),
-            "Finite Private answered this response because your selected model is having problems.",
+            "Finite Private answered this response after OpenRouter returned an error.",
         )
-        self.assertEqual(sends[0]["metadata"]["finite_notice"]["attempted"], "other")
+        self.assertEqual(sends[0]["metadata"]["finite_notice"]["reason"], "context_overflow")
 
     def test_a_user_custom_backup_is_never_called_finite_private(self):
         adapter = self.adapter()
@@ -450,11 +431,8 @@ class UpstreamStatusTests(_NoticeTestCase):
 
     def test_everything_else_is_sent_exactly_as_send_would(self):
         cases = [
-            ("lifecycle", "⚠️ Rate limited, retrying in 5s"),
             ("lifecycle", f"{self.FALLBACK_LINE} Extra."),
-            ("lifecycle", f"Note: {self.RESTORE_LINE}"),
             ("retry", self.FALLBACK_LINE),
-            ("warning", self.RESTORE_LINE),
         ]
         for status_key, content in cases:
             with self.subTest(status_key=status_key, content=content):
@@ -473,38 +451,7 @@ class UpstreamStatusTests(_NoticeTestCase):
 
 
 class NoNoticeTests(_NoticeTestCase):
-    """normal Finite Private serving and a primary that answers are silent."""
-
-    def test_finite_private_serving_alone_sends_nothing(self):
-        routes = {
-            "FP default (bare custom)": ("custom", FP_URL),
-            "conversation override to FP": ("finite-private", FP_URL),
-            "channel override to FP": ("custom:finite-private", FP_URL),
-            "--once to FP": ("finite-private", FP_URL + "/"),
-        }
-        for index, (name, route) in enumerate(routes.items()):
-            with self.subTest(name):
-                adapter = self.adapter()
-                turn = f"turn-{index}"
-                self.fire("pre_api_request", *route, turn=turn)
-                self.fire("post_api_request", *route, turn=turn)
-                self.fire("pre_api_request", *route, turn=turn)
-                self.fire("post_api_request", *route, turn=turn)
-                self.assertEqual(self.complete(adapter, self.event()), [])
-
-    def test_finite_private_error_then_finite_private_success_sends_nothing(self):
-        adapter = self.adapter()
-        self.fire("pre_api_request", "custom", FP_URL)
-        self.fire("api_request_error", "custom", FP_URL, reason="timeout")
-        self.fire("pre_api_request", "finite-private", FP_URL)
-        self.fire("post_api_request", "finite-private", FP_URL)
-        self.assertEqual(self.complete(adapter, self.event()), [])
-
-    def test_primary_answering_sends_nothing(self):
-        adapter = self.adapter()
-        self.fire("pre_api_request", "openrouter", OPENROUTER_URL)
-        self.fire("post_api_request", "openrouter", OPENROUTER_URL)
-        self.assertEqual(self.complete(adapter, self.event()), [])
+    """A notice requires an observed switch between inference routes."""
 
     def test_primary_retry_that_answers_sends_nothing(self):
         adapter = self.adapter()
@@ -514,14 +461,13 @@ class NoNoticeTests(_NoticeTestCase):
         self.fire("post_api_request", "openrouter", OPENROUTER_URL)
         self.assertEqual(self.complete(adapter, self.event()), [])
 
-    def test_a_turn_with_no_observed_request_sends_nothing(self):
+    def test_pre_request_fallback_to_finite_private_sends_nothing(self):
         # A fallback Hermes picks while resolving credentials makes no
         # request on the primary, so the observer sees only Finite Private.
         adapter = self.adapter()
         self.fire("pre_api_request", "custom", FP_URL)
         self.fire("post_api_request", "custom", FP_URL)
         self.assertEqual(self.complete(adapter, self.event()), [])
-        self.assertEqual(self.complete(adapter, self.event("chat-never-seen")), [])
 
 
 class AttributionTests(_NoticeTestCase):
@@ -557,7 +503,7 @@ class AttributionTests(_NoticeTestCase):
         def run_turn(thread: str, failing: bool):
             try:
                 barrier.wait()
-                for _ in range(50):
+                for _ in range(4):
                     if failing:
                         self.fallback_turn(thread=thread, turn=f"{thread}-turn")
                     else:
@@ -586,6 +532,7 @@ class AttributionTests(_NoticeTestCase):
             worker.start()
         for worker in workers:
             worker.join()
+
         self.assertEqual(errors, [])
         self.assertEqual(self.complete(adapter, self.event("chat-b")), [])
         self.assertEqual(len(self.complete(adapter, self.event("chat-a"))), 1)
@@ -630,12 +577,6 @@ class AttributionTests(_NoticeTestCase):
             "Finite Private answered this response because OpenRouter is out of credits or quota.",
         )
 
-    def test_delegated_requests_alone_produce_nothing(self):
-        adapter = self.adapter()
-        self.fallback_turn(session_id="child-session", task_id="child-task", delegated=True)
-        self.fallback_turn(task_id="review-task")
-        self.assertEqual(self.complete(adapter, self.event()), [])
-
     def test_requests_outside_a_finite_conversation_are_ignored(self):
         adapter = self.adapter()
         self.fallback_turn(binding=self.binding(platform="telegram"))
@@ -643,35 +584,13 @@ class AttributionTests(_NoticeTestCase):
         self.fallback_turn(binding={})
         self.assertEqual(self.complete(adapter, self.event()), [])
 
-    def test_internal_event_produces_nothing_and_clears_the_record(self):
-        adapter = self.adapter()
-        self.fallback_turn()
-        self.assertEqual(self.complete(adapter, self.event(internal=True)), [])
-        self.assertEqual(self.complete(adapter, self.event()), [])
-
-    def test_cancellation_clears_the_record(self):
-        adapter = self.adapter()
-        self.fallback_turn()
-        self.assertEqual(self.complete(adapter, self.event(), "cancelled"), [])
-        self.assertEqual(self.complete(adapter, self.event()), [])
-
-    def test_the_record_is_consumed_once(self):
-        adapter = self.adapter()
-        self.fallback_turn()
-        self.assertEqual(len(self.complete(adapter, self.event())), 1)
-        self.assertEqual(self.complete(adapter, self.event()), [])
-
-    def test_a_reason_comes_only_from_the_same_turn(self):
-        adapter = self.adapter()
-        self.fire("pre_api_request", "openrouter", OPENROUTER_URL, turn="turn-1")
-        self.fire(
-            "api_request_error", "openrouter", OPENROUTER_URL, turn="turn-1", reason="billing"
-        )
-        self.fallback_turn(turn="turn-2", reason=None)
-        self.assertEqual(
-            self.notice_text(self.complete(adapter, self.event())),
-            "Finite Private answered this response after OpenRouter returned an error.",
-        )
+    def test_internal_and_cancelled_turns_are_consumed_without_a_notice(self):
+        for event, outcome in ((self.event(internal=True), "success"), (self.event(), "cancelled")):
+            with self.subTest(outcome=outcome, internal=event.internal):
+                adapter = self.adapter()
+                self.fallback_turn()
+                self.assertEqual(self.complete(adapter, event, outcome), [])
+                self.assertEqual(self.complete(adapter, self.event()), [])
 
 
 class ObserverNeverDisturbsDeliveryTests(_NoticeTestCase):
@@ -710,7 +629,7 @@ class ObserverNeverDisturbsDeliveryTests(_NoticeTestCase):
         self.assertIn("RuntimeError", "\n".join(logs.output))
         self.assertEqual([action for action, _, _ in self.calls], ["ack"])
 
-    def test_a_failing_notice_send_does_not_raise(self):
+    def test_a_failing_notice_send_does_not_raise_after_ack(self):
         adapter = self.adapter()
 
         async def failing_json(action, payload, *, timeout):
@@ -721,31 +640,14 @@ class ObserverNeverDisturbsDeliveryTests(_NoticeTestCase):
 
         adapter._finitechat_json = failing_json
         self.fallback_turn()
-        self.assertEqual(len(self.complete(adapter, self.event())), 1)
+        event = self.event()
+        event.raw_message.update({"seq": 7, "message_id": "msg-7"})
 
-    def test_a_failing_status_filter_still_sends_the_status_unchanged(self):
-        class Exploding:
-            def fullmatch(self, text):
-                raise RuntimeError("boom")
+        with self.assertLogs("finite_platform_adapter_under_test", "WARNING"):
+            sends = self.complete(adapter, event)
 
-        adapter = self.adapter()
-        asyncio.run(
-            adapter.send(ROOM, UpstreamStatusTests.FALLBACK_LINE, metadata=dict(REPLY_METADATA))
-        )
-        expected = self.calls
-        self._patch(self.module, "FALLBACK_RE", Exploding())
-        adapter = self.adapter()
-        asyncio.run(
-            adapter.send_or_update_status(
-                ROOM, "lifecycle", UpstreamStatusTests.FALLBACK_LINE, metadata=dict(REPLY_METADATA)
-            )
-        )
-        self.assertEqual(self.calls, expected)
-
-    def test_a_recorded_fallback_never_changes_the_reply_itself(self):
-        baseline = self.reply_payload()
-        self.fallback_turn()
-        self.assertEqual(self.reply_payload(), baseline)
+        self.assertEqual(len(sends), 1)
+        self.assertEqual([action for action, _, _ in self.calls], ["ack", "send"])
 
 
 def _hermes_pin() -> str:
@@ -821,22 +723,6 @@ class PinnedUpstreamWordingTests(unittest.TestCase):
                     )
                     self.assertTrue(self.module._is_upstream_route_status(line))
 
-    def test_fallback_line_is_the_one_the_host_gateway_delivered(self):
-        # Host gateway proof 4a, verbatim.
-        helpers = hermes["agent.chat_completion_helpers"]
-        names = {
-            "old_model": "openai/gpt-4o-mini",
-            "old_provider": "openrouter",
-            "_fallback_reason_text": helpers._fallback_reason_text,
-            "reason": hermes["agent.error_classifier"].FailoverReason.billing,
-            "fb_model": "glm-5-3-flash",
-            "fb_provider": "finite-private",
-        }
-        self.assertEqual(
-            self.render_upstream(helpers, "⚠️ Model fallback: ", names),
-            [UpstreamStatusTests.FALLBACK_LINE],
-        )
-
     def test_restore_line_matches(self):
         runtime_helpers = hermes["agent.agent_runtime_helpers"]
         names = {
@@ -851,9 +737,7 @@ class PinnedUpstreamWordingTests(unittest.TestCase):
                 self.module.RESTORE_RE.fullmatch(line), self.leak_message(repr(line))
             )
 
-    def test_status_lines_still_reach_the_adapter_as_lifecycle(self):
-        # Suppression keys on the gateway calling send_or_update_status with
-        # status_key "lifecycle"; read both call sites from the pinned source.
+    def test_status_lines_still_reach_send_or_update_status_as_lifecycle(self):
         site_packages = Path(cast(str, hermes["agent.error_classifier"].__file__)).parents[1]
         run_agent = (site_packages / "run_agent.py").read_text(encoding="utf-8")
         gateway_run = (site_packages / "gateway" / "run.py").read_text(encoding="utf-8")

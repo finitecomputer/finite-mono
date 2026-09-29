@@ -1,5 +1,3 @@
-"use client";
-
 import { MessageSquareIcon } from "lucide-react";
 
 import { ConnectionCard } from "@/components/connection-card";
@@ -8,15 +6,10 @@ import { backupConfiguredFor, type InferenceView } from "@/lib/inference-status"
 
 const PERSONAL_PLAN_COPY = "Use your personal ChatGPT plan. Work accounts may work if your organization allows it.";
 
-/**
- * Until the dashboard supports ChatGPT sign-in, the card appears only when ChatGPT is the saved
- * route or the agent advertises `codex.login.v1`. No agent can have that update yet, so no card asks for it.
- */
 export function showCodexCard(view: InferenceView) {
   return view.saved.route === "openai_codex" || view.codex !== null;
 }
 
-/** Read-only in PR1: what this agent reports about ChatGPT, and no actions. */
 export function CodexConnection({ view }: { view: InferenceView }) {
   const card = codexCardState(view);
   return (
@@ -31,7 +24,7 @@ export function CodexConnection({ view }: { view: InferenceView }) {
   );
 }
 
-export function codexCardState(view: InferenceView): {
+function codexCardState(view: InferenceView): {
   state: "connected" | "disconnected" | "attention" | "unavailable";
   label?: string;
   lines: string[];

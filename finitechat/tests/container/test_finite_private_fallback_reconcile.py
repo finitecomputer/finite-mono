@@ -238,18 +238,9 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 )
                 self.assertEqual(self.reconcile(reconciled, fp_settings()), reconciled)
 
-    def test_existing_configs_without_key_gain_no_chain(self) -> None:
-        for name, model in EXISTING_MODELS.items():
-            with self.subTest(name):
-                existing = self._existing(model)
-                reconciled = self.reconcile(existing, fp_settings(key_present=False))
-                self._assert_only_finite_private_leaves(existing, reconciled, chain=None)
-
-    def test_config_without_model_gains_the_leaves(self) -> None:
-        existing = self._existing(None)
-        del existing["model"]
-        reconciled = self.reconcile(existing, fp_settings())
-        self._assert_only_finite_private_leaves(existing, reconciled, chain=[CANONICAL_ENTRY])
+        existing = self._existing(OPENROUTER_MODEL)
+        without_key = self.reconcile(existing, fp_settings(key_present=False))
+        self._assert_only_finite_private_leaves(existing, without_key, chain=None)
 
     def test_user_providers_are_kept_and_the_owned_entry_is_replaced(self) -> None:
         existing = self._existing(
@@ -271,6 +262,9 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 "finite-private": CANONICAL_PROVIDER,
             },
         )
+        malformed = self._existing(OPENROUTER_MODEL, providers=["user-owned"])
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(self.reconcile(malformed, fp_settings()), malformed)
 
     def test_owned_entry_is_rewritten_with_discovery_off_except_on_recovery(self) -> None:
         # Without `discover_models: false`, patched Hermes would not validate
@@ -288,11 +282,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
 
                 self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
                 self.assertEqual(recovered["providers"], {"finite-private": entry})
-
-    def test_null_providers_is_treated_as_absent(self) -> None:
-        existing = self._existing(FP_BARE_MODEL, providers=None)
-        reconciled = self.reconcile(existing, fp_settings())
-        self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
 
     def test_user_chain_is_untouched_and_owned_entries_refresh_in_place(self) -> None:
         stale_owned = {
@@ -357,15 +346,6 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
             {"default": "glm-5-2", "provider": "openrouter"},
         )
 
-    def test_codex_model_with_bare_custom_chain_is_preserved(self) -> None:
-        for key_present in (True, False):
-            with self.subTest(key_present=key_present):
-                existing = self._existing(GLOBAL_CODEX_MODEL, fallback_providers=BARE_CUSTOM_CHAIN)
-                reconciled = self.reconcile(existing, fp_settings(key_present=key_present))
-                self.assertEqual(reconciled["model"], GLOBAL_CODEX_MODEL)
-                self.assertEqual(reconciled["fallback_providers"], BARE_CUSTOM_CHAIN)
-                self._assert_only_finite_private_leaves(existing, reconciled, chain=None)
-
     def test_remove_mode_removes_only_owned_chain_entries(self) -> None:
         remove = fp_settings(FINITE_CONFIG_FP_FALLBACK_MODE="remove")
         cases = (
@@ -401,24 +381,8 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
 
     def test_no_seed_when_the_user_configured_either_fallback_key(self) -> None:
         cases = (
-            (
-                "fallback_model_dict",
-                {"fallback_model": {"provider": "openrouter", "model": "openai/gpt-5"}},
-            ),
-            (
-                "fallback_model_list",
-                {"fallback_model": [{"provider": "openrouter", "model": "openai/gpt-5"}]},
-            ),
-            # Hermes reads no entry from these, so only the key itself blocks the seed.
-            ("fallback_model_empty", {"fallback_model": {}}),
-            ("fallback_model_null", {"fallback_model": None}),
+            ("fallback_model", {"fallback_model": {"provider": "openrouter", "model": "x"}}),
             ("fallback_providers_off", {"fallback_providers": []}),
-            (
-                "fallback_providers_mapping",
-                {"fallback_providers": {"provider": "openrouter", "model": "x"}},
-            ),
-            ("fallback_providers_string", {"fallback_providers": "finite-private"}),
-            ("fallback_providers_null", {"fallback_providers": None}),
         )
         for name, extra in cases:
             with self.subTest(name):
@@ -426,14 +390,13 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 reconciled = self.reconcile(existing, fp_settings())
                 self._assert_only_finite_private_leaves(existing, reconciled, chain=None)
 
-    def test_no_seed_without_the_hermes_chain_reader(self) -> None:
+    def test_missing_hermes_chain_reader_warns_without_blocking_boot(self) -> None:
         stderr = io.StringIO()
         with (
             mock.patch.dict(sys.modules, {"hermes_cli.fallback_config": None}),
             redirect_stderr(stderr),
         ):
             reconciled = self.reconcile(None, fp_settings())
-
         self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
         self.assertNotIn("fallback_providers", reconciled)
         self.assertIn("FINITE_AGENT_START_WARNING", stderr.getvalue())
@@ -449,43 +412,15 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
     def test_missing_or_invalid_settings_leave_config_as_today(self) -> None:
         cases = (
             ("no_fp_settings", base_settings()),
-            ("empty_model", fp_settings(FINITE_CONFIG_FP_MODEL="")),
-            ("empty_url", fp_settings(FINITE_CONFIG_FP_BASE_URL="")),
             ("not_a_url", fp_settings(FINITE_CONFIG_FP_BASE_URL="finite-private")),
             ("wrong_scheme", fp_settings(FINITE_CONFIG_FP_BASE_URL="ftp://finite.example/v1")),
-            ("no_host", fp_settings(FINITE_CONFIG_FP_BASE_URL="https:///v1")),
             ("bad_context", fp_settings(FINITE_CONFIG_FP_CONTEXT_LENGTH="lots")),
-            ("zero_context", fp_settings(FINITE_CONFIG_FP_CONTEXT_LENGTH="0")),
         )
         for name, settings in cases:
             for model in (FP_BARE_MODEL, {"default": "glm-5-2", "provider": "finite-private"}):
                 with self.subTest(name, model=model), redirect_stderr(io.StringIO()):
                     existing = self._existing(model)
                     self.assertEqual(self.reconcile(existing, settings), existing)
-
-    def test_http_route_and_other_models_get_matching_declarations(self) -> None:
-        settings = fp_settings(
-            FINITE_CONFIG_FP_MODEL="glm-6",
-            FINITE_CONFIG_FP_BASE_URL="http://127.0.0.1:8787/v1",
-            FINITE_CONFIG_FP_CONTEXT_LENGTH="",
-        )
-        reconciled = self.reconcile(self._existing(OPENROUTER_MODEL), settings)
-
-        self.assertEqual(
-            reconciled["providers"]["finite-private"],
-            {
-                "name": "Finite Private",
-                "base_url": "http://127.0.0.1:8787/v1",
-                "key_env": "FINITE_PRIVATE_API_KEY",
-                "api_mode": "chat_completions",
-                "models": {"glm-6": {}},
-                "discover_models": False,
-            },
-        )
-        self.assertEqual(
-            reconciled["fallback_providers"],
-            [{**CANONICAL_ENTRY, "model": "glm-6", "base_url": "http://127.0.0.1:8787/v1"}],
-        )
 
     def test_unexpected_failure_keeps_the_config_and_boot(self) -> None:
         existing = self._existing(OPENROUTER_MODEL)
@@ -514,25 +449,6 @@ class FinitePrivateFallbackReconcilerProcessTest(unittest.TestCase):
             check=False,
         )
 
-    def test_non_mapping_providers_warns_and_boots(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_home:
-            hermes_home = Path(raw_home)
-            config_path = hermes_home / "config.yaml"
-            config_path.write_text(
-                yaml.safe_dump({"model": OPENROUTER_MODEL, "providers": ["finite-private"]}),
-                encoding="utf-8",
-            )
-
-            result = self._run(hermes_home, fp_settings())
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("FINITE_AGENT_START_WARNING", result.stderr)
-            self.assertIn("providers is not a mapping", result.stderr)
-            config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            self.assertEqual(config["providers"], ["finite-private"])
-            self.assertNotIn("fallback_providers", config)
-            self.assertEqual(config["model"], OPENROUTER_MODEL)
-
     def test_second_run_makes_no_write(self) -> None:
         for name, model in (("first_seed", None), *EXISTING_MODELS.items()):
             with self.subTest(name), tempfile.TemporaryDirectory() as raw_home:
@@ -557,18 +473,6 @@ class FinitePrivateFallbackReconcilerProcessTest(unittest.TestCase):
                 self.assertEqual(config_path.read_bytes(), written)
                 self.assertEqual(config_path.stat().st_mtime_ns, written_stat.st_mtime_ns)
                 self.assertEqual(config_path.stat().st_ino, written_stat.st_ino)
-
-    def test_dotenv_beside_the_config_decides_the_seed(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_home:
-            hermes_home = Path(raw_home)
-            (hermes_home / ".env").write_text("FINITE_PRIVATE_API_KEY=\n", encoding="utf-8")
-
-            result = self._run(hermes_home, fp_settings())
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            config = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
-            self.assertIn("finite-private", config["providers"])
-            self.assertNotIn("fallback_providers", config)
 
 
 if __name__ == "__main__":

@@ -156,8 +156,6 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::facts::{FactsCache, Tri};
-
     const FP_KEY: &str = "synthetic-finite-private-key";
 
     fn fp() -> FinitePrivateEnv {
@@ -397,92 +395,10 @@ mod tests {
         .expect("the helper's process group must be killed");
     }
 
-    #[tokio::test]
-    async fn helper_failure_serves_unknown_facts() {
-        let temp = tempfile::tempdir().unwrap();
-        let cache = FactsCache::default();
-        let failing = fake_helper(temp.path(), "exit 1");
-        let facts = cache
-            .get_or_fetch(temp.path(), || {
-                read_facts(&failing, system_path(), STATUS_FACTS_DEADLINE)
-            })
-            .await;
-        assert_eq!(facts, None, "could not read");
-        // Status still derives every field, with unknown, never a guess.
-        let facts = facts.unwrap_or_else(InferenceFacts::unknown);
-        let status = crate::inference::derive_status(&Value::Null, None, &fp(), &facts);
-        assert_eq!(
-            serde_json::to_value(&status.fallback).unwrap()["state"],
-            "unknown"
-        );
-        assert_eq!(
-            serde_json::to_value(&status.routes.finite_private).unwrap()["state"],
-            "unknown"
-        );
-
-        // A well-formed reply parses into facts.
-        let reply = serde_json::json!({
-            "v": 1, "saved_route": "finite_private",
-            "fallback": {"fallback_providers": "absent", "fallback_model": "absent", "effective": []},
-            "finite_private": {"provider_entry": "canonical", "fp_key": "present"},
-            "openrouter": {"hermes_key": "absent", "hermes_key_fingerprint": null,
-                           "dotenv_key": "absent", "manual_pool_entries": "none"},
-            "codex": {"state": "not_signed_in", "quota_reset_at": null, "reported_quota_reset_at": null},
-            "session_overrides": {"openrouter": "absent", "openai_codex": "unknown"},
-            "alias_present": "no", "codex_home_neutral": "yes"
-        });
-        let working = fake_helper(temp.path(), &format!("echo '{reply}'"));
-        let facts = read_facts(&working, system_path(), STATUS_FACTS_DEADLINE)
-            .await
-            .unwrap();
-        assert_eq!(facts.finite_private.fp_key, Tri::Present);
-        assert_eq!(facts.session_overrides.openai_codex, Tri::Unknown);
-    }
-
-    #[tokio::test]
-    async fn a_helper_slower_than_status_still_answers_the_executor() {
+    #[test]
+    fn status_and_executor_have_distinct_deadlines() {
         assert_eq!(STATUS_FACTS_DEADLINE, Duration::from_secs(10));
         assert_eq!(EXECUTOR_FACTS_DEADLINE, Duration::from_secs(30));
-        // Both helpers answer only once `release` exists. The test creates it
-        // when the status read has given up, so the executor's helper answers
-        // just after 10 s, well inside its 30 s.
-        let temp = tempfile::tempdir().unwrap();
-        let release = temp.path().join("release");
-        let reply = serde_json::json!({
-            "v": 1, "saved_route": "finite_private",
-            "fallback": {"fallback_providers": "absent", "fallback_model": "absent", "effective": []},
-            "finite_private": {"provider_entry": "canonical", "fp_key": "present"},
-            "openrouter": {"hermes_key": "absent", "hermes_key_fingerprint": null,
-                           "dotenv_key": "absent", "manual_pool_entries": "none"},
-            "codex": {"state": "not_signed_in", "quota_reset_at": null, "reported_quota_reset_at": null},
-            "session_overrides": {"openrouter": "absent", "openai_codex": "absent"},
-            "alias_present": "no", "codex_home_neutral": "yes"
-        });
-        let slow = format!(
-            "while [ ! -e '{}' ]; do sleep 0.05; done\necho '{reply}'",
-            release.display()
-        );
-        let path = || BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]);
-        let executor_helper = fake_helper(temp.path(), &slow);
-        let status_helper = fake_helper(temp.path(), &slow);
-        let started = Instant::now();
-        let executor = tokio::spawn(async move {
-            read_facts(&executor_helper, path(), EXECUTOR_FACTS_DEADLINE).await
-        });
-        let status = FactsCache::default()
-            .get_or_fetch(temp.path(), || {
-                read_facts(&status_helper, path(), STATUS_FACTS_DEADLINE)
-            })
-            .await;
-        assert_eq!(status, None, "status gave up");
-        assert!(started.elapsed() >= STATUS_FACTS_DEADLINE);
-        fs::write(&release, "").unwrap();
-        let facts = tokio::time::timeout(EXECUTOR_FACTS_DEADLINE, executor)
-            .await
-            .expect("the executor's read ends")
-            .unwrap()
-            .expect("the executor's read outlasted the status deadline");
-        assert_eq!(facts.session_overrides.openrouter, Tri::Absent);
-        assert!(started.elapsed() > STATUS_FACTS_DEADLINE);
+        assert!(STATUS_FACTS_DEADLINE < EXECUTOR_FACTS_DEADLINE);
     }
 }

@@ -260,9 +260,10 @@ root.
 The dashboard changes which model provider an agent uses through typed Finite
 Agent Daemon commands carried by Finite Chat
 ([ADR 0003](../../docs/adr/0003-agentd-is-the-agent-owned-platform-boundary.md)).
-Core, the Runner and the Runtime Management Pipe take no part. The commands,
-their schemas and capabilities are in `finite-agentd/src/daemon.rs`, and their
-error codes and messages in `finite-agentd/src/lib.rs`. Commands no agent
+Core, the Runner and the Runtime Management Pipe take no part. Command schemas
+are in `finite-agentd/src/inference_commands.rs`, capabilities in
+`finite-agentd/src/inference.rs`, and error codes and messages in
+`finite-agentd/src/lib.rs`. Commands no agent
 advertises answer `unsupported_command`. TODO:
 [FIN-129](https://linear.app/finitecomputer/issue/FIN-129),
 [FIN-130](https://linear.app/finitecomputer/issue/FIN-130).
@@ -334,15 +335,10 @@ credential, then `model`, restarts, and verifies.
   clears depend on it finishing.
 - **Verification compares parsed values, never file bytes.** Hermes rewrites
   `config.yaml` on an agent's first chat turn.
-- **Disconnect verification waits for the launcher.** The supervisor reports
-  Hermes started when the process spawns, but the launcher clears Hermes's
-  credentials and overrides seconds later, before it starts the gateway.
-  Verifying at once found the clears missing and restarted, which stopped the
-  launcher mid-step and could end a correct disconnect as failed. So the
-  executor polls for a bounded window, restarts nothing inside it, and treats
-  an `unknown` fact or a slow or failed read as "not yet". Only a window that
-  ends uncleared is a mismatch; mismatches are re-run a bounded number of
-  times, then the operation fails.
+- **Disconnect verification waits for the launcher.** A spawned process can
+  still be clearing credentials and overrides before gateway startup. The
+  executor polls for a bounded window without restarting it; unknown or failed
+  reads mean "not yet". Only an uncleared window triggers a bounded retry.
 - **Failed checks undo only agentd's model change.** Daemon configuration
   writers share a lock. If an external writer changes unrelated settings while
   the check runs, those settings survive the undo. If the model itself changed,
@@ -356,25 +352,19 @@ credential, then `model`, restarts, and verifies.
   daemon recovery, produces `config_conflict` without a write. It never repeats
   credential migration just to retry the model write.
 
-In the worst case a background operation can take several minutes, longer
-than the dashboard polls. agentd keeps refusing other changes until it ends.
-The windows, retries and backoff are in `finite-agentd/src/executor.rs`.
+An operation can outlast dashboard polling; admission stays locked until it
+ends. Timing and retry limits are in `finite-agentd/src/executor.rs`.
 
-**Disconnecting the Saved Default** switches the agent to Finite Private, so
-agentd first requires the Finite Private settings and a Finite Private key it
-knows is present. It never probes Finite Private live. A setup that is missing
-is refused as `finite_private_unavailable`; a key it could not check, because
-the helper read failed, is refused as `facts_unavailable`, because "not set
-up" would be false and trying again may succeed. Both refusals write nothing.
+Disconnecting the Saved Default requires Finite Private settings and a key
+known present, without a live probe. Missing setup returns
+`finite_private_unavailable`; a failed helper read returns `facts_unavailable`.
+Both refusals leave files unchanged.
 
 ### What a partial state leaves
 
-Every step leaves a **configured** route: the Saved Default names a provider
-whose settings and credential are stored. That is all Finite claims. Whether
-the provider answers depends on the key's allowance, the account's credit and
-the provider. When the provider fails a request, the backup answers if it is
-configured; otherwise the turn fails with Hermes's error. Cases that are easy
-to get wrong:
+A **configured** route has stored settings and credentials; it does not promise
+provider availability or credit. Provider failure uses the configured fallback,
+or fails the turn. Critical partial states:
 
 - A crash after v1 staged a key, before its restore could run, leaves the
   unchecked key in `.env`, as v1 always has.
@@ -388,13 +378,11 @@ to get wrong:
 
 ### What disconnect guarantees
 
-During the disconnect's cleanup restart, the launcher runs
-`apply-pending-disconnect` before Hermes starts, while no gateway process
-exists. It clears Hermes's stored credential for the provider and every
-session override naming it, but only when the intent has reached its cleanup
-phase and the Saved Default on disk is no longer the route. It never stops
-Hermes from starting. The clears run there because a running gateway's session
-store and credential pool write cleared entries back.
+During cleanup restart, the launcher runs `apply-pending-disconnect` before the
+gateway. It clears the provider's credentials and session overrides only after
+the intent reaches cleanup and the Saved Default has moved away. Running these
+clears while a gateway exists would let its cached stores restore removed
+entries. Failure never prevents Hermes startup.
 
 After the operation succeeds, this is guaranteed for this agent:
 

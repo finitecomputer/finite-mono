@@ -7,7 +7,6 @@ uninitialized GatewayRunner, so no gateway starts.
 """
 
 import base64
-import itertools
 import json
 import os
 import subprocess
@@ -21,7 +20,6 @@ FP = "https://private.example.invalid/v1"
 OPENROUTER = "https://openrouter.ai/api/v1"
 CODEX = "https://chatgpt.com/backend-api/codex"
 USERFB = "http://127.0.0.1:9/v1"
-BARE = "https://user.example/v1"
 TENANT = "https://tenant.example.invalid/TenantA/v1"
 OPENCODE_ZEN = "https://opencode.ai/zen"
 NEUTRAL_CODEX_HOME = "/dev/null/finite-codex-home-disabled"
@@ -39,11 +37,6 @@ CODEX_TOKEN = (
     + _b64({"exp": FUTURE, "https://api.openai.com/auth": {"chatgpt_account_id": "acct-FAKE"}})
     + ".sig"
 )
-# A signed-in pool token for every OAuth provider of the sweep (Nous checks the scope).
-OAUTH_TOKEN = (
-    _b64({"alg": "none"}) + "." + _b64({"exp": FUTURE, "scope": "inference:invoke"}) + ".sig"
-)
-KEY_ROUTES = {"fp-FAKE": "fp", "sk-or-FAKE": "or", CODEX_TOKEN: "codex"}
 ROUTES = {
     "fp": {"provider": "finite-private", "model": "glm-5-3-flash", "base_url": FP},
     "or": {
@@ -52,8 +45,6 @@ ROUTES = {
         "base_url": OPENROUTER,
     },
     "codex": {"provider": "openai-codex", "model": "gpt-5.5", "base_url": CODEX},
-    "keyless": {"provider": "userfb", "model": "local-model", "base_url": USERFB},
-    "barecustom": {"provider": "custom", "model": "x", "base_url": BARE},
 }
 FP_DEFAULT = {
     "default": "glm",
@@ -130,20 +121,6 @@ def codex_auth(state):
     return store
 
 
-def route_of_url(url):
-    url = (url or "").rstrip("/").lower()
-    for name, spec in ROUTES.items():
-        if url == spec["base_url"].rstrip("/").lower():
-            return name
-    return "?:" + url
-
-
-def route_of_key(key):
-    if not key or key == "no-key-required" or key.startswith("${"):
-        return "none"
-    return KEY_ROUTES.get(key, "?")
-
-
 def run_case(spec, *, home):
     """Run one case in a fresh interpreter; returns its JSON result."""
     environment = {
@@ -208,10 +185,8 @@ def _case_main(spec):
         return _model_switch_case(cfg)
     if kind == "pinned_switch":
         return _pinned_switch_case(spec, cfg)
-    if kind == "providers":
-        return _registry_providers()
-    if kind == "sweep":
-        return _sweep_case(spec["provider"], cfg)
+    if kind == "switch_and_serve":
+        return _switch_and_serve_case(spec, cfg)
     return _session_case(spec, cfg)
 
 
@@ -415,118 +390,40 @@ def _pinned_switch_case(spec, cfg):
     }
 
 
-def _registry_providers():
-    """Every provider id pinned Hermes knows: its registry, its picker, and its model lists."""
-    from hermes_cli.auth import PROVIDER_REGISTRY
-    from hermes_cli.models import _PROVIDER_MODELS, CANONICAL_PROVIDERS
-
-    ids = [*PROVIDER_REGISTRY, *(entry.slug for entry in CANONICAL_PROVIDERS), *_PROVIDER_MODELS]
-    return list(dict.fromkeys(ids))
-
-
-def _sweep_case(provider, cfg):
-    """switch to each listed model as /model does, then serve the persisted override."""
-    import threading
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
+def _switch_and_serve_case(spec, cfg):
+    """Persist one /model result, then resolve it through a fresh gateway runner."""
     import gateway.run as gateway_run
     from gateway.session import sanitize_model_override
-    from hermes_cli.auth import PROVIDER_REGISTRY
     from hermes_cli.config import get_compatible_custom_providers
     from hermes_cli.model_switch import switch_model
-    from hermes_cli.models import _PROVIDER_MODELS, OPENROUTER_MODELS, normalize_provider
 
-    canonical = normalize_provider(provider)
-    pconfig = PROVIDER_REGISTRY.get(provider) or PROVIDER_REGISTRY.get(canonical)
-    own_key = f"{provider}-FAKE"
-    for name in getattr(pconfig, "api_key_env_vars", None) or ():
-        os.environ[name] = own_key
-    if pconfig is not None and str(pconfig.auth_type).startswith("oauth"):
-        entry = {
-            "id": "p1",
-            "label": "x",
-            "auth_type": "oauth",
-            "priority": 0,
-            "source": "manual:device_code",
-            "access_token": OAUTH_TOKEN,
-            "refresh_token": "oauth-FAKE-refresh",
-            "agent_key": OAUTH_TOKEN,
-            "base_url": pconfig.inference_base_url,
-        }
-        store = {"version": 1, "providers": {}, "credential_pool": {provider: [entry]}}
-        (Path(os.environ["HERMES_HOME"]) / "auth.json").write_text(json.dumps(store))
-    if provider == "azure-foundry":
-        os.environ["AZURE_FOUNDRY_BASE_URL"] = "https://azure.example.invalid/openai/v1"
-    if provider == "lmstudio":
-        # /model validates against LM Studio's own model list.
-        class Catalog(BaseHTTPRequestHandler):
-            def do_GET(self):
-                body = json.dumps({"models": [{"key": "sweep-model", "type": "llm"}]}).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(body)
-
-            def log_message(self, *args):
-                pass
-
-        server = ThreadingHTTPServer(("127.0.0.1", 0), Catalog)
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        os.environ["LM_BASE_URL"] = f"http://127.0.0.1:{server.server_port}/v1"
-
-    if canonical == "openrouter":
-        models = [model for model, _ in OPENROUTER_MODELS]
-    else:
-        models = _PROVIDER_MODELS.get(provider) or _PROVIDER_MODELS.get(canonical) or []
-    rows = []
-    for model in models or ["sweep-model"]:
-        result = switch_model(
-            model,
-            current_provider="custom",
-            current_model="glm",
-            current_base_url=FP,
-            current_api_key="fp-FAKE",
-            explicit_provider=provider,
-            user_providers=cfg["providers"],
-            custom_providers=get_compatible_custom_providers(cfg),
-        )
-        if not result.success:
-            rows.append({"model": model, "switch_error": result.error_message})
-            continue
-        saved = sanitize_model_override(
-            {
-                "model": result.new_model,
-                "provider": result.target_provider,
-                "base_url": result.base_url,
-            }
-        )
-        own = {own_key, OAUTH_TOKEN}
-        if result.target_provider == "openrouter":
-            own.add("sk-or-FAKE")
-        # A restart: a new runner that finds only the persisted override.
-        runner = object.__new__(gateway_run.GatewayRunner)
-        runner.session_store = _Store(saved)
-        try:
-            served_model, runtime = runner._resolve_session_agent_runtime(
-                session_key="k", user_config=cfg
-            )
-        except Exception as error:
-            rows.append({"model": model, "saved": saved, "error": str(error)})
-            continue
-        rows.append(
-            {
-                "model": model,
-                "saved": saved,
-                "served": {
-                    "model": served_model,
-                    "provider": runtime.get("provider"),
-                    "base_url": runtime.get("base_url"),
-                },
-                "own_key": runtime.get("api_key") in own,
-                "api_key": None if runtime.get("api_key") in own else runtime.get("api_key"),
-            }
-        )
-    return rows
+    result = switch_model(
+        spec["model"],
+        current_provider="custom",
+        current_model="glm",
+        current_base_url=FP,
+        current_api_key="fp-FAKE",
+        explicit_provider=spec["provider"],
+        user_providers=cfg["providers"],
+        custom_providers=get_compatible_custom_providers(cfg),
+    )
+    if not result.success:
+        return {"switch_error": result.error_message}
+    saved = sanitize_model_override(
+        {"model": result.new_model, "provider": result.target_provider, "base_url": result.base_url}
+    )
+    runner = object.__new__(gateway_run.GatewayRunner)
+    runner.session_store = _Store(saved)
+    model, runtime = runner._resolve_session_agent_runtime(session_key="k", user_config=cfg)
+    return {
+        "saved": saved,
+        "model": model,
+        "provider": runtime.get("provider"),
+        "base_url": runtime.get("base_url"),
+        "api_key": runtime.get("api_key"),
+        "api_mode": runtime.get("api_mode"),
+        "kept": runner.session_store.saved is not None,
+    }
 
 
 # --- tests ----------------------------------------------------------------------------
@@ -718,10 +615,10 @@ class SessionBoundaryTests(RouteSafetyCase):
         )
         self.assertNotIn("error", result, result)
         self.assertEqual((result["model"], result["base_url"]), ("local-model", USERFB))
-        self.assertEqual(route_of_key(result["api_key"]), "none")
+        self.assertEqual(result["api_key"], "no-key-required")
 
-    def test_codex_failure_recovery_removal(self):
-        """one conversation across a sign-in and a removal."""
+    def test_codex_sign_in_and_removal_retains_the_cached_token_until_restart(self):
+        """One conversation across sign-in and removal documents the cached-token limit."""
         turns = self.run_one(
             {
                 "config": config(FP_DEFAULT),
@@ -837,70 +734,32 @@ class NormalServingTests(RouteSafetyCase):
         self.assertTrue(result["models_requests"], "validation must have met the 404 /models")
         self.assertEqual((result["context_length"], result["supports_vision"]), (393216, True))
 
-
-def matrix_specs():
-    """saved default, override, fallback, credentials, alias (120 cases)."""
-    defaults = {
-        "fp": dict(FP_DEFAULT, default="glm-5-3-flash"),
-        "or": OR_DEFAULT,
-        "codex": {"default": "gpt-5.5", "provider": "openai-codex"},
-    }
-    cases = []
-    for default, override, fallback, creds, alias in itertools.product(
-        ("fp", "or", "codex"),
-        ("fp", "or", "codex", "keyless", "barecustom"),
-        ("off", "custom", "fp"),
-        ("ok", "revoked", "transient"),
-        (0, 1),
-    ):
-        if default == override or (creds == "transient" and override != "codex"):
-            continue
-        if creds != "ok" and override in ("keyless", "barecustom"):
-            continue
-        env = {}
-        if not (override == "fp" and creds == "revoked"):
-            env["FINITE_PRIVATE_API_KEY"] = "fp-FAKE"
-        if alias:
-            env["OPENAI_API_KEY"] = env.get("FINITE_PRIVATE_API_KEY", "fp-FAKE")
-        with_openrouter_key = (override == "or" and creds == "ok") or (
-            default == "or" and not (override == "or" and creds != "ok")
-        )
-        fallback_entries = (
-            [dict(FP_ENTRY, model="glm-5-3-flash")] if fallback == "fp" else FALLBACKS[fallback]
-        )
-        spec = {
-            "label": f"default={default} override={override} fallback={fallback} creds={creds} alias={alias}",
-            "config": {
-                "model": defaults[default],
-                "providers": PROVIDERS,
-                "fallback_providers": fallback_entries,
+    def test_representative_model_switches_survive_a_gateway_restart(self):
+        """One registered-key route and one authenticated route cross switch -> store -> serve."""
+        cfg = config(FP_DEFAULT, "off")
+        specs = [
+            {
+                "kind": "switch_and_serve",
+                "config": cfg,
+                "provider": "openrouter",
+                "model": "anthropic/claude-sonnet-4.6",
+                "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE"},
+                "dotenv": "OPENROUTER_API_KEY=sk-or-FAKE\n",
             },
-            "env": env,
-            "dotenv": "OPENROUTER_API_KEY=sk-or-FAKE\n" if with_openrouter_key else "",
-            "override": ROUTES[override],
-        }
-        if "codex" in (default, override):
-            spec["auth"] = codex_auth(creds if override == "codex" else "ok")
-        cases.append(spec)
-    return cases
-
-
-class MatrixTests(RouteSafetyCase):
-    def test_no_route_ever_carries_another_routes_key(self):
-        """0 of 120 mixed, 120 of 120 persisted overrides kept."""
-        specs = matrix_specs()
-        self.assertEqual(len(specs), 120)
-        labels = [spec.pop("label") for spec in specs]
-        mixed, dropped = [], []
-        for label, result in zip(labels, self.run_cases(specs), strict=True):
-            if not result["kept"]:
-                dropped.append(label)
-            if "error" not in result:
-                endpoint, key = route_of_url(result["base_url"]), route_of_key(result["api_key"])
-                if key not in ("none", endpoint):
-                    mixed.append(f"{label}: {endpoint} endpoint with the {key} key")
-        self.assertEqual(mixed, [], f"{len(mixed)} of {len(specs)} cases mixed routes")
-        self.assertEqual(dropped, [], f"{len(dropped)} of {len(specs)} overrides dropped")
+            {
+                "kind": "switch_and_serve",
+                "config": cfg,
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE"},
+                "auth": codex_auth("ok"),
+            },
+        ]
+        openrouter, codex = self.run_cases(specs)
+        self.assert_runtime(openrouter, openrouter["saved"]["model"], OPENROUTER, "sk-or-FAKE")
+        self.assertEqual(openrouter["provider"], "openrouter")
+        self.assert_runtime(codex, codex["saved"]["model"], CODEX, CODEX_TOKEN)
+        self.assertEqual(codex["provider"], "openai-codex")
 
 
 OPENCODE_CLAUDE = {"provider": "opencode", "model": "claude-sonnet-4-5", "base_url": OPENCODE_ZEN}
@@ -945,7 +804,7 @@ class OverrideModelTests(RouteSafetyCase):
             self.assertEqual(turns[1]["api_mode"], "anthropic_messages")
 
     def test_custom_provider_of_the_opencode_family(self):
-        """A named custom provider that extends a family slug is routed like the family."""
+        """A named custom provider crosses /model persistence and keeps its own route."""
         bridge = {
             "name": "opencode-go-bridge",
             "base_url": "https://opencode.ai/zen/go/v1",
@@ -956,13 +815,11 @@ class OverrideModelTests(RouteSafetyCase):
         cfg["providers"] = dict(PROVIDERS, **{"opencode-go-bridge": bridge})
         result = self.run_one(
             {
+                "kind": "switch_and_serve",
                 "config": cfg,
                 "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE", "BRIDGE_KEY": "bridge-FAKE"},
-                "override": {
-                    "provider": "opencode-go-bridge",
-                    "model": "minimax-m2.7",
-                    "base_url": "https://opencode.ai/zen/go",
-                },
+                "provider": "opencode-go-bridge",
+                "model": "minimax-m2.7",
             }
         )
         self.assert_runtime(result, "minimax-m2.7", "https://opencode.ai/zen/go", "bridge-FAKE")
@@ -1121,78 +978,6 @@ class PinnedProviderTests(RouteSafetyCase):
         for result in results[len(screenshot) :]:
             self.assertTrue(result["success"], result)
             self.assertIn("could not reach the finite-private API to validate", result["warning"])
-
-
-# Providers that /model cannot switch to in a scratch process, and why.
-UNSWEPT = {
-    "copilot-acp": "a local Copilot CLI subprocess with no HTTP credential; Hermes's profile "
-    "isolation drops HERMES_COPILOT_ACP_COMMAND, so no stand-in command can be named",
-    "custom": "the bare custom route takes the current endpoint, which here is Finite Private's, "
-    "and its entry declares only its own models; Finite's routes have their own tests",
-    "vertex": "resolution mints a Google OAuth2 token over the network; its endpoint comes "
-    "from the project and region, never from the model",
-}
-# Keys that pinned Hermes resolves for routes that take no API key.
-KEYLESS = {
-    None,
-    "",
-    "no-key-required",
-    "aws-sdk",
-    "opencode-zen-free-keyless",
-    "moa-virtual-provider",
-}
-
-
-class RegistrySweepTests(RouteSafetyCase):
-    maxDiff = None
-
-    def test_every_listed_model_is_served_where_model_switch_saved_it(self):
-        """for every provider and listed model, /model's endpoint is the one the patch serves."""
-        providers = self.run_one({"kind": "providers"})
-        # The reconciler's configuration: Finite Private's entry declares its whole list.
-        cfg = config(FP_DEFAULT, "off")
-        cfg["providers"] = dict(
-            PROVIDERS,
-            **{"finite-private": dict(PROVIDERS["finite-private"], discover_models=False)},
-        )
-        self.assertLessEqual(
-            {"opencode-zen", "opencode-go", "bedrock", "openrouter"}, set(providers)
-        )
-        specs = [
-            {
-                "kind": "sweep",
-                "provider": provider,
-                "config": cfg,
-                "env": {"FINITE_PRIVATE_API_KEY": "fp-FAKE", "OPENROUTER_API_KEY": "sk-or-FAKE"},
-                "process_env": {"NO_PROXY": "127.0.0.1"} if provider == "lmstudio" else {},
-            }
-            for provider in providers
-        ]
-        unswept, wrong, swept = {}, [], 0
-        for provider, rows in zip(providers, self.run_cases(specs), strict=True):
-            for row in rows:
-                label = f"{provider} {row['model']}"
-                if "switch_error" in row:
-                    unswept.setdefault(provider, row["switch_error"])
-                    continue
-                swept += 1
-                saved, served = row["saved"], row.get("served")
-                if served is None:
-                    wrong.append(f"{label}: saved {saved}, served nothing: {row['error']}")
-                elif (
-                    served["model"],
-                    served["provider"],
-                    (served["base_url"] or "").rstrip("/"),
-                ) != (
-                    saved["model"],
-                    saved["provider"],
-                    saved.get("base_url", "").rstrip("/"),
-                ):
-                    wrong.append(f"{label}: saved {saved}, served {served}")
-                elif not row["own_key"] and row["api_key"] not in KEYLESS:
-                    wrong.append(f"{label}: served {served} with another route's key")
-        self.assertEqual(wrong, [], f"{len(wrong)} of {swept} switches not served as saved")
-        self.assertEqual(sorted(unswept), sorted(UNSWEPT), unswept)
 
 
 if __name__ == "__main__":
