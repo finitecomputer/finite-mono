@@ -10,6 +10,7 @@ import {
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  refuseRestrictedUploadCaption,
   selectOriginalAgentCreationRequest,
   uploadHostedWebChatAttachments,
 } from "@/lib/hosted-web-chat";
@@ -453,6 +454,14 @@ test("parseHostedChatAction refuses restricted slash commands on every send oper
     /\/loop isn't available in Finite/
   );
 
+  for (const text of ["\u001c/debug", "/debug\u0085anything", "\u2029/update"]) {
+    assert.throws(
+      () => parseHostedChatAction({ SendChatMessage: { ...target, text } }),
+      /isn't available in Finite/,
+      JSON.stringify(text)
+    );
+  }
+
   for (const text of ["/new trip", "/pause", "/approve", "/yes", "please /update", "https://x.test/update"]) {
     assert.deepEqual(parseHostedChatAction({ SendChatMessage: { ...target, text } }), {
       SendChatMessage: { ...target, text, metadata_json: null },
@@ -460,16 +469,38 @@ test("parseHostedChatAction refuses restricted slash commands on every send oper
   }
 });
 
-test("attachment uploads refuse a restricted slash command caption before contacting the device", async () => {
+test("attachment captions refuse restricted commands and non-text values", () => {
+  const form = (caption?: string | Blob) => {
+    const formData = new FormData();
+    formData.set("room_id", "room-1");
+    if (typeof caption === "string") formData.set("caption", caption);
+    else if (caption) formData.set("caption", caption, "caption.txt");
+    return formData;
+  };
+  const refused = (pattern: RegExp) => (error: unknown) =>
+    error instanceof HostedWebChatError && error.status === 400 && pattern.test(error.message);
+
+  assert.throws(() => refuseRestrictedUploadCaption(form("/debug")), refused(/^\/debug isn't available in Finite\./));
+  assert.throws(
+    () => refuseRestrictedUploadCaption(form("/debug\u0085anything")),
+    refused(/^\/debug isn't available in Finite\./)
+  );
+  assert.throws(
+    () => refuseRestrictedUploadCaption(form(new Blob(["/debug"], { type: "text/plain" }))),
+    refused(/^Invalid caption\.$/)
+  );
+
+  for (const caption of [undefined, "", "Here is the report", "/new trip", "https://x.test/update"]) {
+    assert.doesNotThrow(() => refuseRestrictedUploadCaption(form(caption)), String(caption));
+  }
+});
+
+test("attachment uploads authenticate before validating the caption", async () => {
   const formData = new FormData();
-  formData.set("room_id", "room-1");
   formData.set("caption", "/debug");
   await assert.rejects(
     uploadHostedWebChatAttachments("machine-1", formData),
-    (error: unknown) =>
-      error instanceof HostedWebChatError
-      && error.status === 400
-      && /^\/debug isn't available in Finite\./.test(error.message)
+    (error: unknown) => !(error instanceof HostedWebChatError && error.status === 400)
   );
 });
 

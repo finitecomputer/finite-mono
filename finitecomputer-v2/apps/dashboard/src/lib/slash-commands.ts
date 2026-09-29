@@ -345,13 +345,22 @@ const TIER_RANK: Record<SlashCommandTier, number> = {
   restricted: 4,
 };
 
+// Python str.isspace(), which Hermes uses to strip and split commands. Exact
+// parity: unlike JavaScript \s it includes U+001C..U+001F and U+0085 and
+// excludes U+FEFF.
+const PY_SPACE =
+  "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const SLASH_QUERY = new RegExp(`^/([^${PY_SPACE}/]*)$`);
+const COMMAND_TOKEN = new RegExp(`^[${PY_SPACE}]*/([^${PY_SPACE}]+)`);
+const INSERTED_COMMAND = new RegExp(`^/([^${PY_SPACE}/]+) $`);
+
 const LISTED_COMMANDS = SLASH_COMMANDS
   .filter((command) => TIER_RANK[command.tier] < TIER_RANK.unlisted)
   .sort((a, b) => TIER_RANK[a.tier] - TIER_RANK[b.tier]);
 
 /** The command token being typed: the draft is `/` plus non-space text only. */
 export function slashQuery(draft: string): string | null {
-  const match = /^\/([^\s/]*)$/.exec(draft);
+  const match = SLASH_QUERY.exec(draft);
   return match ? match[1] : null;
 }
 
@@ -384,7 +393,7 @@ export function findSlashCommand(name: string): SlashCommand | null {
  * `@bot` suffix dropped, underscores equal to hyphens.
  */
 export function restrictedSlashCommand(text: string): SlashCommand | null {
-  const token = /^\/(\S+)/.exec(text.trimStart())?.[1];
+  const token = COMMAND_TOKEN.exec(text)?.[1];
   if (!token) return null;
   const name = token.split("@", 1)[0];
   if (!name || name.includes("/")) return null;
@@ -398,10 +407,81 @@ export function restrictedSlashCommandMessage(command: SlashCommand) {
 
 /** Argument signature to show after the caret right after a command is inserted. */
 export function slashArgsHint(draft: string): string | null {
-  const token = /^\/([^\s/]+) $/.exec(draft)?.[1]?.toLowerCase();
+  const token = INSERTED_COMMAND.exec(draft)?.[1]?.toLowerCase();
   if (!token) return null;
   const command = LISTED_COMMANDS.find((candidate) => commandNames(candidate).includes(token));
   return command?.args ?? null;
+}
+
+/**
+ * Whether the picker shows for this draft. A restricted command always shows
+ * why Send is disabled. A slash draft that came straight from a paste, or
+ * that names an unlisted command, keeps Enter sending as before.
+ */
+export function slashPickerVisible(
+  draft: string,
+  { dismissed, pastedDraft }: { dismissed: boolean; pastedDraft: string | null }
+) {
+  if (restrictedSlashCommand(draft)) return true;
+  const query = slashQuery(draft);
+  if (dismissed || query === null || draft === pastedDraft) return false;
+  return findSlashCommand(query)?.tier !== "unlisted";
+}
+
+/** Esc keeps the picker closed only while the same slash query grows. */
+export function keepSlashDismissed(previousDraft: string, nextDraft: string) {
+  return (
+    slashQuery(previousDraft) !== null
+    && slashQuery(nextDraft) !== null
+    && nextDraft.startsWith(previousDraft)
+  );
+}
+
+/**
+ * Whether Enter inserts the highlighted command instead of sending. The
+ * person is choosing when they moved the highlight, or when the highlight
+ * matched by name or alias prefix. A fully typed listed command and
+ * description-only matches send what was typed.
+ */
+export function slashEnterInserts(
+  query: string,
+  highlighted: SlashCommand | undefined,
+  moved: boolean
+) {
+  if (!highlighted) return false;
+  if (moved) return true;
+  const exact = findSlashCommand(query);
+  if (exact && TIER_RANK[exact.tier] < TIER_RANK.unlisted) return false;
+  const needle = query.toLowerCase();
+  return commandNames(highlighted).some((name) => name.startsWith(needle));
+}
+
+/** Input events that insert text the person did not type key by key. */
+export function isPastedInput(inputType: string | undefined) {
+  return (
+    inputType === "insertFromPaste"
+    || inputType === "insertFromPasteAsQuotation"
+    || inputType === "insertFromDrop"
+  );
+}
+
+export type SlashPickerKeyAction = "dismiss" | "previous" | "next" | "insert";
+
+/** What a composer keydown does to the picker; null leaves the key alone. */
+export function slashPickerKeyAction(
+  event: { key: string; shiftKey: boolean; isComposing: boolean; keyCode: number },
+  picker: { open: boolean; navigable: boolean; blocked: boolean; enterInserts: boolean }
+): SlashPickerKeyAction | null {
+  // IME candidate keys belong to the input method. 229 covers browsers
+  // that report composition keydowns without isComposing.
+  if (!picker.open || event.isComposing || event.keyCode === 229) return null;
+  if (event.key === "Escape") return picker.blocked ? null : "dismiss";
+  if (!picker.navigable || event.shiftKey) return null;
+  if (event.key === "ArrowDown") return "next";
+  if (event.key === "ArrowUp") return "previous";
+  if (event.key === "Tab") return "insert";
+  if (event.key === "Enter" && picker.enterInserts) return "insert";
+  return null;
 }
 
 function commandNames(command: SlashCommand) {

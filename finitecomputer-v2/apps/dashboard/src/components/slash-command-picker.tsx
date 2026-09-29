@@ -22,6 +22,7 @@ export function SlashCommandPicker({
   query,
   commands,
   highlighted,
+  enterInserts,
   blocked,
   onHighlight,
   onInsert,
@@ -30,6 +31,7 @@ export function SlashCommandPicker({
   query: string;
   commands: SlashCommand[];
   highlighted: number;
+  enterInserts: boolean;
   blocked: SlashCommand | null;
   onHighlight: (index: number) => void;
   onInsert: (command: SlashCommand) => void;
@@ -54,7 +56,7 @@ export function SlashCommandPicker({
             <p>{blocked.reason}</p>
           </div>
         </div>
-        <SlashFooter>
+        <SlashFooter closable={false}>
           <span className="finite-chat__slash-count">Can&apos;t be sent from chat</span>
         </SlashFooter>
       </div>
@@ -70,12 +72,12 @@ export function SlashCommandPicker({
           </span>
           <div>
             <p className="finite-chat__slash-empty-title">
-              {"No commands match "}<code>/{query}</code>
+              {"No listed commands match "}<code>/{query}</code>
             </p>
-            <p>Check the spelling, or clear it to see every command.</p>
+            <p>Enter sends it to your agent.</p>
           </div>
         </div>
-        <SlashFooter sendable>
+        <SlashFooter sendable persistent>
           <span className="finite-chat__slash-count">0 matches</span>
         </SlashFooter>
       </div>
@@ -134,7 +136,7 @@ export function SlashCommandPicker({
                     {warn ? (
                       <span className="finite-chat__slash-pill">Not recommended</span>
                     ) : null}
-                    {active ? (
+                    {active && enterInserts ? (
                       <span className="finite-chat__slash-enter" aria-hidden>
                         <CornerDownLeftIcon className="size-3" />
                       </span>
@@ -152,7 +154,7 @@ export function SlashCommandPicker({
           </div>
         ))}
       </div>
-      <SlashFooter navigable>
+      <SlashFooter navigable enterInserts={enterInserts} sendable={!enterInserts}>
         <span className="finite-chat__slash-count">
           {commands.length} {query ? (commands.length === 1 ? "match" : "matches") : "commands"}
         </span>
@@ -163,15 +165,21 @@ export function SlashCommandPicker({
 
 function SlashFooter({
   navigable = false,
+  enterInserts = false,
   sendable = false,
+  persistent = false,
+  closable = true,
   children,
 }: {
   navigable?: boolean;
+  enterInserts?: boolean;
   sendable?: boolean;
+  persistent?: boolean;
+  closable?: boolean;
   children: ReactNode;
 }) {
   return (
-    <div className="finite-chat__slash-footer">
+    <div className={`finite-chat__slash-footer${persistent ? " is-persistent" : ""}`}>
       {navigable ? (
         <>
           <span>
@@ -179,7 +187,8 @@ function SlashFooter({
             <kbd>↓</kbd> Navigate
           </span>
           <span>
-            <kbd>Enter</kbd> or <kbd>Tab</kbd> Insert
+            {enterInserts ? <><kbd>Enter</kbd> or </> : null}
+            <kbd>Tab</kbd> Insert
           </span>
         </>
       ) : null}
@@ -188,9 +197,11 @@ function SlashFooter({
           <kbd>Enter</kbd> Send
         </span>
       ) : null}
-      <span>
-        <kbd>Esc</kbd> Close
-      </span>
+      {closable ? (
+        <span>
+          <kbd>Esc</kbd> Close
+        </span>
+      ) : null}
       {children}
     </div>
   );

@@ -5,8 +5,8 @@ import {
   FormEvent,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -81,9 +81,14 @@ import {
   slashOptionId,
 } from "@/components/slash-command-picker";
 import {
+  isPastedInput,
+  keepSlashDismissed,
   matchSlashCommands,
   restrictedSlashCommand,
   slashArgsHint,
+  slashEnterInserts,
+  slashPickerKeyAction,
+  slashPickerVisible,
   slashQuery,
   type SlashCommand,
 } from "@/lib/slash-commands";
@@ -205,8 +210,10 @@ export function HostedWebChat({
   useEffect(() => {
     setDraft(restoreHostedChatComposerDraft(machineId, initialDraft ?? ""));
   }, [initialDraft, machineId]);
-  // Slash picker: open while the draft is a bare `/token`, until Esc. The
-  // dismissal lasts until the draft stops being a slash query.
+  // Slash picker: open while the draft is a bare `/token`. Esc closes it
+  // while the same query grows; restricted commands always explain the
+  // block. A draft that is exactly what a paste produced stays closed so
+  // Enter still sends.
   const slashListboxId = useId();
   const slashText = slashQuery(draft);
   const slashBlocked = restrictedSlashCommand(draft);
@@ -215,17 +222,19 @@ export function HostedWebChat({
     [slashText]
   );
   const [slashDismissed, setSlashDismissed] = useState(false);
-  const [slashWasActive, setSlashWasActive] = useState(false);
-  if ((slashText !== null) !== slashWasActive) {
-    setSlashWasActive(slashText !== null);
-    if (slashText === null) setSlashDismissed(false);
-  }
-  const [slashHighlight, setSlashHighlight] = useState({ query: "", index: 0 });
-  const slashIndex = slashHighlight.query === slashText
+  const [pastedDraft, setPastedDraft] = useState<string | null>(null);
+  const [slashHighlight, setSlashHighlight] = useState({ query: "", index: 0, moved: false });
+  const slashHighlightCurrent = slashHighlight.query === slashText;
+  const slashIndex = slashHighlightCurrent
     ? Math.min(slashHighlight.index, Math.max(0, slashMatches.length - 1))
     : 0;
-  const slashPickerOpen = !slashDismissed && (slashText !== null || slashBlocked !== null);
+  const slashPickerOpen = slashPickerVisible(draft, { dismissed: slashDismissed, pastedDraft });
   const slashNavigable = slashPickerOpen && !slashBlocked && slashMatches.length > 0;
+  const slashEnterInsertsHighlight = slashNavigable && slashEnterInserts(
+    slashText ?? "",
+    slashMatches[slashIndex],
+    slashHighlightCurrent && slashHighlight.moved
+  );
   const slashHint = slashArgsHint(draft);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
@@ -1222,8 +1231,13 @@ export function HostedWebChat({
                       query={slashText ?? ""}
                       commands={slashMatches}
                       highlighted={slashIndex}
+                      enterInserts={slashEnterInsertsHighlight}
                       blocked={slashBlocked}
-                      onHighlight={(index) => setSlashHighlight({ query: slashText ?? "", index })}
+                      onHighlight={(index) => setSlashHighlight({
+                        query: slashText ?? "",
+                        index,
+                        moved: slashHighlightCurrent && slashHighlight.moved,
+                      })}
                       onInsert={insertSlashCommand}
                     />
                   ) : null}
@@ -1232,6 +1246,7 @@ export function HostedWebChat({
                       ref={textareaRef}
                       aria-label="Message your agent"
                       aria-controls={slashNavigable ? slashListboxId : undefined}
+                      aria-autocomplete={slashNavigable ? "list" : undefined}
                       aria-activedescendant={
                         slashNavigable ? slashOptionId(slashListboxId, slashIndex) : undefined
                       }
@@ -1241,6 +1256,11 @@ export function HostedWebChat({
                       rows={1}
                       onBlur={() => stopTyping(selectedRoom?.room_id)}
                       onChange={(event) => {
+                        const { inputType } = event.nativeEvent as InputEvent;
+                        setPastedDraft(isPastedInput(inputType) ? event.target.value : null);
+                        if (slashDismissed && !keepSlashDismissed(draft, event.target.value)) {
+                          setSlashDismissed(false);
+                        }
                         setDraft(event.target.value);
                         noteTyping(event.target.value);
                       }}
@@ -1248,26 +1268,35 @@ export function HostedWebChat({
                         if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
                       }}
                       onKeyDown={(event) => {
-                        if (slashPickerOpen && event.key === "Escape") {
+                        const action = slashPickerKeyAction(
+                          {
+                            key: event.key,
+                            shiftKey: event.shiftKey,
+                            isComposing: event.nativeEvent.isComposing,
+                            keyCode: event.nativeEvent.keyCode,
+                          },
+                          {
+                            open: slashPickerOpen,
+                            navigable: slashNavigable,
+                            blocked: slashBlocked !== null,
+                            enterInserts: slashEnterInsertsHighlight,
+                          }
+                        );
+                        if (action) {
                           event.preventDefault();
-                          setSlashDismissed(true);
-                          return;
-                        }
-                        if (slashNavigable) {
-                          const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-                          if (step) {
-                            event.preventDefault();
+                          if (action === "dismiss") {
+                            setSlashDismissed(true);
+                          } else if (action === "insert") {
+                            insertSlashCommand(slashMatches[slashIndex]);
+                          } else {
+                            const step = action === "next" ? 1 : -1;
                             setSlashHighlight({
                               query: slashText ?? "",
                               index: (slashIndex + step + slashMatches.length) % slashMatches.length,
+                              moved: true,
                             });
-                            return;
                           }
-                          if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
-                            event.preventDefault();
-                            insertSlashCommand(slashMatches[slashIndex]);
-                            return;
-                          }
+                          return;
                         }
                         if (event.key === "Enter" && !event.shiftKey) {
                           event.preventDefault();

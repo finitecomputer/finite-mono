@@ -348,9 +348,8 @@ export async function streamHostedWebChat(machineId: string, signal: AbortSignal
 }
 
 export async function uploadHostedWebChatAttachments(machineId: string, formData: FormData) {
-  const caption = formData.get("caption");
-  if (typeof caption === "string") refuseRestrictedSlashCommand(caption);
   const context = await hostedWebChatContext(machineId);
+  refuseRestrictedUploadCaption(formData);
   return hostedDeviceAttachments(context.config, context.account, formData);
 }
 
@@ -638,6 +637,15 @@ function boundedString(value: unknown, label: string, maxBytes = 512) {
     throw new HostedWebChatError(`Invalid ${label}.`, 400);
   }
   return value;
+}
+
+export function refuseRestrictedUploadCaption(formData: FormData) {
+  // The device reads a file-valued caption as text, so only strings pass.
+  const caption = formData.get("caption");
+  if (caption !== null && typeof caption !== "string") {
+    throw new HostedWebChatError("Invalid caption.", 400);
+  }
+  if (caption !== null) refuseRestrictedSlashCommand(caption);
 }
 
 function messageText(value: unknown) {

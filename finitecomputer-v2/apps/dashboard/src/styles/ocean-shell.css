@@ -3252,6 +3252,8 @@ button.ocean-pill-button {
 .finite-chat__slash-row.is-active {
   background: color-mix(in srgb, var(--surface-muted), var(--text-primary) 7%);
   box-shadow: inset 0 0 0 1px var(--border);
+  padding-top: 7px;
+  padding-bottom: 7px;
 }
 
 .finite-chat__slash-sig,
@@ -3282,11 +3284,6 @@ button.ocean-pill-button {
 .finite-chat__slash-description {
   color: var(--text-secondary);
   font-size: 13.5px;
-}
-
-.finite-chat__slash-row.is-active {
-  padding-top: 7px;
-  padding-bottom: 7px;
 }
 
 .finite-chat__slash-row.is-active .finite-chat__slash-description {
@@ -3482,6 +3479,10 @@ button.ocean-pill-button {
   .finite-chat__slash-footer,
   .finite-chat__slash-enter {
     display: none;
+  }
+
+  .finite-chat__slash-footer.is-persistent {
+    display: flex;
   }
 }
 
