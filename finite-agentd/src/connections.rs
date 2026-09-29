@@ -208,22 +208,33 @@ impl ConnectionManager {
         Ok(usable_key(self.legacy_openrouter_key()?))
     }
 
+    /// The key `inference.select` validates, in the order status shows it
+    /// (R26): the stored key, else `environment`, agentd's own
+    /// `OPENROUTER_API_KEY`. An environment key is never copied into `.env`.
+    pub(crate) fn selectable_openrouter_key(
+        &self,
+        environment: Option<String>,
+    ) -> Result<Option<String>, AgentdError> {
+        Ok(self.stored_openrouter_key()?.or(usable_key(environment)))
+    }
+
     /// §3.6 background step 1: a validated legacy `model.api_key` moves into
     /// `.env` when `.env` has no key. The config copy is dropped by the model
-    /// block write that follows.
-    pub(crate) fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+    /// block write that follows. `true` when a key moved.
+    pub(crate) fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
         if usable_key(self.openrouter_dotenv_key()?).is_some() {
-            return Ok(());
+            return Ok(false);
         }
         let Some(key) = usable_key(self.legacy_openrouter_key()?) else {
-            return Ok(());
+            return Ok(false);
         };
         let path = self.openrouter_env_path();
         let existing = snapshot(&path)?.unwrap_or_default();
         atomic_private_bytes(
             &path,
             &upsert_dotenv_value(&existing, OPENROUTER_API_KEY_ENV, &key)?,
-        )
+        )?;
+        Ok(true)
     }
 
     /// §3.7 step 3: removes every `OPENROUTER_API_KEY` line from `.env`. Every
@@ -420,7 +431,7 @@ impl ConnectionManager {
                     .map(str::to_owned);
                 let durable_key =
                     read_dotenv_value(&self.openrouter_env_path(), OPENROUTER_API_KEY_ENV)?;
-                let provisioned_key = std::env::var(OPENROUTER_API_KEY_ENV).ok();
+                let provisioned_key = environment_openrouter_key();
                 let (api_key, persist) = select_openrouter_key(
                     request.api_key,
                     durable_key,
@@ -874,6 +885,11 @@ fn finite_private_model_config(model: &str, base_url: &str) -> Value {
     .expect("settings are present")
 }
 
+/// `OPENROUTER_API_KEY` in agentd's own process environment.
+pub(crate) fn environment_openrouter_key() -> Option<String> {
+    std::env::var(OPENROUTER_API_KEY_ENV).ok()
+}
+
 fn usable_key(value: Option<String>) -> Option<String> {
     value.filter(|value| !value.is_empty() && !value.starts_with("${"))
 }
@@ -1124,6 +1140,48 @@ mod tests {
             ConfigManager::new(hermes_home.join("config.yaml"), ledger),
         );
         (temp, manager)
+    }
+
+    #[test]
+    fn r26_select_takes_the_key_in_the_order_status_shows() {
+        let (_temp, manager) = manager();
+        let environment = || Some("sk-or-v1-synthetic-environment".to_owned());
+        assert_eq!(
+            manager.selectable_openrouter_key(environment()).unwrap(),
+            environment(),
+            "the environment key when nothing is stored"
+        );
+        for unusable in [
+            None,
+            Some(String::new()),
+            Some("${OPENROUTER_API_KEY}".to_owned()),
+        ] {
+            assert_eq!(manager.selectable_openrouter_key(unusable).unwrap(), None);
+        }
+        fs::write(
+            manager.config.path(),
+            "model: {default: a/b, provider: openrouter, api_key: sk-or-v1-synthetic-legacy}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manager
+                .selectable_openrouter_key(environment())
+                .unwrap()
+                .as_deref(),
+            Some("sk-or-v1-synthetic-legacy")
+        );
+        fs::write(
+            manager.openrouter_env_path(),
+            "OPENROUTER_API_KEY=sk-or-v1-synthetic-dotenv\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manager
+                .selectable_openrouter_key(environment())
+                .unwrap()
+                .as_deref(),
+            Some("sk-or-v1-synthetic-dotenv")
+        );
     }
 
     #[test]

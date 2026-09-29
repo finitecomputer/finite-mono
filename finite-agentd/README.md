@@ -111,6 +111,21 @@ the design is FIN-129/FIN-130.
   kind, and a `failed` disconnect resumes with a fresh budget. A `failed`
   select or activate stays as it is: the user may have chosen another model
   since, and only their next change replaces it (ruling R12).
+- A select verifies the saved `model` after its restart. It writes again only
+  over the value that this attempt replaced, which is what a stale write from
+  the old process leaves. Any other value, or a replaced value that agentd no
+  longer knows because it restarted, ends `config_conflict` with the state as
+  found and nothing written (ruling R28).
+- OpenRouter select validates the key that status shows, in its order: the
+  `.env` key, the legacy `model.api_key`, else `OPENROUTER_API_KEY` in
+  agentd's own environment. An environment key is never copied into `.env`
+  (ruling R26). A select that moved a legacy key into `.env` also restarts
+  `hermes serve` (ruling R30).
+- agentd's writers of `config.yaml` share one lock per path, held through the
+  config check. When the check fails, the select's write is undone only as far
+  as agentd owns it: the exact bytes if nobody else wrote, only the previous
+  `model` if another writer changed something else, and nothing
+  (`config_conflict`) if the `model` itself changed (ruling R23).
 - A disconnect's verification waits for the launcher's clears. After the
   cleanup restart it reads the helper facts every 5 s for up to 60 s, and
   restarts nothing in that time. It succeeds on two cleared reads in a row;
@@ -120,7 +135,9 @@ the design is FIN-129/FIN-130.
   bounded retry opens a new window without a restart (ruling R15b).
 - The Hermes process gets `FINITE_AGENTD_INTENT_PATH`, so the launcher can
   apply a pending disconnect's clears while no gateway runs. The native
-  `hermes serve` never starts while a disconnect intent exists.
+  `hermes serve` never starts while a disconnect intent exists. A restart of
+  `hermes serve` is always answered, and its callers wait at most 30 s before
+  they go on (ruling R25).
 - OpenRouter keys are checked with `GET /key` only. No completion request is
   ever sent to test a key.
 

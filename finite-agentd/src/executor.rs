@@ -44,6 +44,9 @@ const LAUNCHER_WAIT: Duration = Duration::from_secs(60);
 /// R18: how long `hermes config check` may take before it is killed and the
 /// attempt is `config_invalid`.
 pub(crate) const CONFIG_CHECK_DEADLINE: Duration = Duration::from_secs(60);
+/// R25: how long a `hermes serve` restart is awaited before the operation
+/// continues; its own verification decides the result.
+pub(crate) const SERVE_RESTART_WAIT: Duration = Duration::from_secs(30);
 /// How long status shows a succeeded operation after its record is deleted.
 const RESULT_TTL: Duration = Duration::from_secs(10 * 60);
 
@@ -56,9 +59,11 @@ pub(crate) trait ExecutorHost: Clone + Send + Sync + 'static {
     fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError>;
     /// The value of the last `OPENROUTER_API_KEY` line in `.env`, if any.
     fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError>;
+    /// `OPENROUTER_API_KEY` in agentd's own process environment (R26).
+    fn environment_openrouter_key(&self) -> Option<String>;
     /// §3.6 background step 1: copy a legacy `model.api_key` into `.env` when
-    /// `.env` has no key.
-    fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError>;
+    /// `.env` has no key. `true` when a key moved.
+    fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError>;
     /// §3.7 step 3: remove every `OPENROUTER_API_KEY` line from `.env`.
     fn remove_openrouter_key(&self) -> Result<(), AgentdError>;
     /// Restart the gateway; `Ok` once it is `Running` again.
@@ -125,6 +130,7 @@ pub(crate) struct Executor<H> {
     verify_delay: Duration,
     launcher_wait: Duration,
     config_check_deadline: Duration,
+    serve_restart_wait: Duration,
     last: std::sync::Mutex<Option<(OperationStatus, Instant)>>,
     running: tokio::sync::Mutex<()>,
 }
@@ -145,6 +151,7 @@ impl<H: ExecutorHost> Executor<H> {
             verify_delay: VERIFY_DELAY,
             launcher_wait: LAUNCHER_WAIT,
             config_check_deadline: CONFIG_CHECK_DEADLINE,
+            serve_restart_wait: SERVE_RESTART_WAIT,
             last: std::sync::Mutex::new(None),
             running: tokio::sync::Mutex::new(()),
         }
@@ -252,7 +259,7 @@ impl<H: ExecutorHost> Executor<H> {
         if record.kind == IntentKind::Disconnect {
             // Verified and deleted: `hermes serve` may start again, after the
             // restart that ran the launcher's clears.
-            self.host.restart_serve().await;
+            self.restart_serve().await;
         }
     }
 
@@ -267,29 +274,40 @@ impl<H: ExecutorHost> Executor<H> {
     async fn drive_select(&self, record: &mut IntentRecord) -> Result<(), Failure> {
         let planned = plan_model_block(record.route, record.model.as_deref(), &self.fp)?;
         let mut written = None;
+        let mut key_moved = false;
         for phase in self.remaining(record) {
             self.enter(record, phase)?;
             match phase {
                 IntentPhase::ConfigWritten => {
-                    written = self.write_select(record, &planned).await?;
+                    (written, key_moved) = self.write_select(record, &planned).await?;
                 }
                 IntentPhase::Restarting => {
                     if self.host.restart_gateway().await.is_err() {
                         return Err(self.restore_after_spawn_failure(written.as_ref()).await);
                     }
-                    if record.kind == IntentKind::Activate {
-                        // A replaced credential: flush any copy `hermes serve` holds.
-                        self.host.restart_serve().await;
+                    if record.kind == IntentKind::Activate || key_moved {
+                        // A replaced key, or a legacy key moved into `.env`
+                        // (R30): flush the environment `hermes serve` holds.
+                        self.restart_serve().await;
                     }
                 }
                 IntentPhase::Verifying => {
+                    // R28: only the value this attempt replaced is a stale
+                    // write from the old process. Any other value is someone
+                    // else's choice, and after an agentd restart the replaced
+                    // value is unknown: both are left as found.
+                    let replaced = written.as_ref().map(|written| &written.replaced);
                     let mut reapplies = 0;
                     while !self.select_verified(record, &planned).await? {
-                        if reapplies == MAX_REAPPLIES {
+                        let found = self.config.current_value(MODEL_CONFIG_PATH)?;
+                        if replaced != Some(&found) || reapplies == MAX_REAPPLIES {
                             return Err(Failure::CONFIG_CONFLICT);
                         }
                         reapplies += 1;
-                        self.write_select(record, &planned).await?;
+                        // Credential migration already ran before the first
+                        // model write. A retry must check under the config lock
+                        // before doing any further mutation.
+                        self.reapply_model(&found, &planned).await?;
                         self.host.restart_gateway().await?;
                     }
                 }
@@ -299,18 +317,19 @@ impl<H: ExecutorHost> Executor<H> {
         Ok(())
     }
 
+    /// The select's write, and whether a legacy key moved into `.env`.
     async fn write_select(
         &self,
         record: &IntentRecord,
         planned: &Value,
-    ) -> Result<Option<WrittenConfig>, Failure> {
-        if record.route == IntentRoute::Openrouter {
-            self.host.migrate_legacy_openrouter_key()?;
-        }
-        match self.write_model(planned).await? {
-            ModelWrite::Written(written) => Ok(Some(written)),
-            ModelWrite::Unchanged => Ok(None),
-        }
+    ) -> Result<(Option<WrittenConfig>, bool), Failure> {
+        let key_moved =
+            record.route == IntentRoute::Openrouter && self.host.migrate_legacy_openrouter_key()?;
+        let written = match self.write_model(planned).await? {
+            ModelWrite::Written(written) => Some(written),
+            ModelWrite::Unchanged => None,
+        };
+        Ok((written, key_moved))
     }
 
     /// Writes the `model` block, validated by `hermes config check` on a
@@ -329,13 +348,31 @@ impl<H: ExecutorHost> Executor<H> {
         .map_err(Failure::from)
     }
 
+    async fn reapply_model(&self, expected: &Value, planned: &Value) -> Result<(), Failure> {
+        let config = self.config.clone();
+        let host = self.host.clone();
+        let expected = expected.clone();
+        let planned = planned.clone();
+        let deadline = self.config_check_deadline;
+        tokio::task::spawn_blocking(move || {
+            config.write_model_if_unchanged(&expected, &planned, || host.validate_config(deadline))
+        })
+        .await
+        .map_err(|_| Failure::CONFIG_INVALID)?
+        .map_err(Failure::from)?;
+        Ok(())
+    }
+
     /// §3.10: after a spawn failure, restore the bytes this run wrote (only if
     /// they are still intact) and bring the previous route back up.
     async fn restore_after_spawn_failure(&self, written: Option<&WrittenConfig>) -> Failure {
-        let Some(written) = written else {
+        let Some(written) = written.cloned() else {
             return Failure::SUPERVISOR_UNAVAILABLE;
         };
-        if self.config.restore_if_unchanged(written).is_err() {
+        let config = self.config.clone();
+        let restored =
+            tokio::task::spawn_blocking(move || config.restore_if_unchanged(&written)).await;
+        if !matches!(restored, Ok(Ok(()))) {
             return Failure::CONFIG_CONFLICT;
         }
         let _ = self.host.restart_gateway().await;
@@ -343,8 +380,9 @@ impl<H: ExecutorHost> Executor<H> {
     }
 
     /// Values, never bytes (G1): the parsed `model` mapping equals the planned
-    /// block, and an OpenRouter route has a stored key. Checked after
-    /// `Running` and again after `VERIFY_DELAY`.
+    /// block, and an OpenRouter route has a stored key or agentd's
+    /// environment key (R26). Checked after `Running` and again after
+    /// `VERIFY_DELAY`.
     async fn select_verified(
         &self,
         record: &IntentRecord,
@@ -356,7 +394,8 @@ impl<H: ExecutorHost> Executor<H> {
             }
             let model_matches = self.config.current_value(MODEL_CONFIG_PATH)? == *planned;
             let key_matches = record.route != IntentRoute::Openrouter
-                || stored_key(self.host.dotenv_openrouter_key()?.as_deref());
+                || stored_key(self.host.dotenv_openrouter_key()?.as_deref())
+                || stored_key(self.host.environment_openrouter_key().as_deref());
             if !(model_matches && key_matches) {
                 return Ok(false);
             }
@@ -427,9 +466,22 @@ impl<H: ExecutorHost> Executor<H> {
     /// §3.7 step 4: stop `hermes serve` (it stays stopped while the record
     /// exists), then restart the gateway, whose launcher applies the clears.
     async fn cleanup_restart(&self) -> Result<(), Failure> {
-        self.host.restart_serve().await;
+        self.restart_serve().await;
         self.host.restart_gateway().await?;
         Ok(())
+    }
+
+    /// Restarts `hermes serve`, waiting at most `serve_restart_wait` (R25).
+    async fn restart_serve(&self) {
+        let wait = self.serve_restart_wait;
+        if tokio::time::timeout(wait, self.host.restart_serve())
+            .await
+            .is_err()
+        {
+            eprintln!(
+                "finite-agentd: hermes serve did not confirm its restart within {wait:?}; continuing"
+            );
+        }
     }
 
     /// §3.7 step 5 as ruled in R14 and R15b. The launcher's clears land some
@@ -610,6 +662,10 @@ pub(crate) mod tests {
         config_check: Mutex<Option<PathBuf>>,
         /// The deadline each config check was given.
         check_deadlines: Mutex<Vec<Duration>>,
+        /// A `hermes serve` restart that never returns.
+        serve_hangs: Mutex<bool>,
+        /// agentd's `OPENROUTER_API_KEY`; the tests never read the real one.
+        environment_key: Mutex<Option<String>>,
     }
 
     impl Fake {
@@ -697,7 +753,11 @@ pub(crate) mod tests {
                 .map(str::to_owned))
         }
 
-        fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+        fn environment_openrouter_key(&self) -> Option<String> {
+            self.environment_key.lock().unwrap().clone()
+        }
+
+        fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
             self.record(Event::Migrate(self.phase()));
             let legacy = self.model()["api_key"].as_str().map(str::to_owned);
             if self.dotenv_openrouter_key()?.is_none()
@@ -706,8 +766,9 @@ pub(crate) mod tests {
                 let mut lines = self.env_lines();
                 lines.push(format!("OPENROUTER_API_KEY={key}"));
                 fs::write(self.env_path(), lines.join("\n") + "\n")?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
         }
 
         fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
@@ -761,6 +822,9 @@ pub(crate) mod tests {
                 phase: self.phase(),
                 gated,
             });
+            if *self.serve_hangs.lock().unwrap() {
+                std::future::pending::<()>().await;
+            }
         }
 
         async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
@@ -874,6 +938,8 @@ pub(crate) mod tests {
             restart_times: Mutex::new(Vec::new()),
             config_check: Mutex::new(None),
             check_deadlines: Mutex::new(Vec::new()),
+            serve_hangs: Mutex::new(false),
+            environment_key: Mutex::new(None),
             failed_reads: Mutex::new(0),
             reads: Mutex::new(Vec::new()),
             hermes: Mutex::new(HermesSide {
@@ -1632,6 +1698,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn r25_a_serve_restart_that_never_returns_is_waited_for_a_bounded_time() {
+        assert_eq!(SERVE_RESTART_WAIT, Duration::from_secs(30));
+        let mut setup = disconnect_setup(IntentRoute::Openrouter);
+        setup.executor.serve_restart_wait = Duration::from_millis(100);
+        *setup.fake.serve_hangs.lock().unwrap() = true;
+        arm(
+            &setup,
+            IntentKind::Disconnect,
+            IntentRoute::Openrouter,
+            None,
+        );
+        tokio::time::timeout(Duration::from_secs(30), setup.executor.run())
+            .await
+            .expect("the disconnect does not wait for hermes serve");
+        // The cleanup went on to the gateway restart, and verification decided.
+        assert!(record_now(&setup).is_none());
+        assert_eq!(
+            setup.executor.operation(None).unwrap().state,
+            OperationState::Succeeded
+        );
+        assert_eq!(serve_events(&setup.fake.events()).len(), 2);
+        assert_eq!(gateway_restarts(&setup.fake.events()), 1);
+    }
+
+    #[tokio::test]
+    async fn r30_a_select_that_moved_a_legacy_key_restarts_serve() {
+        let legacy = json!({"default": "old/model", "provider": "openrouter",
+            "api_key": "sk-or-v1-synthetic-legacy"});
+        let setup = new_setup(&legacy, "");
+        arm(
+            &setup,
+            IntentKind::Select,
+            IntentRoute::Openrouter,
+            Some(OPENROUTER_MODEL),
+        );
+        setup.executor.run().await;
+        assert!(record_now(&setup).is_none());
+        assert_eq!(
+            setup.fake.env_lines(),
+            ["OPENROUTER_API_KEY=sk-or-v1-synthetic-legacy"]
+        );
+        assert_eq!(
+            serve_events(&setup.fake.events()),
+            [(Some(IntentPhase::Restarting), false)],
+            "after the gateway restart"
+        );
+    }
+
+    #[tokio::test]
     async fn t_a43_serve_starts_only_after_the_restart_that_ran_the_launcher_step() {
         let setup = disconnect_setup(IntentRoute::Openrouter);
         arm(
@@ -1693,14 +1808,15 @@ pub(crate) mod tests {
         )));
     }
 
-    /// Rewrites `config.yaml` the way the real gateway does on a first turn (G1).
-    fn first_turn_rewrite(path: &Path, change_model: bool) {
+    /// Rewrites `config.yaml` the way the real gateway does on a first turn
+    /// (G1), from a process that may still hold a `stale_model`.
+    fn first_turn_rewrite(path: &Path, stale_model: Option<Value>) {
         let mut document =
             serde_yaml::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap();
         document["onboarding"] = json!({"seen": {"profile_build_offered": true}});
         document["agent"] = json!({});
-        if change_model {
-            document["model"]["default"] = json!("someone/else");
+        if let Some(model) = stale_model {
+            document["model"] = model;
         }
         let text = serde_yaml::to_string(&document)
             .unwrap()
@@ -1719,7 +1835,7 @@ pub(crate) mod tests {
             "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
         );
         *setup.fake.on_restart.lock().unwrap() = Box::new(|_, path| {
-            first_turn_rewrite(path, false);
+            first_turn_rewrite(path, None);
             Ok(())
         });
         arm(&setup, IntentKind::Select, IntentRoute::FinitePrivate, None);
@@ -1734,7 +1850,8 @@ pub(crate) mod tests {
             "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
         );
         *setup.fake.on_restart.lock().unwrap() = Box::new(|count, path| {
-            first_turn_rewrite(path, count == 1);
+            // R28: the stale model is the one the select replaced.
+            first_turn_rewrite(path, (count == 1).then(openrouter_block));
             Ok(())
         });
         arm(&setup, IntentKind::Select, IntentRoute::FinitePrivate, None);
@@ -1744,16 +1861,23 @@ pub(crate) mod tests {
         assert_eq!(setup.fake.model(), fp_block());
     }
 
+    /// Sets `model` the way a writer outside agentd would.
+    fn write_model_as(path: &Path, model: &Value) {
+        let mut document =
+            serde_yaml::from_str::<Value>(&fs::read_to_string(path).unwrap()).unwrap();
+        document["model"] = model.clone();
+        fs::write(path, serde_yaml::to_string(&document).unwrap()).unwrap();
+    }
+
     #[tokio::test]
     async fn t_a14_a_stale_writer_is_reapplied_then_reported_as_found() {
-        // Clobbered once, after the first check passed: the second read
-        // (5 s later in production) catches it. Deterministic: the clobber
-        // runs inside the first check, after its model read.
+        // R28: the old process flushed the value this select replaced, once,
+        // after the first check passed: the second read (5 s later in
+        // production) catches it. Deterministic: the flush runs inside the
+        // first check, after its model read.
         let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
-        *setup.fake.on_verify_key_read.lock().unwrap() = Some(Box::new(|path| {
-            let text = fs::read_to_string(path).unwrap();
-            fs::write(path, text.replace(OPENROUTER_MODEL, "stale-model")).unwrap();
-        }));
+        *setup.fake.on_verify_key_read.lock().unwrap() =
+            Some(Box::new(|path| write_model_as(path, &fp_block())));
         arm(
             &setup,
             IntentKind::Select,
@@ -1765,14 +1889,14 @@ pub(crate) mod tests {
         assert_eq!(*setup.fake.restarts.lock().unwrap(), 2);
         assert_eq!(setup.fake.model(), openrouter_block());
 
-        // Clobbered after every restart: two re-applies, then the state as found.
+        // The replaced value comes back after every restart: two re-applies,
+        // then the state as found.
         let setup = new_setup(
             &openrouter_block(),
             "OPENROUTER_API_KEY=sk-or-v1-synthetic\n",
         );
         *setup.fake.on_restart.lock().unwrap() = Box::new(|_, path| {
-            let text = fs::read_to_string(path).unwrap();
-            fs::write(path, text.replace("glm-5-3-flash", "stale-model")).unwrap();
+            write_model_as(path, &openrouter_block());
             Ok(())
         });
         arm(&setup, IntentKind::Select, IntentRoute::FinitePrivate, None);
@@ -1781,7 +1905,90 @@ pub(crate) mod tests {
         assert_eq!(failed.state, IntentState::Failed);
         assert_eq!(failed.error_code.as_deref(), Some("config_conflict"));
         assert_eq!(*setup.fake.restarts.lock().unwrap(), 1 + MAX_REAPPLIES);
-        assert_eq!(setup.fake.model()["default"], "stale-model");
+        assert_eq!(setup.fake.model(), openrouter_block());
+    }
+
+    #[tokio::test]
+    async fn r28_another_value_after_the_restart_is_left_as_found() {
+        // For example the user's `/model ... --global` in chat while the
+        // select verified. Found at the first check, or at the second.
+        let users_choice = json!({"default": "glm-5-3-flash", "provider": "finite-private"});
+        for at_second_check in [false, true] {
+            let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+            let choice = users_choice.clone();
+            if at_second_check {
+                *setup.fake.on_verify_key_read.lock().unwrap() =
+                    Some(Box::new(move |path| write_model_as(path, &choice)));
+            } else {
+                *setup.fake.on_restart.lock().unwrap() = Box::new(move |_, path| {
+                    write_model_as(path, &choice);
+                    Ok(())
+                });
+            }
+            arm(
+                &setup,
+                IntentKind::Select,
+                IntentRoute::Openrouter,
+                Some(OPENROUTER_MODEL),
+            );
+            setup.executor.run().await;
+            let found = fs::read(setup.fake.config_path()).unwrap();
+            let failed = record_now(&setup).unwrap();
+            assert_eq!(failed.state, IntentState::Failed);
+            assert_eq!(failed.error_code.as_deref(), Some("config_conflict"));
+            assert_eq!(failed.attempts, 1, "not retried");
+            assert_eq!(setup.fake.model(), users_choice);
+            assert_eq!(
+                *setup.fake.restarts.lock().unwrap(),
+                1,
+                "nothing re-applied"
+            );
+            let writes = setup
+                .fake
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::Validate(_)))
+                .count();
+            assert_eq!(writes, 1, "only the select's own write");
+            assert_eq!(fs::read(setup.fake.config_path()).unwrap(), found);
+        }
+    }
+
+    #[tokio::test]
+    async fn r28_an_unknown_replaced_value_is_a_conflict() {
+        // agentd restarted after the write, so this process never knew what
+        // the select replaced. Even the value it did replace is not re-written.
+        for phase in [IntentPhase::Restarting, IntentPhase::Verifying] {
+            let setup = new_setup(&fp_block(), "OPENROUTER_API_KEY=sk-or-v1-synthetic\n");
+            let before = fs::read(setup.fake.config_path()).unwrap();
+            let record = arm(
+                &setup,
+                IntentKind::Select,
+                IntentRoute::Openrouter,
+                Some(OPENROUTER_MODEL),
+            );
+            at_phase(&setup, record, phase);
+            setup.executor.resume_at_startup().await;
+            let failed = record_now(&setup).unwrap();
+            assert_eq!(
+                failed.error_code.as_deref(),
+                Some("config_conflict"),
+                "{phase:?}"
+            );
+            assert_eq!(
+                fs::read(setup.fake.config_path()).unwrap(),
+                before,
+                "{phase:?}"
+            );
+            assert!(
+                !setup
+                    .fake
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event, Event::Validate(_) | Event::Migrate(_))),
+                "{phase:?}: nothing written"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1851,7 +2058,10 @@ pub(crate) mod tests {
             fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
                 self.fake.dotenv_openrouter_key()
             }
-            fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+            fn environment_openrouter_key(&self) -> Option<String> {
+                self.fake.environment_openrouter_key()
+            }
+            fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
                 self.fake.migrate_legacy_openrouter_key()
             }
             fn remove_openrouter_key(&self) -> Result<(), AgentdError> {

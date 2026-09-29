@@ -39,32 +39,6 @@ pub(crate) const STATUS_FACTS_DEADLINE: Duration = Duration::from_secs(10);
 /// An executor read: no reply waits on it, and a busy Agent Runtime can make
 /// the helper slow (R15a).
 pub(crate) const EXECUTOR_FACTS_DEADLINE: Duration = Duration::from_secs(30);
-/// Longer than Hermes's 15 s auth-store lock.
-const CLEAR_DEADLINE: Duration = Duration::from_secs(20);
-
-/// The providers `clear-auth` accepts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "only `clear_auth` takes it, and agentd has no caller"
-    )
-)]
-pub(crate) enum HelperProvider {
-    Openrouter,
-    OpenaiCodex,
-}
-
-impl HelperProvider {
-    fn arg(self) -> &'static str {
-        match self {
-            Self::Openrouter => "openrouter",
-            Self::OpenaiCodex => "openai-codex",
-        }
-    }
-}
-
 /// The interpreter and module agentd runs.
 struct HelperCommand {
     python: OsString,
@@ -100,48 +74,6 @@ async fn read_facts(
     deadline: Duration,
 ) -> Result<InferenceFacts, AgentdError> {
     parse_facts(run_helper(command, environment, &["inference-facts"], deadline).await?)
-}
-
-/// Upstream `clear_provider_auth` for one provider. `true` if anything was cleared.
-#[expect(
-    dead_code,
-    reason = "no agentd caller: the launcher's pending-disconnect step clears (§3.7)"
-)]
-pub(crate) async fn clear_auth(
-    hermes_home: &Path,
-    provider: HelperProvider,
-) -> Result<bool, AgentdError> {
-    let value = run_helper(
-        &HelperCommand::from_env(),
-        helper_env(std::env::vars_os(), hermes_home, &finite_private_env()),
-        &["clear-auth", "--provider", provider.arg()],
-        CLEAR_DEADLINE,
-    )
-    .await?;
-    parse_cleared_auth(&value)
-}
-
-/// Clears conversation overrides naming any of `providers`. Only safe with no
-/// gateway running (X7); the launcher's pending-disconnect step is the normal
-/// caller.
-#[expect(
-    dead_code,
-    reason = "no agentd caller: the launcher's pending-disconnect step clears (§3.7)"
-)]
-pub(crate) async fn clear_session_overrides(
-    hermes_home: &Path,
-    providers: &[&str],
-) -> Result<u32, AgentdError> {
-    let mut args = vec!["clear-session-overrides", "--provider"];
-    args.extend_from_slice(providers);
-    let value = run_helper(
-        &HelperCommand::from_env(),
-        helper_env(std::env::vars_os(), hermes_home, &finite_private_env()),
-        &args,
-        CLEAR_DEADLINE,
-    )
-    .await?;
-    parse_cleared_count(&value)
 }
 
 /// agentd's environment after the §5.6 launch rule, without the helper test
@@ -210,22 +142,6 @@ async fn run_helper(
 
 fn parse_facts(value: Value) -> Result<InferenceFacts, AgentdError> {
     serde_json::from_value(value).map_err(|_| unavailable())
-}
-
-fn parse_cleared_auth(value: &Value) -> Result<bool, AgentdError> {
-    match value.get("cleared").and_then(Value::as_str) {
-        Some("yes") => Ok(true),
-        Some("no") => Ok(false),
-        _ => Err(unavailable()),
-    }
-}
-
-fn parse_cleared_count(value: &Value) -> Result<u32, AgentdError> {
-    value
-        .get("cleared")
-        .and_then(Value::as_u64)
-        .and_then(|count| u32::try_from(count).ok())
-        .ok_or_else(unavailable)
 }
 
 /// Helper failures never carry helper output, which could echo Hermes state.
@@ -306,25 +222,24 @@ mod tests {
         let command = fake_helper(
             temp.path(),
             &format!(
-                "env > '{}'\necho \"$@\" > '{}'\necho '{{\"cleared\": 2}}'",
+                "env > '{}'\necho \"$@\" > '{}'\necho '{{}}'",
                 dump.display(),
                 args.display()
             ),
         );
         let hermes_home = temp.path().join("hermes-home");
 
-        let value = run_helper(
+        run_helper(
             &command,
             helper_env(agentd_env(FP_KEY), &hermes_home, &fp()),
-            &["clear-session-overrides", "--provider", "openrouter"],
-            CLEAR_DEADLINE,
+            &["inference-facts"],
+            STATUS_FACTS_DEADLINE,
         )
         .await
         .unwrap();
-        assert_eq!(parse_cleared_count(&value).unwrap(), 2);
         assert_eq!(
             fs::read_to_string(&args).unwrap().trim(),
-            "-m fake_helper_module clear-session-overrides --provider openrouter"
+            "-m fake_helper_module inference-facts"
         );
         let seen = recorded_env(&dump);
         for name in HELPER_TEST_VARIABLES {
@@ -383,12 +298,15 @@ mod tests {
             temp.path(),
             "echo 'import noise'\necho '{\"cleared\": \"yes\"}'\necho",
         );
-        let value = run_helper(&command, system_path(), &["clear-auth"], CLEAR_DEADLINE)
-            .await
-            .unwrap();
-        assert!(parse_cleared_auth(&value).unwrap());
-        assert_eq!(HelperProvider::OpenaiCodex.arg(), "openai-codex");
-        assert_eq!(HelperProvider::Openrouter.arg(), "openrouter");
+        let value = run_helper(
+            &command,
+            system_path(),
+            &["inference-facts"],
+            STATUS_FACTS_DEADLINE,
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, serde_json::json!({"cleared": "yes"}));
     }
 
     #[tokio::test]
@@ -401,11 +319,10 @@ mod tests {
             "echo '{\"cleared\": \"maybe\"}'",
         ] {
             let command = fake_helper(temp.path(), body);
-            let error =
-                match run_helper(&command, system_path(), &["clear-auth"], CLEAR_DEADLINE).await {
-                    Ok(value) => parse_cleared_auth(&value).unwrap_err(),
-                    Err(error) => error,
-                };
+            let error = match read_facts(&command, system_path(), STATUS_FACTS_DEADLINE).await {
+                Ok(_) => panic!("{body}: not facts"),
+                Err(error) => error,
+            };
             assert_eq!(error.public_code(), "provider_unavailable");
             assert!(!error.public_message().contains("sk-or"));
         }

@@ -785,15 +785,9 @@ exit "$status"
         }
     }
 
-    /// A sleeper is ours when its pid is one the stubs recorded, or its
-    /// environment names this run (`ps eww` shows it for our own user).
+    /// Check the live environment immediately before signaling. A recorded
+    /// PID alone is insufficient because the OS can reuse it after exit.
     fn owns(&self, pid: u32) -> bool {
-        let recorded = self.events().iter().any(|(_, line)| {
-            line.contains(&format!("pid={pid} ")) || line.ends_with(&format!("pid={pid}"))
-        });
-        if recorded {
-            return true;
-        }
         let output = std::process::Command::new("ps")
             .args(["eww", "-o", "command=", "-p", &pid.to_string()])
             .output();
@@ -858,18 +852,33 @@ exit "$status"
         // key is not known present, and the command's facts read shares
         // status's 10 s deadline and cache. On a loaded machine that read can
         // time out, so warm the cache with known facts first.
-        self.known_status().await;
-        let reply = self
-            .command(
-                "agent.inference.disconnect",
-                "finite.agent.inference.disconnect.v1",
-                json!({"route": route}),
-            )
-            .await;
-        if reply["body"]["operation_id"].is_null() {
-            println!("e0: disconnect {route} started no operation: {reply}");
+        let deadline = Instant::now() + Duration::from_secs(300);
+        loop {
+            self.known_status().await;
+            let reply = self
+                .command(
+                    "agent.inference.disconnect",
+                    "finite.agent.inference.disconnect.v1",
+                    json!({"route": route}),
+                )
+                .await;
+            if reply["error"]["code"] != "facts_unavailable" {
+                assert!(
+                    reply["body"]["operation_id"]
+                        .as_str()
+                        .is_some_and(|id| !id.is_empty()),
+                    "disconnect {route} started no operation: {reply}"
+                );
+                return reply;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "disconnect {route} facts never recovered: {reply}"
+            );
+            // A fresh file stamp can invalidate the warmed status cache.
+            // Retry only the explicit transient refusal; no operation exists yet.
+            tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        reply
     }
 
     /// Status once its helper facts are known. Status gives the helper 10 s
@@ -881,15 +890,23 @@ exit "$status"
         let deadline = Instant::now() + Duration::from_secs(300);
         loop {
             let status = self.status().await;
-            if status["inference"]["fallback"]["state"] != "unknown" || Instant::now() >= deadline {
+            if status["inference"]["fallback"]["state"] != "unknown" {
                 return status;
             }
+            assert!(
+                Instant::now() < deadline,
+                "helper facts never became known: {status}"
+            );
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
 
     /// Polls status until the operation `id` is no longer running.
     async fn operation_end(&self, id: &str) -> Value {
+        assert!(
+            !id.is_empty(),
+            "cannot wait for an operation that was not admitted"
+        );
         // A disconnect that ends `verify_failed` waits out three 60 s windows.
         let deadline = Instant::now() + Duration::from_secs(600);
         loop {
@@ -1467,6 +1484,19 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .find(|(_, line)| line.contains("\"applied\":\"yes\""))
         .map(|(_, line)| line.clone())
         .unwrap_or_default();
+    // Startup must spawn Hermes before resuming the intent. The first cleanup
+    // restart may replace that initial process while its launcher is running.
+    // Every later cleanup attempt must still get the full verification window.
+    let p5_spawns = run.stub_lines_since(restarted_at, "gateway-spawn");
+    let p5_initial_pid = p5_spawns
+        .first()
+        .and_then(|(_, line)| field(line, "pid"))
+        .map(str::to_owned);
+    let p5_cleanup_created = p5_spawns
+        .iter()
+        .skip(1)
+        .filter_map(|(_, line)| field(line, "created").and_then(|value| value.parse::<u64>().ok()))
+        .collect::<Vec<_>>();
     proofs.observe(
         "P5 disconnect (resumed at accepted) gateway starts",
         run.stub_story(restarted_at, finished_at),
@@ -1474,6 +1504,12 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     proofs.record(
         "P5 disconnect clears in the launcher step (F1)",
         vec![
+            check(
+                p5_spawns.len() >= 2
+                    && p5_cleanup_created.len() == p5_spawns.len() - 1
+                    && p5_cleanup_created.windows(2).all(|pair| pair[1] >= pair[0] + 60_000),
+                format!("initial startup pid {p5_initial_pid:?} may be replaced; subsequent cleanup starts respect full windows: {p5_cleanup_created:?}"),
+            ),
             check(
                 seeded["openrouter"]["manual_pool_entries"] == "present"
                     && seeded["session_overrides"]["openrouter"] == "present",
@@ -1634,6 +1670,15 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
     run.set_stub_mode("none");
     let story = run.stub_story(before, now_ms());
     let spawns = run.spawns_seeing(before, "intent=disconnect/");
+    let outcomes = spawns
+        .iter()
+        .map(|(_, line)| run.outcome_of(line))
+        .collect::<Vec<_>>();
+    let created = spawns
+        .iter()
+        .filter_map(|(_, line)| field(line, "created").and_then(|value| value.parse::<u64>().ok()))
+        .collect::<Vec<_>>();
+    let after = run.helper_facts();
     let applied = run
         .stub_lines_since(before, "gateway-ready")
         .into_iter()
@@ -1645,28 +1690,56 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
         .iter()
         .filter(|(name, _)| !name.starts_with("P4b"))
         .flat_map(|(name, lines)| {
+            let initial_p5 = name
+                .starts_with("P5 ")
+                .then_some(p5_initial_pid.as_deref())
+                .flatten();
             lines
                 .iter()
                 .filter(|line| line.contains("gateway-stopped") && line.contains("stage=step"))
+                .filter(move |line| initial_p5.is_none_or(|pid| field(line, "pid") != Some(pid)))
                 .map(move |line| format!("{name}: {line}"))
         })
         .collect::<Vec<_>>();
+    let mut evidence = story.clone();
+    for outcome in &outcomes {
+        evidence.push(format!(
+            "launcher step {} ms, load {}",
+            field(outcome, "step_ms").unwrap_or("?"),
+            field(outcome, "load").unwrap_or("?")
+        ));
+    }
     proofs.observe(
-        "P8 disconnect with a 15 s launcher step, gateway starts",
-        story.clone(),
+        "P8 disconnect with a delayed launcher step, gateway starts",
+        evidence,
     );
     let operation = &ended["inference"]["operation"];
     proofs.record(
         "P8 verification waits for the launcher (R14)",
         vec![
             check(
-                spawns.len() == 1,
+                (1..=2).contains(&spawns.len())
+                    && outcomes
+                        .iter()
+                        .take(outcomes.len().saturating_sub(1))
+                        .all(|line| line.contains("step=failed:124")),
                 format!(
-                    "{} gateway start(s) after cleanup (1 = no re-run)",
+                    "{} gateway start(s); a second is allowed only after a timed-out step",
                     spawns.len()
                 ),
             ),
             check(applied, "that start's launcher step reported applied: yes"),
+            check(
+                created.len() == spawns.len()
+                    && created.windows(2).all(|pair| pair[1] >= pair[0] + 60_000),
+                format!("each retry waits for the previous verification window: {created:?}"),
+            ),
+            check(
+                after["openrouter"]["manual_pool_entries"] == "none"
+                    && after["session_overrides"]["openrouter"] == "absent"
+                    && after["openrouter"]["dotenv_key"] == "absent",
+                "the stored credential and conversation overrides are cleared",
+            ),
             check(
                 !story.iter().any(|line| line.contains("gateway-stopped")),
                 "the slow launcher was never stopped",
@@ -1678,7 +1751,7 @@ async fn smoke(run: &mut Run, timeline: Arc<Mutex<Timeline>>) -> Proofs {
             check(
                 mid_step_stops.is_empty(),
                 format!(
-                    "no launcher step stopped mid-way in the other disconnects: {mid_step_stops:?}"
+                    "no cleanup launcher stopped mid-way after the required initial startup replacement: {mid_step_stops:?}"
                 ),
             ),
         ],

@@ -520,6 +520,57 @@ mod tests {
     }
 
     #[test]
+    fn every_shared_fixture_is_loaded_or_quarantined_as_it_states() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/intent");
+        let mut cases = fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .collect::<Vec<_>>();
+        cases.sort();
+        assert!(cases.len() >= 32, "intent fixtures are missing");
+        for case in cases {
+            let name = case.file_name().unwrap().to_string_lossy().into_owned();
+            let case = serde_json::from_slice::<Value>(&fs::read(&case).unwrap()).unwrap();
+            let bytes = serde_json::to_vec_pretty(&case["record"]).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let path = intent_path(temp.path());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, &bytes).unwrap();
+            let loaded = load(&path).unwrap();
+            if case["valid"].as_bool().unwrap() {
+                let loaded = loaded.unwrap_or_else(|| panic!("{name}: a valid record was refused"));
+                assert_eq!(
+                    serde_json::to_value(&loaded).unwrap()["id"],
+                    case["record"]["id"],
+                    "{name}"
+                );
+                assert_eq!(fs::read(&path).unwrap(), bytes, "{name}: the record moved");
+            } else {
+                assert!(loaded.is_none(), "{name}: {}", case["description"]);
+                assert!(
+                    !path.exists(),
+                    "{name}: the refused record was not moved aside"
+                );
+                let names = file_names(path.parent().unwrap());
+                assert_eq!(names.len(), 1, "{name}");
+                assert!(
+                    names[0].starts_with("inference-intent.json.corrupt-"),
+                    "{name}: {names:?}"
+                );
+                assert_eq!(
+                    fs::read(path.parent().unwrap().join(&names[0])).unwrap(),
+                    bytes,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn store_refuses_a_record_it_could_not_read_back() {
         let temp = tempfile::tempdir().unwrap();
         let path = intent_path(temp.path());

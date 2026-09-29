@@ -351,16 +351,33 @@ fn unavailable(error: &str) -> ProcessStatus {
 }
 
 pub(super) fn start(home: PathBuf, gate: ServeGate) -> HostedHermesHandle {
+    start_with(home, gate, CoreConnection::from_env)
+}
+
+/// The worker answers every restart request in every state (R25): at once
+/// when no child can run, after the stop otherwise. When it ends it drops the
+/// receiver, so a later request returns at once too.
+fn start_with(
+    home: PathBuf,
+    gate: ServeGate,
+    core: impl FnOnce() -> Result<CoreConnection, AgentdError> + Send + 'static,
+) -> HostedHermesHandle {
     let (stop, mut stop_rx) = mpsc::channel(1);
     let (restart, mut restart_rx) = mpsc::channel::<oneshot::Sender<()>>(1);
     let (status_tx, status) = watch::channel(ProcessStatus::default());
     let task = tokio::spawn(async move {
-        let core = match CoreConnection::from_env() {
+        let core = match core() {
             Ok(core) => core,
             Err(_) => {
                 status_tx.send_replace(unavailable("Core assignment configuration was invalid"));
-                stop_rx.recv().await;
-                return;
+                loop {
+                    tokio::select! {
+                        Some(done) = restart_rx.recv() => {
+                            let _ = done.send(());
+                        }
+                        _ = stop_rx.recv() => return,
+                    }
+                }
             }
         };
         let mut applied = Applied {
@@ -384,6 +401,7 @@ pub(super) fn start(home: PathBuf, gate: ServeGate) -> HostedHermesHandle {
                 _ = stop_rx.recv() => break,
             }
         }
+        drop(restart_rx);
         applied.stop().await;
         status_tx.send_replace(ProcessStatus {
             state: ProcessState::Stopped,
@@ -745,6 +763,57 @@ mod tests {
             rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap())
                 .is_err()
         );
+    }
+
+    /// Waits for the worker to report `Unavailable` with `error`.
+    async fn unavailable_with(handle: &HostedHermesHandle, error: &str) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if matches!(&handle.status().state, ProcessState::Unavailable { error: found } if found == error)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker reports unavailable");
+    }
+
+    #[tokio::test]
+    async fn r25_restart_returns_while_core_configuration_is_invalid() {
+        // Review B's probe: only one of the two Core variables, or an invalid
+        // one, leaves the worker with no child to stop.
+        let temp = tempfile::tempdir().unwrap();
+        let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), || {
+            CoreConnection::new("https://core.example.invalid/".into(), String::new())
+        });
+        unavailable_with(&handle, "Core assignment configuration was invalid").await;
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(30), handle.restart())
+                .await
+                .expect("restart waited forever although no child exists");
+        }
+        handle.shutdown().await;
+        // A worker that has ended answers at once as well.
+        tokio::time::timeout(Duration::from_secs(30), handle.restart())
+            .await
+            .expect("restart of an ended worker returns");
+    }
+
+    #[tokio::test]
+    async fn r25_restart_returns_after_a_revoked_assignment() {
+        let (origin, requests) = server(1, |_, _| (401, "{}".into(), String::new())).await;
+        let temp = tempfile::tempdir().unwrap();
+        let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), move || {
+            CoreConnection::new(origin, "a".repeat(64))
+        });
+        unavailable_with(&handle, "Core assignment authorization was revoked").await;
+        tokio::time::timeout(Duration::from_secs(30), handle.restart())
+            .await
+            .expect("restart after a revoked assignment returns");
+        handle.shutdown().await;
+        assert_eq!(requests.await.unwrap().len(), 1);
     }
 
     #[test]

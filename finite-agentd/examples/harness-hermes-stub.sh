@@ -13,7 +13,7 @@
 # line on entry, then either `gateway-ready` just before the exec or
 # `gateway-stopped` with the stage it was in when a restart stopped it. The
 # optional "$E0_RUN_DIR/stub-mode" file selects a behavior: `readd-env-key` (a
-# stale writer), `slow-step` (the pending-disconnect step starts 15 s late, as
+# stale writer), `slow-step` (the pending-disconnect step starts 10 s late, as
 # a slow start would), or `cut-step-twice` (the first two starts that run the
 # step hit the launcher's 20 s limit after clearing the pool entry and before
 # the conversation override, and agentd's facts reads hang while they run, as
@@ -163,7 +163,7 @@ intent_path="${FINITE_AGENTD_INTENT_PATH:-}"
 mode="$(cat "$E0_RUN_DIR/stub-mode" 2>/dev/null || echo none)"
 if [[ -n "$intent_path" && -f "$intent_path" ]]; then
     if [[ "$mode" == "slow-step" ]]; then
-        sleep 15
+        sleep 10
     fi
     phase="$(intent_state)"
     before="$(state_digest)"

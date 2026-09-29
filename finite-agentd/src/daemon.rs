@@ -46,29 +46,9 @@ use crate::transport::BridgeClient;
 
 const STATUS_SCHEMA: &str = "finite.agent.status.v1";
 const STATUS_REQUEST_SCHEMA: &str = "finite.agent.status.request.v1";
-const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
+pub(crate) const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
-const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
-const INFERENCE_SELECT_SCHEMA: &str = "finite.agent.inference.select.v1";
-const INFERENCE_DISCONNECT_SCHEMA: &str = "finite.agent.inference.disconnect.v1";
-const OPENROUTER_CONNECT_SCHEMA: &str = "finite.agent.openrouter.connect.v1";
-const CODEX_LOGIN_START_SCHEMA: &str = "finite.agent.codex.login.start.v1";
-const CODEX_LOGIN_CANCEL_SCHEMA: &str = "finite.agent.codex.login.cancel.v1";
-/// The nine commands of the inference contract (§3.12). Each dispatch arm
-/// calls `intent::admit` after its schema check and before any other work.
-const INFERENCE_COMMANDS: [&str; 9] = [
-    "agent.connections.status",
-    "agent.inference.apply",
-    "agent.inference.select",
-    "agent.inference.disconnect",
-    "agent.openrouter.usage",
-    "agent.openrouter.connect",
-    "agent.codex.login.start",
-    "agent.codex.login.cancel",
-    "agent.codex.models",
-];
-const INTENT_WRITE_FAILED: &str = "The agent couldn't record this change.";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
@@ -131,7 +111,7 @@ struct AgentConfigFile {
 }
 
 #[derive(Debug, Deserialize)]
-struct EmptyRequest {}
+pub(crate) struct EmptyRequest {}
 
 impl DaemonConfig {
     pub fn from_env() -> Result<Self, AgentdError> {
@@ -670,671 +650,7 @@ impl CommandExecutor {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SelectRequest {
-    route: IntentRoute,
-    #[serde(default)]
-    model: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct DisconnectRequest {
-    route: IntentRoute,
-}
-
-// No Debug: the credential holds a key or an OAuth code.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConnectRequest {
-    credential: ConnectCredential,
-    #[serde(default)]
-    #[expect(dead_code, reason = "wired in A2")]
-    activate: Option<ConnectActivation>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ConnectActivation {
-    #[expect(dead_code, reason = "wired in A2")]
-    model: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CodexLoginCancelRequest {
-    attempt_id: String,
-}
-
-/// The production executor host: the supervisor, the optional `hermes serve`,
-/// the helper, and `connections.rs` for `.env`.
-#[derive(Clone)]
-struct AgentdHost {
-    hermes_home: PathBuf,
-    connections: ConnectionManager,
-    supervisor: SupervisorHandle,
-    hosted_hermes: Option<HostedHermesHandle>,
-    codex: Arc<CodexState>,
-}
-
-impl ExecutorHost for AgentdHost {
-    fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
-        validate_hermes_config(&self.hermes_home, deadline)
-    }
-
-    fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
-        self.connections.openrouter_dotenv_key()
-    }
-
-    fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
-        self.connections.migrate_legacy_openrouter_key()
-    }
-
-    fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
-        self.connections.remove_openrouter_key()
-    }
-
-    async fn restart_gateway(&self) -> Result<(), AgentdError> {
-        self.supervisor.restart_hermes().await
-    }
-
-    async fn restart_serve(&self) {
-        if let Some(hosted) = &self.hosted_hermes {
-            hosted.restart().await;
-        }
-    }
-
-    async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
-        crate::helper::inference_facts(&self.hermes_home, deadline).await
-    }
-
-    async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
-        crate::codex::cancel_for_disconnect(&self.codex).await
-    }
-}
-
-/// Resumes a recorded intent only once Hermes has been started, so a pending,
-/// failing, or unreadable intent never delays chat (§3.11 Startup). The
-/// daemon detaches the task; tests await it.
-fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
-    executor: Arc<Executor<H>>,
-    supervisor: SupervisorHandle,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let started = supervisor
-                .status()
-                .await
-                .processes
-                .get("hermes")
-                .is_some_and(|status| status.pid().is_some() || status.restart_count > 0);
-            if started {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
-        executor.resume_at_startup().await;
-    })
-}
-
-/// The inference contract's commands (§3): status, v1 apply, select,
-/// disconnect, and the PR2/PR3 hooks.
-struct Inference<H> {
-    host: H,
-    executor: Arc<Executor<H>>,
-    connections: ConnectionManager,
-    config: ConfigManager,
-    hermes_home: PathBuf,
-    intent_path: PathBuf,
-    fp: FinitePrivateEnv,
-    facts: FactsCache,
-    codex: Arc<CodexState>,
-    openrouter: OpenRouterState,
-    openrouter_api_base: String,
-    /// v1's reply must fit the dashboard's wait: its config check gets what is
-    /// left of this from the command's receipt (R18) ...
-    v1_reply_budget: Duration,
-    /// ... and never less than this.
-    v1_min_config_check: Duration,
-}
-
-/// R18: v1's config check ends by this long after the command arrived.
-const V1_REPLY_BUDGET: Duration = Duration::from_secs(40);
-/// R18: the shortest config check v1 ever allows.
-const V1_MIN_CONFIG_CHECK: Duration = Duration::from_secs(5);
-
-/// What is left of `budget` since `received`, and at least `minimum`.
-fn remaining_budget(received: Instant, budget: Duration, minimum: Duration) -> Duration {
-    budget.saturating_sub(received.elapsed()).max(minimum)
-}
-
-impl<H: ExecutorHost + Clone> Inference<H> {
-    fn new(
-        host: H,
-        connections: ConnectionManager,
-        config: ConfigManager,
-        hermes_home: PathBuf,
-        intent_path: PathBuf,
-        fp: FinitePrivateEnv,
-        codex: Arc<CodexState>,
-    ) -> Self {
-        Self {
-            executor: Arc::new(Executor::new(
-                host.clone(),
-                config.clone(),
-                intent_path.clone(),
-                fp.clone(),
-            )),
-            host,
-            connections,
-            config,
-            hermes_home,
-            intent_path,
-            fp,
-            facts: FactsCache::default(),
-            codex,
-            openrouter: OpenRouterState::default(),
-            openrouter_api_base: crate::openrouter::api_base(),
-            v1_reply_budget: V1_REPLY_BUDGET,
-            v1_min_config_check: V1_MIN_CONFIG_CHECK,
-        }
-    }
-
-    /// `None` when the command is not one of `INFERENCE_COMMANDS`.
-    async fn execute(
-        &self,
-        request: &RuntimeCommandRequestV1,
-    ) -> Option<Result<Value, AgentdError>> {
-        if !INFERENCE_COMMANDS.contains(&request.command.as_str()) {
-            return None;
-        }
-        Some(self.dispatch(request, Instant::now()).await)
-    }
-
-    async fn dispatch(
-        &self,
-        request: &RuntimeCommandRequestV1,
-        received: Instant,
-    ) -> Result<Value, AgentdError> {
-        match request.command.as_str() {
-            "agent.connections.status" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.admit(AdmitCommand::Status)?;
-                self.status().await
-            }
-            "agent.inference.apply" => {
-                let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
-                let (_, admission) = self.admit(AdmitCommand::V1Apply)?;
-                self.v1_apply(&request.request_id, body, admission, received)
-                    .await
-            }
-            "agent.inference.select" => {
-                let body = parse_body::<SelectRequest>(request, INFERENCE_SELECT_SCHEMA)?;
-                let (_, admission) = self.admit(AdmitCommand::Select)?;
-                self.select(body, admission).await
-            }
-            "agent.inference.disconnect" => {
-                let body = parse_body::<DisconnectRequest>(request, INFERENCE_DISCONNECT_SCHEMA)?;
-                let (record, admission) = self.admit(AdmitCommand::Disconnect(body.route))?;
-                self.disconnect(body.route, record, admission).await
-            }
-            "agent.openrouter.usage" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.admit(AdmitCommand::OpenRouterUsage)?;
-                self.openrouter_usage().await
-            }
-            "agent.openrouter.connect" => {
-                let body = parse_body::<ConnectRequest>(request, OPENROUTER_CONNECT_SCHEMA)?;
-                self.admit(AdmitCommand::Connect)?;
-                crate::openrouter::obtain_candidate(&self.openrouter, body.credential)
-                    .await
-                    .map(|_| Value::Null)
-            }
-            "agent.codex.login.start" => {
-                parse_body::<EmptyRequest>(request, CODEX_LOGIN_START_SCHEMA)?;
-                self.admit(AdmitCommand::CodexLoginStart)?;
-                crate::codex::start(&self.codex, &self.hermes_home)
-                    .await
-                    .and_then(|view| Ok(serde_json::to_value(view)?))
-            }
-            "agent.codex.login.cancel" => {
-                let body =
-                    parse_body::<CodexLoginCancelRequest>(request, CODEX_LOGIN_CANCEL_SCHEMA)?;
-                self.admit(AdmitCommand::CodexLoginCancel)?;
-                crate::codex::cancel(&self.codex, &body.attempt_id)
-                    .await
-                    .and_then(|view| Ok(serde_json::to_value(view)?))
-            }
-            "agent.codex.models" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                self.admit(AdmitCommand::CodexModels)?;
-                crate::codex::models(&self.hermes_home)
-                    .await
-                    .and_then(|models| Ok(serde_json::to_value(models)?))
-            }
-            command => Err(AgentdError::UnsupportedCommand(command.to_owned())),
-        }
-    }
-
-    /// The one admission (§3.11, F2): the current record through
-    /// `intent::admit`. A read failure fails a mutation closed; status and the
-    /// read-only commands are still served.
-    fn admit(
-        &self,
-        command: AdmitCommand,
-    ) -> Result<(Option<IntentRecord>, Admission), AgentdError> {
-        let record = match intent::load(&self.intent_path) {
-            Ok(record) => record,
-            Err(error)
-                if matches!(
-                    command,
-                    AdmitCommand::Status
-                        | AdmitCommand::OpenRouterUsage
-                        | AdmitCommand::CodexModels
-                        | AdmitCommand::CodexLoginCancel
-                ) =>
-            {
-                eprintln!("finite-agentd: could not read the inference intent: {error}");
-                None
-            }
-            Err(error) => return Err(error),
-        };
-        let admission = intent::admit(record.as_ref(), command)?;
-        Ok((record, admission))
-    }
-
-    async fn facts(&self) -> InferenceFacts {
-        self.read_facts()
-            .await
-            .unwrap_or_else(InferenceFacts::unknown)
-    }
-
-    /// The facts through the status cache, or `None` when the read failed or
-    /// timed out, including a failure remembered for 15 s (R16, R17a).
-    async fn read_facts(&self) -> Option<InferenceFacts> {
-        self.facts
-            .get_or_fetch(&self.hermes_home, || {
-                self.host.facts(crate::helper::STATUS_FACTS_DEADLINE)
-            })
-            .await
-    }
-
-    /// §3.4: legacy fields unchanged, plus stored facts and the operation.
-    async fn status(&self) -> Result<Value, AgentdError> {
-        let facts = self.facts().await;
-        // Re-read after the helper ran, so the operation is current.
-        let record = intent::load(&self.intent_path).unwrap_or(None);
-        let operation = self.executor.operation(record.as_ref());
-        let codex = crate::codex::route_status(&self.codex, &facts);
-        let manager = self.connections.clone();
-        let fp = self.fp.clone();
-        let status = tokio::task::spawn_blocking(move || {
-            manager.status_with_inference(&facts, &fp, operation, codex, capabilities())
-        })
-        .await
-        .map_err(|error| AgentdError::Config(error.to_string()))??;
-        Ok(serde_json::to_value(status)?)
-    }
-
-    fn spawn_executor(&self) {
-        let executor = Arc::clone(&self.executor);
-        tokio::spawn(async move { executor.run().await });
-    }
-
-    /// Writes a new intent before the reply, so nothing can run between
-    /// admission and the record.
-    fn record_intent(
-        &self,
-        kind: IntentKind,
-        route: IntentRoute,
-        model: Option<String>,
-    ) -> Result<Value, AgentdError> {
-        let record = IntentRecord::new(kind, route, model)
-            .and_then(|record| intent::store(&self.intent_path, &record).map(|()| record))
-            .map_err(|_| AgentdError::Config(INTENT_WRITE_FAILED.to_owned()))?;
-        self.spawn_executor();
-        Ok(json!({ "accepted": true, "operation_id": record.id }))
-    }
-
-    /// `ReplaceFailed` for a command that finished without writing an intent.
-    fn clear_failed_record(&self, admission: Admission) {
-        if admission == Admission::ReplaceFailed
-            && let Err(error) = intent::clear(&self.intent_path)
-        {
-            eprintln!("finite-agentd: could not delete a failed inference intent: {error}");
-        }
-    }
-
-    /// v1 (§3.5): today's order and failure behavior, including the `.env`
-    /// snapshot restore, plus the no-op, the `hermes serve` restart for a
-    /// replaced key, and verification after the restart.
-    async fn v1_apply(
-        &self,
-        request_id: &str,
-        body: InferenceApplyRequest,
-        admission: Admission,
-        received: Instant,
-    ) -> Result<Value, AgentdError> {
-        let plan = self
-            .connections
-            .inference_plan_with(request_id, body, &self.fp)?;
-        if self.connections.inference_plan_is_noop(&plan)? {
-            self.clear_failed_record(admission);
-            return Ok(serde_json::to_value(ConfigApplyResultV1 {
-                proposal_id: plan.offer.proposal_id.clone(),
-                path: plan.offer.path.clone(),
-                applied: false,
-                already_applied: true,
-                restart_required: false,
-            })?);
-        }
-        let result = self.apply_inference_plan(&plan, received).await?;
-        self.clear_failed_record(admission);
-        Ok(result)
-    }
-
-    /// The config check's deadline for a v1 apply received at `received`.
-    fn v1_config_check_deadline(&self, received: Instant) -> Duration {
-        remaining_budget(received, self.v1_reply_budget, self.v1_min_config_check)
-    }
-
-    async fn apply_inference_plan(
-        &self,
-        plan: &InferenceApplyPlan,
-        received: Instant,
-    ) -> Result<Value, AgentdError> {
-        let credential_snapshot = self.connections.stage_inference_credential(plan)?;
-        let credential_replaced = credential_snapshot.is_some();
-        let proposal_id = plan.offer.proposal_id.clone();
-        let manager = self.config.clone();
-        let host = self.host.clone();
-        let offer = plan.offer.clone();
-        let deadline = self.v1_config_check_deadline(received);
-        let apply = tokio::task::spawn_blocking(move || {
-            manager.apply(&offer, || host.validate_config(deadline))
-        })
-        .await;
-        let apply = match apply {
-            Ok(apply) => apply,
-            Err(error) => {
-                self.connections
-                    .restore_inference_credential(credential_snapshot)
-                    .map_err(|restore_error| {
-                        AgentdError::Config(format!(
-                            "inference apply task failed ({error}); previous credential could not be restored ({restore_error})"
-                        ))
-                    })?;
-                return Err(AgentdError::Config(error.to_string()));
-            }
-        };
-        let result = match apply {
-            Ok(result) => result,
-            Err(error) => {
-                self.connections
-                    .restore_inference_credential(credential_snapshot)?;
-                return Err(error);
-            }
-        };
-        if !result.restart_required {
-            return Ok(serde_json::to_value(result)?);
-        }
-        if let Err(restart_error) = self.host.restart_gateway().await {
-            let rollback = HermesConfigRollbackV1 { proposal_id };
-            let manager = self.config.clone();
-            let host = self.host.clone();
-            let deadline = self.v1_config_check_deadline(received);
-            let rollback_result = tokio::task::spawn_blocking(move || {
-                manager.rollback(&rollback, || host.validate_config(deadline))
-            })
-            .await;
-            let credential_restore = self
-                .connections
-                .restore_inference_credential(credential_snapshot);
-            let rollback_result = rollback_result.map_err(|rollback_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); configuration rollback task failed ({rollback_error})"
-                ))
-            })?;
-            rollback_result.map_err(|rollback_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous configuration could not be restored ({rollback_error})"
-                ))
-            })?;
-            credential_restore.map_err(|restore_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous credential could not be restored ({restore_error})"
-                ))
-            })?;
-            self.host.restart_gateway().await.map_err(|restore_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous configuration was restored but Hermes could not be reactivated ({restore_error})"
-                ))
-            })?;
-            return Err(restart_error);
-        }
-        if credential_replaced {
-            // A replaced key: flush any copy the native `hermes serve` holds.
-            self.host.restart_serve().await;
-        }
-        self.verify_v1(plan)?;
-        Ok(serde_json::to_value(result)?)
-    }
-
-    /// §3.10 for v1 as ruled in R8: one immediate read of the parsed values
-    /// agentd owns, never bytes, so the reply is no later than before. A
-    /// mismatch is `config_conflict` with the state as found: no re-apply, no
-    /// second restart, and no restore, since the apply itself succeeded.
-    fn verify_v1(&self, plan: &InferenceApplyPlan) -> Result<(), AgentdError> {
-        let model_matches = self.config.current_value(MODEL_CONFIG_PATH)? == plan.offer.value;
-        let key_matches = match plan.credential_to_persist() {
-            Some(key) => self.connections.openrouter_dotenv_key()?.as_deref() == Some(key),
-            None => true,
-        };
-        if model_matches && key_matches {
-            Ok(())
-        } else {
-            Err(AgentdError::ConfigConflict(
-                "Something else changed the agent's model setting after it was saved. Status shows it as found.".to_owned(),
-            ))
-        }
-    }
-
-    /// §3.6: validate synchronously with no file touched, then record the
-    /// intent and reply; the executor writes, restarts, and verifies.
-    async fn select(
-        &self,
-        body: SelectRequest,
-        admission: Admission,
-    ) -> Result<Value, AgentdError> {
-        let model = match body.route {
-            IntentRoute::FinitePrivate => {
-                if body.model.is_some() {
-                    return Err(AgentdError::InvalidPayload(
-                        "Finite Private takes its model from the agent".to_owned(),
-                    ));
-                }
-                None
-            }
-            IntentRoute::Openrouter => {
-                let model = body.model.ok_or_else(|| {
-                    AgentdError::InvalidPayload("OpenRouter model is invalid".to_owned())
-                })?;
-                validate_model_name(&model)?;
-                Some(model)
-            }
-            IntentRoute::OpenaiCodex => {
-                if !capabilities().contains(&"codex.login.v1") {
-                    return Err(AgentdError::InvalidPayload(
-                        "This agent can't use ChatGPT yet".to_owned(),
-                    ));
-                }
-                let model = body
-                    .model
-                    .filter(|model| valid_codex_model(model))
-                    .ok_or_else(|| {
-                        AgentdError::InvalidPayload("ChatGPT model is invalid".to_owned())
-                    })?;
-                Some(model)
-            }
-        };
-        match body.route {
-            IntentRoute::FinitePrivate => {
-                if self.fp.settings().is_none() {
-                    return Err(AgentdError::Config(
-                        "Finite Private isn't available on this agent.".to_owned(),
-                    ));
-                }
-            }
-            IntentRoute::Openrouter => {
-                // The key the route will use, including a legacy-config key the
-                // executor migrates only after this check passes.
-                let key = self.connections.stored_openrouter_key()?.ok_or_else(|| {
-                    AgentdError::NotConnected("Connect OpenRouter first.".to_owned())
-                })?;
-                crate::openrouter::check_key_at(&self.openrouter_api_base, &key).await?;
-            }
-            IntentRoute::OpenaiCodex => {
-                match self.facts().await.codex.state {
-                    CodexStateFact::SignedIn | CodexStateFact::QuotaLimited => {}
-                    CodexStateFact::NotSignedIn => {
-                        return Err(AgentdError::NotConnected(
-                            "Connect ChatGPT first.".to_owned(),
-                        ));
-                    }
-                    CodexStateFact::SignInRequired => return Err(AgentdError::SignInRequired),
-                    CodexStateFact::Unknown => {
-                        return Err(AgentdError::ProviderUnavailable(
-                            "Couldn't read the ChatGPT sign-in on this agent.".to_owned(),
-                        ));
-                    }
-                }
-                match crate::codex::models(&self.hermes_home).await? {
-                    crate::codex::CodexModels::Live { models } => {
-                        if !models.iter().any(|listed| Some(listed) == model.as_ref()) {
-                            return Err(AgentdError::ModelUnavailable);
-                        }
-                    }
-                    crate::codex::CodexModels::Unavailable { .. } => {
-                        return Err(AgentdError::CatalogUnavailable);
-                    }
-                }
-            }
-        }
-        let planned = plan_model_block(body.route, model.as_deref(), &self.fp)?;
-        if self.config.current_value(MODEL_CONFIG_PATH)? == planned {
-            self.clear_failed_record(admission);
-            return Ok(json!({ "changed": false }));
-        }
-        self.record_intent(IntentKind::Select, body.route, model)
-    }
-
-    /// §3.7: the F1 precondition, then a new or resumed intent. Nothing is
-    /// removed synchronously.
-    async fn disconnect(
-        &self,
-        route: IntentRoute,
-        record: Option<IntentRecord>,
-        admission: Admission,
-    ) -> Result<Value, AgentdError> {
-        match route {
-            IntentRoute::Openrouter => {}
-            IntentRoute::OpenaiCodex if capabilities().contains(&"codex.login.v1") => {}
-            _ => {
-                return Err(AgentdError::InvalidPayload(
-                    "That connection can't be disconnected here".to_owned(),
-                ));
-            }
-        }
-        let model = self.config.current_value(MODEL_CONFIG_PATH)?;
-        let is_saved =
-            classify_saved_route(&model, self.fp.base_url.as_deref()) == saved_route_of(route);
-        let read = self.read_facts().await;
-        // F1: switching the agent to Finite Private needs its settings and its
-        // credential known present. No live probe. A read that failed is "try
-        // again" (R17); a key the helper answered as absent or `unknown` (an
-        // external secret source it does not evaluate) is not (R17a).
-        if is_saved {
-            if self.fp.settings().is_none() {
-                return Err(AgentdError::FinitePrivateUnavailable);
-            }
-            match read.as_ref().map(|facts| facts.finite_private.fp_key) {
-                None => return Err(AgentdError::FactsUnavailable),
-                Some(Tri::Present) => {}
-                Some(_) => return Err(AgentdError::FinitePrivateUnavailable),
-            }
-        }
-        let facts = read.unwrap_or_else(InferenceFacts::unknown);
-        if admission == Admission::ResumeFailed {
-            let Some(mut record) = record else {
-                return Err(AgentdError::Config(INTENT_WRITE_FAILED.to_owned()));
-            };
-            record.state = IntentState::Running;
-            record.error_code = None;
-            record.attempts = 0;
-            record.updated_at_ms = now_ms();
-            intent::store(&self.intent_path, &record)
-                .map_err(|_| AgentdError::Config(INTENT_WRITE_FAILED.to_owned()))?;
-            self.spawn_executor();
-            return Ok(json!({ "accepted": true, "operation_id": record.id }));
-        }
-        if !is_saved && self.nothing_stored(route, &facts)? {
-            self.clear_failed_record(admission);
-            return Ok(json!({ "changed": false }));
-        }
-        self.record_intent(IntentKind::Disconnect, route, None)
-    }
-
-    /// Nothing for the route in Finite's or Hermes's storage: what a verified
-    /// disconnect leaves. Any `unknown` counts as stored.
-    fn nothing_stored(
-        &self,
-        route: IntentRoute,
-        facts: &InferenceFacts,
-    ) -> Result<bool, AgentdError> {
-        Ok(match route {
-            IntentRoute::Openrouter => {
-                self.connections.stored_openrouter_key()?.is_none()
-                    && facts.openrouter.dotenv_key == Tri::Absent
-                    && facts.openrouter.manual_pool_entries == PoolEntries::None
-                    && facts.session_overrides.openrouter == Tri::Absent
-            }
-            IntentRoute::OpenaiCodex => {
-                facts.codex.state == CodexStateFact::NotSignedIn
-                    && facts.session_overrides.openai_codex == Tri::Absent
-            }
-            IntentRoute::FinitePrivate => false,
-        })
-    }
-
-    async fn openrouter_usage(&self) -> Result<Value, AgentdError> {
-        let saved_key = self
-            .connections
-            .openrouter_dotenv_key()?
-            .filter(|key| !key.is_empty() && !key.starts_with("${"))
-            .map(|api_key| SavedKey { api_key });
-        let facts = self.facts().await;
-        crate::openrouter::usage(saved_key, &facts).await
-    }
-}
-
-fn saved_route_of(route: IntentRoute) -> SavedRoute {
-    match route {
-        IntentRoute::FinitePrivate => SavedRoute::FinitePrivate,
-        IntentRoute::Openrouter => SavedRoute::Openrouter,
-        IntentRoute::OpenaiCodex => SavedRoute::OpenaiCodex,
-    }
-}
-
-/// §3.6: 1..128 characters of `[A-Za-z0-9._:-]`.
-fn valid_codex_model(model: &str) -> bool {
-    (1..=128).contains(&model.len())
-        && model
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
-}
-
-fn parse_body<T: DeserializeOwned>(
+pub(crate) fn parse_body<T: DeserializeOwned>(
     request: &RuntimeCommandRequestV1,
     expected_schema: &str,
 ) -> Result<T, AgentdError> {
@@ -1369,7 +685,10 @@ fn success_result(
     Ok(result)
 }
 
-fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> RuntimeCommandResultV1 {
+pub(crate) fn failure_result(
+    request: &RuntimeCommandRequestV1,
+    error: AgentdError,
+) -> RuntimeCommandResultV1 {
     RuntimeCommandResultV1 {
         payload_kind: RuntimeCommandPayloadKindV1::Result,
         request_id: request.request_id.clone(),
@@ -1383,7 +702,10 @@ fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> Runt
     }
 }
 
-fn validate_hermes_config(hermes_home: &Path, deadline: Duration) -> Result<(), AgentdError> {
+pub(crate) fn validate_hermes_config(
+    hermes_home: &Path,
+    deadline: Duration,
+) -> Result<(), AgentdError> {
     run_config_check("hermes".as_ref(), hermes_home, deadline)
 }
 
@@ -1660,7 +982,7 @@ pub fn read_status(path: &Path) -> Result<AgentdStatus, AgentdError> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
@@ -1904,19 +1226,755 @@ mod tests {
             "the later item completes before durable redelivery retries the failed item"
         );
     }
+
+    #[test]
+    fn the_hermes_process_is_told_where_the_intent_is() {
+        let config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/usr/local/bin/finitechat"),
+            prepare_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
+            hermes_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            sidecar_admission_default: None,
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        let spec = hermes_spec(&config, &intent::intent_path(&config.agent_home));
+        assert_eq!(
+            spec.environment["FINITE_AGENTD_INTENT_PATH"],
+            "/data/agent/agentd/inference-intent.json"
+        );
+        assert_eq!(spec.environment["FINITE_AGENTD_SUPERVISED"], "1");
+    }
+}
+
+const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
+const INFERENCE_SELECT_SCHEMA: &str = "finite.agent.inference.select.v1";
+const INFERENCE_DISCONNECT_SCHEMA: &str = "finite.agent.inference.disconnect.v1";
+const OPENROUTER_CONNECT_SCHEMA: &str = "finite.agent.openrouter.connect.v1";
+const CODEX_LOGIN_START_SCHEMA: &str = "finite.agent.codex.login.start.v1";
+const CODEX_LOGIN_CANCEL_SCHEMA: &str = "finite.agent.codex.login.cancel.v1";
+/// The nine commands of the inference contract (§3.12). Each dispatch arm
+/// calls `intent::admit` after its schema check and before any other work.
+const INFERENCE_COMMANDS: [&str; 9] = [
+    "agent.connections.status",
+    "agent.inference.apply",
+    "agent.inference.select",
+    "agent.inference.disconnect",
+    "agent.openrouter.usage",
+    "agent.openrouter.connect",
+    "agent.codex.login.start",
+    "agent.codex.login.cancel",
+    "agent.codex.models",
+];
+const INTENT_WRITE_FAILED: &str = "The agent couldn't record this change.";
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SelectRequest {
+    route: IntentRoute,
+    #[serde(default)]
+    model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DisconnectRequest {
+    route: IntentRoute,
+}
+
+// No Debug: the credential holds a key or an OAuth code.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectRequest {
+    credential: ConnectCredential,
+    #[serde(default)]
+    #[expect(dead_code, reason = "wired in A2")]
+    activate: Option<ConnectActivation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectActivation {
+    #[expect(dead_code, reason = "wired in A2")]
+    model: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CodexLoginCancelRequest {
+    attempt_id: String,
+}
+
+/// The production executor host: the supervisor, the optional `hermes serve`,
+/// the helper, and `connections.rs` for `.env`.
+#[derive(Clone)]
+pub(crate) struct AgentdHost {
+    pub(crate) hermes_home: PathBuf,
+    pub(crate) connections: ConnectionManager,
+    pub(crate) supervisor: SupervisorHandle,
+    pub(crate) hosted_hermes: Option<HostedHermesHandle>,
+    pub(crate) codex: Arc<CodexState>,
+}
+
+impl ExecutorHost for AgentdHost {
+    fn validate_config(&self, deadline: Duration) -> Result<(), AgentdError> {
+        validate_hermes_config(&self.hermes_home, deadline)
+    }
+
+    fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
+        self.connections.openrouter_dotenv_key()
+    }
+
+    fn environment_openrouter_key(&self) -> Option<String> {
+        crate::connections::environment_openrouter_key()
+    }
+
+    fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
+        self.connections.migrate_legacy_openrouter_key()
+    }
+
+    fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
+        self.connections.remove_openrouter_key()
+    }
+
+    async fn restart_gateway(&self) -> Result<(), AgentdError> {
+        self.supervisor.restart_hermes().await
+    }
+
+    async fn restart_serve(&self) {
+        if let Some(hosted) = &self.hosted_hermes {
+            hosted.restart().await;
+        }
+    }
+
+    async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
+        crate::helper::inference_facts(&self.hermes_home, deadline).await
+    }
+
+    async fn cancel_codex_login(&self) -> Result<(), AgentdError> {
+        crate::codex::cancel_for_disconnect(&self.codex).await
+    }
+}
+
+/// Resumes a recorded intent only once Hermes has been started, so a pending,
+/// failing, or unreadable intent never delays chat (§3.11 Startup). The
+/// daemon detaches the task; tests await it.
+pub(crate) fn resume_intent_after_hermes_starts<H: ExecutorHost + Clone>(
+    executor: Arc<Executor<H>>,
+    supervisor: SupervisorHandle,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let started = supervisor
+                .status()
+                .await
+                .processes
+                .get("hermes")
+                .is_some_and(|status| status.pid().is_some() || status.restart_count > 0);
+            if started {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        executor.resume_at_startup().await;
+    })
+}
+
+/// The inference contract's commands (§3): status, v1 apply, select,
+/// disconnect, and the PR2/PR3 hooks.
+pub(crate) struct Inference<H> {
+    host: H,
+    pub(crate) executor: Arc<Executor<H>>,
+    connections: ConnectionManager,
+    config: ConfigManager,
+    hermes_home: PathBuf,
+    intent_path: PathBuf,
+    fp: FinitePrivateEnv,
+    facts: FactsCache,
+    codex: Arc<CodexState>,
+    openrouter: OpenRouterState,
+    openrouter_api_base: String,
+    /// v1's reply must fit the dashboard's wait: its config check gets what is
+    /// left of this from the command's receipt (R18) ...
+    v1_reply_budget: Duration,
+    /// ... and never less than this.
+    v1_min_config_check: Duration,
+    serve_restart_wait: Duration,
+}
+
+/// R18: v1's config check ends by this long after the command arrived.
+const V1_REPLY_BUDGET: Duration = Duration::from_secs(40);
+/// R18: the shortest config check v1 ever allows.
+const V1_MIN_CONFIG_CHECK: Duration = Duration::from_secs(5);
+
+/// What is left of `budget` since `received`, and at least `minimum`.
+fn remaining_budget(received: Instant, budget: Duration, minimum: Duration) -> Duration {
+    budget.saturating_sub(received.elapsed()).max(minimum)
+}
+
+impl<H: ExecutorHost + Clone> Inference<H> {
+    pub(crate) fn new(
+        host: H,
+        connections: ConnectionManager,
+        config: ConfigManager,
+        hermes_home: PathBuf,
+        intent_path: PathBuf,
+        fp: FinitePrivateEnv,
+        codex: Arc<CodexState>,
+    ) -> Self {
+        Self {
+            executor: Arc::new(Executor::new(
+                host.clone(),
+                config.clone(),
+                intent_path.clone(),
+                fp.clone(),
+            )),
+            host,
+            connections,
+            config,
+            hermes_home,
+            intent_path,
+            fp,
+            facts: FactsCache::default(),
+            codex,
+            openrouter: OpenRouterState::default(),
+            openrouter_api_base: crate::openrouter::api_base(),
+            v1_reply_budget: V1_REPLY_BUDGET,
+            v1_min_config_check: V1_MIN_CONFIG_CHECK,
+            serve_restart_wait: crate::executor::SERVE_RESTART_WAIT,
+        }
+    }
+
+    /// `None` when the command is not one of `INFERENCE_COMMANDS`.
+    pub(crate) async fn execute(
+        &self,
+        request: &RuntimeCommandRequestV1,
+    ) -> Option<Result<Value, AgentdError>> {
+        if !INFERENCE_COMMANDS.contains(&request.command.as_str()) {
+            return None;
+        }
+        Some(self.dispatch(request, Instant::now()).await)
+    }
+
+    async fn dispatch(
+        &self,
+        request: &RuntimeCommandRequestV1,
+        received: Instant,
+    ) -> Result<Value, AgentdError> {
+        match request.command.as_str() {
+            "agent.connections.status" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                self.admit(AdmitCommand::Status)?;
+                self.status().await
+            }
+            "agent.inference.apply" => {
+                let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
+                let (_, admission) = self.admit(AdmitCommand::V1Apply)?;
+                self.v1_apply(&request.request_id, body, admission, received)
+                    .await
+            }
+            "agent.inference.select" => {
+                let body = parse_body::<SelectRequest>(request, INFERENCE_SELECT_SCHEMA)?;
+                let (_, admission) = self.admit(AdmitCommand::Select)?;
+                self.select(body, admission).await
+            }
+            "agent.inference.disconnect" => {
+                let body = parse_body::<DisconnectRequest>(request, INFERENCE_DISCONNECT_SCHEMA)?;
+                let (record, admission) = self.admit(AdmitCommand::Disconnect(body.route))?;
+                self.disconnect(body.route, record, admission).await
+            }
+            "agent.openrouter.usage" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                self.admit(AdmitCommand::OpenRouterUsage)?;
+                self.openrouter_usage().await
+            }
+            "agent.openrouter.connect" => {
+                let body = parse_body::<ConnectRequest>(request, OPENROUTER_CONNECT_SCHEMA)?;
+                self.admit(AdmitCommand::Connect)?;
+                crate::openrouter::obtain_candidate(&self.openrouter, body.credential)
+                    .await
+                    .map(|_| Value::Null)
+            }
+            "agent.codex.login.start" => {
+                parse_body::<EmptyRequest>(request, CODEX_LOGIN_START_SCHEMA)?;
+                self.admit(AdmitCommand::CodexLoginStart)?;
+                crate::codex::start(&self.codex, &self.hermes_home)
+                    .await
+                    .and_then(|view| Ok(serde_json::to_value(view)?))
+            }
+            "agent.codex.login.cancel" => {
+                let body =
+                    parse_body::<CodexLoginCancelRequest>(request, CODEX_LOGIN_CANCEL_SCHEMA)?;
+                self.admit(AdmitCommand::CodexLoginCancel)?;
+                crate::codex::cancel(&self.codex, &body.attempt_id)
+                    .await
+                    .and_then(|view| Ok(serde_json::to_value(view)?))
+            }
+            "agent.codex.models" => {
+                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
+                self.admit(AdmitCommand::CodexModels)?;
+                crate::codex::models(&self.hermes_home)
+                    .await
+                    .and_then(|models| Ok(serde_json::to_value(models)?))
+            }
+            command => Err(AgentdError::UnsupportedCommand(command.to_owned())),
+        }
+    }
+
+    /// The one admission (§3.11, F2): the current record through
+    /// `intent::admit`. A read failure fails a mutation closed; status and the
+    /// read-only commands are still served.
+    fn admit(
+        &self,
+        command: AdmitCommand,
+    ) -> Result<(Option<IntentRecord>, Admission), AgentdError> {
+        let record = match intent::load(&self.intent_path) {
+            Ok(record) => record,
+            Err(error)
+                if matches!(
+                    command,
+                    AdmitCommand::Status
+                        | AdmitCommand::OpenRouterUsage
+                        | AdmitCommand::CodexModels
+                        | AdmitCommand::CodexLoginCancel
+                ) =>
+            {
+                eprintln!("finite-agentd: could not read the inference intent: {error}");
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let admission = intent::admit(record.as_ref(), command)?;
+        Ok((record, admission))
+    }
+
+    async fn facts(&self) -> InferenceFacts {
+        self.read_facts()
+            .await
+            .unwrap_or_else(InferenceFacts::unknown)
+    }
+
+    /// The facts through the status cache, or `None` when the read failed or
+    /// timed out, including a failure remembered for 15 s (R16, R17a).
+    async fn read_facts(&self) -> Option<InferenceFacts> {
+        self.facts
+            .get_or_fetch(&self.hermes_home, || {
+                self.host.facts(crate::helper::STATUS_FACTS_DEADLINE)
+            })
+            .await
+    }
+
+    /// §3.4: legacy fields unchanged, plus stored facts and the operation.
+    async fn status(&self) -> Result<Value, AgentdError> {
+        let facts = self.facts().await;
+        // Re-read after the helper ran, so the operation is current.
+        let record = intent::load(&self.intent_path).unwrap_or(None);
+        let operation = self.executor.operation(record.as_ref());
+        let codex = crate::codex::route_status(&self.codex, &facts);
+        let manager = self.connections.clone();
+        let fp = self.fp.clone();
+        let status = tokio::task::spawn_blocking(move || {
+            manager.status_with_inference(&facts, &fp, operation, codex, capabilities())
+        })
+        .await
+        .map_err(|error| AgentdError::Config(error.to_string()))??;
+        Ok(serde_json::to_value(status)?)
+    }
+
+    fn spawn_executor(&self) {
+        let executor = Arc::clone(&self.executor);
+        tokio::spawn(async move { executor.run().await });
+    }
+
+    /// Writes a new intent before the reply, so nothing can run between
+    /// admission and the record.
+    fn record_intent(
+        &self,
+        kind: IntentKind,
+        route: IntentRoute,
+        model: Option<String>,
+    ) -> Result<Value, AgentdError> {
+        let record = IntentRecord::new(kind, route, model)
+            .and_then(|record| intent::store(&self.intent_path, &record).map(|()| record))
+            .map_err(|_| AgentdError::Config(INTENT_WRITE_FAILED.to_owned()))?;
+        self.spawn_executor();
+        Ok(json!({ "accepted": true, "operation_id": record.id }))
+    }
+
+    /// `ReplaceFailed` for a command that finished without writing an intent.
+    fn clear_failed_record(&self, admission: Admission) {
+        if admission == Admission::ReplaceFailed
+            && let Err(error) = intent::clear(&self.intent_path)
+        {
+            eprintln!("finite-agentd: could not delete a failed inference intent: {error}");
+        }
+    }
+
+    /// v1 (§3.5): today's order and failure behavior, including the `.env`
+    /// snapshot restore, plus the no-op, the `hermes serve` restart for a
+    /// replaced key, and verification after the restart.
+    async fn v1_apply(
+        &self,
+        request_id: &str,
+        body: InferenceApplyRequest,
+        admission: Admission,
+        received: Instant,
+    ) -> Result<Value, AgentdError> {
+        let plan = self
+            .connections
+            .inference_plan_with(request_id, body, &self.fp)?;
+        if self.connections.inference_plan_is_noop(&plan)? {
+            self.clear_failed_record(admission);
+            return Ok(serde_json::to_value(ConfigApplyResultV1 {
+                proposal_id: plan.offer.proposal_id.clone(),
+                path: plan.offer.path.clone(),
+                applied: false,
+                already_applied: true,
+                restart_required: false,
+            })?);
+        }
+        let result = self.apply_inference_plan(&plan, received).await?;
+        self.clear_failed_record(admission);
+        Ok(result)
+    }
+
+    /// The config check's deadline for a v1 apply received at `received`.
+    fn v1_config_check_deadline(&self, received: Instant) -> Duration {
+        remaining_budget(received, self.v1_reply_budget, self.v1_min_config_check)
+    }
+
+    async fn apply_inference_plan(
+        &self,
+        plan: &InferenceApplyPlan,
+        received: Instant,
+    ) -> Result<Value, AgentdError> {
+        let credential_snapshot = self.connections.stage_inference_credential(plan)?;
+        let credential_replaced = credential_snapshot.is_some();
+        let proposal_id = plan.offer.proposal_id.clone();
+        let manager = self.config.clone();
+        let host = self.host.clone();
+        let offer = plan.offer.clone();
+        let deadline = self.v1_config_check_deadline(received);
+        let apply = tokio::task::spawn_blocking(move || {
+            manager.apply(&offer, || host.validate_config(deadline))
+        })
+        .await;
+        let apply = match apply {
+            Ok(apply) => apply,
+            Err(error) => {
+                self.connections
+                    .restore_inference_credential(credential_snapshot)
+                    .map_err(|restore_error| {
+                        AgentdError::Config(format!(
+                            "inference apply task failed ({error}); previous credential could not be restored ({restore_error})"
+                        ))
+                    })?;
+                return Err(AgentdError::Config(error.to_string()));
+            }
+        };
+        let result = match apply {
+            Ok(result) => result,
+            Err(error) => {
+                self.connections
+                    .restore_inference_credential(credential_snapshot)?;
+                return Err(error);
+            }
+        };
+        if !result.restart_required {
+            return Ok(serde_json::to_value(result)?);
+        }
+        if let Err(restart_error) = self.host.restart_gateway().await {
+            let rollback = HermesConfigRollbackV1 { proposal_id };
+            let manager = self.config.clone();
+            let host = self.host.clone();
+            let deadline = self.v1_config_check_deadline(received);
+            let rollback_result = tokio::task::spawn_blocking(move || {
+                manager.rollback(&rollback, || host.validate_config(deadline))
+            })
+            .await;
+            let credential_restore = self
+                .connections
+                .restore_inference_credential(credential_snapshot);
+            let rollback_result = rollback_result.map_err(|rollback_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); configuration rollback task failed ({rollback_error})"
+                ))
+            })?;
+            rollback_result.map_err(|rollback_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous configuration could not be restored ({rollback_error})"
+                ))
+            })?;
+            credential_restore.map_err(|restore_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous credential could not be restored ({restore_error})"
+                ))
+            })?;
+            self.host.restart_gateway().await.map_err(|restore_error| {
+                AgentdError::Supervisor(format!(
+                    "Hermes inference activation failed ({restart_error}); previous configuration was restored but Hermes could not be reactivated ({restore_error})"
+                ))
+            })?;
+            return Err(restart_error);
+        }
+        if credential_replaced {
+            // A replaced key: flush any copy the native `hermes serve` holds.
+            // Bounded (R25): the verification below decides the reply.
+            let wait = self.serve_restart_wait;
+            if tokio::time::timeout(wait, self.host.restart_serve())
+                .await
+                .is_err()
+            {
+                eprintln!(
+                    "finite-agentd: hermes serve did not confirm its restart within {wait:?}; continuing"
+                );
+            }
+        }
+        self.verify_v1(plan)?;
+        Ok(serde_json::to_value(result)?)
+    }
+
+    /// §3.10 for v1 as ruled in R8: one immediate read of the parsed values
+    /// agentd owns, never bytes, so the reply is no later than before. A
+    /// mismatch is `config_conflict` with the state as found: no re-apply, no
+    /// second restart, and no restore, since the apply itself succeeded.
+    fn verify_v1(&self, plan: &InferenceApplyPlan) -> Result<(), AgentdError> {
+        let model_matches = self.config.current_value(MODEL_CONFIG_PATH)? == plan.offer.value;
+        let key_matches = match plan.credential_to_persist() {
+            Some(key) => self.connections.openrouter_dotenv_key()?.as_deref() == Some(key),
+            None => true,
+        };
+        if model_matches && key_matches {
+            Ok(())
+        } else {
+            Err(AgentdError::ConfigConflict(
+                "Something else changed the agent's model setting after it was saved. Status shows it as found.".to_owned(),
+            ))
+        }
+    }
+
+    /// §3.6: validate synchronously with no file touched, then record the
+    /// intent and reply; the executor writes, restarts, and verifies.
+    async fn select(
+        &self,
+        body: SelectRequest,
+        admission: Admission,
+    ) -> Result<Value, AgentdError> {
+        let model = match body.route {
+            IntentRoute::FinitePrivate => {
+                if body.model.is_some() {
+                    return Err(AgentdError::InvalidPayload(
+                        "Finite Private takes its model from the agent".to_owned(),
+                    ));
+                }
+                None
+            }
+            IntentRoute::Openrouter => {
+                let model = body.model.ok_or_else(|| {
+                    AgentdError::InvalidPayload("OpenRouter model is invalid".to_owned())
+                })?;
+                validate_model_name(&model)?;
+                Some(model)
+            }
+            IntentRoute::OpenaiCodex => {
+                if !capabilities().contains(&"codex.login.v1") {
+                    return Err(AgentdError::InvalidPayload(
+                        "This agent can't use ChatGPT yet".to_owned(),
+                    ));
+                }
+                let model = body
+                    .model
+                    .filter(|model| valid_codex_model(model))
+                    .ok_or_else(|| {
+                        AgentdError::InvalidPayload("ChatGPT model is invalid".to_owned())
+                    })?;
+                Some(model)
+            }
+        };
+        match body.route {
+            IntentRoute::FinitePrivate => {
+                if self.fp.settings().is_none() {
+                    return Err(AgentdError::Config(
+                        "Finite Private isn't available on this agent.".to_owned(),
+                    ));
+                }
+            }
+            IntentRoute::Openrouter => {
+                // The key the route will use, in the order status shows it
+                // (R26): `.env`, a legacy-config key the executor migrates only
+                // after this check passes, else agentd's environment key.
+                let key = self
+                    .connections
+                    .selectable_openrouter_key(self.host.environment_openrouter_key())?
+                    .ok_or_else(|| {
+                        AgentdError::NotConnected("Connect OpenRouter first.".to_owned())
+                    })?;
+                crate::openrouter::check_key_at(&self.openrouter_api_base, &key).await?;
+            }
+            IntentRoute::OpenaiCodex => {
+                match self.facts().await.codex.state {
+                    CodexStateFact::SignedIn | CodexStateFact::QuotaLimited => {}
+                    CodexStateFact::NotSignedIn => {
+                        return Err(AgentdError::NotConnected(
+                            "Connect ChatGPT first.".to_owned(),
+                        ));
+                    }
+                    CodexStateFact::SignInRequired => return Err(AgentdError::SignInRequired),
+                    CodexStateFact::Unknown => {
+                        return Err(AgentdError::ProviderUnavailable(
+                            "Couldn't read the ChatGPT sign-in on this agent.".to_owned(),
+                        ));
+                    }
+                }
+                match crate::codex::models(&self.hermes_home).await? {
+                    crate::codex::CodexModels::Live { models } => {
+                        if !models.iter().any(|listed| Some(listed) == model.as_ref()) {
+                            return Err(AgentdError::ModelUnavailable);
+                        }
+                    }
+                    crate::codex::CodexModels::Unavailable { .. } => {
+                        return Err(AgentdError::CatalogUnavailable);
+                    }
+                }
+            }
+        }
+        let planned = plan_model_block(body.route, model.as_deref(), &self.fp)?;
+        if self.config.current_value(MODEL_CONFIG_PATH)? == planned {
+            self.clear_failed_record(admission);
+            return Ok(json!({ "changed": false }));
+        }
+        self.record_intent(IntentKind::Select, body.route, model)
+    }
+
+    /// §3.7: the F1 precondition, then a new or resumed intent. Nothing is
+    /// removed synchronously.
+    async fn disconnect(
+        &self,
+        route: IntentRoute,
+        record: Option<IntentRecord>,
+        admission: Admission,
+    ) -> Result<Value, AgentdError> {
+        match route {
+            IntentRoute::Openrouter => {}
+            IntentRoute::OpenaiCodex if capabilities().contains(&"codex.login.v1") => {}
+            _ => {
+                return Err(AgentdError::InvalidPayload(
+                    "That connection can't be disconnected here".to_owned(),
+                ));
+            }
+        }
+        let model = self.config.current_value(MODEL_CONFIG_PATH)?;
+        let is_saved =
+            classify_saved_route(&model, self.fp.base_url.as_deref()) == saved_route_of(route);
+        let read = self.read_facts().await;
+        // F1: switching the agent to Finite Private needs its settings and its
+        // credential known present. No live probe. A read that failed is "try
+        // again" (R17); a key the helper answered as absent or `unknown` (an
+        // external secret source it does not evaluate) is not (R17a).
+        if is_saved {
+            if self.fp.settings().is_none() {
+                return Err(AgentdError::FinitePrivateUnavailable);
+            }
+            match read.as_ref().map(|facts| facts.finite_private.fp_key) {
+                None => return Err(AgentdError::FactsUnavailable),
+                Some(Tri::Present) => {}
+                Some(_) => return Err(AgentdError::FinitePrivateUnavailable),
+            }
+        }
+        let facts = read.unwrap_or_else(InferenceFacts::unknown);
+        if admission == Admission::ResumeFailed {
+            let Some(mut record) = record else {
+                return Err(AgentdError::Config(INTENT_WRITE_FAILED.to_owned()));
+            };
+            record.state = IntentState::Running;
+            record.error_code = None;
+            record.attempts = 0;
+            record.updated_at_ms = now_ms();
+            intent::store(&self.intent_path, &record)
+                .map_err(|_| AgentdError::Config(INTENT_WRITE_FAILED.to_owned()))?;
+            self.spawn_executor();
+            return Ok(json!({ "accepted": true, "operation_id": record.id }));
+        }
+        if !is_saved && self.nothing_stored(route, &facts)? {
+            self.clear_failed_record(admission);
+            return Ok(json!({ "changed": false }));
+        }
+        self.record_intent(IntentKind::Disconnect, route, None)
+    }
+
+    /// Nothing for the route in Finite's or Hermes's storage: what a verified
+    /// disconnect leaves. Any `unknown` counts as stored.
+    fn nothing_stored(
+        &self,
+        route: IntentRoute,
+        facts: &InferenceFacts,
+    ) -> Result<bool, AgentdError> {
+        Ok(match route {
+            IntentRoute::Openrouter => {
+                self.connections.stored_openrouter_key()?.is_none()
+                    && facts.openrouter.dotenv_key == Tri::Absent
+                    && facts.openrouter.manual_pool_entries == PoolEntries::None
+                    && facts.session_overrides.openrouter == Tri::Absent
+            }
+            IntentRoute::OpenaiCodex => {
+                facts.codex.state == CodexStateFact::NotSignedIn
+                    && facts.session_overrides.openai_codex == Tri::Absent
+            }
+            IntentRoute::FinitePrivate => false,
+        })
+    }
+
+    async fn openrouter_usage(&self) -> Result<Value, AgentdError> {
+        let saved_key = self
+            .connections
+            .openrouter_dotenv_key()?
+            .filter(|key| !key.is_empty() && !key.starts_with("${"))
+            .map(|api_key| SavedKey { api_key });
+        let facts = self.facts().await;
+        crate::openrouter::usage(saved_key, &facts).await
+    }
+}
+
+fn saved_route_of(route: IntentRoute) -> SavedRoute {
+    match route {
+        IntentRoute::FinitePrivate => SavedRoute::FinitePrivate,
+        IntentRoute::Openrouter => SavedRoute::Openrouter,
+        IntentRoute::OpenaiCodex => SavedRoute::OpenaiCodex,
+    }
+}
+
+/// §3.6: 1..128 characters of `[A-Za-z0-9._:-]`.
+fn valid_codex_model(model: &str) -> bool {
+    (1..=128).contains(&model.len())
+        && model
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'-'))
 }
 
 #[cfg(test)]
 mod inference_tests {
+    use std::collections::BTreeMap;
+    use std::fs;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::sync::Mutex;
 
-    use finitechat_proto::{RuntimeCommandPayloadKindV1, RuntimeCommandTargetV1};
+    use finitechat_proto::{
+        RuntimeCommandJsonPayloadV1, RuntimeCommandPayloadKindV1, RuntimeCommandTargetV1,
+    };
     use serde_json::json;
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::daemon::{failure_result, run_config_check};
+    use crate::ledger::Ledger;
     use crate::openrouter::fake::{FakeOpenRouter, key_data};
+    use crate::supervisor::{ProcessSpec, start_supervisor};
 
     const FP_URL: &str = "https://fp.example.invalid/v1";
     const OR_KEY: &str = "sk-or-v1-synthetic-agent-key";
@@ -1947,6 +2005,10 @@ mod inference_tests {
         launcher_clears_overrides: Arc<Mutex<bool>>,
         /// Set to a marker path to check that Hermes started before each step.
         started_marker: Arc<Mutex<Option<PathBuf>>>,
+        /// A `hermes serve` restart that never returns.
+        serve_hangs: Arc<Mutex<bool>>,
+        /// agentd's `OPENROUTER_API_KEY`; the tests never read the real one.
+        environment_key: Arc<Mutex<Option<String>>>,
     }
 
     impl TestHost {
@@ -2032,7 +2094,11 @@ mod inference_tests {
             self.connections.openrouter_dotenv_key()
         }
 
-        fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+        fn environment_openrouter_key(&self) -> Option<String> {
+            self.environment_key.lock().unwrap().clone()
+        }
+
+        fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
             self.event("migrate");
             self.connections.migrate_legacy_openrouter_key()
         }
@@ -2058,6 +2124,9 @@ mod inference_tests {
 
         async fn restart_serve(&self) {
             self.event("serve");
+            if *self.serve_hangs.lock().unwrap() {
+                std::future::pending::<()>().await;
+            }
         }
 
         async fn facts(&self, deadline: Duration) -> Result<InferenceFacts, AgentdError> {
@@ -2157,6 +2226,8 @@ mod inference_tests {
             hold_restart: Arc::default(),
             launcher_clears_overrides: Arc::new(Mutex::new(true)),
             started_marker: Arc::default(),
+            serve_hangs: Arc::default(),
+            environment_key: Arc::default(),
         };
         let mut inference = Inference::new(
             host.clone(),
@@ -2948,6 +3019,20 @@ mod inference_tests {
     }
 
     #[tokio::test]
+    async fn r25_a_serve_restart_that_never_returns_does_not_hold_the_v1_reply() {
+        let mut setup = new_setup(&fp_block(), "");
+        *setup.host.serve_hangs.lock().unwrap() = true;
+        setup.inference.serve_restart_wait = Duration::from_millis(100);
+        let body = json!({"profile": "openrouter", "api_key": OR_KEY, "model": OR_MODEL});
+        tokio::time::timeout(Duration::from_secs(30), setup.v1(body))
+            .await
+            .expect("the v1 reply does not wait for hermes serve")
+            .unwrap();
+        assert_eq!(setup.host.events(), ["gateway", "serve"]);
+        assert_eq!(setup.host.model()["default"], OR_MODEL);
+    }
+
+    #[tokio::test]
     async fn r8_v1_success_makes_one_restart_and_replies_without_waiting() {
         // The reply is no later than before verification existed: exactly one
         // restart call and one immediate read. `Inference` has no verify delay
@@ -3185,6 +3270,48 @@ mod inference_tests {
                 "{name}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn r26_an_environment_key_that_status_shows_can_be_selected() {
+        // Review B's probe: no `.env` key and no legacy key, only agentd's
+        // environment key, which status shows as `environment`.
+        let environment = "sk-or-v1-synthetic-environment";
+        let mut setup = new_setup(&fp_block(), "KEEP=1\n");
+        *setup.host.environment_key.lock().unwrap() = Some(environment.to_owned());
+        {
+            let mut facts = setup.host.facts.lock().unwrap();
+            facts.openrouter.hermes_key = Tri::Present;
+            facts.openrouter.hermes_key_fingerprint =
+                Some(crate::ledger::hex_digest(environment.as_bytes()));
+        }
+        let status = setup.status().await;
+        assert_eq!(
+            status["inference"]["routes"]["openrouter"]["key_source"],
+            "environment"
+        );
+        let fake = FakeOpenRouter::start(200, &key_data(json!({"limit": null}))).await;
+        setup.inference.openrouter_api_base = fake.base.clone();
+        let reply = setup
+            .select(json!({"route": "openrouter", "model": OR_MODEL}))
+            .await
+            .unwrap();
+        assert_eq!(reply["accepted"], true);
+        assert_eq!(fake.requests(), ["GET /api/v1/key HTTP/1.1"]);
+        assert!(setup.settled().await.is_none(), "verified and succeeded");
+        assert_eq!(setup.host.model()["provider"], "openrouter");
+        assert_eq!(setup.env(), "KEEP=1\n", "never copied into .env");
+
+        // Without it, nothing is selectable.
+        let setup = new_setup(&fp_block(), "");
+        assert_eq!(
+            code(
+                setup
+                    .select(json!({"route": "openrouter", "model": OR_MODEL}))
+                    .await
+            ),
+            "not_connected"
+        );
     }
 
     #[tokio::test]
@@ -3432,7 +3559,10 @@ mod inference_tests {
         fn dotenv_openrouter_key(&self) -> Result<Option<String>, AgentdError> {
             self.inner.dotenv_openrouter_key()
         }
-        fn migrate_legacy_openrouter_key(&self) -> Result<(), AgentdError> {
+        fn environment_openrouter_key(&self) -> Option<String> {
+            self.inner.environment_openrouter_key()
+        }
+        fn migrate_legacy_openrouter_key(&self) -> Result<bool, AgentdError> {
             self.inner.migrate_legacy_openrouter_key()
         }
         fn remove_openrouter_key(&self) -> Result<(), AgentdError> {
@@ -3875,29 +4005,5 @@ mod inference_tests {
             fp_block(),
             "Finite Private stays the saved default"
         );
-    }
-
-    #[test]
-    fn the_hermes_process_is_told_where_the_intent_is() {
-        let config = DaemonConfig {
-            agent_home: PathBuf::from("/data/agent"),
-            hermes_home: PathBuf::from("/data/agent/hermes-home"),
-            bridge_url: "http://127.0.0.1:37633".to_owned(),
-            bridge_addr: "127.0.0.1:37633".to_owned(),
-            finitechat_bin: PathBuf::from("/usr/local/bin/finitechat"),
-            prepare_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
-            hermes_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
-            health_python: PathBuf::from("python"),
-            health_script: PathBuf::from("/opt/health_server.py"),
-            authorized_accounts: BTreeSet::new(),
-            sidecar_admission_default: None,
-            bridge_ready_timeout: Duration::from_secs(1),
-        };
-        let spec = hermes_spec(&config, &intent::intent_path(&config.agent_home));
-        assert_eq!(
-            spec.environment["FINITE_AGENTD_INTENT_PATH"],
-            "/data/agent/agentd/inference-intent.json"
-        );
-        assert_eq!(spec.environment["FINITE_AGENTD_SUPERVISED"], "1");
     }
 }
