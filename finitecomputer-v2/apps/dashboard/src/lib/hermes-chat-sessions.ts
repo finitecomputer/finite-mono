@@ -107,13 +107,21 @@ export function parseHermesMessages(value: unknown): HermesMessageRow[] {
   });
 }
 
-/** Platform-routed sessions are read-only in the browser view. */
-export function hermesSessionReadOnly(session: Pick<HermesSessionRow, "chatId">) {
-  return Boolean(session.chatId);
+/** Sources whose sessions belong to another app or to the agent itself. */
+const NON_WEB_SOURCES = new Set(["finitechat", "simplex", "cron", "kanban", "tool"]);
+
+/**
+ * Platform-routed sessions (and chats carried over from Finite Chat, which
+ * Hermes imports without routing) are read-only in the browser view, as are
+ * scheduled runs. Everything else is a native chat.
+ */
+export function hermesSessionReadOnly(session: Pick<HermesSessionRow, "chatId" | "source">) {
+  return Boolean(session.chatId) || NON_WEB_SOURCES.has(session.source);
 }
 
 export function hermesTopicIdForSession(session: HermesSessionRow) {
-  return session.chatId ? `platform:${session.source}:${session.chatId}` : HOME_TOPIC_ID;
+  if (session.chatId) return `platform:${session.source}:${session.chatId}`;
+  return hermesSessionReadOnly(session) ? `platform:${session.source}` : HOME_TOPIC_ID;
 }
 
 export function hermesChatSummary(session: HermesSessionRow): HostedChatSummary {
@@ -159,14 +167,14 @@ export function hermesTopicGroups(
   for (const [topicId, group] of platforms) {
     const first = group.sessions[0]!;
     const chats = group.sessions.map(hermesChatSummary);
+    const label = first.chatId
+      ? `${platformLabel(first.source)}${first.displayName ? ` · ${first.displayName}` : ""}`
+      : first.source === "finitechat"
+        ? "Finite Chat · earlier"
+        : platformLabel(first.source);
     groups.push({
       readOnly: true,
-      topic: topicFrom(
-        topicId,
-        `${platformLabel(first.source)}${first.displayName ? ` · ${first.displayName}` : ""}`,
-        "Read-only history from this platform",
-        chats,
-      ),
+      topic: topicFrom(topicId, label, "Read-only history", chats),
     });
   }
   return groups;
@@ -320,6 +328,7 @@ function topicFrom(
 function platformLabel(source: string) {
   if (source === "finitechat") return "Finite Chat";
   if (source === "simplex") return "SimpleX";
+  if (source === "cron") return "Scheduled tasks";
   return source.charAt(0).toUpperCase() + source.slice(1);
 }
 

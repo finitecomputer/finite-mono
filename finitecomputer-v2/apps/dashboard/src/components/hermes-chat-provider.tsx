@@ -45,8 +45,10 @@ const MAX_SESSION_PAGES = 20;
 const TRANSCRIPT_PAGE_SIZE = 200;
 const TRANSCRIPT_MAX_BYTES = 8 * 1024 * 1024;
 const RPC_TIMEOUT_MS = 30_000;
+/** A chat Hermes has not listed yet is always one this browser started. */
+const NATIVE_DRAFT = { chatId: null, source: "desktop" };
 const READ_ONLY_REASON =
-  "This chat came in through another app. It is read-only here; start a new chat to talk on the web.";
+  "This chat is history from another app or a scheduled task. It is read-only here; start a new chat to talk on the web.";
 
 type GatewayInbound = {
   jsonrpc: "2.0";
@@ -520,7 +522,7 @@ export function HermesChatProvider({
           : action.SendMessage.text;
       let chatId = ("SendChatMessage" in action ? action.SendChatMessage.chat_id : null)
         ?? selectedRef.current.chatId;
-      if (chatId && hermesSessionReadOnly(sessionFor(chatId) ?? { chatId: null })) {
+      if (chatId && hermesSessionReadOnly(sessionFor(chatId) ?? NATIVE_DRAFT)) {
         throw new Error(READ_ONLY_REASON);
       }
       if (!chatId) chatId = await createDraft();
@@ -556,7 +558,7 @@ export function HermesChatProvider({
     }
     if ("RenameChat" in action) {
       const { chat_id, title } = action.RenameChat;
-      if (hermesSessionReadOnly(sessionFor(chat_id) ?? { chatId: null })) throw new Error(READ_ONLY_REASON);
+      if (hermesSessionReadOnly(sessionFor(chat_id) ?? NATIVE_DRAFT)) throw new Error(READ_ONLY_REASON);
       const call = callRef.current;
       if (!call) throw new Error("Agent chat is not connected. Try again shortly.");
       await call("session.title", { session_id: await liveHandle(chat_id), title });

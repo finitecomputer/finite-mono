@@ -79,6 +79,22 @@ test("groups native chats under Home and each platform room under its own topic"
   assert.equal(room.topic.chats[1]!.title, "first line");
 });
 
+test("scheduled runs and carried-over Finite Chat history get their own read-only topics", () => {
+  const rows = parseHermesSessionPage({
+    sessions: [
+      { id: "cron_1", source: "cron", title: "Daily digest", started_at: 1, last_active: 1 },
+      { id: "finitechat-import-abc", source: "finitechat", title: "yo", chat_id: null, started_at: 2, last_active: 2, archived: 1 },
+    ],
+  }).sessions;
+  assert.ok(rows.every((row) => hermesSessionReadOnly(row)));
+  const groups = hermesTopicGroups(rows);
+  assert.deepEqual(groups[0]!.topic.chats, []);
+  assert.deepEqual(
+    groups.slice(1).map((group) => [group.topic.title, group.readOnly, group.topic.chats.map((chat) => chat.chat_id)]),
+    [["Scheduled tasks", true, ["cron_1"]], ["Finite Chat · earlier", true, ["finitechat-import-abc"]]],
+  );
+});
+
 test("Home exists with no native chats so New chat has a destination", () => {
   const groups = hermesTopicGroups([]);
   assert.equal(groups.length, 1);
