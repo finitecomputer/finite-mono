@@ -6,6 +6,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -75,6 +76,17 @@ import { formatLocalMessageTime } from "@/lib/date-time";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
+import {
+  SlashCommandPicker,
+  slashOptionId,
+} from "@/components/slash-command-picker";
+import {
+  matchSlashCommands,
+  restrictedSlashCommand,
+  slashArgsHint,
+  slashQuery,
+  type SlashCommand,
+} from "@/lib/slash-commands";
 import {
   BrainApprovalCards,
   BrainInvitationCards,
@@ -193,6 +205,28 @@ export function HostedWebChat({
   useEffect(() => {
     setDraft(restoreHostedChatComposerDraft(machineId, initialDraft ?? ""));
   }, [initialDraft, machineId]);
+  // Slash picker: open while the draft is a bare `/token`, until Esc. The
+  // dismissal lasts until the draft stops being a slash query.
+  const slashListboxId = useId();
+  const slashText = slashQuery(draft);
+  const slashBlocked = restrictedSlashCommand(draft);
+  const slashMatches = useMemo(
+    () => (slashText === null ? [] : matchSlashCommands(slashText)),
+    [slashText]
+  );
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [slashWasActive, setSlashWasActive] = useState(false);
+  if ((slashText !== null) !== slashWasActive) {
+    setSlashWasActive(slashText !== null);
+    if (slashText === null) setSlashDismissed(false);
+  }
+  const [slashHighlight, setSlashHighlight] = useState({ query: "", index: 0 });
+  const slashIndex = slashHighlight.query === slashText
+    ? Math.min(slashHighlight.index, Math.max(0, slashMatches.length - 1))
+    : 0;
+  const slashPickerOpen = !slashDismissed && (slashText !== null || slashBlocked !== null);
+  const slashNavigable = slashPickerOpen && !slashBlocked && slashMatches.length > 0;
+  const slashHint = slashArgsHint(draft);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
@@ -596,11 +630,23 @@ export function HostedWebChat({
     );
   }
 
+  function insertSlashCommand(command: SlashCommand) {
+    const next = `/${command.name} `;
+    setDraft(next);
+    noteTyping(next);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(next.length, next.length);
+    });
+  }
+
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
     if (
       (!text && attachments.length === 0)
+      || restrictedSlashCommand(text)
       || !selectedRoom
       || !selectedTopic
       || !selectedChat
@@ -1170,28 +1216,73 @@ export function HostedWebChat({
                       ))}
                     </div>
                   ) : null}
-                  <textarea
-                    ref={textareaRef}
-                    aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
-                    value={draft}
-                    disabled={!connected || sending}
-                    rows={1}
-                    onBlur={() => stopTyping(selectedRoom?.room_id)}
-                    onChange={(event) => {
-                      setDraft(event.target.value);
-                      noteTyping(event.target.value);
-                    }}
-                    onPaste={(event) => {
-                      if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        event.currentTarget.form?.requestSubmit();
+                  {slashPickerOpen ? (
+                    <SlashCommandPicker
+                      listboxId={slashListboxId}
+                      query={slashText ?? ""}
+                      commands={slashMatches}
+                      highlighted={slashIndex}
+                      blocked={slashBlocked}
+                      onHighlight={(index) => setSlashHighlight({ query: slashText ?? "", index })}
+                      onInsert={insertSlashCommand}
+                    />
+                  ) : null}
+                  <div className="finite-chat__composer-input">
+                    <textarea
+                      ref={textareaRef}
+                      aria-label="Message your agent"
+                      aria-controls={slashNavigable ? slashListboxId : undefined}
+                      aria-activedescendant={
+                        slashNavigable ? slashOptionId(slashListboxId, slashIndex) : undefined
                       }
-                    }}
-                  />
+                      placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
+                      value={draft}
+                      disabled={!connected || sending}
+                      rows={1}
+                      onBlur={() => stopTyping(selectedRoom?.room_id)}
+                      onChange={(event) => {
+                        setDraft(event.target.value);
+                        noteTyping(event.target.value);
+                      }}
+                      onPaste={(event) => {
+                        if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
+                      }}
+                      onKeyDown={(event) => {
+                        if (slashPickerOpen && event.key === "Escape") {
+                          event.preventDefault();
+                          setSlashDismissed(true);
+                          return;
+                        }
+                        if (slashNavigable) {
+                          const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+                          if (step) {
+                            event.preventDefault();
+                            setSlashHighlight({
+                              query: slashText ?? "",
+                              index: (slashIndex + step + slashMatches.length) % slashMatches.length,
+                            });
+                            return;
+                          }
+                          if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey) {
+                            event.preventDefault();
+                            insertSlashCommand(slashMatches[slashIndex]);
+                            return;
+                          }
+                        }
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          if (slashBlocked) return;
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                    />
+                    {slashHint ? (
+                      <div className="finite-chat__slash-ghost" aria-hidden>
+                        <span>{draft}</span>
+                        {slashHint}
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="finite-chat__composer-actions">
                     <div className="finite-chat__composer-left">
                       <input
@@ -1261,6 +1352,7 @@ export function HostedWebChat({
                       disabled={
                         !connected
                         || (!draft.trim() && attachments.length === 0)
+                        || slashBlocked !== null
                         || sending
                         || audioRecordingState !== "idle"
                       }

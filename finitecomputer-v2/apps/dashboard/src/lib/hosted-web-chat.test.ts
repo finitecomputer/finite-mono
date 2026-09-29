@@ -11,6 +11,7 @@ import {
   isCanonicalNewChatTarget,
   parseHostedChatAction,
   selectOriginalAgentCreationRequest,
+  uploadHostedWebChatAttachments,
 } from "@/lib/hosted-web-chat";
 import type { CoreAgentCreationRequestSummary } from "@/lib/core-client";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
@@ -423,6 +424,52 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
       RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" },
     }),
     { RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" } }
+  );
+});
+
+test("parseHostedChatAction refuses restricted slash commands on every send operation", () => {
+  const restricted = (error: unknown) =>
+    error instanceof HostedWebChatError
+    && error.status === 400
+    && error.message
+      === "/update isn't available in Finite. Finite manages your agent's software and restarts.";
+  const target = { room_id: "room-1", topic_id: "topic-1", chat_id: "chat-1" };
+  for (const text of ["/update", "  /UPDATE now", "/update@finite_bot"]) {
+    assert.throws(() => parseHostedChatAction({ SendChatMessage: { ...target, text } }), restricted);
+    assert.throws(() => parseHostedChatAction({ SendTopicMessage: { ...target, text } }), restricted);
+    assert.throws(() => parseHostedChatAction({ SendMessage: { room_id: "room-1", text } }), restricted);
+  }
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/codex_runtime auto" } }),
+    /\/codex-runtime isn't available in Finite/
+  );
+
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/help" } }),
+    /\/help isn't available in Finite\. Type \/ in the message box/
+  );
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/proactive 5m ping" } }),
+    /\/loop isn't available in Finite/
+  );
+
+  for (const text of ["/new trip", "/pause", "/approve", "/yes", "please /update", "https://x.test/update"]) {
+    assert.deepEqual(parseHostedChatAction({ SendChatMessage: { ...target, text } }), {
+      SendChatMessage: { ...target, text, metadata_json: null },
+    });
+  }
+});
+
+test("attachment uploads refuse a restricted slash command caption before contacting the device", async () => {
+  const formData = new FormData();
+  formData.set("room_id", "room-1");
+  formData.set("caption", "/debug");
+  await assert.rejects(
+    uploadHostedWebChatAttachments("machine-1", formData),
+    (error: unknown) =>
+      error instanceof HostedWebChatError
+      && error.status === 400
+      && /^\/debug isn't available in Finite\./.test(error.message)
   );
 });
 

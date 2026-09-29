@@ -33,6 +33,10 @@ import {
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
 import { sitesUpstreamOrigin } from "@/lib/site-preview";
+import {
+  restrictedSlashCommand,
+  restrictedSlashCommandMessage,
+} from "@/lib/slash-commands";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -344,6 +348,8 @@ export async function streamHostedWebChat(machineId: string, signal: AbortSignal
 }
 
 export async function uploadHostedWebChatAttachments(machineId: string, formData: FormData) {
+  const caption = formData.get("caption");
+  if (typeof caption === "string") refuseRestrictedSlashCommand(caption);
   const context = await hostedWebChatContext(machineId);
   return hostedDeviceAttachments(context.config, context.account, formData);
 }
@@ -547,7 +553,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
       return {
         SendMessage: {
           room_id: boundedString(value.room_id, "room_id"),
-          text: boundedString(value.text, "text", 64 * 1024),
+          text: messageText(value.text),
           metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
@@ -558,7 +564,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         SendTopicMessage: {
           room_id: boundedString(value.room_id, "room_id"),
           topic_id: boundedString(value.topic_id, "topic_id"),
-          text: boundedString(value.text, "text", 64 * 1024),
+          text: messageText(value.text),
           metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
@@ -570,7 +576,7 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
           room_id: boundedString(value.room_id, "room_id"),
           topic_id: boundedString(value.topic_id, "topic_id"),
           chat_id: boundedString(value.chat_id, "chat_id"),
-          text: boundedString(value.text, "text", 64 * 1024),
+          text: messageText(value.text),
           metadata_json: optionalMetadataJson(value.metadata_json),
         },
       };
@@ -632,6 +638,20 @@ function boundedString(value: unknown, label: string, maxBytes = 512) {
     throw new HostedWebChatError(`Invalid ${label}.`, 400);
   }
   return value;
+}
+
+function messageText(value: unknown) {
+  return refuseRestrictedSlashCommand(boundedString(value, "text", 64 * 1024));
+}
+
+// Web chat refuses the restricted Hermes commands so a hand-built request
+// cannot send what the composer blocks.
+function refuseRestrictedSlashCommand(text: string) {
+  const restricted = restrictedSlashCommand(text);
+  if (restricted) {
+    throw new HostedWebChatError(restrictedSlashCommandMessage(restricted), 400);
+  }
+  return text;
 }
 
 function optionalBoundedString(value: unknown, label: string, maxBytes = 512) {
