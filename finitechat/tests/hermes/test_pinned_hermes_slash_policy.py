@@ -242,7 +242,7 @@ class PolicyDataTests(unittest.TestCase):
                 if "reason" in entry:
                     self.assertEqual(entry["tier"], "restricted")
                     self.assertTrue(entry["reason"].strip())
-                self.assertNotIn("—", entry.get("reason", ""))
+                self.assertNotIn("\u2014", entry.get("reason", ""))
 
     def test_restricted_set_matches_the_catalog(self):
         restricted = {name for name, entry in self.policy.items() if entry["tier"] == "restricted"}
@@ -265,7 +265,7 @@ class EvaluateTests(unittest.TestCase):
                 self.assertIsNotNone(refusal)
                 self.assertEqual(refusal.command, expected)
                 self.assertTrue(refusal.text.startswith(f"/{expected} isn't available"))
-                self.assertNotIn("—", refusal.text)
+                self.assertNotIn("\u2014", refusal.text)
 
     def test_refusal_text_carries_the_catalog_reason(self):
         refusal = self.evaluate("/update")
