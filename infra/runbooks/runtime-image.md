@@ -91,8 +91,11 @@ diagnostic reaches one Runtime only as a separate image scoped to that Runtime.
    SELECT id, reference, promoted_at, canary_runtime_id
    FROM runtime_artifacts WHERE id = '<diagnostic-artifact-id>';
    ```
-4. Upgrade only that Runtime with the reviewed single-project rollout, on the
-   Runtime's own host. Prepare the plan:
+4. Capture `scripts/finite-status --json` on the relevant Core and Runner hosts
+   before the rollout. Reconcile known exceptions and stop on unexpected
+   changes to Chat, recovery, or the selected Runtime. Upgrade only that Runtime
+   with the reviewed single-project rollout, on the Runtime's own host. Prepare
+   the plan:
 
    ```sh
    scripts/rollout-lat1-runtime-artifact --prepare \
@@ -108,7 +111,9 @@ diagnostic reaches one Runtime only as a separate image scoped to that Runtime.
    `POST /api/core/v1/admin/projects/<project-id>/runtime/upgrade` example
    under "Upgrade an existing Kata Runtime explicitly" is for promoted
    targets: it carries no expected Runtime binding, and Core refuses a scoped
-   artifact through it.
+   artifact through it. After the upgrade, capture `scripts/finite-status --json`
+   again on the same hosts and compare with the baseline. Stop the diagnostic
+   exercise and follow the reviewed recovery plan if unexpected changes appear.
 5. Read the trace read-only. The records go to
    `/tmp/finitechat-requester-diagnostics/trace.log` inside the Agent
    container, outside the durable `/data` chat state. Read it with
@@ -136,8 +141,12 @@ diagnostic reaches one Runtime only as a separate image scoped to that Runtime.
    - Each producer ring holds the newest 256 records. A stalled or missing
      worker drops records rather than delay chat, so a missing line is not
      evidence.
-6. Exit with an ordinary upgrade of the Runtime back to the fleet's promoted
-   artifact. Replacement compute does not copy the old image's environment
+6. Capture `scripts/finite-status --json` on the same Core and Runner hosts
+   before the return rollout, and stop on unexpected changes. Exit with an
+   ordinary upgrade of the Runtime back to the fleet's promoted artifact.
+   Capture and compare `scripts/finite-status --json` again after that rollout;
+   unexpected changes require the reviewed recovery plan. Replacement compute
+   does not copy the old image's environment
    defaults, so the flag leaves with the image. Verify that the Runtime's
    `nerdctl inspect` shows neither the label nor the flag, that a Chat reply
    arrives, and that `/contact` reports the same Agent Principal.
