@@ -35,7 +35,8 @@
   # replacing the old CronJob that overwrote finite_core_latest.dump in place
   # (the single-snapshot flaw called out in the runbook). Deliberately NOT
   # services.postgresqlBackup: that module also overwrites one file per db.
-  # Off-box copies: modules/backups.nix borgs this directory.
+  # Off-box recovery: modules/backups.nix archives its coordinated snapshot,
+  # which contains a separate Core dump; this directory is not in that job.
   systemd.services.finite-postgres-backup = {
     description = "Timestamped pg_dump of finite_core to /data/backups/postgres";
     after = [ "postgresql.service" ];

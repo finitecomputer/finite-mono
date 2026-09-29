@@ -6,6 +6,22 @@ Local custom-format dumps live under `/data/backups/postgres/`. The coordinated
 [Hosted recovery snapshot](hosted-web-chat-recovery.md) provides the off-host
 service-consistent copy, including dependent Chat/Brain/Identity state.
 
+## Capture a named dump before a rollout
+
+Confirm `finite-postgres-backup.service` is inactive, record the start time,
+and trigger that unit. It is `Type=oneshot`; require successful completion and
+record the invocation's timestamps. Select the dump created by that invocation
+using its exact name, `finite_core-YYYYMMDDTHHMMSSZ.dump`, and verify that its
+modification time belongs to the observed run. Fail closed if selection is
+ambiguous or the file predates the run.
+
+Do not select the lexical last match of `finite_core-*.dump`: that glob also
+matches manually named historical dumps, which can sort after the timestamped
+files. Record the selected file's size and SHA256 and require
+`pg_restore --list` to succeed. These checks do not restore the database or
+prove application compatibility. The coordinated snapshot's Core dump is a
+separate recovery point; record its archive and manifest independently.
+
 ## Isolated drill
 
 1. Select an immutable dump with its timestamp, checksum and snapshot manifest.
