@@ -87,7 +87,9 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
         // but React suppresses change because the value has not changed.
         await composer.pressSequentially("/qu");
         await composer.press("ArrowDown");
-        await composer.dispatchEvent("input", { inputType: "insertFromPaste", bubbles: true });
+        await composer.evaluate((element) => element.dispatchEvent(
+          new InputEvent("input", { inputType: "insertFromPaste", bubbles: true })
+        ));
         assert.equal(await a.getByRole("listbox").count(), 0);
         await composer.press("Enter");
         await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
