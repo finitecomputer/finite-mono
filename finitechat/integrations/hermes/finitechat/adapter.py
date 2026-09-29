@@ -84,6 +84,7 @@ ADMISSION_RETRY_SECS = 1.0
 ADMISSION_MAX_RETRY_SECS = 30.0
 REFUSAL_RETRY_SECS = 1.0
 REFUSAL_MAX_RETRY_SECS = 30.0
+REFUSAL_MAX_ACTIVE_SENDS = 2
 DEFAULT_FINITE_PRIVATE_CONTROL_URL = "https://finite.computer/api/core/v1/finite-private"
 FINITE_PRIVATE_CONTROL_TIMEOUT_SECS = 5
 FINITECHAT_HOME_CHANNEL_ENV = "FINITECHAT_HOME_CHANNEL"
@@ -597,7 +598,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
         # One task owns a refused inbox entry from its reply send until it
         # acks the entry or hands it back. A redelivery of an owned entry
-        # joins that owner, so one entry never has two replies in flight.
+        # joins that owner, so this adapter never starts a second reply for an
+        # entry it still owns (the transport can still retry one send).
         # Every live task keeps its entry so shutdown can join it, including a
         # task that already gave up ownership to hand the entry back. Shutdown
         # releases only the entries in ``_refusal_unsent``: not yet sent, or
@@ -605,11 +607,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # already running in a worker thread or CLI process, so any other
         # entry keeps its lease rather than be redelivered beside it.
         # A reply that failed doubles the entry's next retry delay, bounded, so
-        # a persistent failure cannot spin the inbound stream.
+        # a persistent failure cannot spin the inbound stream. A few refusal
+        # sends run at once, so a burst of stuck ones cannot take every worker
+        # thread from ordinary replies and acks; a task waiting for a slot is
+        # still unsent.
         self._refusal_owners: dict[str, asyncio.Task] = {}
         self._refusal_tasks: dict[asyncio.Task, tuple[str, Any, str]] = {}
         self._refusal_unsent: set[asyncio.Task] = set()
         self._refusal_retry_delays: dict[str, float] = {}
+        self._refusal_send_slots = asyncio.Semaphore(REFUSAL_MAX_ACTIVE_SENDS)
         # (session, command) pairs already told that a scheduled command was
         # refused, so a persisted loop does not post a reply on every tick.
         self._internal_refusals_sent: set[tuple[str, str]] = set()
@@ -780,12 +786,17 @@ class FiniteChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         payload = self._send_payload(chat_id, content, reply_to, metadata)
         drained = self._attach_brain_approval_metadata(payload)
+        result = await self._send_prepared_payload(payload)
+        if result.success:
+            self._finish_brain_approval_drain(drained)
+        return result
+
+    async def _send_prepared_payload(self, payload: dict[str, Any]) -> SendResult:
         result = await self._finitechat_json("send", payload, timeout=30)
         if not result.ok:
             # `retryable` is the sidecar's decision, carried verbatim from the
             # envelope; nothing here reads the message text.
             return SendResult(success=False, error=result.error, retryable=result.retryable)
-        self._finish_brain_approval_drain(drained)
         message_id = str(result.data.get("message_id") or result.data.get("id") or "") or None
         return SendResult(
             success=True,
@@ -1353,9 +1364,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         entry that is not handed back waits for the sidecar's lease expiry.
         """
         current = asyncio.current_task()
+        # Always started by _refuse_finitechat_command as its own task.
+        assert current is not None
         try:
-            self._refusal_unsent.discard(current)
-            result = await self._send_refusal(event, refusal.text, reply_to=message_id)
+            async with self._refusal_send_slots:
+                self._refusal_unsent.discard(current)
+                result = await self._send_refusal(event, refusal.text, reply_to=message_id)
             if result.success:
                 self._refusal_retry_delays.pop(owner_key, None)
                 await self._ack_finitechat_event(room_id, seq, message_id)
@@ -1380,7 +1394,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             self._refusal_tasks.pop(current, None)
             self._refusal_unsent.discard(current)
 
-    def _drop_refusal_owner(self, owner_key: str, task: asyncio.Task | None) -> None:
+    def _drop_refusal_owner(self, owner_key: str, task: asyncio.Task) -> None:
         if self._refusal_owners.get(owner_key) is task:
             self._refusal_owners.pop(owner_key, None)
 
@@ -1400,12 +1414,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         metadata: dict[str, Any] = dict(route or ({"thread_id": thread_id} if thread_id else {}))
         metadata["_finitechat_kind"] = "message"
         metadata["_finitechat_status"] = "complete"
+        chat_id = str(event.source.chat_id or raw_event.get("room_id") or self.room_id)
         try:
-            return await self.send(
-                chat_id=str(event.source.chat_id or raw_event.get("room_id") or self.room_id),
-                content=text,
-                reply_to=reply_to,
-                metadata=metadata,
+            # An ordinary send, but never the carrier for brain approval
+            # filings: those belong to the turn that filed them.
+            return await self._send_prepared_payload(
+                self._send_payload(chat_id, text, reply_to, metadata)
             )
         except Exception as exc:
             logger.exception("[finitechat] command refusal send raised")

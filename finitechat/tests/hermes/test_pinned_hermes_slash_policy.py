@@ -1074,6 +1074,68 @@ class AdapterSettlementTests(AdapterTestCase):
 
         self.run_scenario(scenario)
 
+    def test_refusal_sends_are_bounded_and_ordinary_work_keeps_moving(self):
+        async def scenario(h: PolicyHarness):
+            h.send_behaviors = ["block"] * 3
+            for seq in (1, 2, 3):
+                await h.deliver(raw_event(seq, "/update"), settle=False)
+            await h.wait_for(lambda: h.refusal_sends() == 2)
+            for _ in range(20):
+                await asyncio.sleep(0)
+            self.assertEqual(h.refusal_sends(), h.module.REFUSAL_MAX_ACTIVE_SENDS)
+
+            await h.deliver(raw_event(4, "hello there"), settle=False)
+            await h.wait_for(lambda: h.state("msg-4") == "acked")
+            await h.deliver(raw_event(5, "/status"), settle=False)
+            await h.wait_for(lambda: h.state("msg-5") == "acked")
+            self.assertEqual(h.handled, ["hello there", "/status"])
+            self.assertEqual(h.refusal_sends(), 2)
+
+            await h.adapter.disconnect()
+            # Active sends may still finish in their workers and keep their
+            # leases; the one still waiting for a slot was never sent.
+            self.assertEqual(
+                [h.state(f"msg-{seq}") for seq in (1, 2, 3)], ["leased"] * 2 + ["pending"]
+            )
+            self.assertEqual(
+                [h.settlements(f"msg-{seq}") for seq in (1, 2, 3)], [[], [], ["release"]]
+            )
+            h.send_gate.set()
+            await h.wait_for(lambda: len(h.refusals()) == 2)
+            self.assertEqual(h.refusal_sends(), 2)
+
+        self.run_scenario(scenario)
+
+    def test_refusal_never_carries_a_pending_brain_approval(self):
+        async def scenario(h: PolicyHarness):
+            broker = h.module._BrainApprovalFilings()
+            h.adapter._brain_approval_filings = broker
+            broker.after_tool_call(
+                tool_name="terminal",
+                result=json.dumps(
+                    {"output": "finite-brain-approval-filed brain=brain-1 request=approval-1"}
+                ),
+            )
+            await h.deliver(raw_event(1, "/update"))
+            (refusal,) = h.refusals()
+            self.assertNotIn("approve", refusal["metadata"])
+            self.assertEqual([f["requestId"] for f in broker.take_pending()], ["approval-1"])
+
+            # The filing still rides the next ordinary final reply, on another chat.
+            raw = raw_event(2, "hello there")
+            raw["segment_id"] = "segment-2"
+            raw["source"]["thread_id"] = "segment-2"
+            await h.deliver(raw)
+            await h.wait_for(lambda: h.state("msg-2") == "acked")
+            (reply,) = [sent for sent in h.sent if sent["text"] == "done"]
+            self.assertEqual(reply["thread_id"], "segment-2")
+            self.assertEqual(
+                [r["requestId"] for r in reply["metadata"]["approve"]["requests"]], ["approval-1"]
+            )
+            self.assertEqual(broker.take_pending(), [])
+
+        self.run_scenario(scenario)
+
 
 class AdapterRouteTests(AdapterTestCase):
     def test_refusal_without_a_segment_stays_on_the_topic_route(self):
