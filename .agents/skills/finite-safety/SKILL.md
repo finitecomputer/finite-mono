@@ -6,8 +6,8 @@ description: Trace Finite compatibility, onboarding, routing, and recovery contr
 # Finite change contracts
 
 Read the owning code and tests, relevant retained component contracts, and
-`docs/monorepo-doctrine.md`. Follow the root `AGENTS.md` for the GitHub–Linear
-boundary; keep new plans and decisions in Linear.
+`docs/monorepo-doctrine.md`. Follow the root `AGENTS.md` for the
+repository–Linear boundary; keep new plans and decisions in Linear.
 
 ## Chat and onboarding
 
