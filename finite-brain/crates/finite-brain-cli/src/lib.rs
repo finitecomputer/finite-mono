@@ -5095,6 +5095,45 @@ mod tests {
         assert!(error.to_string().contains("rejected with 403"));
     }
 
+    #[test]
+    fn invitation_expiry_is_client_now_plus_the_requested_whole_duration() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let expires_at = |value: &str| {
+            invitation_expires_at(&env, &["--expires-in".to_owned(), value.to_owned()])
+        };
+        assert_eq!(expires_at("1h").unwrap(), "2026-06-24T21:46:36Z");
+        assert_eq!(expires_at("30d").unwrap(), "2026-07-24T20:46:36Z");
+        assert_eq!(expires_at("720h").unwrap(), "2026-07-24T20:46:36Z");
+        assert_eq!(
+            invitation_expires_at(&env, &[]).unwrap(),
+            "2026-07-01T20:46:36Z"
+        );
+        for invalid in [
+            "0h",
+            "31d",
+            "721h",
+            "90m",
+            "1.5h",
+            "-1h",
+            "h",
+            "",
+            "18446744073709551615d",
+        ] {
+            assert!(
+                matches!(expires_at(invalid), Err(CliError::InvalidInput(_))),
+                "{invalid:?} must be rejected"
+            );
+        }
+        assert!(matches!(
+            invitation_expires_at(
+                &env,
+                &["--expires".to_owned(), "2026-06-25T00:00:00Z".to_owned()]
+            ),
+            Err(CliError::InvalidInput(_))
+        ));
+    }
+
     fn env_for(tmp: &TempDir) -> CliEnvironment {
         CliEnvironment {
             cwd: tmp.path().to_path_buf(),

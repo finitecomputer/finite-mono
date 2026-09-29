@@ -168,6 +168,20 @@ fn spawn_file_backed_brain_server(
     tokio::sync::oneshot::Sender<()>,
     thread::JoinHandle<()>,
 ) {
+    spawn_clocked_file_backed_brain_server(owner_npub, database_path, None)
+}
+
+/// Like `spawn_file_backed_brain_server`, optionally pinning the server clock
+/// (with a 300 second auth skew) so a test controls client and server time.
+fn spawn_clocked_file_backed_brain_server(
+    owner_npub: &str,
+    database_path: std::path::PathBuf,
+    server_now_unix: Option<u64>,
+) -> (
+    String,
+    tokio::sync::oneshot::Sender<()>,
+    thread::JoinHandle<()>,
+) {
     let (url_tx, url_rx) = mpsc::channel();
     let owner_npub = owner_npub.to_owned();
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -189,7 +203,10 @@ fn spawn_file_backed_brain_server(
             if !brain_exists {
                 store.create_brain_bootstrap(&organization, &[]).unwrap();
             }
-            let state = finite_brain_server::ServerState::new(store, url.clone());
+            let mut state = finite_brain_server::ServerState::new(store, url.clone());
+            if let Some(now) = server_now_unix {
+                state = state.with_auth_clock(now, 300);
+            }
             url_tx.send(url).unwrap();
             let router = finite_brain_server::router_with_state(state);
             axum::serve(
@@ -1299,6 +1316,110 @@ fn built_fbrain_process_brain_restore_drill() {
     // same ciphertext-bearing SQLite the server held all along.
     drop(shutdown_b);
     server_b.join().unwrap();
+}
+
+#[test]
+fn built_fbrain_invite_brain_create_accepts_one_hour_from_a_lagging_client() {
+    // FIN-147: the CLI computes `expiresAt` from its own clock (`FBRAIN_NOW`)
+    // and the server stamps `createdAt` on receipt. Pin the server clock and
+    // run the CLI clock 30 seconds behind it, as request latency or clock
+    // offset does in production.
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home-admin");
+    fs::create_dir_all(&home).unwrap();
+    let secret_file = scratch.path().join("secret-admin");
+    fs::write(
+        &secret_file,
+        "0000000000000000000000000000000000000000000000000000000000000001\n",
+    )
+    .unwrap();
+    let imported = run(
+        &home,
+        &home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret_file.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(imported.status.success());
+    let public_key = run(&home, &home, &["signer", "public-key", "--json"]);
+    assert!(public_key.status.success());
+    let public_key: Value = serde_json::from_slice(&public_key.stdout).unwrap();
+    let admin_npub = public_key["npub"].as_str().unwrap().to_owned();
+    let target_npub = |secret: &str| {
+        NostrPublicKey::from_protocol(Keys::parse(secret).unwrap().public_key())
+            .to_npub()
+            .unwrap()
+    };
+
+    let server_now = OffsetDateTime::now_utc().unix_timestamp();
+    let (server_url, shutdown, server) = spawn_clocked_file_backed_brain_server(
+        &admin_npub,
+        scratch.path().join("brain.sqlite3"),
+        Some(server_now as u64),
+    );
+    let invite = |client_now: OffsetDateTime, target: &str, expires_in: &str| {
+        command(&home, &home)
+            .env("FBRAIN_NOW", client_now.format(&Rfc3339).unwrap())
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args([
+                "invite",
+                "brain",
+                "create",
+                "--brain",
+                "roundtrip-org",
+                "--target",
+                target,
+                "--expires-in",
+                expires_in,
+                "--json",
+            ])
+            .output()
+            .unwrap()
+    };
+
+    let lagging_client_now = OffsetDateTime::from_unix_timestamp(server_now - 30).unwrap();
+    let created = invite(
+        lagging_client_now,
+        &target_npub("0000000000000000000000000000000000000000000000000000000000000003"),
+        "1h",
+    );
+    assert!(
+        created.status.success(),
+        "invite brain create --expires-in 1h failed: {}{}",
+        String::from_utf8_lossy(&created.stdout),
+        String::from_utf8_lossy(&created.stderr),
+    );
+    let created: Value = serde_json::from_slice(&created.stdout).unwrap();
+    // The server stores exactly what the CLI asked for; nothing extends it.
+    assert_eq!(
+        created["expiresAt"].as_str().unwrap(),
+        (lagging_client_now + time::Duration::hours(1))
+            .format(&Rfc3339)
+            .unwrap()
+    );
+
+    // The thirty-day ceiling stays strict for a client whose clock leads.
+    let leading_client_now = OffsetDateTime::from_unix_timestamp(server_now + 30).unwrap();
+    let too_long = invite(
+        leading_client_now,
+        &target_npub("0000000000000000000000000000000000000000000000000000000000000004"),
+        "30d",
+    );
+    assert!(!too_long.status.success());
+    assert!(
+        String::from_utf8_lossy(&too_long.stderr)
+            .contains("invitation expiry must be between one hour and thirty days"),
+        "unexpected rejection: {}",
+        String::from_utf8_lossy(&too_long.stderr),
+    );
+
+    drop(shutdown);
+    server.join().unwrap();
 }
 
 #[test]

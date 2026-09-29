@@ -7192,6 +7192,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offer_creation_accepts_one_hour_from_a_client_at_the_auth_skew_edge() {
+        // The test server clock is TEST_NOW with a 60 second auth skew. A
+        // client whose clock trails by the full skew computes `--expires-in 1h`
+        // from its own clock and signs the request at that same instant.
+        let admin_keys = Keys::generate();
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let create_folder_body = serde_json::json!({
+            "folderId": "strategy",
+            "name": "Strategy",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": "getting-started",
+            "path": "getting-started/Strategy",
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-strategy-admin-v1", 1, npub(&admin_keys).as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "change_create_strategy_expiry",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("strategy"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_folder = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders",
+            Some(create_folder_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(create_folder.status(), StatusCode::OK);
+
+        let lagging_client_now = TEST_NOW - 60;
+        let one_hour = format_unix_timestamp(lagging_client_now + 60 * 60).unwrap();
+        let brain_target = npub(&Keys::generate());
+        let invitation = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({ "targetNpub": brain_target, "expiresAt": one_hour })
+                    .to_string(),
+            ),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(invitation.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invitation).await;
+        assert_eq!(invitation.expires_at, one_hour);
+
+        let folder_target = npub(&Keys::generate());
+        let folder_invitation = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations",
+            Some(
+                serde_json::json!({
+                    "recipientNpub": folder_target,
+                    "grant": folder_key_grant_value(
+                        "grant-strategy-expiry-v1",
+                        1,
+                        folder_target.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        "change_share_strategy_expiry",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(folder_target.as_str()),
+                        Some(1),
+                    ),
+                    "expiresAt": one_hour,
+                })
+                .to_string(),
+            ),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(folder_invitation.status(), StatusCode::OK);
+        let folder_invitation: FolderInvitationResponse = read_json(folder_invitation).await;
+        assert_eq!(folder_invitation.expires_at, one_hour);
+
+        let token = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(serde_json::json!({ "role": "member", "expiresAt": one_hour }).to_string()),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(token.status(), StatusCode::OK);
+        let token: CreateBrainInviteTokenResponse = read_json(token).await;
+        assert_eq!(token.expires_at, one_hour);
+
+        // The thirty-day ceiling gets no allowance: a client whose clock leads
+        // the server cannot stretch an offer past thirty days of server time.
+        let leading_client_now = TEST_NOW + 60;
+        let thirty_days = format_unix_timestamp(leading_client_now + 30 * 24 * 60 * 60).unwrap();
+        let too_long = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&Keys::generate()),
+                    "expiresAt": thirty_days,
+                })
+                .to_string(),
+            ),
+            leading_client_now,
+        )
+        .await;
+        assert_error(
+            too_long,
+            StatusCode::BAD_REQUEST,
+            "invitation expiry must be between one hour and thirty days",
+        )
+        .await;
+
+        let too_short = format_unix_timestamp(TEST_NOW + 55 * 60 - 1).unwrap();
+        let too_short = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&Keys::generate()),
+                    "expiresAt": too_short,
+                })
+                .to_string(),
+            ),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            too_short,
+            StatusCode::BAD_REQUEST,
+            "invitation expiry must be between one hour and thirty days",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn brain_invitation_create_rejects_existing_members() {
         let admin_keys = Keys::generate();
         let admin_npub = npub(&admin_keys);

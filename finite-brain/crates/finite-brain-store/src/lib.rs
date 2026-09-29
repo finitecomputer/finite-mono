@@ -5852,6 +5852,142 @@ mod tests {
         ));
     }
 
+    /// Create one pending offer on every path that shares the bounded offer
+    /// expiry rule, with the server stamping `created_at`.
+    fn create_offer_on_every_path(
+        case: usize,
+        expires_at: &str,
+        created_at: &str,
+    ) -> [(&'static str, Result<(), StoreError>); 4] {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Dest", "npub-dest-admin");
+        let brain_id = BrainId::new("acme").unwrap();
+        let folder_id = FolderId::new("strategy").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let recipient = UserId::new("npub-offer-recipient").unwrap();
+        let destination_admin = UserId::new("npub-dest-admin").unwrap();
+        [
+            (
+                "brain invitation",
+                store
+                    .create_brain_invitation(
+                        &brain_id,
+                        &format!("invitation-expiry-{case}"),
+                        &recipient,
+                        &format!("invite-expiry-{case}"),
+                        &format!("/v1/brain-invitation-links/invite-expiry-{case}/accept"),
+                        &[],
+                        &admin,
+                        expires_at,
+                        created_at,
+                    )
+                    .map(drop),
+            ),
+            (
+                "folder invitation",
+                store
+                    .create_share_link(
+                        &brain_id,
+                        &folder_id,
+                        &format!("share-link-expiry-{case}"),
+                        &recipient,
+                        &admin,
+                        expires_at,
+                        &format!("/v1/invitations/share-link-expiry-{case}/accept"),
+                        &grant(
+                            &format!("grant-share-expiry-{case}"),
+                            "strategy",
+                            1,
+                            admin.as_str(),
+                            recipient.as_str(),
+                        ),
+                        created_at,
+                    )
+                    .map(drop),
+            ),
+            (
+                "mount offer",
+                store
+                    .create_shared_folder_invitation(
+                        &brain_id,
+                        &folder_id,
+                        &BrainId::new("dest").unwrap(),
+                        &format!("mount-offer-expiry-{case}"),
+                        &destination_admin,
+                        &admin,
+                        &format!("/v1/mount-offers/mount-offer-expiry-{case}/accept"),
+                        &grant(
+                            &format!("grant-mount-expiry-{case}"),
+                            "strategy",
+                            1,
+                            admin.as_str(),
+                            destination_admin.as_str(),
+                        ),
+                        expires_at,
+                        created_at,
+                    )
+                    .map(drop),
+            ),
+            (
+                "invite token",
+                store
+                    .create_brain_invite_token(
+                        &brain_id,
+                        &invite_token_hash(&format!("{case}")),
+                        BrainInviteTokenRole::Member,
+                        &admin,
+                        expires_at,
+                        created_at,
+                    )
+                    .map(drop),
+            ),
+        ]
+    }
+
+    #[test]
+    fn bounded_offer_expiry_tolerates_request_drift_at_the_floor_only() {
+        // The server stamps `created_at` on receipt; clients compute
+        // `expires_at` from their own clock before the request arrives.
+        let created_at = "2026-06-23T00:00:00Z";
+        let cases = [
+            // `--expires-in 1h` from a client 30 seconds behind the server,
+            // or 30 seconds of request latency: the FIN-147 failure.
+            (
+                "one hour from a lagging client",
+                "2026-06-23T00:59:30Z",
+                true,
+            ),
+            ("exactly one hour", "2026-06-23T01:00:00Z", true),
+            ("tolerated minimum", "2026-06-23T00:55:00Z", true),
+            (
+                "just under tolerated minimum",
+                "2026-06-23T00:54:59Z",
+                false,
+            ),
+            ("exactly thirty days", "2026-07-23T00:00:00Z", true),
+            ("just over thirty days", "2026-07-23T00:00:01Z", false),
+            ("expires on receipt", created_at, false),
+            ("already expired", "2026-06-22T23:00:00Z", false),
+        ];
+        let mut mismatches = Vec::new();
+        for (case, (label, expires_at, accepted)) in cases.into_iter().enumerate() {
+            for (path, result) in create_offer_on_every_path(case, expires_at, created_at) {
+                match (&result, accepted) {
+                    (Ok(()), true) => {}
+                    (Err(StoreError::BrokenInvariant { reason }), false)
+                        if reason
+                            == "invitation expiry must be between one hour and thirty days" => {}
+                    _ => mismatches.push(format!("{path}: {label} ({expires_at}): {result:?}")),
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "offer expiry mismatches:\n{}",
+            mismatches.join("\n")
+        );
+    }
+
     #[test]
     fn shared_folder_connection_mount_projection_and_delegated_member_rotation() {
         let mut store = store_with_strategy_folder();
