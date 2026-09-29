@@ -2348,8 +2348,17 @@ fn validate_bounded_offer_expiry(expires_at: &str, created_at: &str) -> Result<(
         OffsetDateTime::parse(created_at, &Rfc3339).map_err(|_| StoreError::BrokenInvariant {
             reason: "createdAt must be an RFC3339 timestamp".to_owned(),
         })?;
+    // Callers choose one hour through thirty days (ADR 0042), measured from
+    // the server's `createdAt`. Clients compute `expiresAt` from their own
+    // clock before the request arrives, so request latency and clock offset
+    // shorten a requested one-hour lifetime. The floor only keeps offers
+    // usable, so it absorbs that drift: five minutes exceeds the server's
+    // 60 second request-auth skew plus the lookups made before `createdAt`
+    // is stamped. The ceiling bounds how long a capability stays live, so it
+    // gets no allowance. `expiresAt` itself is stored unchanged.
     let duration = expires - created;
-    if duration < time::Duration::hours(1) || duration > time::Duration::days(30) {
+    let floor = time::Duration::hours(1) - time::Duration::minutes(5);
+    if duration < floor || duration > time::Duration::days(30) {
         return Err(StoreError::BrokenInvariant {
             reason: "invitation expiry must be between one hour and thirty days".to_owned(),
         });
