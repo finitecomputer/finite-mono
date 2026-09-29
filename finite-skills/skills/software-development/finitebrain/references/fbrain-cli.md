@@ -320,24 +320,24 @@ between a key-addressed invitation and an email capability invitation, for
 `deliveryStatus` values, for membership versus readable Folders, and for the
 unsupported cases. This section lists the command syntax.
 
-`invite brain list` answers two different questions depending on the flag:
-with no `--brain` it lists invitations RECEIVED by the acting identity
-(invitation ids, inviter, brain display name); with `--brain <id>` it lists
-invitations ISSUED on that Brain. To answer "have I been invited to
-anything?", run the no-flag form; `brain list --json` rows with
+`invite brain list` lists received invitations only when run without `--brain`
+from outside any Brain Working Tree, with the intended server selected.
+Inside a Working Tree it infers that Brain and lists issued invitations,
+just like `--brain <id>`; that scoped listing requires admin standing.
+To answer "have I been invited to anything?", use the outside-tree form; `brain list --json` rows with
 `role: "invited"` are the same incoming invitations from the Brain side.
 `invite brain inspect` and `accept` want the invitation id
 (`invitation-...`); an invite code (`invite-...`) is resolved to its id by
 the code's public `llms.txt` instructions URL.
 
 When the user asks whether anything is waiting for them, check both sides:
-your own `fbrain invite brain list` for invitations addressed to your
-principal, and their pending approval and invitation cards in chat.
+your own `fbrain invite brain list` outside any Brain Working Tree for
+invitations addressed to your principal, and their pending approval and invitation cards in chat.
 
 ```sh
 fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05>
 fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05> --folder <folder-id> --expires-in 7d
-fbrain invite brain list
+fbrain invite brain list # outside a Working Tree for the incoming inbox
 fbrain invite brain inspect <invitation-id>
 fbrain invite brain accept <invitation-id>
 fbrain invite brain revoke <invitation-id>
@@ -369,8 +369,12 @@ fbrain mount participant remove <mount-id> <npub|hex|NIP-05>
 fbrain mount revoke <mount-id>
 ```
 
-Invitations, Invite Tokens, and Mount Offers default to seven days and accept
-`--expires-in` in whole hours or days from `1h` through `30d`. Brain
+Invitations, Invite Tokens, and Mount Offers default to seven days. The CLI
+accepts `--expires-in` in whole hours or days from `1h` through `30d`. Servers
+before the FIN-147 fix can reject `1h` after request drift; report the error
+and preserve the requested expiry until the user chooses a longer duration
+or the server is fixed. A leading client clock can exceed the strict `30d`
+ceiling. Brain
 Invitations create Members. Folder Invitations create bounded Guest access.
 Mounts are source-backed and work between either Brain kind; the CLI opens and
 wraps required Folder grants in memory.

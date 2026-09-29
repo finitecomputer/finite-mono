@@ -74,9 +74,10 @@ Agent Home automatically. An existing agent keeps the revision it was seeded
 with until the user or agent runs `finite skills sync` in a Runtime image that
 contains the newer tested bundle. The command replaces only
 `managed-skills/finite/current`; it never rewrites the user-owned Hermes skills
-directory. New skill names require Hermes `/reload-skills`, while updated
-content at an existing skill path is available from the new baseline without a
-Runtime reboot.
+directory. Updated content at an existing skill path is available when the
+agent rereads it. Changes to names or index descriptions require an authorized
+gateway restart to clear the process cache; `/reload-skills` alone does not
+refresh that index. Follow the verification steps below.
 
 Component trees still contain historical/reference skill snapshots. They are
 not deployment sources. The Finite Sites and FiniteBrain contract deltas have
@@ -108,13 +109,17 @@ steps. Stop at the first one that fails and record where the rollout stands.
    No output means the managed baseline matches the image. Also hash any file
    the correction changed and compare it with `git show <revision>:<path> |
    sha256sum`.
-6. Start a new chat session before retesting. Hermes builds its skills index
-   once per session and caches it per gateway process; `skill_view` reads
-   changed content at an existing skill path from disk. New or removed skill
-   names need `/reload-skills`.
+6. Have the agent reread the corrected skill body before retesting in a new
+   conversation. `skill_view` reads an existing path from disk. Hermes also
+   caches its skills index in the gateway process: a new conversation or
+   `/reload-skills` alone does not clear that cache. If skill names or index
+   descriptions changed, arrange an authorized gateway restart and verify
+   the new index. This correction retains the existing name and description.
 7. Leave user-owned skills in `$HERMES_HOME/skills` as they are. When one
    contradicts the corrected guidance, give the user its name, path, and the
    conflicting sentence; the user decides whether to edit or remove it.
 
-`fbrain --skill` and the Brain Working Tree `AGENTS.md` ship inside the `fbrain`
-binary, so step 3 alone corrects them.
+The updated `fbrain --skill` guide is available after step 3. Existing Brain
+Working Tree `AGENTS.md` files regenerate on the next successful open or sync
+with authoritative Brain metadata from the updated binary. Inspect the
+regenerated file before claiming that its instructions have been updated.

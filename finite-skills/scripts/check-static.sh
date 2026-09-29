@@ -280,22 +280,43 @@ else:
             f"{brain_reference_path}: Folder Invitation command overview must match the CLI"
         )
 
-    # Invitations target one key or use a capability token. fbrain 0.5.0
-    # resolves email only through public NIP-05 and has no guest email
-    # bootstrap, so guidance must not advertise either retired path.
-    for retired_invite in (
-        "invite folder claim",
-        "|claim|",
-        "--invite-secret-file",
-        "<email|npub>",
-        "<email|NIP-05|npub>",
-        "<email|nip05|npub>",
-        "preflight/commit",
-        "is a symlink to",
+    def normalize_invite_examples(text: str) -> str:
+        text = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", text).lower()
+        text = re.sub(r"<([^<>]*)>", lambda match: re.sub(r"\s+", "", match[0]), text)
+        text = re.sub(r"\s*\|\s*", "|", text)
+        return " ".join(text.split())
+
+    def retired_invite_syntax(text: str) -> list[str]:
+        normalized = normalize_invite_examples(text)
+        retired = [
+            marker for marker in (
+                "invite folder claim", "|claim|", "--invite-secret-file",
+                "--target <email>", "preflight/commit", "is a symlink to",
+            ) if marker in normalized
+        ]
+        for placeholder in re.findall(r"<([^<>]*)>", normalized):
+            alternatives = set(placeholder.split("|"))
+            if "email" in alternatives and alternatives & {"npub", "hex", "nip05", "nip-05"}:
+                retired.append(f"<{placeholder}>")
+        return retired
+
+    # These are syntax regression guards, not proof of natural-language meaning.
+    # Keep the demonstrated formatting bypasses executable beside the checker.
+    for example in (
+        "fbrain invite brain create --target <email | npub>",
+        "fbrain invite brain create --target <EMAIL|NPUB>",
+        "fbrain invite folder \\\n  claim <invite-code> --email <address>",
+        "admin ensure-access --target < email >",
     ):
-        if retired_invite in brain_text:
+        if not retired_invite_syntax(example):
+            errors.append(f"invitation syntax checker missed {example!r}")
+    if retired_invite_syntax("fbrain invite-token create --email <address>"):
+        errors.append("invitation syntax checker rejects capability email delivery")
+
+    for source_path in (brain_path, *brain_reference_paths):
+        for retired_invite in retired_invite_syntax(source_path.read_text(encoding="utf-8")):
             errors.append(
-                f"{brain_path}: retired Brain invitation guidance {retired_invite!r}"
+                f"{source_path}: retired Brain invitation guidance {retired_invite!r}"
             )
     invitation_contracts = (
         (
@@ -306,7 +327,7 @@ else:
             r"fbrain invite-token create --brain <brain-id> --email <address>",
             "email capability invitation",
         ),
-        (r"single-use bearer capability", "capability link semantics"),
+        (r"bearer capability", "capability terminology"),
         (
             r"`sent`.*`not_configured`.*`failed`.*link still works.*`manual`",
             "token delivery statuses",
@@ -333,7 +354,7 @@ else:
         ),
     )
     for pattern, behavior in invitation_contracts:
-        if not re.search(pattern, brain_text, re.DOTALL):
+        if not re.search(pattern, normalize_invite_examples(brain_text), re.IGNORECASE | re.DOTALL):
             errors.append(f"{brain_path}: missing Brain invitation contract for {behavior}")
     for forbidden_server in (
         'SERVER="https://finite.computer"',

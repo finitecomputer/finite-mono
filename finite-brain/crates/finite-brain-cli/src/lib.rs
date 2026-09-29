@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -4924,6 +4924,88 @@ mod tests {
         assert!(!reference.contains("`auth login` is legacy guidance"));
     }
 
+    fn normalized_invite_examples(text: &str) -> String {
+        let joined = text
+            .lines()
+            .map(|line| line.trim_end().trim_end_matches('\\'))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let mut in_placeholder = false;
+        let compact: String = joined
+            .chars()
+            .filter(|&character| {
+                if character == '<' {
+                    in_placeholder = true;
+                } else if character == '>' {
+                    in_placeholder = false;
+                }
+                !in_placeholder || !character.is_whitespace()
+            })
+            .collect();
+        compact
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" |", "|")
+            .replace("| ", "|")
+    }
+
+    fn retired_invite_syntax(text: &str) -> Vec<String> {
+        let normalized = normalized_invite_examples(text);
+        let mut retired = [
+            "|claim|",
+            "invite folder claim",
+            "--invite-secret-file",
+            "--target <email>",
+            "preflight/commit",
+        ]
+        .into_iter()
+        .filter(|marker| normalized.contains(marker))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        for tail in normalized.split('<').skip(1) {
+            let Some((placeholder, _)) = tail.split_once('>') else {
+                continue;
+            };
+            let alternatives = placeholder.split('|').collect::<Vec<_>>();
+            if alternatives.contains(&"email")
+                && alternatives
+                    .iter()
+                    .any(|value| matches!(*value, "npub" | "hex" | "nip05" | "nip-05"))
+            {
+                retired.push(format!("<{placeholder}>"));
+            }
+        }
+        retired
+    }
+
+    #[test]
+    fn invite_guidance_guard_handles_formatted_command_examples() {
+        for example in [
+            "fbrain invite brain create --target <email | npub>",
+            "fbrain invite brain create --target <EMAIL|NPUB>",
+            "fbrain invite folder \\\n  claim <invite-code> --email <address>",
+            "admin ensure-access --target < email >",
+        ] {
+            assert!(
+                !retired_invite_syntax(example).is_empty(),
+                "missed {example}"
+            );
+        }
+        for example in [
+            "fbrain invite brain create --target <npub | hex | NIP-05>",
+            "fbrain invite-token create --email <address>",
+            "a single-use bearer capability",
+            "a bearer capability redeemable by one key",
+        ] {
+            assert!(
+                retired_invite_syntax(example).is_empty(),
+                "rejected {example}"
+            );
+        }
+    }
+
     #[test]
     fn packaged_invite_guidance_matches_the_supported_invite_surface() {
         let skill = include_str!(
@@ -4935,6 +5017,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let help = run(&tmp, &["help"]);
         let guide = run(&tmp, &["--skill"]);
+        // Inspect the generated instruction template without exposing a new
+        // production API just for its prose. Unescape its line separators.
+        let generated = include_str!("../../finite-brain-core/src/portability/working_tree.rs")
+            .replace("\\n", "\n");
 
         // The retired guest email bootstrap is not a command.
         let error = run_with_env(
@@ -4951,32 +5037,34 @@ mod tests {
             ("--skill", guide.as_str()),
             ("SKILL.md", skill),
             ("fbrain-cli.md", reference),
+            ("generated AGENTS.md template", generated.as_str()),
         ] {
-            for retired in ["|claim|", "invite folder claim", "--invite-secret-file"] {
-                assert!(!text.contains(retired), "{source} advertises {retired}");
-            }
+            let retired = retired_invite_syntax(text);
+            assert!(retired.is_empty(), "{source} advertises {retired:?}");
             assert!(
                 text.contains("invite-token create"),
                 "{source} omits invite tokens"
             );
         }
 
-        // Every guide an agent reads describes the same invite contract.
+        // Syntax and terminology guards supplement source review; they cannot
+        // prove that arbitrary natural-language guidance describes the contract.
         for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+            let normalized = normalized_invite_examples(text);
             for contract in [
                 "--target <npub|hex|NIP-05>",
                 "invite-token create --brain <brain-id> --email <address>",
-                "single-use bearer capability",
+                "bearer capability",
                 "`not_configured`",
                 "`manual`",
                 "from `1h` through `30d`",
                 "Membership and readable Folders are separate states",
                 "fbrain access explain <folder-id>",
             ] {
-                assert!(text.contains(contract), "{source} omits {contract}");
-            }
-            for retired in ["<email|npub>", "<email|nip05|npub>", "preflight/commit"] {
-                assert!(!text.contains(retired), "{source} advertises {retired}");
+                assert!(
+                    normalized.contains(&normalized_invite_examples(contract)),
+                    "{source} omits {contract}"
+                );
             }
         }
     }

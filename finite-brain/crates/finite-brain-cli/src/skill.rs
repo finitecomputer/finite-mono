@@ -68,9 +68,10 @@ metadata-only Folders.
 
 ## Sharing: inviting someone (admin)
 
-Every invite command requires Brain admin standing. Grants name keys or
-capability tokens, never emails. Choose the path by what identifies the
-invitee.
+Creating and revoking invitations require Brain admin standing. Invitees
+inspect and accept key-addressed invitations as the addressed key; a bearer
+holder can redeem a token. Grants name keys or capability tokens. Choose the
+path by what identifies the invitee.
 
 Key-addressed invitation: for an npub, a 64-character hex public key, or a
 name that resolves through public NIP-05 (for example `name@finite.vip`):
@@ -82,7 +83,8 @@ fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05> [--fold
 `fbrain` resolves a NIP-05 name once and binds the invitation to that one
 key; only that key can accept it. The receipt reports
 `deliveryStatus: in_app`: the invitee finds it with `fbrain invite brain list`
-or in the Product Client. No email is sent, by design.
+outside any Brain Working Tree, with the intended server selected, or in the
+Product Client. No email is sent, by design.
 
 Email capability invitation: for an email address with no public NIP-05:
 
@@ -101,45 +103,59 @@ and never paste it into logs, Brain pages, or reports. `deliveryStatus` is
 yourself), `failed` (the link still works; share it yourself or revoke it),
 or `manual` (no `--email`; share the link yourself).
 
-`--expires-in` takes whole hours or days from `1h` through `30d`; the default
-is `7d`.
+The CLI accepts `--expires-in` in whole hours or days from `1h` through `30d`;
+the default is `7d`. Servers before the FIN-147 fix can reject `1h` after
+request drift. Report the error and preserve the requested expiry; let the
+user choose a longer duration or wait for the server fix. A leading client
+clock can also make `30d` exceed the server's strict ceiling.
 
-Membership and readable Folders are separate states. Acceptance or redemption
-grants Brain Membership and Folder entitlement: every `all_members` Folder,
-plus each `--folder` named on a key-addressed invitation. A member-role token
-never entitles a `restricted` Folder. An entitled Folder stays locked until a
-Brain admin who holds the current Folder Key wraps it for the new member, on
-that admin's next `fbrain sync now` or with:
+Membership and readable Folders are separate states. A Brain Invitation grants
+Membership and entitlement to every `all_members` Folder plus each selected
+`restricted` Folder. Naming an `owner` or `admin_only` Folder with `--folder`
+does not grant its required standing. A member-role token grants Membership
+and `all_members` entitlement; an Organization Brain admin-role token grants
+admin standing and entitlement to every Folder. Folder Invitations instead
+grant bounded Guest access, without Brain Membership.
 
-```sh
-fbrain admin ensure-access --brain <brain-id> --target <npub|hex|NIP-05>
-```
+For an intended Brain member, an entitled Folder stays locked until an admin
+holding the current Folder Key wraps it for them. That admin's ordinary sync
+attempts pending wraps on a best-effort basis. If necessary, that admin can run
+`fbrain admin ensure-access --brain <brain-id> --target <npub|hex|NIP-05>`.
+This also completes missing Brain Membership: use it only for an intended
+member, never to repair a Folder Guest's access. A `needsKeyHolder` result
+requires an admin who holds the current key.
 
-It is idempotent and also completes a missing Membership. Re-run it from a
-current key holder when a Folder reports `needsKeyHolder`.
 The invitee checks with `fbrain sync now --summary`, then
-`fbrain access explain <folder-id>`: `readable` means usable, `locked` means
-still waiting for a Folder Key. Lower-level primitives: `admin member add`,
+`fbrain access explain <folder-id> --json`. Its local `state` is `readable`,
+`locked`, `unavailable`, or `unknown`. `locked` means Folder Access or an open
+Folder Key is missing; verify entitlement before diagnosing delayed keys.
+`unavailable` means present but unreadable; `unknown` means absent locally.
+Confirm successful sync and expected revisions alongside `readable` before
+reporting that current content is usable. Lower-level primitives:
+`admin member add`,
 `admin role grant admin`, `admin folder-access grant --folder <id>`.
 
 Unsupported: inviting by Finite account, login email, or Core account lookup;
 one invitation reaching every agent or device of one person; guest email
-bootstrap through a Folder claim flow or invite secret. An email that is not a
-public NIP-05 name fails as a `--target`; use the email capability invitation.
+bootstrap through a Folder claim flow or invite secret. If a public NIP-05
+record is confirmed absent, explain the email capability alternative and
+obtain the user's choice before changing identity binding. Transport or
+document errors only establish that resolution could not verify a key.
 
 ## Sharing: being invited (invitee)
 
 ```sh
-fbrain invite brain list                 # your pending invitations (expired ones are marked)
+# Run outside any Brain Working Tree, with the intended server selected.
+fbrain invite brain list                 # incoming invitations, including expired ones
 fbrain invite brain accept --id <invitation-id>
 fbrain invite-accept <url-or-token>      # redeem a capability Invite Token link
 fbrain open <brain-id>                   # then sync as usual
 ```
 
-`invite brain list` with no `--brain` is your inbox: invitations addressed
-to this identity. The same command with `--brain <id>` lists invitations
-ISSUED on that Brain, a different dataset, so do not answer "have I been
-invited to anything?" with the `--brain` form. `brain list --json` also
+`invite brain list` with no `--brain` is your inbox only outside a Brain
+Working Tree. Inside a tree it infers that Brain and lists issued invitations,
+just like `--brain <id>`; the scoped listing requires admin standing.
+`brain list --json` also
 hints at incoming invitations with `role: "invited"`. Accept by invitation
 id (`invitation-...`), not by invite code (`invite-...`); when only a code
 is at hand, read its `llms.txt` instructions URL for the id.
@@ -175,7 +191,8 @@ inferring from local files.
 - `approval nonce was already applied`: the signed approval was already
   executed; do not retry the same artifact.
 - `deliveryStatus: in_app` on an invitation: in-band delivery by design.
-  The invitee sees it in `fbrain invite brain list` or the Product Client.
+  The invitee sees it in `fbrain invite brain list` outside any Brain Working
+  Tree, with the intended server selected, or the Product Client.
   It does not mean email delivery is broken.
 - `expired` on an invitation: it can no longer be accepted; re-invite.
 - Invite-code vs invitation-id confusion: codes start with `invite-`; open
@@ -193,12 +210,13 @@ reference is its `llms.txt` document:
 
 ## Guidance precedence
 
-This guide ships inside this `fbrain` binary and describes its behavior. When
-an installed skill disagrees with this guide or with `fbrain` errors, follow
-this guide, tell the user which skill disagrees, and leave the skill unchanged
-unless the user asks. Notes saved in an agent's own skills about a Brain
-defect or workaround are dated observations of one `fbrain` and server
-version: recheck them against this guide before repeating them as advice.
+This guide describes the installed CLI. Verify technical claims against its
+help and errors and current server evidence. Preserve user instructions,
+authorization limits, and intentional customizations, including restrictions
+on bearer invitations. Report unresolved conflicts before acting on the
+conflicting instruction; leave user-owned skills unchanged unless the user
+asks. Saved defect notes are dated observations: recheck the installed CLI
+and current server behavior before repeating them as advice.
 
 ## Security rules
 
