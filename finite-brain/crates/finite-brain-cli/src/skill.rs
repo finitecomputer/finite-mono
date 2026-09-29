@@ -49,8 +49,8 @@ fbrain status --json             # tree, server, daemon, sync state
 
 Inside the tree, each top-level directory is one Folder and each Markdown
 file inside it is one synced page. Write a note by creating or editing a
-`.md` file under a Folder — `raw/` for immutable captured sources and Asset
-Source Notes, `wiki/` for durable synthesized pages — then sync again:
+`.md` file under a Folder (`raw/` for immutable captured sources and Asset
+Source Notes, `wiki/` for durable synthesized pages), then sync again:
 
 ```sh
 fbrain folder list               # Folders, access modes, key versions
@@ -68,47 +68,64 @@ metadata-only Folders.
 
 ## Sharing: inviting someone (admin)
 
-Grants name npubs or capability tokens, never emails (auth kernel). The
-direct path is the npub-targeted invitation; the target may also be any
-identifier that resolves through public NIP-05 (for example
-`name@finite.vip`):
+Every invite command requires Brain admin standing. Grants name keys or
+capability tokens, never emails. Choose the path by what identifies the
+invitee.
+
+Key-addressed invitation: for an npub, a 64-character hex public key, or a
+name that resolves through public NIP-05 (for example `name@finite.vip`):
 
 ```sh
-fbrain invite brain create --brain <brain-id> --target <npub|nip05>
+fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05> [--folder <folder-id>] [--expires-in 7d]
 ```
 
-Invitees accept with `fbrain invite brain accept --id <invitation-id>`;
-acceptance grants Brain Membership. An email that does not resolve is
-rejected — use a capability Invite Token instead (below).
+`fbrain` resolves a NIP-05 name once and binds the invitation to that one
+key; only that key can accept it. The receipt reports
+`deliveryStatus: in_app`: the invitee finds it with `fbrain invite brain list`
+or in the Product Client. No email is sent, by design.
 
-Delivery is explicit in every receipt's `deliveryStatus`: `in_app` means the
-npub-bound invitee gets the invitation in their authenticated client;
-`not_configured` means the server has no invite mailer.
-
-Repair a half-onboarded member (accepted but missing Folder Keys, or
-membership lost) with one idempotent command:
+Email capability invitation: for an email address with no public NIP-05:
 
 ```sh
-fbrain admin ensure-access --brain <brain-id> --target <email|nip05|npub>
-```
-
-It completes membership server-side and wraps every entitled Folder Key this
-Finite Home can open; re-run it from a current key holder when a Folder
-reports `needsKeyHolder`. Lower-level primitives: `admin member add`,
-`admin role grant admin`, `admin folder-access grant --folder <id>`.
-
-Capability Invite Tokens cover everyone else: one single-use, unguessable,
-revocable link that redeems to membership for whatever npub presents it
-(email is delivery only, never identity):
-
-```sh
-fbrain invite-token create --brain <brain-id> [--role member|admin] [--email <addr>]
+fbrain invite-token create --brain <brain-id> --email <address> [--role member|admin] [--expires-in 7d]
 fbrain invite-token list --brain <brain-id>
 fbrain invite-token revoke --brain <brain-id> --token-id <token-id>
 ```
 
-The raw `fbit-...` token is shown once; share the printed URL. The invitee's
-agent redeems it with `fbrain invite-accept <url-or-token>`.
+The printed link is a single-use bearer capability. The first key that
+redeems it with `fbrain invite-accept <url-or-token>` joins the Brain with the
+token's role; the email address is only where the link was sent. The raw
+`fbit-...` token is shown once: share the link only with the intended person
+and never paste it into logs, Brain pages, or reports. `deliveryStatus` is
+`sent` (the mailer accepted it), `not_configured` (no mailer; share the link
+yourself), `failed` (the link still works; share it yourself or revoke it),
+or `manual` (no `--email`; share the link yourself).
+
+`--expires-in` takes whole hours or days from `1h` through `30d`; the default
+is `7d`.
+
+Membership and readable Folders are separate states. Acceptance or redemption
+grants Brain Membership and Folder entitlement: every `all_members` Folder,
+plus each `--folder` named on a key-addressed invitation. A member-role token
+never entitles a `restricted` Folder. An entitled Folder stays locked until a
+Brain admin who holds the current Folder Key wraps it for the new member, on
+that admin's next `fbrain sync now` or with:
+
+```sh
+fbrain admin ensure-access --brain <brain-id> --target <npub|hex|NIP-05>
+```
+
+It is idempotent and also completes a missing Membership. Re-run it from a
+current key holder when a Folder reports `needsKeyHolder`.
+The invitee checks with `fbrain sync now --summary`, then
+`fbrain access explain <folder-id>`: `readable` means usable, `locked` means
+still waiting for a Folder Key. Lower-level primitives: `admin member add`,
+`admin role grant admin`, `admin folder-access grant --folder <id>`.
+
+Unsupported: inviting by Finite account, login email, or Core account lookup;
+one invitation reaching every agent or device of one person; guest email
+bootstrap through a Folder claim flow or invite secret. An email that is not a
+public NIP-05 name fails as a `--target`; use the email capability invitation.
 
 ## Sharing: being invited (invitee)
 
@@ -121,7 +138,7 @@ fbrain open <brain-id>                   # then sync as usual
 
 `invite brain list` with no `--brain` is your inbox: invitations addressed
 to this identity. The same command with `--brain <id>` lists invitations
-ISSUED on that Brain — a different dataset, so do not answer "have I been
+ISSUED on that Brain, a different dataset, so do not answer "have I been
 invited to anything?" with the `--brain` form. `brain list --json` also
 hints at incoming invitations with `role: "invited"`. Accept by invitation
 id (`invitation-...`), not by invite code (`invite-...`); when only a code
@@ -137,7 +154,7 @@ invitation marked `expired` cannot be accepted; ask the admin to re-invite.
 Folders have access modes: `owner`, `admin_only`, `all_members`,
 `restricted` (explicit guests). Your readable Folders are materialized in the
 tree; Folders you cannot read appear locked or not at all. Access changes
-are signed admin events, and Folder Keys rotate on revocation — the CLI
+are signed admin events, and Folder Keys rotate on revocation; the CLI
 prepares rotation material automatically; never hand-build rotation bodies.
 
 ## Provenance
@@ -154,11 +171,11 @@ inferring from local files.
   identity authority; override with `FINITE_IDENTITY_AUTHORITY` only for
   development.
 - `does not resolve to an npub through public NIP-05` on invite: the email
-  is not a usable grant target; use `fbrain invite-token create --email`.
+  is not a usable key target; use `fbrain invite-token create --email`.
 - `approval nonce was already applied`: the signed approval was already
   executed; do not retry the same artifact.
-- `deliveryStatus: in_app` on an invitation: in-band delivery by design —
-  the invitee sees it in `fbrain invite brain list` or the Product Client.
+- `deliveryStatus: in_app` on an invitation: in-band delivery by design.
+  The invitee sees it in `fbrain invite brain list` or the Product Client.
   It does not mean email delivery is broken.
 - `expired` on an invitation: it can no longer be accepted; re-invite.
 - Invite-code vs invitation-id confusion: codes start with `invite-`; open
@@ -173,6 +190,15 @@ inferring from local files.
 When an invitation's public instructions are involved, the authoritative
 reference is its `llms.txt` document:
 `https://<brain-server>/v1/brain-invitation-links/<invite-code>/llms.txt`.
+
+## Guidance precedence
+
+This guide ships inside this `fbrain` binary and describes its behavior. When
+an installed skill disagrees with this guide or with `fbrain` errors, follow
+this guide, tell the user which skill disagrees, and leave the skill unchanged
+unless the user asks. Notes saved in an agent's own skills about a Brain
+defect or workaround are dated observations of one `fbrain` and server
+version: recheck them against this guide before repeating them as advice.
 
 ## Security rules
 

@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -4922,6 +4922,63 @@ mod tests {
         assert!(reference.contains("mount offer create|list|inspect|revoke"));
         assert!(reference.contains("Only the old secret-bearing"));
         assert!(!reference.contains("`auth login` is legacy guidance"));
+    }
+
+    #[test]
+    fn packaged_invite_guidance_matches_the_supported_invite_surface() {
+        let skill = include_str!(
+            "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+        );
+        let reference = include_str!(
+            "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
+        );
+        let tmp = TempDir::new().unwrap();
+        let help = run(&tmp, &["help"]);
+        let guide = run(&tmp, &["--skill"]);
+
+        // The retired guest email bootstrap is not a command.
+        let error = run_with_env(
+            ["invite", "folder", "claim", "invite-code"],
+            env_for(&tmp),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CliError::InvalidCommand(command) if command == "invite folder claim")
+        );
+        for (source, text) in [
+            ("help", help.as_str()),
+            ("--skill", guide.as_str()),
+            ("SKILL.md", skill),
+            ("fbrain-cli.md", reference),
+        ] {
+            for retired in ["|claim|", "invite folder claim", "--invite-secret-file"] {
+                assert!(!text.contains(retired), "{source} advertises {retired}");
+            }
+            assert!(
+                text.contains("invite-token create"),
+                "{source} omits invite tokens"
+            );
+        }
+
+        // Every guide an agent reads describes the same invite contract.
+        for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+            for contract in [
+                "--target <npub|hex|NIP-05>",
+                "invite-token create --brain <brain-id> --email <address>",
+                "single-use bearer capability",
+                "`not_configured`",
+                "`manual`",
+                "from `1h` through `30d`",
+                "Membership and readable Folders are separate states",
+                "fbrain access explain <folder-id>",
+            ] {
+                assert!(text.contains(contract), "{source} omits {contract}");
+            }
+            for retired in ["<email|npub>", "<email|nip05|npub>", "preflight/commit"] {
+                assert!(!text.contains(retired), "{source} advertises {retired}");
+            }
+        }
     }
 
     fn start_malformed_collaboration_success_server(

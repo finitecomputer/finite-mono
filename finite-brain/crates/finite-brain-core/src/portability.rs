@@ -802,6 +802,15 @@ mod tests {
         assert!(root_instructions.contains("fbrain folder list"));
         assert!(root_instructions.contains("fbrain invite brain accept"));
         assert!(root_instructions.contains("fbrain --skill"));
+        // Sharing guidance names only the supported invite paths: one key,
+        // or a capability token for an email with no public NIP-05.
+        assert!(root_instructions.contains("--target <npub|hex|NIP-05>"));
+        assert!(root_instructions.contains("fbrain invite-token create --email <address>"));
+        assert!(root_instructions.contains("single-use bearer capability"));
+        assert!(root_instructions.contains("fbrain access explain <folder-id>"));
+        assert!(!root_instructions.contains("<email|npub>"));
+        assert!(!root_instructions.contains("--target <email>"));
+        assert!(!root_instructions.contains("preflight/commit"));
         assert!(projection.files.contains_key("_index.md"));
         assert!(projection.files.contains_key("_wiki/index.md"));
         assert!(projection.files.contains_key("Concepts/AGENTS.md"));
