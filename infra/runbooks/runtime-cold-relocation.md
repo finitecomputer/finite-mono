@@ -14,6 +14,13 @@ name is not authority to select a Runtime.
 
 - The Core, source Runner, and target Runner run the reviewed generation that
   contains the `runtime_relocation.v1` contract.
+- For an Agent enrolled in Core authentication, the target Runner must also
+  advertise `supportsRelocationCredentials` in its lease capacity, which it
+  does when `FC_RUNNER_RUNTIME_CORE_URL` is configured. Core will not lease
+  that relocation to an older Runner. A new Runner talking to an older Core
+  stops before provider work and retries. Quiesce already-leased relocations
+  before deploying this Core change: the capability gate cannot recall work an
+  old Runner has already claimed.
 - A full lat1 Borg archive completed successfully after quiescing the hosted
   services, and its archive is visible from the independently held recovery
   credentials.
@@ -203,12 +210,31 @@ Only after those checks does Core replace the source binding. The Runner
 resolves fresh target-host secrets through the normal launch path; durable
 state is never used as the secret transport.
 
+For an enrolled Agent, the authenticated relocation-credential endpoint prepares
+one inactive successor credential for the exact live lease. Retries reuse it.
+The predecessor remains bound until completion, which revokes it and activates
+the successor on the target in one transaction. If the lease expires before the
+successor activates, the whole completion rolls back with a lease conflict: the
+predecessor stays bound and unrevoked with the activation state it had before,
+the successor stays pending, and the request stays launching until its lease is
+retried, the Runner records the failure, or an operator cancels it.
+Hosted access preferences and native credentials carry forward from their latest
+committed state; routing waits for the new process to acknowledge the current
+configuration generation.
+An Agent that was never enrolled stays unenrolled. A revoked or inconsistent
+credential fails closed; this operation cannot repair historical credentials.
+
 ## VERIFY
 
 - The relocation creation request is `running`.
 - Core still has the same Project, Runtime ID, artifact, state schema, and
   Agent Principal, now bound to the target host and same machine name.
 - The target container is running and healthy.
+- For an enrolled Agent, Core configuration polling succeeds with the target
+  credential, the predecessor no longer authenticates, and hosted access is
+  ready after the target acknowledges its configuration. A subsequent canary
+  upgrade must obtain the current credential successfully. Record outcomes,
+  never credential values.
 - Finite Chat receives a round trip from the existing Agent Principal.
 - Sites, Brain, workspace files, Hermes memory, and installed skills expected
   for the canary are present.
@@ -233,6 +259,17 @@ registration. Preserve that tree under a request-specific, non-canonical name,
 then restage the absent canonical path from the stopped source only after
 diagnosing the failure.
 
+Failure or cancellation revokes only the pending successor credential. It does
+not re-activate stopped source compute or alter the predecessor's existing
+activation state. A fresh relocation request receives a fresh successor.
+
+After the first successful credential handoff, keep Core on a version that
+understands relocation-owned credentials. Older Core versions cannot provision
+a later upgrade from that credential lineage. If Core must be rolled back,
+hold relocations and upgrades until a compatible version is restored; do not
+unrevoke or rebind credential rows manually. Existing runtime authentication
+uses the same schema and token contract, and no database migration is required.
+
 After Core switches the binding, do not manually start source compute: that
 would create two writers. Stop the target through Core first. A reverse
 relocation requires a new exact transaction, but the old source canonical path
@@ -245,3 +282,79 @@ rename or delete either copy automatically.
 If the target modified durable state and cannot be stopped cleanly, fail closed.
 Preserve both sides and restore the named pre-move Borg archive to an empty
 recovery target rather than guessing which tree is canonical.
+
+## Recover an already-completed relocation with a revoked credential
+
+`runtime-credential-recover-exact` is a separate operator recovery for the
+pre-handoff defect: a completed relocation has no successor credential and the
+original creation's credential is still Runtime-bound, revoked and inactive.
+Ordinary provisioning must continue to refuse this state. The command requires
+an explicit attestation of this incident; a revoked credential alone does not
+establish why it was revoked. Remove this compatibility command after the
+confirmed affected assignments have recovered or been retired (FIN-117).
+
+Before execution:
+
+1. Deploy Core with relocation-credential lineage and recovery support, and a
+   Runner that accepts the explicit predecessor hash on the private upgrade
+   credential response. An older Core cannot serve recovery; an older Runner
+   rejects this new response field before replacing compute. Ordinary responses
+   omit the field, preserving their existing wire format.
+2. Use `scripts/finite-status` to establish the exact active owner, Runtime,
+   Project, host, machine and expected Principal. Verify direct/published routes
+   and unique port ownership. Review the exact original creation and completed
+   relocation records. Never choose a record by order or use this on an
+   offboarding, owner-changed, stopped or ambiguously relocated Runtime.
+3. Record a consistent Core backup and the current Runtime's verified recovery
+   boundary. Retain its image digest, durable root and Chat continuity evidence.
+   Freeze unrelated lifecycle operations for this Runtime during the repair.
+4. Qualify a different target artifact. Using the currently installed artifact
+   can take the upgrade's no-op path and leave the new credential undelivered.
+5. Run the exact command with `--dry-run`. It rolls back all database writes and
+   prints only a Runtime Operation. Review the target before executing without
+   that flag under explicit production authorization.
+
+Required arguments are `--admin-email`, `--admin-workos-user-id`, `--project-id`,
+`--expected-agent-runtime-id`, `--expected-source-host-id`,
+`--expected-source-machine-id`, `--expected-owner-email`, `--expected-agent-npub`,
+`--expected-predecessor-creation-request-id`, `--expected-relocation-request-id`,
+`--target-runtime-artifact-id`, and `--confirm-relocation-credential-loss`.
+There are no credential arguments or credential output.
+
+The transaction retains the predecessor as revoked history, creates one new
+credential bound to the completed relocation, preserves hosted-access settings
+and resets their application acknowledgement, and enqueues the exact upgrade.
+Core writes a typed `runtime_credential_recoveries` receipt in the same
+transaction, linking the upgrade to its predecessor and successor. The private
+upgrade provisioning endpoint reads that receipt only after validating the live
+lease and current assignment. It returns the new secret and the predecessor's
+SHA-256. The Runner requires the same Core URL and exactly one matching installed
+credential before changing the candidate environment. A mismatch is rejected
+without writing a replacement credential. Verification of an already-running target accepts only the new
+credential; it cannot substitute a value in memory and claim delivery.
+
+No public API can create recovery authority. Audit events record the operation
+but are not authorization inputs. The additive table preserves existing rows
+and older binaries ignore it. Keep it and its reader until no failed recovery
+can require delivery. The operation does not edit identity, Chat state, data
+roots or ports.
+
+After execution, observe the returned operation through Core and run canonical
+status again. Prove new credential authentication, old credential denial,
+hosted-access acknowledgement, unchanged Principal and routes, retained Chat
+history and an actual reply. For FIN-117, only then resume Brain diagnostics
+and verify Brain creation, write and read through an authenticated Chat turn.
+
+The command is single-use for an exact legacy state. Repeating it after success
+fails closed; it never rotates a credential again. Runner lease retries reuse
+the new credential. If the upgrade fails after the transaction,
+retain the successor and enqueue an ordinary exact upgrade to the same artifact
+on the same owner, Project, Runtime, host and machine. Core may reuse the receipt
+of the failed recovery operation only for that same binding and artifact. It
+returns the same successor, never another rotation. Other upgrades receive no
+replacement authorization. Do not re-run
+recovery, restore the old credential or roll the database back over later writes.
+Compute rollback retains the old image and data but does not restore Core
+access to the old process. Keep compatible Core deployed until delivery and
+verification finish. This is not an automatic fleet repair or a promise that
+an image rollback also rolls back credentials.

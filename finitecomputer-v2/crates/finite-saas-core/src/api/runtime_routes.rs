@@ -58,6 +58,31 @@ pub(super) async fn provision_upgrade_credential(
     Ok(([("cache-control", "no-store")], Json(result)))
 }
 
+// Separate endpoint: N-1 Core returns 404, so a new Runner keeps the request
+// retryable before calling the provider. A null response preserves unenrollment.
+pub(super) async fn provision_relocation_credential(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(input): Json<ProvisionRuntimeCredentialRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let result = state
+        .store
+        .provision_relocation_credential(
+            crate::store::runtime_credentials::ProvisionRuntimeCredential {
+                creation_request_id: request_id,
+                runner_id: input.runner_id,
+                lease_token: input.lease_token,
+                source_host_id: credential.source_host_id,
+                prepare_hosted_access: false,
+            },
+        )
+        .await?;
+    Ok(([("cache-control", "no-store")], Json(result)))
+}
+
 pub(super) async fn hosted_hermes_location(
     State(state): State<CoreApiState>,
     headers: HeaderMap,

@@ -155,6 +155,7 @@ async fn postgres_same_host_relocation_recreates_compute_only_under_absence_atte
             let capacity = RunnerLeaseCapacity {
                 runner_classes: vec![RunnerClass::Kata],
                 runtime_capabilities: Some(kata_runtime_capabilities()),
+                supports_relocation_credentials: true,
                 ..RunnerLeaseCapacity::default()
             };
 
@@ -309,6 +310,18 @@ async fn postgres_same_host_relocation_recreates_compute_only_under_absence_atte
                 .unwrap()
                 .unwrap();
             assert_eq!(lease.request.id, relocation.id);
+            let successor = store
+                .provision_relocation_credential(runtime_credentials::ProvisionRuntimeCredential {
+                    creation_request_id: relocation.id.clone(),
+                    runner_id: format!("runner-{host}"),
+                    lease_token: "relocate-lease".to_string(),
+                    source_host_id: host.to_string(),
+                    prepare_hosted_access: false,
+                })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(store.authenticate_runtime_credential(&successor.secret).await.unwrap().is_none());
             store
                 .register_agent_creation_runtime(RegisterAgentCreationRuntimeInput {
                     request_id: relocation.id.clone(),
@@ -362,8 +375,9 @@ async fn postgres_same_host_relocation_recreates_compute_only_under_absence_atte
                 .await
                 .unwrap();
             assert!(store.authenticate_runtime_credential(&old_secret).await.unwrap().is_none());
-            let credential = store.query_json("SELECT to_jsonb(c) FROM runtime_core_credentials c WHERE agent_runtime_id=$1", &[&runtime_id]).await;
-            assert_eq!(credential[0]["revoked"], true);
+            assert!(store.authenticate_runtime_credential(&successor.secret).await.unwrap().is_some());
+            let credential = store.query_json("SELECT jsonb_build_object('revoked',revoked,'agent_runtime_id',agent_runtime_id) FROM runtime_core_credentials WHERE creation_request_id=$1", &[&completed.request.id]).await;
+            assert_eq!(credential[0]["revoked"], false);
             // The relocated incarnation latches `online` with no standing
             // report of its own (the old host's last report must not project
             // as its status) and its attribution pin is the relocation's

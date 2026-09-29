@@ -128,6 +128,9 @@ pub(crate) enum Command {
     /// Rebind one stopped Kata Runtime after its exact durable state is staged.
     #[command(name = "runtime-cold-relocate-exact")]
     RuntimeColdRelocateExact(RuntimeColdRelocateExactCliArgs),
+    /// Recover an exact historical relocation credential and enqueue its upgrade.
+    #[command(name = "runtime-credential-recover-exact")]
+    RuntimeCredentialRecoverExact(RuntimeCredentialRecoveryArgs),
     /// Archive a legacy Runtime only after exact binding and absence attestations.
     #[command(name = "runtime-archive-unrecoverable")]
     RuntimeArchiveUnrecoverable(RuntimeArchiveUnrecoverableCliArgs),

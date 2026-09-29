@@ -145,6 +145,13 @@ lat1-healthcheck-contract:
 runner-host-contract:
     cd ../.. && python3 scripts/check_runner_host_contract.py
 
+# Scoped Rust package source sets hold each crate's manifest, build script and
+# src/ tree plus its declared compile inputs. Edits to docs and to files beside
+# src/ (tests/, scripts, examples) keep package store paths and running services
+# unchanged. Edits under src/, including cfg(test) modules, still rebuild.
+package-source-contract:
+    cd ../.. && python3 -m unittest scripts.tests.test_nix_package_sources
+
 # Values-free file/mode/name contract for rebuilding lat1 secret inputs.
 lat1-secret-bootstrap-contract:
     cd ../.. && python3 -m json.tool infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json >/dev/null

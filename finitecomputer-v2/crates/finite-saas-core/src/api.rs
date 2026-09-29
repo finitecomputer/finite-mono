@@ -210,6 +210,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(provision_runtime_credential),
         )
         .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/relocation-credential",
+            post(provision_relocation_credential),
+        )
+        .route(
             "/api/core/v1/runtime-control-requests/{request_id}/runtime-credential",
             post(provision_upgrade_credential),
         )

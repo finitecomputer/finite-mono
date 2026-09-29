@@ -129,6 +129,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_lat3_closure_artifact.py",
     "scripts/tests/test_lat2_closure_artifact.py",
     "scripts/tests/test_lat4_closure_artifact.py",
+    "scripts/tests/test_nix_package_sources.py",
     "infra/scripts/test-hosted-web-chat-restore",
     "infra/scripts/test-litestream-restore",
     "infra/nixos/hosts/finite-lat-1/secret-bootstrap-contract.json",

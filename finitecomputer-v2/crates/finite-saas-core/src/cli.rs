@@ -1,4 +1,6 @@
 use super::*;
+mod credential_recovery;
+pub(super) use credential_recovery::*;
 mod arguments;
 pub(super) use arguments::*;
 mod lifecycle;
