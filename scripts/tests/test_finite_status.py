@@ -1814,6 +1814,57 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         output = finite_status.render_human(report)
         self.assertIn("runner: not applicable on this host", output)
 
+    def test_split_host_containers_are_scored_by_role(self) -> None:
+        # Evidence shape from the collector that probed both tools on every
+        # host: the other role's counts are failed reads.
+        cases = [
+            ("finite-lat-2", "app", "podman", "kata", "podman 1/1 running; Kata VMs not applicable on this host"),
+            ("finite-lat-3", "runner", "kata", "podman", "podman not applicable on this host; Kata VMs 1/1 running"),
+        ]
+        for hostname, role, own, other, line in cases:
+            with self.subTest(role=role):
+                raw = finite_status.load_fixture(FIXTURE)
+                raw["host_health"]["hostname"] = hostname
+                raw["host_health"]["roles"] = [role]
+                raw["host_health"]["hosted_hermes"] = {"status": "green", "state": "not-configured"}
+                raw["host_health"]["containers"] = {
+                    f"{own}_running": 1,
+                    f"{own}_total": 1,
+                    f"{other}_running": None,
+                    f"{other}_total": None,
+                }
+                report = finite_status.build_report(raw, finite_status.parse_time(raw["now"]))
+                containers = report["sections"]["host_health"]["containers"]
+                self.assertEqual(containers["status"], "green")
+                self.assertEqual(containers["not_applicable"], [other])
+                self.assertIn(line, finite_status.render_human(report))
+
+                raw["host_health"]["containers"][f"{own}_running"] = None
+                report = finite_status.build_report(raw, finite_status.parse_time(raw["now"]))
+                self.assertEqual(report["sections"]["host_health"]["containers"]["status"], "unknown")
+
+    def test_collect_probes_only_the_container_tool_of_the_host_role(self) -> None:
+        stats = mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)
+        for hostname, tool, counts in [
+            ("finite-lat-2", "podman", {"podman_running", "podman_total"}),
+            ("finite-lat-3", "nerdctl", {"kata_running", "kata_total"}),
+        ]:
+            with (
+                self.subTest(hostname=hostname),
+                mock.patch.object(finite_status, "systemd_properties", return_value={"LoadState": "loaded"}),
+                mock.patch.object(finite_status, "collect_service_executable", return_value={}),
+                mock.patch.object(finite_status, "collect_hosted_hermes", return_value={}),
+                mock.patch.object(finite_status, "collect_healthcheck_journal", return_value={}),
+                mock.patch.object(finite_status, "collect_host_capacity", return_value={}),
+                mock.patch.object(finite_status.os, "statvfs", return_value=stats),
+                mock.patch.object(finite_status, "line_count", return_value=1) as line_count,
+                mock.patch.object(finite_status, "read_environment_values", return_value={}),
+            ):
+                collected = finite_status.collect_host_health(hostname)
+            self.assertEqual(set(collected["containers"]), counts)
+            self.assertEqual({call.args[0][0] for call in line_count.call_args_list}, {tool})
+            self.assertEqual(collected["errors"], [])
+
     def test_legacy_host_health_input_without_roles_keeps_combined_scoring(
         self,
     ) -> None:
