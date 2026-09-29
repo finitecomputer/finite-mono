@@ -224,6 +224,7 @@ def _finite_private_provider(
 ) -> dict[str, Any]:
     # Finite Private serves no model list, so the model and its capabilities
     # are declared. Vision is scoped like agentd's Finite Private block.
+    # The helper's `_canonical_provider` must equal this entry key for key.
     capabilities: dict[str, Any] = {}
     if context_length is not None:
         capabilities["context_length"] = context_length
@@ -235,6 +236,11 @@ def _finite_private_provider(
         "key_env": FINITE_PRIVATE_KEY_ENV,
         "api_mode": "chat_completions",
         "models": {model_id: capabilities},
+        # The declared models are the whole list. The image's Hermes patch then
+        # validates `/model` against them, so a model this route does not
+        # serve is refused, not saved; unpatched Hermes only skips probing a
+        # listing that Finite Private does not serve.
+        "discover_models": False,
     }
 
 

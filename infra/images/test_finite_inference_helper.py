@@ -10,6 +10,7 @@ import importlib.util
 import inspect
 import json
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ from unittest.mock import patch
 
 REPO = Path(__file__).resolve().parents[2]
 HELPER = REPO / "finite-agentd/integrations/hermes/finite_inference_helper.py"
+RECONCILER = REPO / "finitechat/containers/agent/reconcile_hermes_config.py"
 FIXTURES = REPO / "finite-agentd/tests/fixtures"
 
 FP_MODEL = "glm-5-3-flash"
@@ -180,6 +182,7 @@ def canonical_provider():
         "key_env": "FINITE_PRIVATE_API_KEY",
         "api_mode": "chat_completions",
         "models": {FP_MODEL: {"context_length": 393216, "supports_vision": True}},
+        "discover_models": False,
     }
 
 
@@ -481,10 +484,49 @@ class InferenceFactsTests(HelperCase):
             provider["models"] = {"future-model": {}}
             self.write_config({"providers": {"finite-private": provider}})
             self.assertEqual(self.facts()["finite_private"]["provider_entry"], "canonical")
-        self.write_config(
-            {"providers": {"finite-private": dict(canonical_provider(), transport="x")}}
-        )
-        self.assertEqual(self.facts()["finite_private"]["provider_entry"], "modified")
+        for provider in (
+            dict(canonical_provider(), transport="x"),
+            dict(canonical_provider(), discover_models=True),
+            # As earlier builds of this branch wrote it; the next normal start rewrites it.
+            {key: value for key, value in canonical_provider().items() if key != "discover_models"},
+        ):
+            with self.subTest(provider=provider):
+                self.write_config({"providers": {"finite-private": provider}})
+                self.assertEqual(self.facts()["finite_private"]["provider_entry"], "modified")
+
+    def test_canonical_copies_equal_what_the_reconciler_writes(self):
+        """The reconciler owns both entries; the helper keeps copies to
+        recognize them. A key on one side only makes status report the image's
+        own entries as modified."""
+        reconcile = runpy.run_path(str(RECONCILER))["_reconcile_finite_private_route"]
+        for model_id, base_url, context_length in (
+            (FP_MODEL, FP_BASE_URL, "393216"),
+            (FP_MODEL, "https://kimi-k2-6.finite.containers.tinfoil.dev/v1", ""),
+            ("glm-6", "http://127.0.0.1:8787/v1", ""),
+        ):
+            settings = {
+                "FINITE_CONFIG_FP_MODEL": model_id,
+                "FINITE_CONFIG_FP_BASE_URL": base_url,
+                "FINITE_CONFIG_FP_CONTEXT_LENGTH": context_length,
+            }
+            with self.subTest(**settings), patch.dict(os.environ, settings):
+                config = {"model": fp_model_block()}
+                reconcile(config, {**settings, "FINITE_CONFIG_FP_KEY_PRESENT": "1"}, None)
+                self.assertEqual(
+                    config["providers"]["finite-private"],
+                    helper._canonical_provider(*helper._fp_settings()),
+                )
+                self.assertEqual(
+                    config["fallback_providers"], [helper._canonical_entry(model_id, base_url)]
+                )
+                self.assertEqual(helper._provider_entry_fact(config), "canonical")
+                self.assertEqual(
+                    [
+                        entry["owned_canonical"]
+                        for entry in helper._fallback_facts(config)["effective"]
+                    ],
+                    ["yes"],
+                )
 
     def test_session_override_facts(self):
         self.assertEqual(

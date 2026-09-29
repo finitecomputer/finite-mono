@@ -43,6 +43,7 @@ CANONICAL_PROVIDER = {
     "key_env": "FINITE_PRIVATE_API_KEY",
     "api_mode": "chat_completions",
     "models": {FP_MODEL: {"context_length": FP_CONTEXT, "supports_vision": True}},
+    "discover_models": False,
 }
 CANONICAL_ENTRY = {
     "provider": "finite-private",
@@ -274,6 +275,23 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
             },
         )
 
+    def test_owned_entry_is_rewritten_with_discovery_off_except_on_recovery(self) -> None:
+        # Without `discover_models: false`, patched Hermes would not validate
+        # `/model` against the declared models (R33).
+        earlier_build = {
+            key: value for key, value in CANONICAL_PROVIDER.items() if key != "discover_models"
+        }
+        discovery_on = {**CANONICAL_PROVIDER, "discover_models": True}
+        for name, entry in (("earlier_build", earlier_build), ("discovery_on", discovery_on)):
+            with self.subTest(name):
+                existing = self._existing(FP_BARE_MODEL, providers={"finite-private": entry})
+
+                reconciled = self.reconcile(existing, fp_settings())
+                recovered = self.reconcile(existing, fp_settings(), recover_known_good=True)
+
+                self.assertEqual(reconciled["providers"], {"finite-private": CANONICAL_PROVIDER})
+                self.assertEqual(recovered["providers"], {"finite-private": entry})
+
     def test_null_providers_is_treated_as_absent(self) -> None:
         existing = self._existing(FP_BARE_MODEL, providers=None)
         reconciled = self.reconcile(existing, fp_settings())
@@ -470,6 +488,7 @@ class FinitePrivateFallbackReconcileTest(unittest.TestCase):
                 "key_env": "FINITE_PRIVATE_API_KEY",
                 "api_mode": "chat_completions",
                 "models": {"glm-6": {}},
+                "discover_models": False,
             },
         )
         self.assertEqual(

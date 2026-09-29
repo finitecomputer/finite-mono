@@ -195,6 +195,7 @@ def _fp_settings() -> tuple[str, str, int | None]:
 
 
 def _canonical_provider(model_id: str, base_url: str, context_length: int | None) -> dict:
+    """The reconciler's `_finite_private_provider`, key for key."""
     capabilities: dict[str, Any] = {}
     if context_length is not None:
         capabilities["context_length"] = context_length
@@ -209,6 +210,7 @@ def _canonical_provider(model_id: str, base_url: str, context_length: int | None
         "key_env": FINITE_PRIVATE_KEY_ENV,
         "api_mode": "chat_completions",
         "models": {model_id: capabilities},
+        "discover_models": False,
     }
 
 
