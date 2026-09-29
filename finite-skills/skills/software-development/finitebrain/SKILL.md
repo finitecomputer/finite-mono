@@ -107,7 +107,7 @@ follow that branch's contract.
 Before using an expected domain skill, inspect the skills that are actually installed;
 do not assume a skill exists because the user or a previous Page named it. In a
 managed Runtime, inspect both the Runtime catalog and
-`~/.finite/managed-skills/finite/current`.
+`/data/agent/managed-skills/finite/current`.
 
 If the expected skill is missing:
 
@@ -291,37 +291,111 @@ Folder and Mount revocation commands prepare key rotation and re-encrypted live
 Folder objects automatically. If preparation fails, stop on the reported
 blocker; never create or edit a raw rotation body.
 
-## Managed Skill Verification
+## Managed Skill Freshness
 
-In Finite runtimes, `~/.finite/managed-skills/finite/current` is a symlink to
-the checked-out `finite-skills` repo. Use symlink-aware searches when verifying
-the installed skill:
+In a hosted Agent Runtime this skill is a plain copy, without git metadata, in
+the managed baseline `/data/agent/managed-skills/finite/current`. The baseline
+was copied from the Runtime image bundle `/runtime/finite-skills` when the
+agent was created, and it changes only when `finite skills sync` runs. A
+Runtime restart or image upgrade leaves it as it was.
+
+The installed `fbrain` is the authority on its own behavior: its error
+messages and `fbrain --skill` guide ship inside the binary. When this skill and
+`fbrain` disagree, follow `fbrain` and check the baseline against the image:
 
 ```sh
-find -L ~/.finite/managed-skills/finite/current -path '*finitebrain/SKILL.md' -print
+diff -rq -x __pycache__ /runtime/finite-skills /data/agent/managed-skills/finite/current
 ```
+
+No output means the baseline matches the running image. Any difference means
+the baseline is behind or ahead of this image: tell the user, and run
+`finite skills sync` when they agree. It replaces only the managed baseline.
+
+User-owned skills in `$HERMES_HOME/skills` load alongside this one and are the
+user's data. When a user-owned skill about Brain access or invitations (for
+example `finitebrain-access`) contradicts this skill or `fbrain --skill`,
+follow this skill and the installed CLI. Tell the user the skill's name, path,
+and the conflicting sentence, and edit or remove that skill only when the user
+asks. Notes you saved in your own skills about a Brain defect or workaround
+are dated observations of one `fbrain` and server version: recheck them against
+`fbrain --skill` and this skill before repeating them as advice.
 
 If a runtime lists `finitebrain-agent`, treat it as a stale skill name. The
 current skill name is `finitebrain`.
 
 ## User-Facing Identity
 
-Treat identity as email-first at every user-facing boundary. Ask for, show, and
-confirm a User or Agent by canonical resolvable email, then resolve that email to
-the underlying Member Identity `npub` for `fbrain` and signed operations. Keep
-`npub` values internal to command execution and diagnostics. If email resolution
-fails, report that failure; show the `npub` only when the user asks for advanced
-identity details.
+Show and confirm people by the email or NIP-05 name the user knows. Keep
+`npub` values for command execution and diagnostics, and show one only when the
+user asks for advanced identity details. `fbrain` turns an email into a key
+only through public NIP-05; it never looks up a Finite account or a login
+email. When resolution fails, report that the address has no public NIP-05 key
+and offer the email capability invitation below.
 
 ## Brain Invitations
 
-`invite brain create --target <npub|NIP-05>` is the blessed invite path. It
-invites exactly the resolved key, and its receipt reports
-`deliveryStatus: in_app`: the invitee sees the invitation in their
-authenticated client, which is the designed outcome, not a delivery failure.
-To reach an email address with no public NIP-05, use
-`invite-token create --brain <id> --email <email>`; its receipt reports
-`sent`, `not_configured`, `failed` (the token stays valid), or `manual`.
+Every invite command requires Brain admin standing. Choose the path by what
+identifies the invitee.
+
+Key-addressed invitation: for an npub, a 64-character hex public key, or a name
+that resolves through public NIP-05 (for example `name@finite.vip`):
+
+```sh
+fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05> [--folder <folder-id>] [--expires-in 7d]
+```
+
+`fbrain` resolves a NIP-05 name once and binds the invitation to that one
+key; only that key can accept it. The receipt reports `deliveryStatus: in_app`:
+the invitee finds it with `fbrain invite brain list` or in the Product Client.
+No email is sent, by design.
+
+Email capability invitation: for an email address with no public NIP-05:
+
+```sh
+fbrain invite-token create --brain <brain-id> --email <address> [--role member|admin] [--expires-in 7d]
+```
+
+The printed link is a single-use bearer capability. The first key that
+redeems it with `fbrain invite-accept <url>` joins the Brain with the token's
+role; the email address is only where the link was sent. The raw token is
+shown once: share the link only with the intended person and never paste it
+into logs, Brain pages, or reports. The receipt's `deliveryStatus` is one of:
+
+- `sent`: the mailer accepted the email.
+- `not_configured`: the server has no mailer; share the link yourself.
+- `failed`: the email failed; the link still works, so share it yourself or
+  revoke it.
+- `manual`: no `--email` was given; share the link yourself.
+
+Revoke an unredeemed link with
+`fbrain invite-token revoke --brain <brain-id> --token-id <token-id>`.
+
+`--expires-in` takes whole hours or days from `1h` through `30d`; the default
+is `7d`.
+
+Membership and readable Folders are separate states. Accepting an invitation
+or redeeming a token grants Brain Membership and Folder entitlement: every
+`all_members` Folder, plus each `--folder` named on a key-addressed
+invitation. A member-role token never entitles a `restricted` Folder. An
+entitled Folder stays locked until a Brain admin who holds the current Folder
+Key wraps it for the new member. That happens on that admin's next
+`fbrain sync now`, or when that admin runs
+`fbrain admin ensure-access --brain <brain-id> --target <npub|hex|NIP-05>`. The
+invitee checks with `fbrain sync now --summary`, then
+`fbrain access explain <folder-id>`: `readable` means usable, `locked` means
+still waiting for a Folder Key. Report a new member as joined and waiting for
+Folder Keys until each entitled Folder is `readable`.
+
+Unsupported, so never offer them:
+
+- Inviting by Finite account, login email, or Core account lookup. An email
+  that is not a public NIP-05 name fails as a `--target` for every `invite`,
+  `admin`, `collaborator`, and `mount` command; use the email capability
+  invitation.
+- Inviting every agent or device that belongs to one person. Each invitation
+  reaches exactly one key; invite each key separately.
+- Guest email bootstrap. The Folder claim flow and invite secrets are retired;
+  Folder Invitations target one key.
 
 To answer "have I been invited to anything?", run `fbrain invite brain list`
 with no `--brain`: that form is the acting identity's incoming-invitation
@@ -343,9 +417,9 @@ fbrain collaborator ensure-admin \
 ```
 
 Do not resolve the email yourself and do not probe a public NIP-05 endpoint
-with `curl`. `fbrain` performs native identity resolution once, prepares every
-Folder grant whose current key this Finite Home can open, and returns a typed
-receipt. Inspect `state` before reporting the result:
+with `curl`; `fbrain` resolves the email itself, once, through public
+NIP-05. It prepares every Folder grant whose current key this Finite Home can
+open and returns a typed receipt. Inspect `state` before reporting the result:
 
 - `complete`: authoritative postcondition inspection proved the Admin Brain
   Role and a current Folder Key Grant for every Folder in this operation's

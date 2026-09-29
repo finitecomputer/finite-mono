@@ -83,3 +83,38 @@ not deployment sources. The Finite Sites and FiniteBrain contract deltas have
 been reconciled into this baseline; future component contract changes must land
 here before promotion. The dashboard catalog also still has local-sibling and
 GitHub fallback behavior instead of a release-bound catalog source.
+
+## Correcting Guidance On Existing Agents
+
+A merged skill correction reaches an existing agent only after all of these
+steps. Stop at the first one that fails and record where the rollout stands.
+
+1. Merge the correction to `main`.
+2. Build and promote a Runtime image from a revision that contains it, per
+   `infra/runbooks/runtime-image.md` sections 2 through 4. Record the bundled
+   Finite Skills revision beside the image.
+3. Move the agent's Runtime to that image with an explicit Runtime Upgrade
+   (`infra/runbooks/runtime-image.md` section 4a). The upgrade preserves
+   `/data`, so the old managed baseline is still in place afterwards.
+4. Have the user ask the agent to run `finite skills sync`, or run it in the
+   agent's Runtime with the user's agreement. It prints the adopted tree as
+   `sha256:<digest>`.
+5. Verify from the agent's Runtime:
+
+   ```sh
+   diff -rq -x __pycache__ /runtime/finite-skills /data/agent/managed-skills/finite/current
+   ```
+
+   No output means the managed baseline matches the image. Also hash any file
+   the correction changed and compare it with `git show <revision>:<path> |
+   sha256sum`.
+6. Start a new chat session before retesting. Hermes builds its skills index
+   once per session and caches it per gateway process; `skill_view` reads
+   changed content at an existing skill path from disk. New or removed skill
+   names need `/reload-skills`.
+7. Leave user-owned skills in `$HERMES_HOME/skills` as they are. When one
+   contradicts the corrected guidance, give the user its name, path, and the
+   conflicting sentence; the user decides whether to edit or remove it.
+
+`fbrain --skill` and the Brain Working Tree `AGENTS.md` ship inside the `fbrain`
+binary, so step 3 alone corrects them.

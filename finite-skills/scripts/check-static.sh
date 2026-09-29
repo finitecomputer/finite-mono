@@ -273,12 +273,68 @@ else:
     brain_reference_path = brain_reference_dir / "fbrain-cli.md"
     if not brain_reference_path.is_file():
         errors.append(f"{brain_reference_path}: canonical FiniteBrain CLI reference is required")
-    elif "fbrain invite folder create|list|inspect|accept|claim|revoke" not in (
+    elif "fbrain invite folder create|list|inspect|accept|revoke" not in (
         brain_reference_path.read_text(encoding="utf-8")
     ):
         errors.append(
-            f"{brain_reference_path}: Folder Invitation command overview must include claim"
+            f"{brain_reference_path}: Folder Invitation command overview must match the CLI"
         )
+
+    # Invitations target one key or use a capability token. fbrain 0.5.0
+    # resolves email only through public NIP-05 and has no guest email
+    # bootstrap, so guidance must not advertise either retired path.
+    for retired_invite in (
+        "invite folder claim",
+        "|claim|",
+        "--invite-secret-file",
+        "<email|npub>",
+        "<email|NIP-05|npub>",
+        "<email|nip05|npub>",
+        "preflight/commit",
+        "is a symlink to",
+    ):
+        if retired_invite in brain_text:
+            errors.append(
+                f"{brain_path}: retired Brain invitation guidance {retired_invite!r}"
+            )
+    invitation_contracts = (
+        (
+            r"fbrain invite brain create --brain <brain-id> --target <npub\|hex\|NIP-05>",
+            "key-addressed invitation",
+        ),
+        (
+            r"fbrain invite-token create --brain <brain-id> --email <address>",
+            "email capability invitation",
+        ),
+        (r"single-use bearer capability", "capability link semantics"),
+        (
+            r"`sent`.*`not_configured`.*`failed`.*link still works.*`manual`",
+            "token delivery statuses",
+        ),
+        (r"from `1h` through `30d`", "invitation expiry bounds"),
+        (
+            r"Membership and readable Folders are separate states.*"
+            r"stays locked until.*fbrain access explain",
+            "membership versus Folder Key delivery",
+        ),
+        (
+            r"Unsupported, so never offer them.*Finite account.*"
+            r"every agent or device.*Guest email bootstrap",
+            "unsupported invitation paths",
+        ),
+        (
+            r"diff -rq -x __pycache__ /runtime/finite-skills "
+            r"/data/agent/managed-skills/finite/current.*finite skills sync",
+            "managed baseline freshness check",
+        ),
+        (
+            r"User-owned skills.*edit or remove that skill only when the user\s+asks",
+            "user-owned skill preservation",
+        ),
+    )
+    for pattern, behavior in invitation_contracts:
+        if not re.search(pattern, brain_text, re.DOTALL):
+            errors.append(f"{brain_path}: missing Brain invitation contract for {behavior}")
     for forbidden_server in (
         'SERVER="https://finite.computer"',
         'SERVER="https://brain.smoke.finite.computer"',

@@ -49,14 +49,17 @@ fbrain brain list|create|bootstrap-personal|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
-approvals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]
-fbrain invite folder create|list|inspect|accept|claim|revoke
+fbrain invite-token create|list|revoke
+fbrain invite-accept <url-or-token>
+fbrain approvals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]
+fbrain invite folder create|list|inspect|accept|revoke
 fbrain mount offer create|list|inspect|revoke
 fbrain mount accept|list|inspect|revoke
 fbrain mount participant add|remove
 fbrain admin member add|remove
 fbrain admin role grant|revoke admin
 fbrain admin folder-access grant|revoke
+fbrain admin ensure-access
 ```
 
 Use `brain bootstrap-personal` for first-time Personal Brain setup. It creates
@@ -168,7 +171,7 @@ Semantic indexing is selected by default for readable Folders. Inspect it with
 `search-index status`; `disable --folder` deletes that Folder's vectors but
 keeps BM25, while `enable --folder` durably schedules it for the foreground
 `daemon watch` worker to rebuild in the background. Status reports only
-lifecycle, model contract, and counts—not credentials or wiki text. Folder
+lifecycle, model contract, and counts, never credentials or wiki text. Folder
 selectors use the same readable-Folder and mounted-source rules as `search`.
 
 The lexical index is private disposable state under `.finitebrain/`. It is
@@ -266,12 +269,12 @@ brains, `folder create` defaults to restricted access; for personal brains it
 defaults to owner access.
 
 ```sh
-fbrain admin member add --target <email|NIP-05|npub>
-fbrain admin member remove --target <email|NIP-05|npub>
-fbrain admin role grant admin --target <email|NIP-05|npub>
-fbrain admin role revoke admin --target <email|NIP-05|npub>
-fbrain admin folder-access grant --target <email|NIP-05|npub>
-fbrain admin folder-access revoke --target <email|NIP-05|npub>
+fbrain admin member add --target <npub|hex|NIP-05>
+fbrain admin member remove --target <npub|hex|NIP-05>
+fbrain admin role grant admin --target <npub|hex|NIP-05>
+fbrain admin role revoke admin --target <npub|hex|NIP-05>
+fbrain admin folder-access grant --target <npub|hex|NIP-05>
+fbrain admin folder-access revoke --target <npub|hex|NIP-05>
 
 # Normal, convergent Organization Brain collaboration from its Working Tree
 fbrain collaborator ensure-admin \
@@ -287,7 +290,8 @@ falling back to a guess.
 
 `collaborator ensure-admin` is the normal email-first Organization Brain
 sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
-command resolves the Managed Agent Email natively and returns one typed receipt:
+command resolves the Managed Agent Email through public NIP-05 and returns one
+typed receipt:
 
 - `complete` proves Admin Brain Role plus current Folder readiness across the
   authoritative Folder snapshot.
@@ -311,16 +315,10 @@ normal sharing workflow.
 
 ## Invitations And Sharing
 
-`invite brain create --target <npub|NIP-05>` and
-`invite folder create --target <npub|NIP-05>` invite exactly the resolved key
-and require Brain admin standing. To invite an email address with no public
-NIP-05, use `invite-token create --brain <id> --email <email>`: the token link
-is the capability, and the email is only its delivery.
-
-Key-addressed invitations report `deliveryStatus: in_app`; the invitee sees
-them in their authenticated client. Invite Tokens report `sent`,
-`not_configured`, or `failed` when an email was requested (the token stays
-valid if the email fails) and `manual` otherwise.
+The finitebrain skill's Brain Invitations section is the contract for choosing
+between a key-addressed invitation and an email capability invitation, for
+`deliveryStatus` values, for membership versus readable Folders, and for the
+unsupported cases. This section lists the command syntax.
 
 `invite brain list` answers two different questions depending on the flag:
 with no `--brain` it lists invitations RECEIVED by the acting identity
@@ -337,37 +335,45 @@ your own `fbrain invite brain list` for invitations addressed to your
 principal, and their pending approval and invitation cards in chat.
 
 ```sh
-fbrain invite brain create --target <email|npub>
-fbrain invite brain create --target <email|npub> --expires-in 7d
+fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05>
+fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05> --folder <folder-id> --expires-in 7d
 fbrain invite brain list
 fbrain invite brain inspect <invitation-id>
 fbrain invite brain accept <invitation-id>
 fbrain invite brain revoke <invitation-id>
 
+fbrain invite-token create --brain <brain-id> --email <address> [--role member|admin] [--expires-in 7d]
+fbrain invite-token create --brain <brain-id> [--role member|admin]
+fbrain invite-token list --brain <brain-id>
+fbrain invite-token revoke --brain <brain-id> --token-id <token-id>
+fbrain invite-accept <url-or-token>
+
+fbrain admin ensure-access --brain <brain-id> --target <npub|hex|NIP-05>
+
 fbrain approvals list
 fbrain approvals approve --id <request-id>
 fbrain approvals deny --id <request-id>
 
-fbrain invite folder create --target <email|npub>
+fbrain invite folder create --folder <folder-id> --target <npub|hex|NIP-05>
 fbrain invite folder list
 fbrain invite folder inspect <invitation-id>
 fbrain invite folder accept <invitation-id>
-fbrain invite folder claim <invite-code> --email <email> --invite-secret-file <path>
 fbrain invite folder revoke <invitation-id>
 
-fbrain mount offer create --destination-brain <brain-id> --destination-controller <email|npub>
+fbrain mount offer create --destination-brain <brain-id> --destination-controller <npub|hex|NIP-05>
 fbrain mount offer list
 fbrain mount offer inspect <offer-id>
 fbrain mount accept <offer-id>
-fbrain mount participant add <mount-id> <email|npub>
-fbrain mount participant remove <mount-id> <email|npub>
+fbrain mount participant add <mount-id> <npub|hex|NIP-05>
+fbrain mount participant remove <mount-id> <npub|hex|NIP-05>
 fbrain mount revoke <mount-id>
 ```
 
-Invitations and Mount Offers default to seven days and accept `--expires-in`
-from `1h` through `30d`. Brain Invitations create Members. Folder Invitations
-create bounded Guest access. Mounts are source-backed and work between either
-Brain kind; the CLI opens and wraps required Folder grants in memory.
+Invitations, Invite Tokens, and Mount Offers default to seven days and accept
+`--expires-in` in whole hours or days from `1h` through `30d`. Brain
+Invitations create Members. Folder Invitations create bounded Guest access.
+Mounts are source-backed and work between either Brain kind; the CLI opens and
+wraps required Folder grants in memory.
 Folder Invitations target an exact key, supplied directly or resolved through
 public NIP-05; they do not invite an unregistered email address. A Folder's
 native access mode remains unchanged; explicit Guest access is orthogonal to it.
