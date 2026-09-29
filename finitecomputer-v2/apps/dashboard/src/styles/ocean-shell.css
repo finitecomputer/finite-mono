@@ -3215,9 +3215,11 @@ button.ocean-pill-button {
 
 .finite-chat__slash {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + 8px);
-  left: 0;
+  /* The composer box is 1rem narrower than the anchor on each side and has
+     a 1px border. These offsets keep the picker aligned with the box. */
+  right: calc(1rem + 1px);
+  bottom: calc(100% + 7px);
+  left: calc(1rem + 1px);
   z-index: 20;
   display: flex;
   max-height: min(360px, 55vh);
