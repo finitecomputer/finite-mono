@@ -37,10 +37,14 @@ jobs:
     name: Review PR with local Codex
     if: >-
       ${{
-        github.event_name == 'workflow_dispatch' ||
+        github.event.repository.private == true &&
+        vars.FINITE_AUTOMATED_PR_REVIEW_ENABLED == 'true' &&
         (
-          github.event.pull_request.draft == false &&
-          github.event.pull_request.head.repo.full_name == github.repository
+          github.event_name == 'workflow_dispatch' ||
+          (
+            github.event.pull_request.draft == false &&
+            github.event.pull_request.head.repo.full_name == github.repository
+          )
         )
       }}
     runs-on: [self-hosted, macOS, finite-pr-review]
@@ -55,7 +59,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.FINITE_PR_REVIEW_GITHUB_TOKEN || github.token }}
-          persist-credentials: true
+          persist-credentials: false
 
       - name: Resolve PR metadata
         id: pr
@@ -69,10 +73,14 @@ jobs:
           head_sha="$(jq -r '.head.sha' <<<"$pr_json")"
           is_draft="$(jq -r '.draft' <<<"$pr_json")"
           head_repository="$(jq -r '.head.repo.full_name' <<<"$pr_json")"
+          state="$(jq -r '.state' <<<"$pr_json")"
 
           should_review=true
           skip_reason=
-          if [[ "$head_repository" != "$GITHUB_REPOSITORY" ]]; then
+          if [[ "$state" != "open" ]]; then
+            should_review=false
+            skip_reason="closed PRs are not reviewed"
+          elif [[ "$head_repository" != "$GITHUB_REPOSITORY" ]]; then
             should_review=false
             skip_reason="fork PRs are not reviewed on the trusted Mac runner"
           elif [[ "$is_draft" == "true" && "${{ github.event_name }}" != "workflow_dispatch" ]]; then
@@ -111,20 +119,30 @@ jobs:
 
       - name: Check out PR merge ref when available
         if: steps.pr.outputs.should_review == 'true'
+        env:
+          PR_HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
         run: |
           set -euo pipefail
+
+          gh auth setup-git
 
           merge_ref="refs/remotes/pull/${PR_NUMBER}/merge"
           head_ref="refs/remotes/pull/${PR_NUMBER}/head"
 
           if git fetch --no-tags origin "pull/${PR_NUMBER}/merge:$merge_ref"; then
             git checkout --detach "$merge_ref"
+            checked_head="$(git rev-parse HEAD^2)"
             echo "CHECKOUT_KIND=merge" >> "$GITHUB_ENV"
           else
             git fetch --no-tags origin "pull/${PR_NUMBER}/head:$head_ref"
             git checkout --detach "$head_ref"
+            checked_head="$(git rev-parse HEAD)"
             echo "CHECKOUT_KIND=head" >> "$GITHUB_ENV"
           fi
+          [[ "$checked_head" == "$PR_HEAD_SHA" ]] || {
+            echo 'PR changed during checkout; rerun against its current head' >&2
+            exit 1
+          }
 
       - name: Capture review runtime preflight
         if: steps.pr.outputs.should_review == 'true'
@@ -136,6 +154,7 @@ jobs:
             echo "== codex =="
             codex --version
             codex doctor --summary
+            codex --ask-for-approval never exec --sandbox danger-full-access --ephemeral --help >/dev/null
             echo
             echo "== gh =="
             gh --version
@@ -173,9 +192,8 @@ jobs:
           set -o pipefail
           mkdir -p .codex-review
 
-          codex exec \
+          codex --ask-for-approval never exec \
             --sandbox danger-full-access \
-            --ask-for-approval never \
             --ephemeral \
             --output-last-message .codex-review/final-message.md \
             - < .github/codex/prompts/finite-automated-pr-review.md \

@@ -18,9 +18,12 @@ must use ChatGPT-managed Codex auth instead of an OpenAI API key.
   `accept-flake-config = true`, so the repo flake can provide the Finite
   Cachix substituter and trusted key.
 
-Do not use this runner for public repositories or fork PRs. The workflow skips
+Do not use this runner for public repositories or fork PRs. The workflow requires
+a private repository and `FINITE_AUTOMATED_PR_REVIEW_ENABLED=true`, and skips
 fork PRs because the runner has local Codex credentials and may run PR code
-during focused validation.
+during focused validation. Leave the variable unset until runner setup and
+local preflight pass. Repository privacy is tracked in FIN-82; this workflow
+does not change repository visibility.
 
 ## One-time setup
 
@@ -68,6 +71,10 @@ during focused validation.
 7. Confirm the runner appears online and idle in GitHub with the
    `finite-pr-review` label.
 
+8. After the repository is private and the dedicated runner is ready, enable
+   the repository variable `FINITE_AUTOMATED_PR_REVIEW_ENABLED=true`. Unsetting
+   it prevents new review jobs from running; cancel any active job separately.
+
 ## Review identity
 
 By default, the workflow posts reviews with GitHub's `GITHUB_TOKEN`, usually as
@@ -76,13 +83,17 @@ or a personal account, create a repository secret named
 `FINITE_PR_REVIEW_GITHUB_TOKEN` with pull-request review permission. That token
 is separate from OpenAI billing and does not change Codex usage.
 
-If `github-actions[bot]` approvals should count for branch protection, enable
-the repository or organization Actions setting that allows GitHub Actions to
-create and approve pull requests.
+For `github-actions[bot]` to submit approvals, enable the repository or
+organization Actions setting that allows GitHub Actions to create and approve
+pull requests. Verify this before activation; a green static check does not
+prove that the selected token can submit reviews. A personal review identity
+uses `COMMENT` with an explicit Pass/Fail outcome on its own PRs because GitHub
+forbids self-approval and self-requested changes.
 
 ## Validation
 
-After the workflow lands on `main`, manually dispatch one run:
+After the workflow lands on `main`, the repository is private, and the runner
+is enabled, manually dispatch one run:
 
 ```bash
 gh workflow run finite-automated-pr-review.yml -f pr_number=<pr-number>

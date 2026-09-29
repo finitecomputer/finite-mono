@@ -121,7 +121,10 @@ Use `REQUEST_CHANGES` when there is a concrete blocker, such as:
   compatibility/recovery proof required by repo instructions.
 
 Use `COMMENT` only when a neutral review is requested, when the PR cannot be
-assessed due to missing context, or when the right outcome is not pass/fail.
+assessed due to missing context, when the right outcome is not pass/fail, or
+when the authenticated reviewer authored the PR. For an own-PR review, state
+Pass or Fail in the comment; GitHub forbids self-approval and self-requested
+changes.
 
 ## Review Voice
 

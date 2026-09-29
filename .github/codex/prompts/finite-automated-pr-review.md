@@ -54,7 +54,9 @@ The workflow provides these environment variables:
    duplicate it; end with a short skipped summary.
 10. Submit a GitHub pull request review on `PR_HEAD_SHA` using the pending
     review API. Use `APPROVE`, `REQUEST_CHANGES`, or `COMMENT` according to
-    the decision rules. Inline comments should be rare and reserved for tight,
+    the decision rules. For the authenticated reviewer's own PR, use `COMMENT`
+    with an explicit Pass/Fail result; GitHub forbids self-approval and
+    self-requested changes. Inline comments should be rare and reserved for tight,
     actionable blockers on specific lines.
 
 Completion means a review has been submitted on the current PR head, or you
