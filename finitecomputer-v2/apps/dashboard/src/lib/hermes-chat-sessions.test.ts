@@ -101,6 +101,8 @@ test("maps stored rows to prose and collapsible tool rows", () => {
       { id: 4, role: "assistant", content: "It is Tuesday.", timestamp: 13 },
       { id: 5, role: "user", content: "summary", display_kind: "hidden", timestamp: 14 },
       { id: 6, role: "system", content: "prompt", timestamp: 15 },
+      { id: 7, role: "user", content: "notice", display_kind: "internal_notification", timestamp: 16 },
+      { id: 8, role: "assistant", content: "raw", display_content: "Earlier turns", timestamp: 17 },
     ],
   });
   const transcript = hermesTranscript(rows, "native_1", HOME_TOPIC_ID, "Agent");
@@ -112,6 +114,7 @@ test("maps stored rows to prose and collapsible tool rows", () => {
       ["tool", false, "terminal: {\"command\":\"date\"}"],
       ["tool", false, "terminal: Tue"],
       ["message", false, "It is Tuesday."],
+      ["tool", false, "Context summary: Earlier turns"],
     ],
   );
   assert.equal(new Set(transcript.map((message) => message.message_id)).size, transcript.length);

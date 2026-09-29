@@ -49,6 +49,8 @@ export type HermesMessageRow = {
   reasoning: string | null;
   timestamp: number;
   hidden: boolean;
+  /** A compaction summary projected for display; the originals are listed too. */
+  summary: boolean;
 };
 
 export type HermesTopicGroup = {
@@ -99,7 +101,8 @@ export function parseHermesMessages(value: unknown): HermesMessageRow[] {
       toolCalls: toolCalls(row.tool_calls),
       reasoning: optionalString(row.reasoning) ?? optionalString(row.reasoning_content),
       timestamp: numberOr(row.timestamp, 0),
-      hidden: row.display_kind === "hidden",
+      hidden: row.display_kind === "hidden" || row.display_kind === "internal_notification",
+      summary: display !== null,
     };
   });
 }
@@ -185,6 +188,10 @@ export function hermesTranscript(
     if (row.hidden) return;
     const key = row.id ?? index;
     const at = row.timestamp;
+    if (row.summary) {
+      if (row.content) mapped.push(toolRow(`Context summary: ${truncate(row.content, 2_000)}`, `${chatId}:${key}:summary`, chatId, topicId, at, agentName));
+      return;
+    }
     if (row.role === "user") {
       if (row.content) mapped.push(hermesMessage({ role: "user", text: row.content, chatId, topicId, id: `${chatId}:${key}`, at, agentName }));
       return;

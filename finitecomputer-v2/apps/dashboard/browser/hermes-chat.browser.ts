@@ -89,6 +89,7 @@ test("admin Hermes chat lists archived platform history read-only and runs nativ
       }
       if (path === "api/sessions/fc-old/messages") {
         assert.equal(url.searchParams.get("order"), "latest");
+        assert.equal(url.searchParams.get("include_compacted"), "true");
         await fulfill(route, { messages: [
           { id: 1, role: "user", content: "Old question", timestamp: 1 },
           { id: 2, role: "assistant", content: "Old answer", timestamp: 2 },

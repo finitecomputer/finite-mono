@@ -214,7 +214,8 @@ export function HermesChatProvider({
       runtimeId,
       `api/sessions/${chatId}/messages`,
       lifetimeRef.current.signal,
-      { query: { order: "latest", limit: TRANSCRIPT_PAGE_SIZE }, maxBytes: TRANSCRIPT_MAX_BYTES }
+      // Compaction retires rows from the model's context, not from history.
+      { query: { order: "latest", limit: TRANSCRIPT_PAGE_SIZE, include_compacted: true }, maxBytes: TRANSCRIPT_MAX_BYTES }
     ));
     if (streamingRef.current.has(chatId)) return;
     transcriptRef.current.set(chatId, hermesTranscript(result, chatId, topicOf(chatId), agentName));
