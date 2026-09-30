@@ -12,7 +12,7 @@ import { chromium, type Browser, type BrowserContext } from "playwright";
 import { fixtureEnvironment, subscriptionFixture, startModelFixture, assertFixtureInference } from "./billing-runtime-fixtures";
 import { assertRecovered, localOrigin, ownsContainer, type RuntimeProof } from "./billing-runtime-proof";
 
-const root = path.resolve(import.meta.dirname, "../../../..");
+const root = path.resolve(__dirname, "../../../..");
 const runRoot = path.resolve(process.env.BILLING_SMOKE_ROOT ?? "");
 assert(process.env.BILLING_SMOKE_ROOT && runRoot !== root, "explicit disposable state root required");
 const evidence = path.join(runRoot, "evidence");
@@ -256,4 +256,4 @@ async function main() {
     process.exitCode = 1;
   }
 }
-await main();
+void main();

@@ -1,9 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import path from "node:path";
 import { assertRecovered, localOrigin, ownsContainer, type RuntimeProof } from "./billing-runtime-proof";
 const before: RuntimeProof = {project:"p",runtime:"r",principal:"npub",room:"room",topic:"home",chat:"chat",fileHash:"sha",messageIds:["sent","reply"],running:true,startedAt:"one"};
 const stopped = {...before,running:false};
 const after = {...before,startedAt:"two",messageIds:["sent","reply","new"]};
+test("smoke entry point loads under the dashboard CommonJS configuration and fails closed", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", path.join(__dirname, "billing-runtime-smoke.ts")], {
+    encoding: "utf8", timeout: 15_000, env: { ...process.env, BILLING_SMOKE_ROOT: "" },
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /explicit disposable state root required/);
+  assert.doesNotMatch(result.stderr, /TransformError|TypeError/);
+});
 test("requires actual stop and restart, same durable identity and ordered history", () => {
   assertRecovered(before, stopped, after);
   for (const patch of [{running:false},{startedAt:"one"},{principal:"other"},{fileHash:"changed"},{messageIds:["reply","sent"]},{messageIds:["sent"]}]) {
