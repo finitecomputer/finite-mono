@@ -134,8 +134,12 @@ pub struct VisibleProject {
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeRecoveryStatus {
+    /// Billing-owned automatic recovery with a retained suspension marker.
     Restarting,
     Failed,
+    /// Latest restart without durable payment provenance.
+    RestartPending,
+    RestartFailed,
 }
 
 mod artifacts;

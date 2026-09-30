@@ -102,6 +102,7 @@ where
                          AND NOT core_trial_access_blocked(project.customer_org_id, $2::text::timestamptz)
                          THEN CASE WHEN resume.status = 'failed' THEN 'failed' ELSE 'restarting' END
                     END AS runtime_recovery,
+                    core_trial_access_blocked(project.customer_org_id, $2::text::timestamptz) AS billing_access_blocked,
                     suspension.resume_allowed AS billing_resume_allowed,
                     latest.kind AS latest_control_kind, latest.status AS latest_control_status,
                     control.id AS control_id, control.project_id AS control_project_id,
@@ -309,16 +310,23 @@ where
                     .as_deref()
                 {
                     Some("requested" | "launching" | "compute_up" | "ready") => {
-                        Some(RuntimeRecoveryStatus::Restarting)
+                        Some(RuntimeRecoveryStatus::RestartPending)
                     }
-                    Some("failed") => Some(RuntimeRecoveryStatus::Failed),
-                    _ if awaiting_restart_health => Some(RuntimeRecoveryStatus::Restarting),
+                    Some("failed") => Some(RuntimeRecoveryStatus::RestartFailed),
+                    _ if awaiting_restart_health => Some(RuntimeRecoveryStatus::RestartPending),
                     _ => None,
                 }
             } else {
                 None
             };
-            let runtime_recovery = latest_restart_recovery.or(runtime_recovery);
+            // Only the suspension marker proves payment provenance. Once it
+            // clears, latest restart outcomes use generic presentation. Reads
+            // also suppress both forms while access remains billing-blocked.
+            let runtime_recovery = if row.get::<_, bool>("billing_access_blocked") {
+                None
+            } else {
+                runtime_recovery.or(latest_restart_recovery)
+            };
             Ok(VisibleProject {
                 project,
                 runtime,

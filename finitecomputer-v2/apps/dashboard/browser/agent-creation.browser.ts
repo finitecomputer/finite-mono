@@ -34,7 +34,7 @@ type AgentCreationRequest = {
 };
 
 type VisibleProject = {
-  runtime_recovery?: "restarting" | "failed" | null;
+  runtime_recovery?: "restarting" | "failed" | "restart_pending" | "restart_failed" | null;
   project: {
     id: string;
     display_name: string;
@@ -469,6 +469,19 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(new URL(page.url()).pathname, "/dashboard/machines/runtime_payment-agent");
       assert.equal(core.state.creationPosts.length, 0);
       assert.equal(core.state.restartPosts.length, 0, "viewing or reloading recovery must never submit restart");
+      // No marker provenance: an ordinary restart must never claim payment
+      // recovery or automatic lifecycle ownership, including terminal errors.
+      core.state.projects[0].runtime_recovery = "restart_pending";
+      core.state.projects[0].runtime!.runtime_status = "offline";
+      await waitFor(async () => {
+        await page.reload();
+        return page.getByText("Your agent is restarting. This page updates automatically.", { exact: true }).isVisible();
+      }, 20_000);
+      assert.equal(await page.getByText(/Restarting your agent automatically/).count(), 0);
+      core.state.projects[0].runtime_recovery = "restart_failed";
+      await page.getByRole("alert").filter({ hasText: "Restart needs help." }).waitFor({ timeout: 40_000 });
+      assert.equal(await page.getByText(/after payment|Automatic restart needs help/).count(), 0);
+
     });
 
     core.reset({

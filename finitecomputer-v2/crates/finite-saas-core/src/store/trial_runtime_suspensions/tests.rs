@@ -713,7 +713,7 @@ async fn runtime_recovery_waits_for_fresh_health_after_marker_clears() {
         complete_next(&store, RuntimeControlKind::Restart).await;
         store.reconcile_trial_runtimes(None).await.unwrap();
         assert!(store.query_json("SELECT to_jsonb(s) FROM trial_runtime_suspensions s", &[]).await.is_empty());
-        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::Restarting));
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
         let client = store.connection().await.unwrap();
         client.execute("UPDATE agent_runtimes SET health_ready = TRUE, health_reported_at = now(), health_observed_at = now(), health_report_interval_seconds = 30 WHERE id = $1", &[&runtime]).await.unwrap();
         drop(client);
@@ -721,5 +721,51 @@ async fn runtime_recovery_waits_for_fresh_health_after_marker_clears() {
         assert!(project.runtime_recovery.is_none());
         let public = crate::api::PublicVisibleProject::from(project);
         assert_eq!(public.runtime.unwrap().runtime_status, RuntimeSummaryStatus::Online);
+    }).await;
+}
+
+#[tokio::test]
+async fn ordinary_restart_has_generic_presentation_and_blocked_access_hides_recovery() {
+    with_isolated_postgres(|store| async move {
+        let (org, project, runtime, _) = setup(&store).await;
+        store.request_runtime_restart(RequestRuntimeRestartInput {
+            verified_email: "trial-lifecycle@finite.vip".into(),
+            workos_user_id: "workos_trial-lifecycle".into(),
+            project_id: project.clone(),
+            now: None,
+        }).await.unwrap();
+        let visible = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap();
+        assert_eq!(visible[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE runtime_control_requests SET status = 'failed', failure_stage = 'launch' WHERE agent_runtime_id = $1 AND kind = 'restart'", &[&runtime]).await.unwrap();
+        drop(client);
+        let visible = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap();
+        assert_eq!(visible[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartFailed));
+        // Access gating is independent of lifecycle reconciliation. A read must
+        // not present payment recovery merely because an old restart exists.
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE customer_billing_accounts SET subscription_status = 'past_due' WHERE customer_org_id = $1", &[&org]).await.unwrap();
+        drop(client);
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE customer_billing_accounts SET subscription_status = 'active' WHERE customer_org_id = $1", &[&org]).await.unwrap();
+        drop(client);
+        store.request_runtime_restart(RequestRuntimeRestartInput {
+            verified_email: "trial-lifecycle@finite.vip".into(),
+            workos_user_id: "workos_trial-lifecycle".into(),
+            project_id: project.clone(), now: None,
+        }).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Restart).await;
+        assert!(store.query_json("SELECT to_jsonb(s) FROM trial_runtime_suspensions s", &[]).await.is_empty());
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
+        store.request_runtime_stop(RequestRuntimeStopInput {
+            verified_email: "trial-lifecycle@finite.vip".into(),
+            workos_user_id: "workos_trial-lifecycle".into(),
+            project_id: project, now: None,
+        }).await.unwrap();
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+        complete_next(&store, RuntimeControlKind::Stop).await;
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+
     }).await;
 }

@@ -5,10 +5,13 @@ export function paymentRecoveryPresentation(
   recovery: CoreVisibleProject["runtime_recovery"],
   runtimeStatus: CoreRuntimeStatus
 ): { description: string; state: CubeState; failed: boolean } | null {
+  if (recovery === "restart_failed") {
+    return { description: "We couldn’t restart your agent. Your home, data, and history are retained. Choose Restart agent to retry, or contact your Finite team for help.", state: "stuck", failed: true };
+  }
   if (recovery === "failed") {
     return { description: "We couldn’t restart your agent after payment. Your home, data, and history are retained. Contact support for help restarting this agent.", state: "stuck", failed: true };
   }
-  if (recovery === "restarting") {
+  if (recovery === "restarting" || recovery === "restart_pending") {
     return { description: "Restarting your agent. Your home, data, and history are retained.", state: "working", failed: false };
   }
   if (runtimeStatus === "online") {
