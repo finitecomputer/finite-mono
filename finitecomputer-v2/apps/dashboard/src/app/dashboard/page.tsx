@@ -1,5 +1,6 @@
 import { PaymentRecoveryNotice } from "@/components/payment-recovery-notice";
 import { paymentRecoveryPresentation } from "@/lib/payment-recovery";
+import { ManageBillingForm } from "@/components/manage-billing-form";
 import { TrialStatusPanel } from "@/components/trial-status-panel";
 import Link from "next/link";
 import { redirect } from "next/navigation";
@@ -22,7 +23,6 @@ import {
   approveFinitePrivateGrantAction,
   cancelFailedAgentCreationRequestAction,
   issueFinitePrivateApiKeyAction,
-  openBillingPortalAction,
   resetFinitePrivateGrantAction,
   revokeFinitePrivateApiKeyAction,
   revokeFinitePrivateGrantAction,
@@ -469,12 +469,10 @@ function AccountBillingPanel({
           </p>
         </div>
         {billingClass === "standard" ? (
-          <form action={openBillingPortalAction}>
-            <FormActionButton variant="outline" pendingLabel="Opening…">
-              <CreditCardIcon />
-              Manage billing
-            </FormActionButton>
-          </form>
+          <ManageBillingForm variant="outline">
+            <CreditCardIcon />
+            Manage billing
+          </ManageBillingForm>
         ) : null}
       </div>
     </section>
@@ -892,7 +890,7 @@ function CoreProjectCard({
         description={accessBlocked ? "Dashboard access is paused until payment is resolved." : description}
         state={heroState}
         actions={
-          accessBlocked ? <form action={openBillingPortalAction}><Button>Manage billing</Button></form> : <>
+          accessBlocked ? <ManageBillingForm /> : <>
             {chatHref ? (
               <Button asChild>
                 <Link href={chatHref}>
@@ -913,6 +911,7 @@ function CoreProjectCard({
         }
       />
     </>
+
   );
 }
 

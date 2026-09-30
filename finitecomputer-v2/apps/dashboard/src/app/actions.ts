@@ -1,5 +1,6 @@
 "use server";
 import { trialCheckoutDestination } from "@/lib/trial-checkout";
+import { billingManagementResult, type BillingManagementState } from "@/lib/billing-management";
 import { randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
@@ -239,14 +240,22 @@ export async function billingCheckoutDestination(
   return checkout.url;
 }
 
-export async function openBillingPortalAction() {
-  const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-  const stripeCustomerId = billing.billing?.billing_account?.stripe_customer_id?.trim();
-  if (!stripeCustomerId) {
-    return startBillingCheckoutAction();
-  }
+export async function openBillingPortalAction(): Promise<BillingManagementState> {
+  const result = await billingManagementResult({
+    loadCustomerId: async () => {
+      const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
+      if (!billing.billing) {
+        throw new Error(billing.error ?? "Billing overview unavailable.");
+      }
+      return billing.billing.billing_account?.stripe_customer_id;
+    },
+    checkoutDestination: billingCheckoutDestination,
+    portalDestination: billingPortalDestination,
+  });
+  if ("error" in result) return { error: result.error };
 
-  redirect(await billingPortalDestination(stripeCustomerId));
+  // Next.js redirects throw; keep them outside the provider error boundary.
+  redirect(result.destination);
 }
 
 async function billingPortalDestination(
