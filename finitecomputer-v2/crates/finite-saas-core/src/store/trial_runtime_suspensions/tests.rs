@@ -715,6 +715,17 @@ async fn runtime_recovery_waits_for_fresh_health_after_marker_clears() {
         assert!(store.query_json("SELECT to_jsonb(s) FROM trial_runtime_suspensions s", &[]).await.is_empty());
         assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
         let client = store.connection().await.unwrap();
+        client.execute("UPDATE agent_runtimes SET health_ready = FALSE, health_reported_at = now(), health_observed_at = now(), health_report_interval_seconds = 30 WHERE id = $1", &[&runtime]).await.unwrap();
+        drop(client);
+        let not_ready = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap().remove(0);
+        assert_eq!(not_ready.runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
+        let public = crate::api::PublicVisibleProject::from(not_ready);
+        assert_eq!(public.runtime.unwrap().runtime_status, RuntimeSummaryStatus::Offline);
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE agent_runtimes SET health_reported_at = now() - interval '5 minutes' WHERE id = $1", &[&runtime]).await.unwrap();
+        drop(client);
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
+        let client = store.connection().await.unwrap();
         client.execute("UPDATE agent_runtimes SET health_ready = TRUE, health_reported_at = now(), health_observed_at = now(), health_report_interval_seconds = 30 WHERE id = $1", &[&runtime]).await.unwrap();
         drop(client);
         let project = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap().remove(0);

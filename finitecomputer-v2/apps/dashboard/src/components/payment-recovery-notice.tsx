@@ -6,12 +6,13 @@ export function PaymentRecoveryNotice({ recovery }: { recovery: CoreVisibleProje
   const failed = recovery === "failed" || recovery === "restart_failed";
   return (
     <section role={failed ? "alert" : "status"} aria-live="polite" className="rounded-xl border bg-card p-4 text-sm">
-      <PendingRefresh enabled={!failed} />
+      {/* Automatic failures are retried by FIN-151; a manual failure is terminal. */}
+      <PendingRefresh enabled={recovery !== "restart_failed"} />
       {failed ? (
-        <>{recovery === "failed" ? "Automatic restart needs help." : "Restart needs help."} Open Agent and choose Restart agent to retry. If restart is unavailable, contact your Finite team for help with this agent.</>
+        <>{recovery === "failed" ? "Automatic restart needs help. Recovery will keep retrying." : "Restart needs help."} Open Agent and choose Restart agent to retry. If restart is unavailable, contact your Finite team for help with this agent.</>
       ) : recovery === "restarting"
         ? "Restarting your agent automatically. You can leave this page and return."
-        : "Your agent is restarting. This page updates automatically."}
+        : "Waiting for your agent to be ready. This page updates automatically."}
     </section>
   );
 }

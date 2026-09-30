@@ -282,7 +282,8 @@ where
                 _ => None,
             };
             // Completion clears the billing marker and invalidates old health.
-            // Continue presenting the same restart until fresh health arrives;
+            // Continue observing the same restart until fresh health is ready;
+            // not-ready and stale reports can still advance without a new control.
             // the latest control also prevents reviving an owner's later Stop.
             let awaiting_restart_health = row
                 .get::<_, Option<String>>("latest_control_kind")
@@ -294,7 +295,7 @@ where
                     == Some("succeeded")
                 && runtime_health
                     .as_ref()
-                    .is_some_and(|health| health.status == crate::RuntimeHealthStatus::Unknown)
+                    .is_some_and(|health| health.status != crate::RuntimeHealthStatus::Ready)
                 && runtime.as_ref().is_some_and(|runtime| {
                     runtime.host_facts.runtime_status == RuntimeSummaryStatus::Online
                 });
