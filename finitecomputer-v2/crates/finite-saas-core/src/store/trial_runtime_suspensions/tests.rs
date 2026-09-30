@@ -672,3 +672,54 @@ async fn trial_manual_recovery_satisfies_failed_automatic_resume_without_second_
     })
     .await;
 }
+
+#[tokio::test]
+async fn runtime_recovery_projection_respects_billing_and_stop_intent() {
+    with_isolated_postgres(|store| async move {
+        let (org, _, runtime, _) = setup(&store).await;
+        let projects = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap();
+        assert!(projects[0].runtime_recovery.is_none());
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::PastDue, 20)).await.unwrap();
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::Active, 30)).await.unwrap();
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::Restarting));
+        complete_next(&store, RuntimeControlKind::Stop).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::Restarting));
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE runtime_control_requests SET status = 'failed', failure_stage = 'launch', failure_message = 'private provider detail' WHERE agent_runtime_id = $1 AND kind = 'restart'", &[&runtime]).await.unwrap();
+        drop(client);
+        let projects = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap();
+        assert_eq!(projects[0].runtime_recovery, Some(RuntimeRecoveryStatus::Failed));
+        assert!(projects[0].active_runtime_control.is_none());
+        let public = crate::api::PublicVisibleProject::from(projects[0].clone());
+        let json = serde_json::to_string(&public).unwrap();
+        assert!(json.contains("\"runtime_recovery\":\"failed\""));
+        assert!(!json.contains("private provider detail"));
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE trial_runtime_suspensions SET resume_allowed = FALSE WHERE agent_runtime_id = $1", &[&runtime]).await.unwrap();
+        drop(client);
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+    }).await;
+}
+
+#[tokio::test]
+async fn runtime_recovery_waits_for_fresh_health_after_marker_clears() {
+    with_isolated_postgres(|store| async move {
+        let (org, _, runtime, _) = setup(&store).await;
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::PastDue, 20)).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Stop).await;
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::Active, 30)).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Restart).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        assert!(store.query_json("SELECT to_jsonb(s) FROM trial_runtime_suspensions s", &[]).await.is_empty());
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::Restarting));
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE agent_runtimes SET health_ready = TRUE, health_reported_at = now(), health_observed_at = now(), health_report_interval_seconds = 30 WHERE id = $1", &[&runtime]).await.unwrap();
+        drop(client);
+        let project = store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap().remove(0);
+        assert!(project.runtime_recovery.is_none());
+        let public = crate::api::PublicVisibleProject::from(project);
+        assert_eq!(public.runtime.unwrap().runtime_status, RuntimeSummaryStatus::Online);
+    }).await;
+}

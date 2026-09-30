@@ -34,6 +34,7 @@ type AgentCreationRequest = {
 };
 
 type VisibleProject = {
+  runtime_recovery?: "restarting" | "failed" | null;
   project: {
     id: string;
     display_name: string;
@@ -439,6 +440,37 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     dashboardOutput = collectOutput(dashboard);
     await waitForDashboard(dashboardPort, dashboardOutput);
 
+    // Synthetic Core recovery states; no live WorkOS or Stripe calls.
+    const recovering = visibleProject("project_payment", "Paid Agent", hostedDevice.runtimeStatusUrl, "payment-agent");
+    recovering.runtime_recovery = "restarting";
+    recovering.runtime!.runtime_status = "offline";
+    core.reset({ projects: [recovering], requests: [] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await expectVisibleText(page, "Restarting your agent. Your home, data, and history are retained.");
+      await page.reload();
+      await expectVisibleText(page, "Restarting your agent. Your home, data, and history are retained.");
+      if (process.env.FIN152_SCREENSHOT_DIR) {
+        await mkdir(process.env.FIN152_SCREENSHOT_DIR, { recursive: true });
+        await page.screenshot({ path: `${process.env.FIN152_SCREENSHOT_DIR}/restarting.png` });
+      }
+      assert.equal(await page.getByRole("button", { name: /resume/i }).count(), 0);
+      core.state.projects[0].runtime_recovery = "failed";
+      await page.getByRole("alert").filter({ hasText: "Automatic restart needs help" }).waitFor({ timeout: 40_000 });
+      await page.getByRole("alert").filter({ hasText: "Open Agent and choose Restart agent to retry." }).waitFor();
+      core.state.projects[0].runtime_recovery = "restarting";
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_payment-agent`);
+      await expectVisibleText(page, "Restarting your agent. Your home, data, and history are retained.");
+      await page.reload();
+      core.state.projects[0].runtime_recovery = null;
+      core.state.projects[0].runtime!.runtime_status = "online";
+      await page.getByText("Your agent is ready.", { exact: true }).waitFor({ timeout: 40_000 });
+      if (process.env.FIN152_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.FIN152_SCREENSHOT_DIR}/ready.png` });
+      assert.equal(new URL(page.url()).pathname, "/dashboard/machines/runtime_payment-agent");
+      assert.equal(core.state.creationPosts.length, 0);
+      assert.equal(core.state.restartPosts.length, 0, "viewing or reloading recovery must never submit restart");
+    });
+
     core.reset({
       projects: [
         visibleProject(
@@ -800,7 +832,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
       const main = page.getByRole("main");
-      await expectVisibleText(page, "Your agent is online.");
+      await expectVisibleText(page, "Your agent is ready.");
       const productNav = page.getByRole("navigation", { name: "Agent navigation" });
       const agentLink = productNav.getByRole("link", { name: "Agent", exact: true });
       // The fake Core changes out of band, unlike a product mutation that

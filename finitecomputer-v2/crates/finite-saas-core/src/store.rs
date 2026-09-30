@@ -124,6 +124,18 @@ pub struct VisibleProject {
     #[serde(default)]
     pub runtime_health: Option<RuntimeHealthProjection>,
     pub active_runtime_control: Option<RuntimeControlRequest>,
+    #[serde(default)]
+    pub runtime_recovery: Option<RuntimeRecoveryStatus>,
+}
+
+/// Read-only projection of billing recovery and the latest restart outcome,
+/// including fresh readiness after its billing marker has cleared. No request
+/// details or failure messages cross the public API boundary.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeRecoveryStatus {
+    Restarting,
+    Failed,
 }
 
 mod artifacts;

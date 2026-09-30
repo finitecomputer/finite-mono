@@ -85,6 +85,7 @@ export type CoreVisibleProject = {
   project: CoreProject;
   runtime?: CoreAgentRuntime | null;
   active_runtime_control?: CorePublicRuntimeControl | null;
+  runtime_recovery?: "restarting" | "failed" | null;
 };
 
 /**

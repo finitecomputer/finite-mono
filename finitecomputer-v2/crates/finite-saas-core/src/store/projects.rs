@@ -98,6 +98,12 @@ where
                     core_rfc3339(runtime.health_observed_at) AS health_observed_at,
                     runtime.health_ready, runtime.health_reason,
                     runtime.health_report_interval_seconds, runtime.health_reporting_npub,
+                    CASE WHEN suspension.resume_allowed
+                         AND NOT core_trial_access_blocked(project.customer_org_id, $2::text::timestamptz)
+                         THEN CASE WHEN resume.status = 'failed' THEN 'failed' ELSE 'restarting' END
+                    END AS runtime_recovery,
+                    suspension.resume_allowed AS billing_resume_allowed,
+                    latest.kind AS latest_control_kind, latest.status AS latest_control_status,
                     control.id AS control_id, control.project_id AS control_project_id,
                     control.agent_runtime_id AS control_agent_runtime_id,
                     control.source_host_id AS control_source_host_id,
@@ -120,6 +126,13 @@ where
              LEFT JOIN project_runtime_links AS link
                ON link.project_id = project.id AND link.active
              LEFT JOIN agent_runtimes AS runtime ON runtime.id = link.agent_runtime_id
+             LEFT JOIN trial_runtime_suspensions AS suspension ON suspension.agent_runtime_id = runtime.id
+             LEFT JOIN runtime_control_requests AS resume ON resume.id = suspension.resume_request_id
+             LEFT JOIN LATERAL (
+               SELECT request.kind, request.status FROM runtime_control_requests request
+               WHERE request.agent_runtime_id = runtime.id
+               ORDER BY request.created_at DESC, request.id DESC LIMIT 1
+             ) AS latest ON TRUE
              LEFT JOIN LATERAL (
                SELECT request.*
                FROM runtime_control_requests AS request
@@ -137,7 +150,7 @@ where
                    AND hidden.agent_runtime_id IS NULL
                )
              ORDER BY project.created_at, project.id",
-            &[&user_id],
+            &[&user_id, &now],
         )
         .await
         .map_err(store_error)?;
@@ -254,11 +267,64 @@ where
                     })
                 })
                 .transpose()?;
+            let runtime_recovery = match row.get::<_, Option<String>>("runtime_recovery").as_deref()
+            {
+                Some("failed") => Some(RuntimeRecoveryStatus::Failed),
+                Some("restarting")
+                    if row
+                        .get::<_, Option<String>>("latest_control_status")
+                        .as_deref()
+                        != Some("succeeded") =>
+                {
+                    Some(RuntimeRecoveryStatus::Restarting)
+                }
+                _ => None,
+            };
+            // Completion clears the billing marker and invalidates old health.
+            // Continue presenting the same restart until fresh health arrives;
+            // the latest control also prevents reviving an owner's later Stop.
+            let awaiting_restart_health = row
+                .get::<_, Option<String>>("latest_control_kind")
+                .as_deref()
+                == Some("restart")
+                && row
+                    .get::<_, Option<String>>("latest_control_status")
+                    .as_deref()
+                    == Some("succeeded")
+                && runtime_health
+                    .as_ref()
+                    .is_some_and(|health| health.status == crate::RuntimeHealthStatus::Unknown)
+                && runtime.as_ref().is_some_and(|runtime| {
+                    runtime.host_facts.runtime_status == RuntimeSummaryStatus::Online
+                });
+            let latest_restart_recovery = if row.get::<_, Option<bool>>("billing_resume_allowed")
+                != Some(false)
+                && row
+                    .get::<_, Option<String>>("latest_control_kind")
+                    .as_deref()
+                    == Some("restart")
+            {
+                match row
+                    .get::<_, Option<String>>("latest_control_status")
+                    .as_deref()
+                {
+                    Some("requested" | "launching" | "compute_up" | "ready") => {
+                        Some(RuntimeRecoveryStatus::Restarting)
+                    }
+                    Some("failed") => Some(RuntimeRecoveryStatus::Failed),
+                    _ if awaiting_restart_health => Some(RuntimeRecoveryStatus::Restarting),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let runtime_recovery = latest_restart_recovery.or(runtime_recovery);
             Ok(VisibleProject {
                 project,
                 runtime,
                 runtime_health,
                 active_runtime_control,
+                runtime_recovery,
             })
         })
         .collect()

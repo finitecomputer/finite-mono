@@ -149,6 +149,8 @@ pub struct PublicVisibleProject {
     pub project: PublicProject,
     pub runtime: Option<PublicAgentRuntime>,
     pub active_runtime_control: Option<PublicRuntimeControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_recovery: Option<crate::store::RuntimeRecoveryStatus>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,6 +189,7 @@ impl From<VisibleProject> for PublicVisibleProject {
                 .runtime
                 .map(|runtime| PublicAgentRuntime::project(runtime, &runtime_health)),
             active_runtime_control,
+            runtime_recovery: project.runtime_recovery,
         }
     }
 }

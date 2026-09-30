@@ -1,3 +1,5 @@
+import { PaymentRecoveryNotice } from "@/components/payment-recovery-notice";
+import { paymentRecoveryPresentation } from "@/lib/payment-recovery";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import {
@@ -100,6 +102,7 @@ async function ImportedMachineOverview({
       ? access.coreProject.active_runtime_control
       : null;
   const runtimeStatus = access.coreProject.runtime?.runtime_status ?? "unknown";
+  const recovery = paymentRecoveryPresentation(access.coreProject.runtime_recovery, runtimeStatus);
   const overview = activeRetirement
     ? {
         state: "stale" as const,
@@ -148,10 +151,11 @@ async function ImportedMachineOverview({
           {coreRuntimeControlConflictMessage(access.coreProject.active_runtime_control)}
         </section>
       ) : null}
+      <PaymentRecoveryNotice recovery={access.coreProject.runtime_recovery} />
       <AgentHeroCard
         name={access.displayName}
-        description={overview.description}
-        state={prismState}
+        description={activeRetirement ? overview.description : recovery?.description ?? overview.description}
+        state={activeRetirement ? prismState : recovery?.state ?? prismState}
         actions={
           <>
               {canRestartRuntime ? (
