@@ -242,12 +242,12 @@ export async function billingCheckoutDestination(
 
 export async function openBillingPortalAction(): Promise<BillingManagementState> {
   const result = await billingManagementResult({
-    loadCustomerId: async () => {
+    loadBillingAccount: async () => {
       const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
       if (!billing.billing) {
         throw new Error(billing.error ?? "Billing overview unavailable.");
       }
-      return billing.billing.billing_account?.stripe_customer_id;
+      return billing.billing.billing_account;
     },
     checkoutDestination: billingCheckoutDestination,
     portalDestination: billingPortalDestination,
