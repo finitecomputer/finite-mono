@@ -80,6 +80,10 @@ struct UpArgs {
     #[arg(long, conflicts_with = "services_only")]
     docker_runtime: bool,
 
+    /// Verify and use an existing digest-pinned canonical AMD64 image instead of building.
+    #[arg(long, requires = "docker_runtime", conflicts_with = "workos_staging")]
+    prebuilt_runtime_image: Option<String>,
+
     /// Reset persistent state before starting. Allowed only with
     /// --services-only and intended for an isolated smoke-test state root.
     #[arg(long, requires = "services_only")]
@@ -164,6 +168,9 @@ fn run() -> anyhow::Result<ExitCode> {
             let mut stack = Stack::new(cli.state_dir)?
                 .with_profile(profile)
                 .with_fresh_services_state(args.fresh);
+            if let Some(image) = args.prebuilt_runtime_image {
+                stack = stack.with_prebuilt_runtime_image(image)?;
+            }
             if args.workos_staging {
                 stack = stack.with_workos_staging()?;
             }

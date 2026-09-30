@@ -385,6 +385,7 @@ pub struct Stack {
     apple_host_access: AppleHostAccess,
     apple_container_name_prefix: String,
     runtime_image_ref: String,
+    prebuilt_runtime_image: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -467,12 +468,31 @@ impl Stack {
             apple_host_access: AppleHostAccess::default(),
             apple_container_name_prefix,
             runtime_image_ref,
+            prebuilt_runtime_image: false,
         })
     }
 
     pub fn with_profile(mut self, profile: StackProfile) -> Self {
         self.profile = profile;
         self
+    }
+
+    pub fn with_prebuilt_runtime_image(mut self, image: String) -> Result<Self> {
+        let prefix = "ghcr.io/finitecomputer/agent-runtime@sha256:";
+        let valid_digest = image.strip_prefix(prefix).is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+        if self.profile != StackProfile::DockerSaas || !valid_digest {
+            bail!(
+                "prebuilt runtime requires --docker-runtime and the canonical ghcr.io/finitecomputer/agent-runtime@sha256:<64 lowercase hex> reference"
+            );
+        }
+        self.runtime_image_ref = image;
+        self.prebuilt_runtime_image = true;
+        Ok(self)
     }
 
     pub fn with_fresh_services_state(mut self, fresh: bool) -> Self {
@@ -1805,19 +1825,27 @@ wait "$postgres_pid"
         let report = self.runtime_image_dir().join("build-report.json");
         let context = self.runtime_image_context_dir();
         let engine = self.runtime_image_engine();
-        let command = format!(
-            concat!(
-                "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
-                "--engine {} ",
-                "--image-ref {} ",
-                "--context-dir {} ",
-                "--report {}"
-            ),
-            engine,
-            shell_quote(&self.runtime_image_ref),
-            shell_quote(&context.display().to_string()),
-            shell_quote(&report.display().to_string()),
-        );
+        let command = if self.prebuilt_runtime_image {
+            format!(
+                "exec python3 scripts/prepare_prebuilt_runtime_image.py --image {} --report {}",
+                shell_quote(&self.runtime_image_ref),
+                shell_quote(&report.display().to_string()),
+            )
+        } else {
+            format!(
+                concat!(
+                    "exec python3 finitecomputer-v2/scripts/build_runtime_image.py ",
+                    "--engine {} ",
+                    "--image-ref {} ",
+                    "--context-dir {} ",
+                    "--report {}"
+                ),
+                engine,
+                shell_quote(&self.runtime_image_ref),
+                shell_quote(&context.display().to_string()),
+                shell_quote(&report.display().to_string()),
+            )
+        };
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(
             yaml,
@@ -2002,7 +2030,11 @@ wait "$postgres_pid"
                     shell_quote(RUNTIME_ARTIFACT_ID_PREFIX)
                 ),
                 String::from("digest=\"sha256:$digest_hex\""),
-                format!("reference={}@\"$digest\"", shell_quote(&self.runtime_image_ref)),
+                if self.prebuilt_runtime_image {
+                    format!("reference={}", shell_quote(&self.runtime_image_ref))
+                } else {
+                    format!("reference={}@\"$digest\"", shell_quote(&self.runtime_image_ref))
+                },
                 command,
                 String::from("umask 077"),
                 format!(
@@ -2119,7 +2151,15 @@ wait "$postgres_pid"
                     self.ports.runtime_agent.to_string(),
                 ),
                 ("FC_RUNNER_DOCKER_CONTAINER_PORT", "8080".to_string()),
-                ("FC_RUNNER_DOCKER_PULL_POLICY", "never".to_string()),
+                (
+                    "FC_RUNNER_DOCKER_PULL_POLICY",
+                    if self.prebuilt_runtime_image {
+                        "missing"
+                    } else {
+                        "never"
+                    }
+                    .to_string(),
+                ),
                 ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
                 ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
                 (
@@ -2857,8 +2897,12 @@ wait "$postgres_pid"
                     ManagedProcess::FiniteBrain => vec![String::from("finite-brain")],
                     ManagedProcess::RuntimeImage => vec![
                         String::from("python3"),
-                        String::from("build_runtime_image.py"),
-                        String::from(self.runtime_image_engine()),
+                        String::from(if self.prebuilt_runtime_image {
+                            "prepare_prebuilt_runtime_image.py"
+                        } else {
+                            "build_runtime_image.py"
+                        }),
+                        self.runtime_image_ref.clone(),
                     ],
                     ManagedProcess::FinitePrivateLimiter => vec![
                         String::from("finite-saas-local"),
@@ -2957,7 +3001,11 @@ wait "$postgres_pid"
                 ManagedProcess::RuntimeImage,
                 vec![
                     String::from("python3"),
-                    String::from("build_runtime_image.py"),
+                    String::from(if self.prebuilt_runtime_image {
+                        "prepare_prebuilt_runtime_image.py"
+                    } else {
+                        "build_runtime_image.py"
+                    }),
                     self.runtime_image_dir().display().to_string(),
                 ],
             ),
@@ -4740,6 +4788,43 @@ fn yaml_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prebuilt_image_is_docker_only_and_digest_pinned() {
+        let reference = format!(
+            "ghcr.io/finitecomputer/agent-runtime@sha256:{}",
+            "a".repeat(64)
+        );
+        assert!(
+            Stack::new(PathBuf::from("/tmp/devfinity-prebuilt-test"))
+                .unwrap()
+                .with_prebuilt_runtime_image(reference.clone())
+                .is_err()
+        );
+        let stack = Stack::new(PathBuf::from("/tmp/devfinity-prebuilt-test"))
+            .unwrap()
+            .with_profile(StackProfile::DockerSaas);
+        assert!(
+            stack
+                .clone()
+                .with_prebuilt_runtime_image("ghcr.io/finitecomputer/agent-runtime:latest".into())
+                .is_err()
+        );
+        let stack = stack
+            .with_prebuilt_runtime_image(reference.clone())
+            .unwrap();
+        let mut image_yaml = String::new();
+        stack.write_runtime_image(&mut image_yaml);
+        assert!(image_yaml.contains("prepare_prebuilt_runtime_image.py"));
+        assert!(!image_yaml.contains("build_runtime_image.py"));
+        let mut artifact_yaml = String::new();
+        stack.write_runtime_artifact(&mut artifact_yaml);
+        assert!(artifact_yaml.contains(&reference));
+        assert!(!artifact_yaml.contains("@\\\"$digest"));
+        let mut runner_yaml = String::new();
+        stack.write_runner(&mut runner_yaml);
+        assert!(runner_yaml.contains("FC_RUNNER_DOCKER_PULL_POLICY=missing"));
+    }
 
     #[test]
     fn docker_runtime_image_engine_override_accepts_only_supported_engines() {
