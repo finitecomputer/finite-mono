@@ -170,7 +170,9 @@ Restart of that same runtime. Explicit Stop/Destroy requests persist a no-resume
 intent through failed stops and enforcement retries. Accepted explicit up-bound
 requests satisfy automatic recovery and reset that intent. Duplicate
 reconciliation uses the existing single-operation
-lifecycle slot. Failed operations are retried through that same control path;
+lifecycle slot. Failed operations are retried through that same control path
+with exponential backoff (first retry immediate, then 15 seconds up to 30
+minutes) rather than on every sweep;
 unavailable Runners or unsupported capabilities remain visible errors, not
 permission to purge data or create a replacement agent.
 

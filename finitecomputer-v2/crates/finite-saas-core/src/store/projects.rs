@@ -291,9 +291,9 @@ where
             // stays not-ready, returns to the ordinary overview after ten minutes.
             let awaiting_restart_health = row.get::<_, bool>("latest_control_recent")
                 && row
-                .get::<_, Option<String>>("latest_control_kind")
-                .as_deref()
-                == Some("restart")
+                    .get::<_, Option<String>>("latest_control_kind")
+                    .as_deref()
+                    == Some("restart")
                 && row
                     .get::<_, Option<String>>("latest_control_status")
                     .as_deref()

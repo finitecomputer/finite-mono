@@ -181,7 +181,7 @@ export async function recoverHostedWebChatBinding(machineId: string) {
     throw new HostedWebChatError("Sign in again to finish chat setup.", 401);
   }
   const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
-  if (!billing.billing || billing.billing.trial_access?.blocked) {
+  if (billing.billing?.trial_access?.blocked) {
     throw new HostedWebChatError("Payment is required to access your agent. Manage billing from the dashboard.", 402);
   }
   const core = await loadCoreMe();
