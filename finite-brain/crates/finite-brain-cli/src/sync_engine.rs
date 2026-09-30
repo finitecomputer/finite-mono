@@ -74,8 +74,13 @@ pub(crate) fn run_working_tree_sync(
         .map_err(|error| sync_stage_error("read prior encrypted export", &root, error))?;
     let server_url = server_url_for_command(env, args)?;
     let auth = load_signer(env)?;
-    let pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
+    let mut pending_local_changes = scan_working_tree_changes(&root, &prior_tree_state)
         .map_err(|error| sync_stage_error("scan local Working Tree changes", &root, error))?;
+    // Edits to pages retained in a Folder the manifest marks unreadable are
+    // invisible to the scan above. If this sync restores that Folder's key,
+    // they must be submitted (and conflict) rather than be overwritten.
+    let retained_edits = scan_retained_unreadable_edits(&root, &prior_tree_state)
+        .map_err(|error| sync_stage_error("scan retained Working Tree edits", &root, error))?;
     // Routine sync reconciles against the cached export and pulls only the
     // sync records after the last known sequence, so the response scales with
     // new activity instead of total Brain size. The full export is fetched on
@@ -83,6 +88,7 @@ pub(crate) fn run_working_tree_sync(
     // authoritative), whenever the cached export is stale, and whenever the
     // incremental path escalates below.
     let cached_export_candidate = pending_local_changes.is_empty()
+        && retained_edits.is_empty()
         && prior_tree_state.sync.latest_sequence > 0
         && prior_export.is_some();
     // Routine sync fetches metadata anyway; fetching it first can identify a
@@ -140,6 +146,12 @@ pub(crate) fn run_working_tree_sync(
         &mounted_exports,
         &session_keys,
     );
+    pending_local_changes.extend(readable_retained_edits(
+        retained_edits,
+        &export,
+        &mounted_exports,
+        &session_keys,
+    ));
     let mut preflight_remote_result = if !pending_local_changes.is_empty() {
         // Local submission is followed by a bootstrap so accepted writes can
         // be confirmed from the authoritative projection. Validate that this
@@ -2853,6 +2865,89 @@ fn parse_folder_access(access: &str) -> Result<FolderAccessMode, CliError> {
             "unknown folder access mode {other}"
         ))),
     }
+}
+
+/// An edited page retained from an earlier readable projection of a Folder the
+/// manifest now marks unreadable.
+struct RetainedEdit {
+    source_brain_id: Option<String>,
+    folder_id: String,
+    change: WorkingTreeChange,
+}
+
+/// Find edits to pages whose manifest entries survive in unreadable Folders.
+/// A tree stuck by a stale cached export keeps revision plaintext there, and a
+/// user may edit it. Only known pages count: files a metadata-only Folder did
+/// not materialize from the server are never treated as new submissions.
+fn scan_retained_unreadable_edits(
+    root: &Path,
+    state: &finite_brain_core::portability::BrainWorkingTreeStateManifest,
+) -> Result<Vec<RetainedEdit>, CliError> {
+    let mut edits = Vec::new();
+    for folder in state.folder_roots.iter().filter(|folder| !folder.can_read) {
+        for object in state.objects.iter().filter(|object| {
+            object.content_type == "text/markdown"
+                && object.folder_id == folder.folder_id
+                && object.source_brain_id == folder.source_brain_id
+        }) {
+            let relative_path = format!("{}/{}", folder.path, object.path);
+            if is_generated_folder_file(&folder.path, &relative_path) {
+                continue;
+            }
+            let Ok(body) = fs::read_to_string(root.join(&relative_path)) else {
+                continue;
+            };
+            if object.content_hash == sha256_hex(body.as_bytes()) {
+                continue;
+            }
+            edits.push(RetainedEdit {
+                source_brain_id: folder.source_brain_id.clone(),
+                folder_id: folder.folder_id.clone(),
+                change: WorkingTreeChange::Upsert {
+                    path: SafeRelativePath::new("change_path", relative_path)
+                        .map_err(|error| CliError::InvalidInput(error.to_string()))?,
+                    markdown: body,
+                },
+            });
+        }
+    }
+    Ok(edits)
+}
+
+/// Retained edits whose Folder this sync can now read with its current key.
+/// Edits in Folders that stay unreadable remain on disk untouched: the
+/// projection cannot materialize over them without the key.
+fn readable_retained_edits(
+    edits: Vec<RetainedEdit>,
+    export: &CliEncryptedBrainExport,
+    mounted_exports: &[MountedFolderSyncContext],
+    session_keys: &SessionFolderKeyring,
+) -> Vec<WorkingTreeChange> {
+    edits
+        .into_iter()
+        .filter(|edit| match edit.source_brain_id.as_deref() {
+            None => export.folders.iter().any(|folder| {
+                folder.id == edit.folder_id
+                    && session_keys.contains(
+                        &export.brain.id,
+                        &folder.id,
+                        folder.current_key_version,
+                    )
+            }),
+            Some(source) => mounted_exports.iter().any(|mounted| {
+                mounted.export.brain.id == source
+                    && mounted.source_folder().is_some_and(|folder| {
+                        folder.id == edit.folder_id
+                            && session_keys.contains(
+                                &mounted.export.brain.id,
+                                &folder.id,
+                                folder.current_key_version,
+                            )
+                    })
+            }),
+        })
+        .map(|edit| edit.change)
+        .collect()
 }
 
 fn scan_working_tree_changes(

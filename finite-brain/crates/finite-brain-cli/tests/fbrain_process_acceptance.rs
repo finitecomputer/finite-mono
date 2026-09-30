@@ -5039,6 +5039,83 @@ fn built_fbrain_sync_recovers_invited_folder_stuck_by_stale_cached_export() {
     journey.assert_ordinary_sync_recovers();
 }
 
+/// Recovery must not silently overwrite an unsynced edit to a page retained
+/// in the stuck, metadata-only Folder. The edit reaches conflict handling
+/// against the newer server revision instead of being replaced by it.
+#[test]
+fn built_fbrain_sync_recovery_preserves_unsynced_edit_in_stuck_folder() {
+    use InviteJourneyStep::*;
+    let journey = InvitedMemberJourney::start();
+    let binary = fbrain();
+    let sync_dir = journey.member_tree.join(".finitebrain/encrypted-sync");
+    let state_path = journey
+        .member_tree
+        .join(".finitebrain/working-tree-state.json");
+    journey.member_open(&binary, &journey.member_tree);
+    journey.step(&binary, MemberSync);
+    let export_before_delivery = fs::read(sync_dir.join("export.json")).unwrap();
+    journey.step(&binary, OwnerDeliversKey);
+    journey.step(&binary, MemberSync);
+    let revision_one_state = InvitedMemberJourney::tree_state(&journey.member_tree);
+    let revision_one_pages = ["index.md", "log.md", "wiki/verification.md"].map(|page| {
+        let path = journey.member_tree.join("Team Folder").join(page);
+        (path.clone(), fs::read(path).unwrap())
+    });
+    journey.step(&binary, OwnerRevisesPages("amberorchidtwo"));
+    journey.step(&binary, MemberSync);
+
+    fs::write(sync_dir.join("export.json"), export_before_delivery).unwrap();
+    let bootstrap = journey.member_json_file("bootstrap.json");
+    let mut stuck_state = revision_one_state;
+    stuck_state["sync"]["latestSequence"] = bootstrap["latestSequence"].clone();
+    for root in stuck_state["folderRoots"].as_array_mut().unwrap() {
+        if root["folderId"] == INVITED_FOLDER_ID {
+            root["canRead"] = json!(false);
+            root["metadataOnly"] = json!(true);
+        }
+    }
+    write_json(&state_path, &stuck_state);
+    for (path, bytes) in &revision_one_pages {
+        fs::write(path, bytes).unwrap();
+    }
+    let edited = journey.member_tree.join("Team Folder/wiki/verification.md");
+    let marker = "unsynced-member-note-vermilionquartz";
+    fs::write(
+        &edited,
+        format!(
+            "{}\n{marker}\n",
+            String::from_utf8_lossy(&revision_one_pages[2].1)
+        ),
+    )
+    .unwrap();
+
+    let result = journey.member_sync(&binary, &journey.member_tree);
+    assert_ne!(
+        result["conflicts"],
+        json!([]),
+        "an edit against revision 1 must conflict with server revision 2: {result}"
+    );
+    let mut preserved = Vec::new();
+    let mut pending = vec![journey.member_tree.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if fs::read(&path)
+                .map(|bytes| String::from_utf8_lossy(&bytes).contains(marker))
+                .unwrap_or(false)
+            {
+                preserved.push(path);
+            }
+        }
+    }
+    assert!(
+        preserved.iter().any(|path| !path.starts_with(&sync_dir)),
+        "the unsynced edit must remain in the Working Tree: {preserved:?}"
+    );
+}
+
 /// Cross-version proof: the member runs the pre-fix CLI named by
 /// `FBRAIN_PRE_FIX_BIN` (for example fbrain 0.5.0 built from
 /// `fbrain/v0.5.0`) against the current server until it reaches the FIN-146
