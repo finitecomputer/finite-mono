@@ -463,7 +463,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.getByText("Restarting your agent. Your home, data, and history are retained.", { exact: true }).waitFor({ timeout: 40_000 });
       core.state.projects[0].runtime_recovery = null;
       core.state.projects[0].runtime!.runtime_status = "online";
-      await page.getByText("Your agent is ready.", { exact: true }).waitFor({ timeout: 40_000 });
+      await page.getByText(/^Your agent is online\./).first().waitFor({ timeout: 40_000 });
       assert.equal(new URL(page.url()).pathname, "/dashboard");
       assert.equal(await page.getByRole("alert").filter({ hasText: "Automatic restart needs help" }).count(), 0);
 
@@ -480,7 +480,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await page.getByText("Your agent is stopped.", { exact: true }).count(), 0);
       core.state.projects[0].runtime_recovery = null;
       core.state.projects[0].runtime!.runtime_status = "online";
-      await page.getByText("Your agent is ready.", { exact: true }).waitFor({ timeout: 40_000 });
+      await page.getByText(/^Your agent is online\./).first().waitFor({ timeout: 40_000 });
       if (process.env.FIN152_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.FIN152_SCREENSHOT_DIR}/ready.png` });
       assert.equal(new URL(page.url()).pathname, "/dashboard/machines/runtime_payment-agent");
       assert.equal(core.state.creationPosts.length, 0);
@@ -861,7 +861,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot$/u);
       const main = page.getByRole("main");
-      await expectVisibleText(page, "Your agent is ready.");
+      await expectVisibleText(page, "Your agent is online.");
       const productNav = page.getByRole("navigation", { name: "Agent navigation" });
       const agentLink = productNav.getByRole("link", { name: "Agent", exact: true });
       // The fake Core changes out of band, unlike a product mutation that

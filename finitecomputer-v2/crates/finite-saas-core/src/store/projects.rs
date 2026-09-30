@@ -105,6 +105,8 @@ where
                     core_trial_access_blocked(project.customer_org_id, $2::text::timestamptz) AS billing_access_blocked,
                     suspension.resume_allowed AS billing_resume_allowed,
                     latest.kind AS latest_control_kind, latest.status AS latest_control_status,
+                    COALESCE(latest.completed_at > $2::text::timestamptz - interval '10 minutes', FALSE)
+                        AS latest_control_recent,
                     control.id AS control_id, control.project_id AS control_project_id,
                     control.agent_runtime_id AS control_agent_runtime_id,
                     control.source_host_id AS control_source_host_id,
@@ -130,7 +132,7 @@ where
              LEFT JOIN trial_runtime_suspensions AS suspension ON suspension.agent_runtime_id = runtime.id
              LEFT JOIN runtime_control_requests AS resume ON resume.id = suspension.resume_request_id
              LEFT JOIN LATERAL (
-               SELECT request.kind, request.status FROM runtime_control_requests request
+               SELECT request.kind, request.status, request.completed_at FROM runtime_control_requests request
                WHERE request.agent_runtime_id = runtime.id
                ORDER BY request.created_at DESC, request.id DESC LIMIT 1
              ) AS latest ON TRUE
@@ -284,8 +286,11 @@ where
             // Completion clears the billing marker and invalidates old health.
             // Continue observing the same restart until fresh health is ready;
             // not-ready and stale reports can still advance without a new control.
-            // the latest control also prevents reviving an owner's later Stop.
-            let awaiting_restart_health = row
+            // The latest control also prevents reviving an owner's later Stop.
+            // Observation is bounded: a runtime that never reports health, or
+            // stays not-ready, returns to the ordinary overview after ten minutes.
+            let awaiting_restart_health = row.get::<_, bool>("latest_control_recent")
+                && row
                 .get::<_, Option<String>>("latest_control_kind")
                 .as_deref()
                 == Some("restart")

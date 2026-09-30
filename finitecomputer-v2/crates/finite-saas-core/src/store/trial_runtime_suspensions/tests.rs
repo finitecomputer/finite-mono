@@ -780,3 +780,22 @@ async fn ordinary_restart_has_generic_presentation_and_blocked_access_hides_reco
 
     }).await;
 }
+
+#[tokio::test]
+async fn runtime_recovery_observation_ends_when_health_never_arrives() {
+    with_isolated_postgres(|store| async move {
+        let (org, _, _, _) = setup(&store).await;
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::PastDue, 20)).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Stop).await;
+        store.sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::Active, 30)).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Restart).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        // No health report yet: the completed restart is still being observed.
+        assert_eq!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery, Some(RuntimeRecoveryStatus::RestartPending));
+        // A runtime that never reports health must not show "waiting" forever.
+        let client = store.connection().await.unwrap();
+        client.execute("UPDATE runtime_control_requests SET completed_at = completed_at - interval '11 minutes' WHERE kind = 'restart'", &[]).await.unwrap();
+        drop(client);
+        assert!(store.visible_projects_for_workos_user("workos_trial-lifecycle").await.unwrap()[0].runtime_recovery.is_none());
+    }).await;
+}
