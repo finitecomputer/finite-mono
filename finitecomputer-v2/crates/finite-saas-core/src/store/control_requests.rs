@@ -92,6 +92,17 @@ pub(super) async fn postgres_enqueue_runtime_control_request_bound<C>(
 where
     C: GenericClient + Sync,
 {
+    if matches!(
+        kind,
+        RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade
+    ) && trials_access::trial_access(client, &project.customer_org_id, now)
+        .await?
+        .is_some_and(|access| access.blocked)
+    {
+        return Err(CoreError::BillingRequired);
+    }
     let runtime = postgres_active_runtime_for_project(client, &project.id)
         .await?
         .ok_or(CoreError::ProjectRuntimeNotFound)?;
@@ -263,7 +274,50 @@ where
     if project.owner_user_id != user.id {
         return Err(CoreError::ProjectNotFound);
     }
-    postgres_enqueue_runtime_control_request(client, &project, &user.id, kind, None, &now).await
+    let request =
+        postgres_enqueue_runtime_control_request(client, &project, &user.id, kind, None, &now)
+            .await?;
+    record_explicit_trial_runtime_intent(client, &request).await?;
+    Ok(request)
+}
+
+pub(super) async fn record_explicit_trial_runtime_intent<C>(
+    client: &C,
+    request: &RuntimeControlRequest,
+) -> CoreResult<()>
+where
+    C: GenericClient + Sync,
+{
+    if matches!(
+        request.kind,
+        RuntimeControlKind::Stop | RuntimeControlKind::Destroy
+    ) {
+        // Explicit owner/operator intent supersedes billing's automatic resume,
+        // including an acknowledgement that dedupes onto the billing Stop.
+        // Persist that intent so a later enforcement retry cannot reclaim it.
+        client
+            .execute(
+                "INSERT INTO trial_runtime_suspensions
+                    (agent_runtime_id, stop_request_id, resume_allowed)
+                 SELECT $1, $2, FALSE WHERE EXISTS (
+                    SELECT 1 FROM projects p JOIN trial_redemptions t ON t.customer_org_id = p.customer_org_id
+                    WHERE p.id = $3 AND t.state = 'redeemed'
+                 ) ON CONFLICT (agent_runtime_id) DO UPDATE
+                 SET stop_request_id = EXCLUDED.stop_request_id, resume_request_id = NULL, resume_allowed = FALSE",
+                &[&request.agent_runtime_id, &request.id, &request.project_id],
+            )
+            .await
+            .map_err(store_error)?;
+    } else {
+        client
+            .execute(
+                "DELETE FROM trial_runtime_suspensions WHERE agent_runtime_id = $1",
+                &[&request.agent_runtime_id],
+            )
+            .await
+            .map_err(store_error)?;
+    }
+    Ok(())
 }
 
 pub(super) async fn postgres_admin_request_runtime_control<C>(

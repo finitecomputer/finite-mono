@@ -504,7 +504,9 @@ where
             .execute(
                 "UPDATE customer_orgs
                  SET billing_class = 'standard', updated_at = $2::text::timestamptz
-                 WHERE id = $1",
+                 WHERE id = $1 AND (billing_class = 'standard' OR NOT EXISTS (
+                     SELECT 1 FROM trial_redemptions WHERE customer_org_id = $1 AND state = 'redeemed'
+                 ))",
                 &[&customer_org_id, &now],
             )
             .await

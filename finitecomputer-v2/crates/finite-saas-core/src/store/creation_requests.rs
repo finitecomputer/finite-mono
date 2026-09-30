@@ -111,6 +111,13 @@ where
             .map(|org| org.id),
         None => None,
     };
+    if let Some(org_id) = existing_org_id.as_deref()
+        && trials_access::trial_access(client, org_id, &now)
+            .await?
+            .is_some_and(|access| access.blocked)
+    {
+        return Err(CoreError::BillingRequired);
+    }
     let locked_launch_code = if let Some(code) = launch_code.as_deref() {
         let locked = lock_postgres_launch_code(client, code, &now).await?;
         if let (Some(redeemed_org_id), Some(redeemed_key)) = (

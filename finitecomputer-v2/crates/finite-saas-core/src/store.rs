@@ -156,6 +156,9 @@ mod launch_code_rows;
 use launch_code_rows::*;
 mod launch_codes;
 mod offboarding;
+#[cfg(test)]
+mod trial_access_gates_tests;
+mod trial_runtime_suspensions;
 pub(crate) mod trials;
 mod trials_access;
 #[cfg(test)]

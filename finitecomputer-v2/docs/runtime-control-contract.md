@@ -150,6 +150,30 @@ fails closed. This operation is neither off-host restore nor generic data repair
 Core records the runtime as `offline` and the request confirms into the
 `stopped` terminal after the provider command succeeds.
 
+### Event-trial access suspension
+
+Redeemed event trials on standard accounts lose new-work admission at the trial
+end timestamp, or when billing is no longer active/trialing. There is no grace
+period. Paid active subscriptions and sponsored/grandfathered accounts remain
+exempt. Core owns the same read-only policy for dashboard access, creation, and
+up-bound control request/lease admission; login and billing remain available.
+
+Core reconciles trial compute every five seconds and after billing updates,
+using the existing Stop operation. Stop is asynchronous: a live control lease
+must settle first, and provider shutdown retains its bounded termination
+behavior. Running tasks are not promised completion. Stop preserves the runtime,
+its durable mount, identity, history, memberships, and credentials.
+
+A durable marker distinguishes trial-owned stops from owner/operator stops.
+After billing recovers, Core waits for the trial Stop to settle and requests a
+Restart of that same runtime. Explicit Stop/Destroy requests persist a no-resume
+intent through failed stops and enforcement retries. Accepted explicit up-bound
+requests satisfy automatic recovery and reset that intent. Duplicate
+reconciliation uses the existing single-operation
+lifecycle slot. Failed operations are retried through that same control path;
+unavailable Runners or unsupported capabilities remain visible errors, not
+permission to purge data or create a replacement agent.
+
 ### Operator-only Cold Relocation
 
 Cold relocation moves one exact, stopped Kata Runtime between Finite-owned

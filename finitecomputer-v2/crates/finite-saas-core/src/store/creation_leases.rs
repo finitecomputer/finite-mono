@@ -123,6 +123,7 @@ where
                           AND (lease_expires_at IS NULL OR lease_expires_at <= $4::text::timestamptz)
                         )
                       )
+                  AND NOT core_trial_access_blocked(customer_org_id, $4::text::timestamptz)
                   AND (
                         target_source_host_id IS NULL
                         OR target_source_host_id = $5

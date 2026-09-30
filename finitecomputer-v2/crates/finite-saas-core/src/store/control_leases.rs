@@ -181,6 +181,14 @@ where
                   AND ($5::text IS NULL OR request.source_host_id = $5)
                   AND runtime.placement_runner_class = ANY($6::text[])
                   AND request.kind = ANY($7::text[])
+                  AND (
+                        request.kind IN ('stop', 'destroy')
+                        OR EXISTS (
+                            SELECT 1 FROM projects
+                            WHERE projects.id = request.project_id
+                              AND NOT core_trial_access_blocked(projects.customer_org_id, $4::text::timestamptz)
+                        )
+                      )
                   AND runtime.runtime_capabilities->>'schema' = 'runtime_capabilities.v1'
                   AND CASE request.kind
                         WHEN 'restart' THEN
