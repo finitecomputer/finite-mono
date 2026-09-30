@@ -266,7 +266,7 @@ async function scenario() {
     await turn(`after-${c.run}`); const after = await snapshot(); assertRecovered(before, stopped, after);
     await until("Core recovery observation cleared", async () => { const p = (await me()).projects.find((x: any) => x.project.id === project); return !p.runtime_recovery && p.runtime?.runtime_status === "online" && p.runtime.runtime_health?.status === "ready" ? true : null; });
     await waiting.waitFor({ state: "hidden", timeout: 180_000 });
-    await page.getByText("Your agent is ready.", { exact: true }).first().waitFor({ timeout: 30_000 });
+    await page.getByText(/^Your agent is online\./).first().waitFor({ timeout: 30_000 });
     report.recoveryUiRefreshedWithoutReload = true;
     await page.screenshot({ path: path.join(evidence, "recovered.png") });
     await ingest(restored); await pause(7000); assert.equal(physical().State.StartedAt, after.startedAt, "duplicate billing input restarted runtime again");
