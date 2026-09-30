@@ -164,10 +164,11 @@ jobs:
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 75
     env:
-      BILLING_SMOKE_ROOT: ${{ runner.temp }}/finite-billing-${{ github.run_id }}-${{ github.run_attempt }}
       BILLING_SMOKE_IMAGE: ${{ inputs.billing_runtime_image }}
     steps:
       - uses: actions/checkout@v4
+      - name: Select disposable state directory
+        run: echo "BILLING_SMOKE_ROOT=$RUNNER_TEMP/finite-billing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v16
       - uses: cachix/cachix-action@v17
         with:
