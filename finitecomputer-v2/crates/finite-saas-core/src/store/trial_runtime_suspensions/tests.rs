@@ -672,3 +672,80 @@ async fn trial_manual_recovery_satisfies_failed_automatic_resume_without_second_
     })
     .await;
 }
+
+#[tokio::test]
+async fn trial_canceled_then_paid_checkout_restores_same_agent() {
+    with_isolated_postgres(|store| async move {
+        let (org, _, runtime, _) = setup(&store).await;
+        let runtime_before = store.row("agent_runtimes", &runtime).await.unwrap();
+        store
+            .sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::Canceled, 20))
+            .await
+            .unwrap();
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Stop).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        assert_eq!(store.all("runtime_control_requests").await.len(), 1);
+        // Manage billing sends a canceled trial to paid Checkout, which creates
+        // a replacement subscription without a trial attempt.
+        let mut paid = subscription(&org, BillingSubscriptionStatus::Active, 30);
+        paid.stripe_subscription_id = "sub_paid".into();
+        paid.stripe_event_id = Some("evt_paid".into());
+        let account = store.sync_stripe_subscription(paid).await.unwrap();
+        assert_eq!(account.stripe_subscription_id.as_deref(), Some("sub_paid"));
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        complete_next(&store, RuntimeControlKind::Restart).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        assert_eq!(store.all("runtime_control_requests").await.len(), 2);
+        assert_eq!(store.all("agent_runtimes").await.len(), 1);
+        assert_eq!(store.all("agent_creation_requests").await.len(), 1);
+        let runtime_after = store.row("agent_runtimes", &runtime).await.unwrap();
+        for field in [
+            "id",
+            "project_id",
+            "source_machine_id",
+            "runtime_artifact_id",
+        ] {
+            assert_eq!(runtime_before[field], runtime_after[field]);
+        }
+        let overview = store
+            .billing_overview(LinkVerifiedUserInput {
+                verified_email: "trial-lifecycle@finite.vip".into(),
+                workos_user_id: "workos_trial-lifecycle".into(),
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert!(!overview.trial_access.unwrap().blocked);
+        assert!(!overview.requires_billing);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trial_failed_stop_retries_back_off_instead_of_every_sweep() {
+    with_isolated_postgres(|store| async move {
+        let (org, _, _, _) = setup(&store).await;
+        store
+            .sync_stripe_subscription(subscription(&org, BillingSubscriptionStatus::PastDue, 20))
+            .await
+            .unwrap();
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        fail_next(&store, RuntimeControlKind::Stop).await;
+        // The first retry is immediate.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        store.reconcile_trial_runtimes(None).await.unwrap();
+        fail_next(&store, RuntimeControlKind::Stop).await;
+        // A second failure waits instead of re-enqueueing on every sweep.
+        for _ in 0..3 {
+            store.reconcile_trial_runtimes(None).await.unwrap();
+        }
+        assert_eq!(store.all("runtime_control_requests").await.len(), 2);
+        let later = (time::OffsetDateTime::now_utc() + time::Duration::seconds(20))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap();
+        store.reconcile_trial_runtimes(Some(&later)).await.unwrap();
+        assert_eq!(store.all("runtime_control_requests").await.len(), 3);
+    })
+    .await;
+}

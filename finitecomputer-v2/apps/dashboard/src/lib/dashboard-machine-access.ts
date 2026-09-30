@@ -41,7 +41,10 @@ export async function loadDashboardMachineAccess(
     loadCoreMe({ cacheMode: options.coreCacheMode }),
     loadCoreBillingOverview({ cacheMode: "fresh" }),
   ]);
-  if (!billing.billing || billing.billing.trial_access?.blocked) return null;
+  // Only a confirmed trial block denies access. An unavailable billing read must
+  // not take chat away from every account; Core independently stops blocked
+  // trial runtimes and refuses their up-bound controls.
+  if (billing.billing?.trial_access?.blocked) return null;
   let core = initialCore;
   let coreProject = dashboardMachineProjectFromSnapshot(core.me, routeIdentifier);
   if (!coreProject && options.coreCacheMode === "swr") {
@@ -56,7 +59,7 @@ export async function loadDashboardMachineAccess(
 
   return {
     viewer,
-    trialAccount: Boolean(billing.billing.trial_access),
+    trialAccount: Boolean(billing.billing?.trial_access),
     coreProject,
     mode: "core",
     machineId: runtime.id,

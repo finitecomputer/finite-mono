@@ -14,10 +14,19 @@ impl CoreStore {
                 .connection()
                 .await?
                 .query(
-                    "SELECT customer_org_id FROM trial_redemptions
-                 WHERE state = 'redeemed' AND customer_org_id > $1
-                 ORDER BY customer_org_id LIMIT 100",
-                    &[&after],
+                    // Only orgs with work to do: currently blocked, or holding a
+                    // suspension marker that may need a resume. Converted, paid
+                    // orgs without markers are not locked on every sweep.
+                    "SELECT t.customer_org_id FROM trial_redemptions t
+                 WHERE t.state = 'redeemed' AND t.customer_org_id > $1
+                   AND (core_trial_access_blocked(t.customer_org_id, $2::text::timestamptz)
+                        OR EXISTS (
+                            SELECT 1 FROM trial_runtime_suspensions s
+                            JOIN agent_runtimes r ON r.id = s.agent_runtime_id
+                            JOIN projects p ON p.id = r.project_id
+                            WHERE p.customer_org_id = t.customer_org_id))
+                 ORDER BY t.customer_org_id LIMIT 100",
+                    &[&after, &now],
                 )
                 .await
                 .map_err(store_error)?;
@@ -38,7 +47,7 @@ impl CoreStore {
     #[tracing::instrument(skip(self), fields(operation = "reconcile_trial_org"))]
     pub(super) async fn reconcile_trial_org(&self, org: &str, now: &str) -> CoreResult<()> {
         let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
+        let mut tx = client.transaction().await.map_err(store_error)?;
         // Serialize with accepted billing updates and other Core replicas. We
         // always derive desired access from persisted billing, never the event
         // payload that happened to wake this reconciliation.
@@ -68,7 +77,18 @@ impl CoreStore {
             let project = select_project(&*tx, &row.get::<_, String>(0))
                 .await?
                 .ok_or(CoreError::ProjectNotFound)?;
-            reconcile_runtime(&*tx, &project, blocked, now).await?;
+            // Isolate each runtime: an unsupported capability, lock contention
+            // or other failure on one agent must not stop its siblings from
+            // being suspended or restored. The next sweep retries it.
+            let savepoint = tx.savepoint("trial_runtime").await.map_err(store_error)?;
+            match reconcile_runtime(&*savepoint, &project, blocked, now).await {
+                Ok(()) => savepoint.commit().await.map_err(store_error)?,
+                Err(error) => {
+                    tracing::error!(operation = "reconcile_trial_runtime", project_id = %project.id,
+                        error = %error, "trial runtime reconciliation failed; will retry");
+                    savepoint.rollback().await.map_err(store_error)?;
+                }
+            }
         }
         self.finish(tx).await
     }
@@ -127,6 +147,9 @@ async fn reconcile_runtime<C: GenericClient + Sync>(
         {
             return Ok(());
         }
+        if !retry_backoff_elapsed(tx, &runtime.id, "stop", now).await? {
+            return Ok(());
+        }
         let stop = postgres_enqueue_runtime_control_request_bound(
             tx,
             project,
@@ -158,7 +181,9 @@ async fn reconcile_runtime<C: GenericClient + Sync>(
             )
             .await
             .map_err(store_error)?;
-        } else if matches!(stop_status.as_str(), "stopped" | "failed") {
+        } else if matches!(stop_status.as_str(), "stopped" | "failed")
+            && retry_backoff_elapsed(tx, &runtime.id, "restart", now).await?
+        {
             // Restart uses the existing RuntimeSpec, identity, handle and durable
             // mount. No agent-creation request, key rotation or data deletion.
             let resume = postgres_enqueue_runtime_control_request_bound(
@@ -176,4 +201,36 @@ async fn reconcile_runtime<C: GenericClient + Sync>(
         }
     }
     Ok(())
+}
+
+/// Failed enforcement and recovery operations retry through the same control
+/// path, but not on every five-second sweep. Only consecutive failures since
+/// the last non-failed operation of that kind count. The first retry is
+/// immediate; later ones back off exponentially from 15 seconds to a 30 minute
+/// ceiling. The reconciler's own fencing of queued controls is not an
+/// operation failure.
+async fn retry_backoff_elapsed<C: GenericClient + Sync>(
+    tx: &C,
+    runtime_id: &str,
+    kind: &str,
+    now: &str,
+) -> CoreResult<bool> {
+    let row = tx
+        .query_one(
+            "SELECT count(*) <= 1 OR max(failed.completed_at)
+                    + LEAST(interval '15 seconds' * power(2, LEAST(count(*) - 2, 7)),
+                            interval '30 minutes') <= $3::text::timestamptz
+             FROM runtime_control_requests failed
+             WHERE failed.agent_runtime_id = $1 AND failed.kind = $2 AND failed.status = 'failed'
+               AND failed.failure_message IS DISTINCT FROM 'Trial access requires payment'
+               AND failed.created_at > COALESCE((
+                   SELECT max(settled.created_at) FROM runtime_control_requests settled
+                   WHERE settled.agent_runtime_id = $1 AND settled.kind = $2
+                     AND settled.status <> 'failed'
+               ), '-infinity'::timestamptz)",
+            &[&runtime_id, &kind, &now],
+        )
+        .await
+        .map_err(store_error)?;
+    Ok(row.get(0))
 }
