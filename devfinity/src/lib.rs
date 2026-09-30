@@ -1512,6 +1512,23 @@ wait "$postgres_pid"
             .with_context(|| format!("failed to write {}", script.display()))
     }
 
+    fn runtime_product_environment(&self) -> serde_json::Value {
+        let mut environment = serde_json::json!({
+            "FINITE_SITES_API": self.finitesites_api_url(),
+            "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
+            "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
+            "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
+        });
+        // A local deterministic inference fixture must also receive Hermes's
+        // post-turn usage request. Preserve the normal profile when unset.
+        if let Ok(url) = std::env::var("DEVFINITY_FINITE_PRIVATE_CONTROL_URL")
+            && !url.trim().is_empty()
+        {
+            environment["FINITE_PRIVATE_CONTROL_URL"] = url.into();
+        }
+        environment
+    }
+
     fn write_core(&self, yaml: &mut String) {
         let process = ManagedProcess::Core;
         let _ = writeln!(yaml, "  {process}:");
@@ -1547,13 +1564,7 @@ wait "$postgres_pid"
             ),
             (
                 "FC_CORE_RUNTIME_ENV_JSON",
-                serde_json::json!({
-                    "FINITE_SITES_API": self.finitesites_api_url(),
-                    "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                    "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
-                    "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
-                })
-                .to_string(),
+                self.runtime_product_environment().to_string(),
             ),
             (
                 "FC_CORE_AGENT_CREATION_PLACEMENT_JSON",
@@ -2122,13 +2133,7 @@ wait "$postgres_pid"
                 ),
                 (
                     "FC_RUNNER_RUNTIME_ENV_JSON",
-                    serde_json::json!({
-                        "FINITE_SITES_API": self.finitesites_api_url(),
-                        "FINITE_BRAIN_SERVER_URL": self.runtime_finite_brain_url(),
-                        "FINITE_BRAIN_PUBLIC_BASE_URL": self.dashboard_origin(),
-                        "FINITE_BRAIN_DEVELOPMENT_HTTP_HOST": self.apple_host_access.runtime_host,
-                    })
-                    .to_string(),
+                    self.runtime_product_environment().to_string(),
                 ),
                 (
                     "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",

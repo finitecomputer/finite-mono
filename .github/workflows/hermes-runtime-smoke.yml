@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       billing_runtime_smoke:
-        description: Approve one isolated Stripe TEST / Docker / inference qualification instead of the image smoke
+        description: Run deterministic billing contracts with real Docker lifecycle instead of the image smoke
         type: boolean
         required: true
         default: false
@@ -175,11 +175,8 @@ jobs:
           skipPush: true
       - name: Install pinned dashboard dependencies
         run: nix develop -c pnpm --dir finitecomputer-v2/apps/dashboard install --frozen-lockfile
-      - name: Exercise actual billing suspension and physical recovery
+      - name: Exercise synthetic billing contracts and physical runtime recovery
         timeout-minutes: 60
-        env:
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_BILLING_SMOKE_TEST_KEY }}
-          FINITE_PRIVATE_SMOKE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
         run: |
           nix develop -c bash -c '
             set -euo pipefail
@@ -190,8 +187,6 @@ jobs:
       - name: Retry scoped cleanup even after failed qualification
         if: always()
         timeout-minutes: 5
-        env:
-          STRIPE_SECRET_KEY: ${{ secrets.STRIPE_BILLING_SMOKE_TEST_KEY }}
         run: |
           if test -f "$BILLING_SMOKE_ROOT/context.json"; then
             nix develop -c bash -c 'cd finitecomputer-v2/apps/dashboard && node --import tsx scripts/billing-runtime-smoke.ts --cleanup'

@@ -158,50 +158,54 @@ launch. Results remain under `.local-state/stripe-trial-e2e/<run-id>/`; test
 clocks and their customers/subscriptions are deleted, and the temporary price
 and product are archived. Live account settings are not changed.
 
-### Disposable Linux billing/runtime qualification
+### Deterministic Linux billing/runtime qualification
 
-The dispatch-only `hermes-runtime-smoke.yml` billing mode joins the trial path to Devfinity's
-real Docker Runner and Hosted Device. Select `billing_runtime_smoke=true` and the
-reviewed branch ref; this skips the separate image-build smoke. Reusing the
-existing dispatch workflow allows branch qualification before merging this test
-support. It requires explicit dispatch approval,
-`STRIPE_BILLING_SMOKE_TEST_KEY` containing an approved Stripe TEST key, and the
-existing `FINITE_PRIVATE_SMOKE_API_KEY`. Do not copy a personal development key
-into Actions without approval. The job uses one Linux AMD64 worker, one runtime,
-one disposable account/test clock and two short requested chat turns. Its
-75-minute timeout is a time limit, not a dollar cap; provider retries may add
-inference calls. It creates no permanent environment and publishes no image.
+The dispatch-only `hermes-runtime-smoke.yml` billing mode tests Core's billing
+contract against Devfinity's real Docker Runner and Hosted Device. Select
+`billing_runtime_smoke=true` and the reviewed branch ref; this skips the separate
+image-build smoke. It requires no Stripe or inference secret and must not be
+coupled to external payment/model availability in required CI. Dispatch still
+uses a paid Linux worker and needs the appropriate compute authorization. The
+75-minute timeout bounds runtime, not the complete provider bill. The job creates
+no permanent environment and publishes no image.
 
 The runtime input must be the canonical image pinned by SHA256. Devfinity's
 `up --docker-runtime --prebuilt-runtime-image <reference>` verifies the pulled
 digest, Linux AMD64 architecture, flake-derived Hermes version, and source
-revision. It records `verified_prebuilt`, never a claim that the existing image
-was built from the candidate application's commit. The ordinary build path is
-unchanged. The selected runtime's source and candidate host-service SHA can
-differ; the report qualifies that explicit combination.
+revision. It records `verified_prebuilt`, not an image build from the candidate
+commit. The report identifies both runtime and candidate host-service revisions.
 
-The test uses the actual dashboard onboarding route and hosted Stripe TEST
-Checkout (synthetic card/address), then replays actual customer-scoped Stripe
-events through the dashboard HTTP webhook. Checkout selector changes fail the
-run; no API-forged completion, sponsored Launch Code, fake Runner ack, or
-synthetic health report can produce a pass. It seeds a disposable file and chat
-turn, advances the clock into failed payment, requires an actual stopped Docker
-container, pays the test invoice, then requires a new physical start with the
-same Project, Runtime, Principal, Home chat, file checksum and retained ordered
-message IDs plus a fresh real reply. Duplicate event replay must not restart it
-again. The unit tests only verify the proof checker; they are not this physical
-qualification.
+The harness creates an isolated account and trial reservation through authenticated
+Core HTTP APIs, then supplies synthetic `trialing`, `past_due` and `active`
+subscription contracts to `/api/core/v1/billing/stripe/subscription`. This is the
+same Core ingestion endpoint used by the dashboard Stripe adapter. No direct DB
+writes, Runner acknowledgements or health fixtures substitute for reconciliation.
+The real dashboard launches using the resulting trial entitlement. A local
+bounded deterministic chat-completions responder follows the existing
+`hermes-chat-interruption-docker-smoke.py` pattern through Runner's supported
+inference URL override. `DEVFINITY_FINITE_PRIVATE_CONTROL_URL` also directs
+Hermes usage-control requests to that fixture; the harness checks the effective
+container configuration before sending chat. Hermes, the chat bridge and Hosted Device remain real;
+the generated response is a fixture, not model inference. Product API credentials
+are not inherited into the stack.
 
-The report and four dashboard screenshots are the only uploaded artifacts.
-Private stack logs, Checkout URLs, environment, database/chat stores and Docker
-environment inspection must not be uploaded. Cleanup stops only the exact
-run-owned runtime, preserves its local data, deletes that new test clock and
-archives its product/price. An always-run cleanup step retries after failure;
-inspect its result and reported object IDs if cancellation prevents cleanup.
-Ephemeral worker disposal removes its local state. Existing Mac QA state is
-never read or changed.
+The test seeds a file and chat turn, injects billing suspension, requires actual
+Docker shutdown and dashboard access denial, then injects restored access. A pass
+requires a new physical start with the same Project, Runtime, Principal, Home
+chat, file checksum and ordered message IDs, plus a fresh deterministic reply
+through Hermes. The dashboard must observe recovery and update without reloading.
+Delayed and duplicate contract inputs must not unblock/restart the runtime.
 
-A pass establishes Docker lifecycle and application billing integration. It
-does not establish Kata/Phala provider behavior, real WorkOS enrollment,
-deployed Stripe webhook delivery or independent backup restore. A separately
-authorized provider smoke is still needed for those deployment boundaries.
+Only the sanitized report and four dashboard screenshots are uploaded. Private
+logs, environment, DB/chat stores and Docker environment inspection stay local.
+Scoped cleanup stops exact run-owned containers and preserves local data until
+ephemeral worker disposal. Existing Mac QA state is never read or changed.
+
+This establishes Core-to-Docker lifecycle and dashboard contract behavior. It
+**does not test Stripe, Checkout, the portal, payment processing, webhook signature
+verification/translation, real inference, real WorkOS, Kata/Phala or independent
+backup restore**. Keep real Stripe TEST validation separate: the existing manual
+`stripe-trial-test-clock-e2e.ts` and `stripe-billing-test-clock-e2e.ts` harnesses
+above exercise the external provider boundary with an explicitly authorized local
+sandbox key. Do not add a Stripe CI secret for this runtime contract test. Combining
+those results is complementary coverage, not a single continuous end-to-end pass.
