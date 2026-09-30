@@ -39,6 +39,25 @@ class FiniteStatusTests(unittest.TestCase):
                 observation = report["sections"]["fleet_convergence"]["credential_recovery_state"]
                 self.assertEqual(observation["observations"], [{"schema_state": state, "receipt_count": count}])
 
+    def test_registry_inventory_keeps_retired_and_missing_references(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        core = raw["core"]
+        old = core["artifacts"][-1]
+        old["retired_at"] = "2026-07-31T00:00:00Z"
+        old["reference"] = "ghcr.io/finite/runtime@sha256:" + "a" * 64
+        core["runtimes"][0]["runtime_artifact_id"] = old["id"]
+        core["runtimes"][0]["link_state"] = "inactive"
+        core["artifacts"].append(
+            {"id": "unknown-reference", "version_label": "unknown"}
+        )
+        report = finite_status.build_fleet(core, finite_status.parse_time(raw["now"]))
+        inventory = {row["id"]: row for row in report["artifact_inventory"]}
+        self.assertEqual(inventory[old["id"]]["reference"], old["reference"])
+        self.assertGreaterEqual(inventory[old["id"]]["recorded_runtime_count"], 1)
+        self.assertEqual(inventory[old["id"]]["retired_at"], old["retired_at"])
+        self.assertIsNone(inventory["unknown-reference"]["reference"])
+        self.assertEqual(inventory["unknown-reference"]["recorded_runtime_count"], 0)
+
     def fixture_report(self) -> dict[str, object]:
         raw = finite_status.load_fixture(FIXTURE)
         now = finite_status.parse_time(raw["now"])
