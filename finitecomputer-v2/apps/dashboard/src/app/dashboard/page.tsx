@@ -865,7 +865,7 @@ function CoreProjectCard({
   const chatHref = overviewHref ? `${overviewHref}/chat` : null;
   const statusLabel = coreProjectLaunchStatusLabel(project, request);
   const runtimeStatus = project.runtime?.runtime_status ?? "unknown";
-  const recovery = paymentRecoveryPresentation(project.runtime_recovery, runtimeStatus);
+  const recovery = paymentRecoveryPresentation(project.runtime_recovery);
   const heroState = recovery?.state ?? runtimePrismState(runtimeStatus);
   const statusDescription = request?.status === "failed"
     ? "We could not start this agent. Ask a team member to retry it."

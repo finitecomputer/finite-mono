@@ -44,7 +44,7 @@ test("machine recovery route identity comes from one Core snapshot", () => {
 });
 
 
-test("dashboard access checks fresh billing and only blocks marked trial accounts", async (t) => {
+test("dashboard access checks fresh billing, only blocks marked trial accounts, and survives billing outages", async (t) => {
   const { createServer } = await import("node:http");
   const { loadDashboardMachineAccess } = await import("./dashboard-machine-access");
   const saved = { ...process.env };
@@ -78,6 +78,7 @@ test("dashboard access checks fresh billing and only blocks marked trial account
   blocked = false;
   assert(await loadDashboardMachineAccess("r", { coreCacheMode: "swr" }));
   unavailable = true;
-  assert.equal(await loadDashboardMachineAccess("r"), null);
+  // A billing outage must not block every account's agent access.
+  assert(await loadDashboardMachineAccess("r"));
   assert.equal(checks, 4);
 });

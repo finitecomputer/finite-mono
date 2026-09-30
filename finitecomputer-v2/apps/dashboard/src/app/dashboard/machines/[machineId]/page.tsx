@@ -102,7 +102,7 @@ async function ImportedMachineOverview({
       ? access.coreProject.active_runtime_control
       : null;
   const runtimeStatus = access.coreProject.runtime?.runtime_status ?? "unknown";
-  const recovery = paymentRecoveryPresentation(access.coreProject.runtime_recovery, runtimeStatus);
+  const recovery = paymentRecoveryPresentation(access.coreProject.runtime_recovery);
   const overview = activeRetirement
     ? {
         state: "stale" as const,
