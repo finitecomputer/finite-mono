@@ -181,19 +181,43 @@ async function scenario() {
     docker(["exec", container, "sh", "-c", 'printf "%s" "$1" > "$2"', "sh", marker, markerPath]);
     const hash = () => createHash("sha256").update(docker(["exec", container, "cat", markerPath])).digest("hex");
     const chatUrl = dashboard + `/api/chat/machines/${runtime}/hosted-device`;
-    async function chat(): Promise<any> { const r = await browserContext.request.get(chatUrl + "/state"); assert(r.ok(), "Hosted Device unavailable"); return r.json(); }
+    let viewQuery = "";
+    let streamError: unknown;
+    async function chat(): Promise<any> {
+      assert(!streamError, "Hosted Device update stream failed");
+      const r = await browserContext.request.get(chatUrl + "/state" + viewQuery); assert(r.ok(), "Hosted Device unavailable"); return r.json();
+    }
     function stream() {
       updates?.abort(); updates = new AbortController();
-      void fetch(chatUrl + "/updates", { signal: updates.signal }).then(async r => {
-        assert(r.ok); const reader = r.body?.getReader();
-        if (reader) { try { while (!(await reader.read()).done) { /* drain real updates */ } } finally { reader.releaseLock(); } }
-      }).catch(() => {});
+      const signal = updates.signal;
+      streamError = undefined;
+      void (async () => {
+        let transportFailures = 0;
+        // Trial streams deliberately expire after 30 seconds. Reconnect like
+        // the browser, retaining the explicit transcript view across reads.
+        while (!signal.aborted) {
+          try {
+            const r = await fetch(chatUrl + "/updates" + viewQuery, { signal });
+            assert(r.ok && r.body, "Hosted Device update stream unavailable");
+            const reader = r.body.getReader();
+            try { while (!(await reader.read()).done) { transportFailures = 0; } } finally { reader.releaseLock(); }
+          } catch (error) {
+            if (signal.aborted) return;
+            // The dashboard's bounded trial stream can terminate the body.
+            // State reads still fail closed if access or the service is lost.
+            if (!(error instanceof TypeError) || ++transportFailures > 3) throw error;
+          }
+          await pause(500);
+        }
+      })().catch(error => { if (!signal.aborted) streamError = error; });
     }
-    stream();
+    await chat(); // bootstrap the one canonical binding before opening a stream
     const initialChat = await until("real Hosted Device connection", async () => { const s = await chat(); return s.rooms?.some((r: any) => r.is_agent_chat && r.state === "Connected") ? s : null; });
     const room = initialChat.hosted_agent_binding.canonical_room_id;
     const topic = initialChat.topics.find((t: any) => t.room_id === room && t.topic_id === "home");
     assert(topic); const chatId = topic.chats.find((t: any) => t.active)?.chat_id ?? topic.chats[0]?.chat_id; assert(chatId);
+    viewQuery = "?" + new URLSearchParams({ room_id: room, topic_id: topic.topic_id, chat_id: chatId, limit: "100" });
+    stream();
     const scoped = (s: any) => s.messages.filter((m: any) => m.room_id === room && m.conversation_id === topic.topic_id && m.chat_id === chatId).sort((a: any, b: any) => Number(a.seq) - Number(b.seq));
     async function turn(text: string) {
       const current = await chat(); const previous = Math.max(0, ...scoped(current).map((m: any) => Number(m.seq)));
@@ -201,15 +225,22 @@ async function scenario() {
       return until("real Hermes reply from deterministic local responder", async () => { const s = await chat(); return scoped(s).some((m: any) => m.sender_account_id !== s.identity.account_id && Number(m.seq) > previous && m.final_delivery === true && String(m.display_content ?? m.text ?? "").includes(text)) ? s : null; }, 240);
     }
     async function snapshot(): Promise<RuntimeProof> {
+      // Scoped transcript reads omit binding metadata. Observe the actual
+      // persisted binding afresh at each proof boundary, never reuse a cached
+      // pre-restart identity as evidence of recovery.
+      const bindingResponse = await browserContext.request.get(chatUrl + "/state");
+      assert(bindingResponse.ok());
+      const binding = (await bindingResponse.json()).hosted_agent_binding; assert(binding);
       const s = await chat(), item = (await me()).projects.find((x: any) => x.project.id === project); assert(item?.runtime);
       const p = physical();
-      const home = s.topics.find((t: any) => t.room_id === s.hosted_agent_binding.canonical_room_id && t.topic_id === "home");
+      const home = s.topics.find((t: any) => t.room_id === binding.canonical_room_id && t.topic_id === "home");
       assert(home?.chats.some((t: any) => t.chat_id === chatId), "original chat missing");
-      return { project: item.project.id, runtime: item.runtime.id, principal: await principal(), room: s.hosted_agent_binding.canonical_room_id, topic: home.topic_id, chat: chatId, fileHash: hash(), messageIds: scoped(s).map((m: any) => m.id ?? m.message_id), running: p.State.Running, startedAt: p.State.StartedAt };
+      return { project: item.project.id, runtime: item.runtime.id, principal: await principal(), room: binding.canonical_room_id, topic: home.topic_id, chat: chatId, fileHash: hash(), messageIds: scoped(s).map((m: any) => m.id ?? m.message_id), running: p.State.Running, startedAt: p.State.StartedAt };
     }
     await turn(`before-${c.run}`);
     const before = await snapshot(); assert(before.messageIds.every(Boolean));
     await page.goto(dashboard + "/dashboard"); await page.screenshot({ path: path.join(evidence, "normal.png") });
+    updates?.abort(); // an expired account must not keep an authorized stream
     await ingest(fixture("past_due", 2));
     // A delayed pre-expiry contract input must not unblock the account.
     await ingest(fixture("trialing", 1));
@@ -250,7 +281,7 @@ async function main() {
     else if (process.argv.includes("--cleanup")) { report = JSON.parse(await readFile(path.join(evidence, "report.json"), "utf8").catch(() => "{}")); await cleanup(); }
     else await boot();
   } catch {
-    report.passed = false; report.failedStage = stage;
+    report.passed = false; report.failedStage ??= stage;
     await save().catch(() => {});
     console.error(`Billing runtime smoke failed at ${stage}; private diagnostics remain in the run directory.`);
     process.exitCode = 1;
