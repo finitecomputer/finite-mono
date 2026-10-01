@@ -161,10 +161,11 @@ where
                id, request_id, api_key_id, grant_id, endpoint, model,
                estimated_usage_units, reserved_usage_units, settled_usage_units,
                settlement_kind, status, usage_formula_version, upstream_status,
-               upstream_error_class, burst_window_epoch, created_at, updated_at
+               upstream_error_class, burst_window_epoch, created_at, updated_at,
+               usage_user_id
              )
              VALUES ($1, $2, $3, $4, $5, $6, $7, $7, NULL, NULL, 'reserved', $8, NULL, NULL,
-                     $9, $10::text::timestamptz, $10::text::timestamptz)",
+                     $9, $10::text::timestamptz, $10::text::timestamptz, $11)",
             &[
                 &reservation_id,
                 &request_id,
@@ -176,6 +177,7 @@ where
                 &usage_formula_version,
                 &reservation_epoch,
                 &now,
+                &grant.user_id,
             ],
         )
         .await

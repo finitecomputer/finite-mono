@@ -264,22 +264,25 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
             })
             .await
             .unwrap();
+        let reserve_input = crate::ReserveFinitePrivateUsageInput {
+            request_id: "req-metrics-1".to_string(),
+            presented_api_key: "fpk_live_metrics".to_string(),
+            endpoint: "/v1/chat/completions".to_string(),
+            model: "glm-5-3-flash".to_string(),
+            estimated_prompt_tokens: 10,
+            estimated_completion_tokens: 20,
+            estimated_usage_units: 70,
+            usage_formula_version: "2026-05-26.v1".to_string(),
+            dashboard_url: "https://finite.computer/dashboard".to_string(),
+            now: None,
+        };
         let decision = store
-            .reserve_finite_private_usage(crate::ReserveFinitePrivateUsageInput {
-                request_id: "req-metrics-1".to_string(),
-                presented_api_key: "fpk_live_metrics".to_string(),
-                endpoint: "/v1/chat/completions".to_string(),
-                model: "glm-5-3-flash".to_string(),
-                estimated_prompt_tokens: 10,
-                estimated_completion_tokens: 20,
-                estimated_usage_units: 70,
-                usage_formula_version: "2026-05-26.v1".to_string(),
-                dashboard_url: "https://finite.computer/dashboard".to_string(),
-                now: None,
-            })
+            .reserve_finite_private_usage(reserve_input.clone())
             .await
             .unwrap();
         let reservation_id = decision.reservation_id.unwrap();
+        let reservation = db.row("finite_private_reservations", &reservation_id).await.unwrap();
+        assert_eq!(reservation["usage_user_id"], grant.user_id);
         let input = crate::RecordFinitePrivateRequestDiagnosticInput {
             reservation_id: reservation_id.clone(),
             request_id: "req-metrics-1".to_string(),
@@ -296,6 +299,13 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
             grant_id: grant.id.clone(), raw_key: "fpk_live_metrics".into(),
             project_id: None, agent_runtime_id: None, now: None,
         }).await.unwrap();
+        // Synthetic ownership change after admission must not move old usage.
+        db.query_json("WITH new_owner AS (INSERT INTO users (id,normalized_email,link_status,created_at,updated_at) VALUES ('user-new-owner','new-owner@example.invalid','pending',NOW(),NOW()) RETURNING id) UPDATE finite_private_grants SET user_id=(SELECT id FROM new_owner) WHERE id=$1 RETURNING to_jsonb(finite_private_grants)", &[&grant.id]).await;
+        assert_eq!(
+            store.reserve_finite_private_usage(reserve_input.clone()).await.unwrap().reservation_id,
+            Some(reservation_id.clone())
+        );
+        assert_eq!(db.row("finite_private_reservations", &reservation_id).await.unwrap(), reservation);
         let response = router(store.clone(), scoped_test_auth())
             .oneshot(
                 Request::builder()
@@ -327,6 +337,46 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         assert_eq!(first["completion_tokens"], 19);
         assert_eq!(first["project_id"], "project-metrics");
         assert_eq!(first["agent_runtime_id"], serde_json::Value::Null);
+        assert_eq!(first["usage_user_id"], grant.user_id);
+        assert_eq!(first["usage_user_email"], "metrics@finite.vip");
+        assert_eq!(first["project_display_name"], "Synthetic");
+        // Display labels are frozen with the diagnostic, not looked up on export.
+        db.query_json("UPDATE users SET normalized_email='renamed@example.invalid' WHERE id=$1 RETURNING to_jsonb(users)", &[&grant.user_id]).await;
+        db.query_json("UPDATE projects SET display_name='Renamed agent' WHERE id='project-metrics' RETURNING to_jsonb(projects)", &[]).await;
+        // Previous Core binaries omit the additive column. New diagnostics
+        // must not infer ownership for those reservations from the current grant.
+        db.query_json(
+            "INSERT INTO finite_private_reservations (id,request_id,api_key_id,grant_id,endpoint,model,estimated_usage_units,reserved_usage_units,status,usage_formula_version,created_at,updated_at) SELECT 'legacy-reservation','legacy-request',api_key_id,grant_id,endpoint,model,1,1,'reserved',usage_formula_version,created_at,updated_at FROM finite_private_reservations WHERE id=$1 RETURNING to_jsonb(finite_private_reservations)",
+            &[&reservation_id],
+        ).await;
+        store.record_finite_private_request_diagnostic(crate::RecordFinitePrivateRequestDiagnosticInput {
+            reservation_id: "legacy-reservation".into(),
+            request_id: "legacy-request".into(),
+            ..input.clone()
+        }).await.unwrap();
+        let legacy = db.query_json(
+            "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id='legacy-reservation'",
+            &[],
+        ).await.pop().unwrap();
+        assert_eq!(legacy["usage_user_id"], serde_json::Value::Null);
+        assert_eq!(legacy["usage_user_email"], serde_json::Value::Null);
+        let account_only = store.reserve_finite_private_usage(crate::ReserveFinitePrivateUsageInput {
+            request_id: "account-only-request".into(),
+            ..reserve_input
+        }).await.unwrap().reservation_id.unwrap();
+        store.record_finite_private_request_diagnostic(crate::RecordFinitePrivateRequestDiagnosticInput {
+            reservation_id: account_only.clone(),
+            request_id: "account-only-request".into(),
+            ..input.clone()
+        }).await.unwrap();
+        let account_only = db.query_json(
+            "SELECT to_jsonb(d) FROM finite_private_request_diagnostics d WHERE reservation_id=$1",
+            &[&account_only],
+        ).await.pop().unwrap();
+        assert_eq!(account_only["usage_user_id"], "user-new-owner");
+        assert_eq!(account_only["project_id"], serde_json::Value::Null);
+        assert_eq!(account_only["usage_user_email"], "new-owner@example.invalid");
+        assert_eq!(account_only["project_display_name"], serde_json::Value::Null);
         // Accounting may advance after diagnostics have been recorded/exported.
         // Replaying diagnostics must not change accounting or the diagnostic payload.
         store.settle_finite_private_reservation(crate::SettleFinitePrivateReservationInput {

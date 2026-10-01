@@ -25,13 +25,24 @@ class LokiInstantQueries(unittest.TestCase):
             for target in panel.get("targets", [])
             if target.get("queryType") == "instant"
         ]
-        self.assertEqual(len(expressions), 6)
+        self.assertEqual(len(expressions), 11)
         for expression in expressions:
             self.assertEqual(
                 re.findall(r"\b(\w+_over_time)\(", expression),
                 ["last_over_time"],
                 expression,
             )
+
+    def test_user_filter_is_limited_to_retained_events(self):
+        dashboard = json.loads(DASHBOARD.read_text())
+        for panel in dashboard["panels"]:
+            for target in panel.get("targets", []):
+                expression = target["expr"]
+                if panel["datasource"]["uid"] == "finite-loki":
+                    self.assertIn('user=~"${usage_user:raw}"', expression)
+                    self.assertIn('{{if .user}}{{.user}}{{else}}unknown{{end}}', expression)
+                else:
+                    self.assertNotIn("usage_user", expression)
 
 
 if __name__ == "__main__":

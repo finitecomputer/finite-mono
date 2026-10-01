@@ -91,6 +91,17 @@
         }
       },
       {
+        "name": "usage_user",
+        "label": "Usage user (details)",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*"
+        },
+        "description": "Responsible grant user ID captured at admission; not an active human session. unknown includes historical records without attribution; .* means all."
+      },
+      {
         "name": "project",
         "label": "Project (details)",
         "type": "textbox",
@@ -146,8 +157,146 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked \u201cmodel\u201d; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began."
+        "content": "**All-traffic aggregates** count inference arrivals, refused admission, degraded admission and terminal outcomes at the limiter. Project / Agent Runtime / key filters apply **only to Core-reserved reporting** below. Shared keys cannot identify an individual caller. Model filters apply to panels marked \u201cmodel\u201d; arrivals, refusals, active and health remain all-model totals.\n\n**Request detail and attributed usage: last 7 days only.** Low-cardinality Prometheus aggregates: up to 15 days, subject to 20 GB storage. Unknown tokens/timings are unavailable, not zero. Final usage and completion measurements appear after termination. Timings are limiter-observed, not client receipt or engine decode speed. Core accounting remains the Runaway Guard authority. Historical data is available only after collection began.\n\n**Usage user** is the responsible grant account captured at admission, not the person initiating a turn. Older records without this snapshot are **unknown**. User filters apply only to retained-event panels; all-traffic panels remain global."
       }
+    },
+    {
+      "id": 34,
+      "title": "Who is using agents? \u00b7 recorded requests",
+      "type": "table",
+      "description": "Requests in the selected time range, grouped by the responsible account and recorded agent association. Last request is the diagnostic observation time, not proof of a human chat session. Labels are captured with each diagnostic; renamed accounts/projects may have separate historical rows. Stable IDs remain the attribution authority. Unknown means attribution or display labels were not collected.",
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 6
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unknown",
+          "custom": {
+            "width": 150
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Last request"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              },
+              {
+                "id": "custom.width",
+                "value": 220
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Account email"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 280
+              },
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "View this account's requests",
+                    "url": "/d/finite-private-requests/finite-private-requests-and-usage?${__url_time_range}&var-usage_user=${__data.fields[\"User ID\"]}&viewPanel=26"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Requests"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "enablePagination": true,
+        "sortBy": [
+          {
+            "displayName": "Last request",
+            "desc": true
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (user,account,project,agent,runtime,attribution)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", account=\"usageUserEmail\", agent=\"projectDisplayName\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format account=\"{{if .account}}{{.account}}{{else}}Unknown{{end}}\", agent=\"{{if .agent}}{{.agent}}{{else if ne .project `shared-unattributed`}}{{.project}}{{else}}Not recorded{{end}}\", attribution=\"{{if and .runtime (ne .runtime `shared-unattributed`)}}Runtime{{else if and .project (ne .project `shared-unattributed`)}}Project{{else if ne .user `unknown`}}Account only{{else}}Unknown{{end}}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "queryType": "instant",
+          "legendFormat": "Requests"
+        },
+        {
+          "refId": "B",
+          "expr": "max by (user,account,project,agent,runtime,attribution)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", account=\"usageUserEmail\", agent=\"projectDisplayName\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format account=\"{{if .account}}{{.account}}{{else}}Unknown{{end}}\", agent=\"{{if .agent}}{{.agent}}{{else if ne .project `shared-unattributed`}}{{.project}}{{else}}Not recorded{{end}}\", attribution=\"{{if and .runtime (ne .runtime `shared-unattributed`)}}Runtime{{else if and .project (ne .project `shared-unattributed`)}}Project{{else if ne .user `unknown`}}Account only{{else}}Unknown{{end}}\" | unwrap observed | __error__=\"\" [$__range])) * 1000",
+          "queryType": "instant",
+          "legendFormat": "Last request"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "account": 0,
+              "agent": 1,
+              "attribution": 2,
+              "user": 5,
+              "project": 6,
+              "runtime": 7,
+              "Value #A": 3,
+              "Value #B": 4
+            },
+            "renameByName": {
+              "account": "Account email",
+              "agent": "Agent / project",
+              "attribution": "Attribution",
+              "user": "User ID",
+              "project": "Project ID",
+              "runtime": "Runtime ID",
+              "Value #A": "Requests",
+              "Value #B": "Last request"
+            }
+          }
+        }
+      ]
     },
     {
       "id": 2,
@@ -158,7 +307,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 6
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -207,7 +356,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 6
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -256,7 +405,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 6
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -305,7 +454,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 6
+        "y": 16
       },
       "fieldConfig": {
         "defaults": {
@@ -354,7 +503,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 10
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -403,7 +552,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 10
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -452,7 +601,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 10
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -510,7 +659,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 10
+        "y": 20
       },
       "fieldConfig": {
         "defaults": {
@@ -559,7 +708,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 14
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -600,7 +749,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 14
+        "y": 24
       },
       "fieldConfig": {
         "defaults": {
@@ -648,7 +797,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 22
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -696,7 +845,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 22
+        "y": 32
       },
       "fieldConfig": {
         "defaults": {
@@ -752,7 +901,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 30
+        "y": 40
       },
       "fieldConfig": {
         "defaults": {
@@ -800,7 +949,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 30
+        "y": 40
       },
       "fieldConfig": {
         "defaults": {
@@ -848,7 +997,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 38
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -896,7 +1045,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 38
+        "y": 48
       },
       "fieldConfig": {
         "defaults": {
@@ -951,7 +1100,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 46
+        "y": 56
       },
       "fieldConfig": {
         "defaults": {
@@ -962,19 +1111,19 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "The following panels apply Model, Project, Agent Runtime and Key filters to **trusted Core associations**. Filters are regular expressions over opaque IDs; `.*` includes all and `shared-unattributed` includes shared/unattributed associations. No Project or key appears in Prometheus labels. Usage here covers retained diagnostic events only; missing diagnostics and refused/degraded requests are excluded. Narrow the time range if queries reach Loki limits."
+        "content": "The following panels apply Model, Usage user, Project, Agent Runtime and Key filters to **trusted Core associations**. Filters are regular expressions over opaque IDs; `.*` includes all and `shared-unattributed` includes shared/unattributed associations. No Project or key appears in Prometheus labels. Usage here covers retained diagnostic events only; missing diagnostics and refused/degraded requests are excluded. Narrow the time range if queries reach Loki limits."
       }
     },
     {
-      "id": 19,
-      "title": "Input / output tokens by Project \u00b7 retained events",
+      "id": 32,
+      "title": "Input / output tokens by usage user \u00b7 retained events",
       "type": "bargauge",
       "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
       "gridPos": {
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 60
       },
       "fieldConfig": {
         "defaults": {
@@ -1029,13 +1178,170 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (user) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"promptTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "Input {{user}}",
+          "queryType": "instant"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (user) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"completionTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "legendFormat": "Output {{user}}",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 33,
+      "title": "Requests by usage user \u00b7 retained events",
+      "type": "bargauge",
+      "description": "One count per retained reservation, deduplicated across exporter retries. Includes unknown attribution. This does not count unique people or all arrivals.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 68
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.name}",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by(user)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "legendFormat": "{{user}}",
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "rowsToFields",
+          "options": {}
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": ""
+        },
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 19,
+      "title": "Input / output tokens by Project \u00b7 retained events",
+      "type": "bargauge",
+      "description": "Exact sums of known reported totals within retained events. Missing values excluded, not converted to zero. Immutable reservation IDs deduplicate ambiguous exporter retries before totals are grouped.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 76
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "displayName": "${__field.name}",
+          "min": 0
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "rowsToFields-A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.name} input"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "rowsToFields-B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "${__field.name} output"
+              }
+            ]
+          }
+        ]
+      },
+      "datasource": {
+        "type": "loki",
+        "uid": "finite-loki"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"promptTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "Input {{project}}",
           "queryType": "instant"
         },
         {
           "refId": "B",
-          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (project) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"completionTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "Output {{project}}",
           "queryType": "instant"
         }
@@ -1068,7 +1374,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 58
+        "y": 84
       },
       "fieldConfig": {
         "defaults": {
@@ -1123,13 +1429,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"promptTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"promptTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "{{key}} input",
           "queryType": "instant"
         },
         {
           "refId": "B",
-          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", value=\"completionTokens\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
+          "expr": "sum by (key) (last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", value=\"completionTokens\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | value!=\"\" | unwrap value | __error__=\"\" [$__range]))",
           "legendFormat": "{{key}} output",
           "queryType": "instant"
         }
@@ -1162,7 +1468,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 92
       },
       "fieldConfig": {
         "defaults": {
@@ -1192,7 +1498,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(quality)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", quality=\"measurementQuality\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "expr": "sum by(quality)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", quality=\"measurementQuality\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
           "legendFormat": "{{quality}}",
           "queryType": "instant"
         }
@@ -1225,7 +1531,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 92
       },
       "fieldConfig": {
         "defaults": {
@@ -1255,7 +1561,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by(reason)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", reason=\"terminationReason\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
+          "expr": "sum by(reason)(last_over_time({service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\", reason=\"terminationReason\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\" | label_format record=\"1\" | unwrap record | __error__=\"\" [$__range]))",
           "legendFormat": "{{reason}}",
           "queryType": "instant"
         }
@@ -1288,7 +1594,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 74
+        "y": 100
       },
       "fieldConfig": {
         "defaults": {
@@ -1306,12 +1612,12 @@
       "id": 26,
       "title": "Request metadata \u00b7 newest 1,000 matches; narrow range for more",
       "type": "table",
-      "description": "",
+      "description": "Usage user is the responsible grant account, not the initiating human. Missing user fields in historical events mean unknown.",
       "gridPos": {
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 104
       },
       "fieldConfig": {
         "defaults": {
@@ -1330,7 +1636,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "{service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\"",
+          "expr": "{service=\"finite-private-request-diagnostics\"} | json reservation=\"reservationId\", observed=\"observedAtUnixSeconds\", model=\"model\", endpoint=\"endpoint\", project=\"projectId\", runtime=\"agentRuntimeId\", key=\"apiKeyId\", user=\"usageUserId\" | label_format user=\"{{if .user}}{{.user}}{{else}}unknown{{end}}\" | user=~\"${usage_user:raw}\" | label_format diagnostic_age=\"{{sub (unixEpoch now) .observed}}\" | diagnostic_age >= 0 | diagnostic_age <= 604800 | drop diagnostic_age | model=~\"$model\" | endpoint=~\"$endpoint\" | project=~\"${project:raw}\" | runtime=~\"${runtime:raw}\" | key=~\"${key:raw}\"",
           "legendFormat": "",
           "queryType": "range",
           "maxLines": 1000,
@@ -1379,26 +1685,34 @@
               "endpoint": "Endpoint",
               "reservationId": "Reservation ID",
               "upstreamStatus": "Upstream HTTP",
-              "upstreamErrorClass": "Upstream error"
+              "upstreamErrorClass": "Upstream error",
+              "usageUserId": "Usage user ID",
+              "userAttribution": "User attribution",
+              "usageUserEmail": "Account email",
+              "projectDisplayName": "Agent / project"
             },
             "indexByName": {
               "observedAt": 0,
               "requestId": 1,
               "model": 2,
               "endpoint": 3,
-              "apiKeyId": 4,
-              "projectId": 5,
-              "terminationReason": 6,
-              "promptTokens": 7,
-              "completionTokens": 8,
-              "firstOutputMs": 9,
-              "firstAnswerMs": 10,
-              "durationMs": 11,
-              "measurementQuality": 12,
-              "agentRuntimeId": 13,
-              "upstreamStatus": 17,
-              "upstreamErrorClass": 18,
-              "reservationId": 20
+              "apiKeyId": 8,
+              "projectId": 9,
+              "terminationReason": 10,
+              "promptTokens": 11,
+              "completionTokens": 12,
+              "firstOutputMs": 13,
+              "firstAnswerMs": 14,
+              "durationMs": 15,
+              "measurementQuality": 16,
+              "agentRuntimeId": 17,
+              "upstreamStatus": 21,
+              "upstreamErrorClass": 22,
+              "reservationId": 24,
+              "usageUserId": 6,
+              "userAttribution": 7,
+              "usageUserEmail": 4,
+              "projectDisplayName": 5
             }
           }
         }
@@ -1413,7 +1727,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 90
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1462,7 +1776,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 90
+        "y": 116
       },
       "fieldConfig": {
         "defaults": {
@@ -1510,7 +1824,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 98
+        "y": 124
       },
       "fieldConfig": {
         "defaults": {
