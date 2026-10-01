@@ -6304,8 +6304,9 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
 /// any application rows for the attempted room; callers must discard the
 /// in-memory Device candidate because MLS processing may have changed it.
 /// The one exception is [`ClientError::DeviceStateBehindServer`]: the rewind
-/// evidence (and the entries applied before it) is persisted before the
-/// error surfaces, so the flag survives the caller's reload.
+/// evidence and safe replay prefix are persisted before the error surfaces,
+/// so the flag survives reload. Recovery never includes an unvalidated skip
+/// or its speculative suffix in that save.
 pub fn run_room_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,

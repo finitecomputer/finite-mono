@@ -5702,3 +5702,200 @@ fn forward_recovery_waits_when_the_commit_is_outside_the_page_budget() {
         2
     );
 }
+
+#[test]
+fn recovery_persists_rewind_evidence_without_committing_unvalidated_skips() {
+    for validated_commit in [false, true] {
+        let tag = if validated_commit {
+            "rewind_after_commit"
+        } else {
+            "rewind_after_skip"
+        };
+        let (mut f, readable, rejected) = forward_recovery_fixture(tag);
+        let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+        let mut other_writer =
+            FiniteChatDevice::from_state(config.clone(), f.alice.export_state().unwrap()).unwrap();
+        other_writer.bypass_currency_gate_for_tests(ROOM_ID);
+        let commit = if validated_commit {
+            let commit = rekey_like_the_pre_fix_image(
+                &mut f.bob_store,
+                &mut f.bob,
+                &mut f.delivery,
+                "rewind_evidence_commit",
+            );
+            let page = f
+                .delivery
+                .sync_events(ROOM_ID, other_writer.device_ref(), commit - 1)
+                .unwrap();
+            other_writer
+                .apply_commit_entry(ROOM_ID, &page.entries[0])
+                .unwrap();
+            Some(commit)
+        } else {
+            None
+        };
+        let own = send_recorded(
+            &mut f.delivery,
+            &mut other_writer,
+            None,
+            "other writer",
+            "unrecognized_own_send",
+        );
+        let error = run_runtime_sync_tick(
+            &mut f.alice_store,
+            &mut f.alice,
+            &mut f.delivery,
+            &f.options,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                    ClientError::DeviceStateBehindServer { .. }
+                ))
+            ),
+            "{error:?}"
+        );
+        let mut loaded = f.alice_store.load_device(config.clone()).unwrap();
+        let evidence = room_cursor(&loaded)
+            .behind_server
+            .expect("rewind evidence must survive reload");
+        assert_eq!(evidence.observed_seq, own.seq);
+        assert_eq!(evidence.message_id, own.message_id);
+        assert_eq!(
+            evidence.evidence_epoch,
+            if validated_commit { 2 } else { 1 }
+        );
+        assert!(matches!(
+            loaded.ensure_current_for_send(ROOM_ID),
+            Err(ClientError::DeviceStateBehindServer { .. })
+        ));
+        let cursor = loaded.last_applied_seq(ROOM_ID).unwrap();
+        assert_eq!(cursor, commit.unwrap_or(readable[0]));
+        let messages = f
+            .alice_store
+            .load_app_messages(loaded.device_ref(), 100)
+            .unwrap();
+        let events = f
+            .alice_store
+            .load_app_events(loaded.device_ref(), 100)
+            .unwrap();
+        for seq in &readable {
+            assert_eq!(messages.iter().any(|m| m.seq == *seq), *seq <= cursor);
+            assert_eq!(events.iter().any(|e| e.seq == *seq), *seq <= cursor);
+        }
+        let gaps = f
+            .alice_store
+            .load_sync_recoveries(loaded.device_ref(), ROOM_ID)
+            .unwrap();
+        assert_eq!(
+            gaps.iter().map(|g| g.seq).collect::<Vec<_>>(),
+            if validated_commit { rejected } else { vec![] }
+        );
+        if !validated_commit {
+            rekey_like_the_pre_fix_image(
+                &mut f.bob_store,
+                &mut f.bob,
+                &mut f.delivery,
+                "later_evidence_heal",
+            );
+            run_runtime_sync_tick(&mut f.alice_store, &mut loaded, &mut f.delivery, &f.options)
+                .unwrap();
+            assert!(room_cursor(&loaded).behind_server.is_none());
+            assert!(loaded.room_currency_verified(ROOM_ID));
+        }
+    }
+}
+
+#[test]
+fn forward_recovery_refuses_the_sixty_fifth_rejection() {
+    for count in [64, 65] {
+        let mut f = currency_fixture(&format!("recovery_skip_limit_{count}"));
+        let mut stale =
+            FiniteChatDevice::from_state(f.bob_config.clone(), f.bob.export_state().unwrap())
+                .unwrap();
+        stale.bypass_currency_gate_for_tests(ROOM_ID);
+        for i in 0..count {
+            send_recorded(
+                &mut f.delivery,
+                &mut f.bob,
+                Some(&mut f.bob_store),
+                "original",
+                &format!("original_{i}"),
+            );
+        }
+        run_runtime_sync_tick(
+            &mut f.alice_store,
+            &mut f.alice,
+            &mut f.delivery,
+            &f.options,
+        )
+        .unwrap();
+        for i in 0..count {
+            send_recorded(
+                &mut f.delivery,
+                &mut stale,
+                None,
+                "reused",
+                &format!("reused_{i}"),
+            );
+        }
+        rekey_like_the_pre_fix_image(
+            &mut f.bob_store,
+            &mut f.bob,
+            &mut f.delivery,
+            "skip_limit_commit",
+        );
+        let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+        let before = f
+            .alice_store
+            .load_device(config.clone())
+            .unwrap()
+            .export_state()
+            .unwrap();
+        let messages = f
+            .alice_store
+            .load_app_messages(f.alice.device_ref(), 100)
+            .unwrap();
+        let result = run_runtime_sync_tick(
+            &mut f.alice_store,
+            &mut f.alice,
+            &mut f.delivery,
+            &f.options,
+        );
+        if count == 64 {
+            result.unwrap();
+            assert_eq!(
+                f.alice_store
+                    .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+                    .unwrap()
+                    .len(),
+                64
+            );
+            assert!(f.alice.room_currency_verified(ROOM_ID));
+        } else {
+            assert!(result.is_err());
+            assert_eq!(
+                f.alice_store
+                    .load_device(config)
+                    .unwrap()
+                    .export_state()
+                    .unwrap(),
+                before
+            );
+            assert_eq!(
+                f.alice_store
+                    .load_app_messages(f.alice.device_ref(), 100)
+                    .unwrap(),
+                messages
+            );
+            assert!(
+                f.alice_store
+                    .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}

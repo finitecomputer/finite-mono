@@ -15,6 +15,15 @@ pub struct StoredSyncRecovery {
     pub recovered_epoch: u64,
 }
 
+// The prefix before the first skip still waiting for a validating Commit.
+// Rewind evidence may be saved on failure, but this speculative suffix may not.
+struct RecoveryCheckpoint {
+    state: FiniteChatDeviceState,
+    messages: usize,
+    events: usize,
+    recoveries: usize,
+}
+
 fn restore_candidate(
     device: &FiniteChatDevice,
     state: FiniteChatDeviceState,
@@ -52,6 +61,7 @@ pub(super) fn recover_room<D: RuntimeDelivery>(
     }
     let mut after_seq = candidate.last_applied_seq(room_id)?;
     let mut caught_up = false;
+    let mut checkpoint: Option<RecoveryCheckpoint> = None;
     let mut recoveries = Vec::new();
     let mut applied_entries = Vec::new();
     let mut messages = Vec::new();
@@ -71,9 +81,15 @@ pub(super) fn recover_room<D: RuntimeDelivery>(
         }
         for entry in page.entries {
             let epoch = candidate.group_epoch(room_id)?;
-            // Failed MLS processing may mutate secret-tree state. Every
-            // rejected application is rolled back before continuing replay.
-            let before = candidate.export_state()?;
+            // Only foreign applications can be skipped. Their failed MLS
+            // processing may mutate state, so retain a rollback snapshot.
+            let before = if entry.kind == LogEntryKind::Application
+                && entry.sender != *candidate.device_ref()
+            {
+                Some(candidate.export_state()?)
+            } else {
+                None
+            };
             let applied = match apply_log_entry_in_memory(&mut candidate, room_id, &entry) {
                 Ok(applied) => applied,
                 Err(ClientStoreError::Client(ClientError::ApplicationGenerationUnavailable {
@@ -83,6 +99,15 @@ pub(super) fn recover_room<D: RuntimeDelivery>(
                     && entry.epoch == epoch
                     && recoveries.len() < MAX_RECOVERY_SKIPS =>
                 {
+                    let before = before.expect("foreign application has a rollback snapshot");
+                    if checkpoint.is_none() {
+                        checkpoint = Some(RecoveryCheckpoint {
+                            state: before.clone(),
+                            messages: messages.len(),
+                            events: events.len(),
+                            recoveries: recoveries.len(),
+                        });
+                    }
                     candidate = restore_candidate(&candidate, before)?;
                     candidate.set_last_applied_seq(room_id, entry.seq)?;
                     recoveries.push(StoredSyncRecovery {
@@ -95,11 +120,27 @@ pub(super) fn recover_room<D: RuntimeDelivery>(
                     });
                     continue;
                 }
+                Err(error) if is_behind_server_error(&error) => {
+                    let evidence = candidate.room_entry(room_id)?.behind_server.clone();
+                    if let Some(prefix) = checkpoint {
+                        candidate = restore_candidate(&candidate, prefix.state)?;
+                        candidate.room_entry_mut(room_id)?.behind_server = evidence;
+                        messages.truncate(prefix.messages);
+                        events.truncate(prefix.events);
+                        recoveries.truncate(prefix.recoveries);
+                    }
+                    // Match strict sync's durable rewind refusal without
+                    // committing a skip that has no authenticated heal yet.
+                    store.save_sync_tick(&candidate, &messages, &events, &recoveries)?;
+                    *device = candidate;
+                    return Err(error.into());
+                }
                 Err(error) => return Err(error.into()),
             };
             let Some(applied) = applied else { continue };
             let new_epoch = candidate.group_epoch(room_id)?;
             if entry.kind == LogEntryKind::Commit && new_epoch > epoch {
+                checkpoint = None;
                 for recovery in &mut recoveries {
                     if recovery.recovery_commit_seq == 0 && new_epoch > recovery.previous_epoch {
                         recovery.recovery_commit_seq = entry.seq;

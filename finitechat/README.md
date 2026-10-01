@@ -68,7 +68,10 @@ Sync can recover from reused or expired application-message generations when
 it can validate a later Commit that advances the MLS epoch. Replay is bounded
 by the configured sync page budget and at most 64 rejected entries. Without
 that Commit, or on an invalid Commit, malformed entry, or other error, the
-recovery candidate is discarded and the room remains blocked.
+recovery candidate is discarded and the room remains blocked. As in strict
+sync, newly discovered evidence that this device is behind the server is
+persisted with the safe replay prefix before returning the refusal; no skip
+without a validating Commit is committed.
 
 Recovery saves readable messages, events, the cursor and gap records in one
 SQLite transaction. `client_sync_recoveries` retains each rejected sequence,

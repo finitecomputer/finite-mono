@@ -23610,6 +23610,129 @@ mod tests {
     }
 
     #[test]
+    fn send_gate_preserves_currency_behind_discovered_during_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let room = QuarantineRoomSpec {
+            room_id: "room_recovery_rewind",
+            mls_group_id: "mls_recovery_rewind",
+            key_package_id: "kp_recovery_rewind",
+            welcome_id: "welcome_recovery_rewind",
+        };
+        let alice_config = quarantine_device_config("recovery-alice", "alice");
+        let victim_config = quarantine_device_config("recovery-victim", "victim");
+        let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+        let mut victim = FiniteChatDevice::new(victim_config.clone()).unwrap();
+        let victim_dir = dir.path().join("victim");
+        fs::create_dir_all(&victim_dir).unwrap();
+        let mut victim_store = SqliteClientStore::open(
+            victim_dir.join(CLIENT_STORE_FILE),
+            SqliteClientStoreOptions::from_nostr_secret(
+                &victim_config.account_secret_key,
+                "victim",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut delivery = test_quarantine_delivery(&server_url);
+        quarantine_join_room(
+            &mut delivery,
+            &mut victim,
+            &mut victim_store,
+            &mut alice,
+            &room,
+        );
+        let mut stale =
+            FiniteChatDevice::from_state(alice_config.clone(), alice.export_state().unwrap())
+                .unwrap();
+        let mut stale_store = SqliteClientStore::open(
+            dir.path().join("stale.sqlite3"),
+            SqliteClientStoreOptions::from_nostr_secret(&alice_config.account_secret_key, "alice")
+                .unwrap(),
+        )
+        .unwrap();
+        stale_store.save_device_state(&stale).unwrap();
+        let options = RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 8,
+        };
+        run_room_sync_tick(
+            &mut stale_store,
+            &mut stale,
+            &mut delivery,
+            &options,
+            room.room_id,
+        )
+        .unwrap();
+        let healthy = quarantine_append_message(
+            &mut delivery,
+            &mut alice,
+            room.room_id,
+            b"consumed generation",
+            "recovery_original",
+        );
+        run_room_sync_tick(
+            &mut victim_store,
+            &mut victim,
+            &mut delivery,
+            &options,
+            room.room_id,
+        )
+        .unwrap();
+        quarantine_append_message(
+            &mut delivery,
+            &mut stale,
+            room.room_id,
+            b"reused generation",
+            "recovery_reused",
+        );
+        let own = quarantine_append_message(
+            &mut delivery,
+            &mut victim,
+            room.room_id,
+            b"accepted from another copy",
+            "recovery_unknown_own",
+        );
+        // The store predates this own send, as if a copied writer published it.
+        drop(victim_store);
+        let mut app = open_app_runtime_state_with_account_at_system_now(
+            &victim_dir,
+            &server_url,
+            "victim",
+            "recovery-victim",
+        );
+        let error = app
+            .core
+            .currency_gate_before_send(room.room_id)
+            .unwrap_err();
+        assert!(
+            matches!(error, FiniteChatCoreError::DeviceStateBehindServer { observed_seq, .. } if observed_seq == own),
+            "{error:?}"
+        );
+        assert_eq!(error.classification().kind, ErrorKind::CurrencyBehind);
+        assert!(!error.classification().retryable);
+        app.core.reload_persisted_device().unwrap();
+        assert_eq!(
+            app.core.device.last_applied_seq(room.room_id).unwrap(),
+            healthy
+        );
+        assert!(
+            app.core
+                .device
+                .room_sync_cursors()
+                .iter()
+                .any(|r| r.room_id == room.room_id && r.behind_server.is_some())
+        );
+        assert!(
+            app.core
+                .store
+                .load_sync_recoveries(app.core.device.device_ref(), room.room_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn send_gate_reports_quarantined_sync_failure_instead_of_currency_warning() {
         let dir = tempfile::tempdir().unwrap();
         let (server_url, _requests) = spawn_counting_http_server(dir.path().join("server.sqlite3"));
