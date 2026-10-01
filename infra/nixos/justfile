@@ -125,8 +125,8 @@ lat3-runner-rollout-contract:
 # Static manifest, install-input, build-host, dry-activation, app-plane
 # fence, and rollback contract for finite-lat-2 closure rollouts.
 lat2-runner-rollout-contract:
-    cd ../.. && bash -n scripts/build-lat2-nixos-closure-artifact scripts/deploy-lat2-closure-cache scripts/install-lat2-from-artifact
-    cd ../.. && python3 -m unittest scripts.tests.test_lat2_closure_artifact
+    cd ../.. && bash -n scripts/build-lat2-nixos-closure-artifact scripts/deploy-lat2-closure-cache scripts/install-lat2-from-artifact infra/nixos/scripts/prepull-lat2-dashboard-image
+    cd ../.. && python3 -m unittest scripts.tests.test_lat2_closure_artifact scripts.tests.test_prepull_lat2_dashboard_image
 
 # Static manifest, install-input, build-host, dry-activation, Runner-fencing,
 # and rollback contract for finite-lat-4 closure rollouts.
