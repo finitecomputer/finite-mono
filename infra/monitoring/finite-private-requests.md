@@ -12,7 +12,7 @@ traffic, tokens, timings, and seven-day diagnostic metadata.
   unsettled reservations.
 - The detail table covers Core-reserved requests only. Refusals and degraded
   traffic appear in aggregate counts without individual rows. Project, Agent
-  Runtime, and key filters apply only to trusted Core attribution. All-traffic
+  Runtime, key, and usage-user filters apply only to trusted Core attribution. All-traffic
   panels explicitly ignore these filters.
 - Retain input/output tokens only when upstream reports them. Missing usage
   is unavailable, not zero or an accounting estimate. Do not add overlapping
@@ -34,6 +34,29 @@ The accounting ledger and Finite Private Runaway Guard remain authoritative.
 Diagnostics do not copy grant balances, accounting state, or settled units.
 Current guard/reset views, aging reservations, engine queue/cache metrics,
 alerts, and customer billing are outside this delivery.
+
+## Usage user attribution
+
+Core snapshots the charged grant's opaque `user_id` into each new reservation's
+`usage_user_id` in the admission transaction. Diagnostics copy that snapshot;
+exported events carry `usageUserId` and `userAttribution=reservation_grant`.
+Key reassignment, later ownership changes, and diagnostic retries cannot move
+that recorded consumption to another user. This identifies the responsible
+account, not the human initiating a turn: scheduled and background agent work
+belongs to the same usage account. Names, emails, credentials, and content are
+not exported.
+
+Reservations from before collection or a previous Core binary have a null
+snapshot. Their events carry null `usageUserId` and `userAttribution=unknown`;
+existing Loki events without these fields are grouped as `unknown` too. There
+is no current-ownership join or historical backfill. Account-only keys can have
+known user attribution even when Project and runtime attribution are absent.
+
+The Usage user filter applies to all retained-event panels, including request
+counts and input/output tokens grouped by user. It never filters all-traffic
+Prometheus panels. These are best-effort diagnostic totals, not a complete
+billing ledger or a count of active people. Per-user IDs remain event fields,
+not Prometheus or persistent Loki stream labels.
 
 ## Access and data path
 
@@ -117,6 +140,25 @@ disposable Loki instance. It uses real scratch Postgres to prove batch replay,
 accounting and empty diagnostics.
 
 ## Separate production activation
+
+For usage-user attribution, pause the exporter timer and let any active export
+finish successfully before upgrading Core. Then deploy Core's additive
+migration/writer, the exporter query, and its narrow column-level grant for
+`usage_user_id`, before resuming export. This prevents the old exporter from
+sending a new attributed row without its user field and later replaying that
+same reservation with a different grouping. Investigate an interrupted or failed
+export before proceeding; a remote success without its local acknowledgment is
+ambiguous. No event rewrite or re-export of acknowledged history is required.
+
+Existing limiters work with the new Core; old Core binaries can still insert
+reservations with null attribution. The dashboard accepts both old and new event
+shapes. For rollback, prefer reverting Core while keeping the new exporter;
+retained snapshots continue to export correctly. If reverting the exporter too,
+first drain its outbox successfully, pause its timer, and wait for the active
+export to finish. Retain both nullable columns; do not drop them or rewrite old events.
+The reservation snapshot follows the existing accounting backup policy, while
+the diagnostic copy remains subject to seven-day expiry and dump exclusions.
+No token retention extension or production backfill is implied.
 
 Code review and merge do not authorize a Production Deploy. The dependency
 order is accounting safety, measurements/storage with retention controls,

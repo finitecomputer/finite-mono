@@ -67,7 +67,7 @@ where
     let result = client
         .query_one(
             "WITH source AS MATERIALIZED (
-               SELECT r.id AS reservation_id, r.request_id, r.api_key_id,
+               SELECT r.id AS reservation_id, r.request_id, r.api_key_id, r.usage_user_id,
                       CASE WHEN issue.event_count = 1 THEN issue.project_id
                            WHEN issue.event_count = 0 AND k.updated_at <= r.created_at THEN k.project_id
                            ELSE NULL END AS project_id,
@@ -100,12 +100,12 @@ where
                  AND r.created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
              ), inserted AS (
                INSERT INTO finite_private_request_diagnostics (
-                 reservation_id, request_id, api_key_id, project_id, agent_runtime_id,
+                 reservation_id, request_id, api_key_id, usage_user_id, project_id, agent_runtime_id,
                  endpoint, model, prompt_tokens, completion_tokens, first_output_ms,
                  first_answer_ms, duration_ms, termination_reason, measurement_quality,
                  upstream_status, upstream_error_class, observed_at
                )
-               SELECT reservation_id, request_id, api_key_id, project_id, agent_runtime_id,
+               SELECT reservation_id, request_id, api_key_id, usage_user_id, project_id, agent_runtime_id,
                       endpoint, model, prompt_tokens, completion_tokens, first_output_ms,
                       first_answer_ms, duration_ms, termination_reason, measurement_quality,
                       upstream_status, upstream_error_class, observed_at

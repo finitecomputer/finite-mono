@@ -52,6 +52,8 @@ suffix = uuid.uuid4().hex[:12]
 source_name = "metrics_verify_" + suffix
 restore_name = "metrics_restore_" + suffix
 created = []
+reporting_role = "metrics_reader_" + suffix
+role_created = False
 
 
 def url(name):
@@ -110,7 +112,7 @@ try:
             "[0-9][0-9][0-9][0-9]_*.sql"
         )
     )
-    sql("\n".join(p.read_text() for p in files), url(source_name))
+    sql("\n".join(p.read_text() for p in files if p.name < "0037"), url(source_name))
     # Events span 100 minutes: more than one hourly query split, yet inside
     # Loki's default 2h max_chunk_age and 3h query_ingesters_within, so
     # unflushed synthetic chunks stay visible to every query.
@@ -136,21 +138,67 @@ try:
       FROM finite_private_reservations, LATERAL (SELECT right(id,4)::int AS n) seq;
     """
     sql(seed.replace("verify-key", "verify-key-" + suffix), url(source_name))
+    migration = next(p for p in files if p.name.startswith("0037_"))
+    # Upgrade an existing ledger twice: no backfill or changed accounting.
+    sql(migration.read_text() * 2, url(source_name))
+    # Apply any subsequent migrations too as the repository evolves.
+    sql("\n".join(p.read_text() for p in files if p.name > migration.name), url(source_name))
+    assert sql(
+        "SELECT COUNT(usage_user_id) FROM finite_private_reservations;",
+        url(source_name),
+    ) == "0"
+    # Synthetic snapshots cover two owners plus pre-collection unknowns.
+    for table, identifier in (
+        ("finite_private_reservations", "id"),
+        ("finite_private_request_diagnostics", "reservation_id"),
+    ):
+        sql(
+            f"UPDATE {table} SET usage_user_id = CASE right({identifier},4)::int % 3 "
+            "WHEN 1 THEN 'verify-user' WHEN 2 THEN 'verify-user-2' ELSE NULL END;",
+            url(source_name),
+        )
     module_spec = importlib.util.spec_from_file_location(
         "private_export", ROOT / "infra/monitoring/private_requests/export.py"
     )
     module = importlib.util.module_from_spec(module_spec)
     module_spec.loader.exec_module(module)
+    module_text = (
+        ROOT / "infra/nixos/modules/finite-private-request-diagnostics.nix"
+    ).read_text()
+    sql(f"CREATE ROLE {reporting_role};", ADMIN)
+    role_created = True
+    grants = re.findall(r"GRANT [^;]+;", module_text)
+    sql("\n".join(grants).replace("TO finite_private_diagnostics", f"TO {reporting_role}"), url(source_name))
+    assert sql(
+        f"SELECT has_table_privilege('{reporting_role}', 'finite_private_reservations', 'SELECT');",
+        url(source_name),
+    ) == "f"
+
+    def export_query(statement):
+        return parsed(f"SET ROLE {reporting_role};\n" + statement)
+
     query = (ROOT / "infra/monitoring/private_requests/requests.sql").read_text()
-    first = parsed(query)
+    first = export_query(query)
     assert len(first) == 500
+    assert {r["event"]["usageUserId"] for r in first} == {
+        "verify-user", "verify-user-2", None
+    }
+    for row in first:
+        event = row["event"]
+        assert event["userAttribution"] == (
+            "reservation_grant" if event["usageUserId"] else "unknown"
+        )
+        if event["usageUserId"] is None:
+            # Historical Loki records lack both fields. Replaying their new
+            # shape must still count the reservation only once as unknown.
+            del event["usageUserId"], event["userAttribution"]
     # Simulate remote success followed by crash before acknowledgement.
     push([module.stream(module.SERVICE, first)])
     total = 0
     batches = []
-    while rows := parsed(query):
+    while rows := export_query(query):
         batches.append(len(rows))
-        total += module.export_batch(rows, send=push, query=parsed)
+        total += module.export_batch(rows, send=push, query=export_query)
     assert total == 1001 and batches == [500, 500, 1], (total, batches)
     assert (
         int(
@@ -176,6 +224,9 @@ try:
         ("Input / output tokens by key · retained events", 1): 19,
         ("Measurement quality · retained requests", 0): 1,
         ("Termination reasons · retained requests", 0): 1,
+        ("Input / output tokens by usage user · retained events", 0): 11,
+        ("Input / output tokens by usage user · retained events", 1): 19,
+        ("Requests by usage user · retained events", 0): 1,
     }
     instant = {
         (panel["title"], index): target["expr"]
@@ -197,26 +248,71 @@ try:
             )
         )
         report[window] = requests
-        for (title, index), expression in instant.items():
-            for variable, value in {
+        groups = parsed(
+            "SELECT json_object_agg(owner, total) FROM (SELECT "
+            "COALESCE(usage_user_id,'unknown') AS owner, COUNT(*) AS total "
+            "FROM finite_private_request_diagnostics "
+            f"WHERE observed_at > to_timestamp({evaluated_at - seconds}) "
+            f"AND observed_at <= to_timestamp({evaluated_at}) "
+            "GROUP BY owner) counts;"
+        )
+        # Every retained-event panel respects exact user filters, including
+        # historical missing fields. All-user queries must preserve each group.
+        for owner in (".*", "verify-user", "verify-user-2", "unknown", "absent-user"):
+            expected_groups = {
+                key: count for key, count in groups.items()
+                if owner == ".*" or key == owner
+            }
+            variables = {
                 "$__range": window,
                 "$model": "synthetic-model",
                 "$endpoint": "/v1/chat/completions",
                 "${project:raw}": ".*",
                 "${runtime:raw}": ".*",
                 "${key:raw}": "verify-key-" + suffix,
-            }.items():
-                expression = expression.replace(variable, value)
-            endpoint = (
-                LOKI
-                + "/loki/api/v1/query?"
-                + urllib.parse.urlencode({"query": expression, "time": evaluated_at})
-            )
-            with urllib.request.urlopen(endpoint, timeout=30) as response:
-                result = json.load(response)["data"]["result"]
-                value = sum(float(series["value"][1]) for series in result)
-            expected = requests * per_request[(title, index)]
-            assert value == expected, (window, title, index, value, expected)
+                "${usage_user:raw}": owner,
+            }
+            for (title, index), expression in instant.items():
+                for variable, value in variables.items():
+                    expression = expression.replace(variable, value)
+                endpoint = LOKI + "/loki/api/v1/query?" + urllib.parse.urlencode(
+                    {"query": expression, "time": evaluated_at}
+                )
+                with urllib.request.urlopen(endpoint, timeout=30) as response:
+                    result = json.load(response)["data"]["result"]
+                expected = {
+                    key: count * per_request[(title, index)]
+                    for key, count in expected_groups.items()
+                }
+                assert sum(float(s["value"][1]) for s in result) == sum(expected.values()), (
+                    window, owner, title, result, expected
+                )
+                if "by usage user" in title:
+                    assert {
+                        s["metric"]["user"]: float(s["value"][1]) for s in result
+                    } == expected, (window, owner, title, result, expected)
+            if window == "24h" and owner != ".*":
+                table = next(p for p in dashboard["panels"] if p["id"] == 26)
+                expression = table["targets"][0]["expr"]
+                for variable, value in variables.items():
+                    expression = expression.replace(variable, value)
+                endpoint = LOKI + "/loki/api/v1/query_range?" + urllib.parse.urlencode({
+                    "query": expression,
+                    "start": (evaluated_at - seconds) * 1000000000,
+                    "end": evaluated_at * 1000000000,
+                    "limit": 1000,
+                })
+                with urllib.request.urlopen(endpoint, timeout=30) as response:
+                    streams = json.load(response)["data"]["result"]
+                events = [json.loads(line) for stream in streams for _, line in stream["values"]]
+                assert all((e.get("usageUserId") or "unknown") == owner for e in events)
+                assert len({e["reservationId"] for e in events}) == sum(expected_groups.values())
+    report["user_attribution"] = {
+        "aggregate_queries": len(instant) * 5 * 3,
+        "filtered_detail_queries": 4,
+        "historical_unknown_and_replay": "passed",
+        "restored_owner_snapshots": 668,
+    }
     assert report["1h"] < report["24h"] == report["168h"] == 1001, report
     with tempfile.TemporaryDirectory(prefix="metrics-restore-") as directory:
         dump = Path(directory) / "core.dump"
@@ -255,6 +351,10 @@ try:
             )
             == "1002|68136"
         )
+        assert sql(
+            "SELECT COUNT(usage_user_id), COUNT(DISTINCT usage_user_id) FROM finite_private_reservations;",
+            url(restore_name),
+        ) == "668|2"
         sql(
             "\n".join(p.read_text() for p in files if p.name < "0032"),
             url(restore_name),
@@ -272,15 +372,12 @@ try:
             "usage_units": 68136,
             "previous_schema_reapply": "passed",
         }
-    module_text = (
-        ROOT / "infra/nixos/modules/finite-private-request-diagnostics.nix"
-    ).read_text()
     prune = re.search(
         r"DELETE FROM finite_private_request_diagnostics\s+WHERE observed_at < CURRENT_TIMESTAMP - INTERVAL \'7 days\';",
         module_text,
     )
     assert prune, "explicit prune query missing"
-    sql(prune.group(), url(source_name))
+    export_query(prune.group())
     assert (
         sql(
             "SELECT COUNT(*) FROM finite_private_request_diagnostics;", url(source_name)
@@ -299,3 +396,5 @@ try:
 finally:
     for name in reversed(created):
         sql(f"DROP DATABASE {name} WITH (FORCE);", ADMIN)
+    if role_created:
+        sql(f"DROP ROLE {reporting_role};", ADMIN)
