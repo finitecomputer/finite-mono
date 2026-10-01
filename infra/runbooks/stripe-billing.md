@@ -157,3 +157,55 @@ to a deployed webhook destination. Check that destination separately before
 launch. Results remain under `.local-state/stripe-trial-e2e/<run-id>/`; test
 clocks and their customers/subscriptions are deleted, and the temporary price
 and product are archived. Live account settings are not changed.
+
+### Deterministic Linux billing/runtime qualification
+
+The dispatch-only `hermes-runtime-smoke.yml` billing mode tests Core's billing
+contract against Devfinity's real Docker Runner and Hosted Device. Select
+`billing_runtime_smoke=true` and the reviewed branch ref; this skips the separate
+image-build smoke. It requires no Stripe or inference secret and must not be
+coupled to external payment/model availability in required CI. Dispatch still
+uses a paid Linux worker and needs the appropriate compute authorization. The
+75-minute timeout bounds runtime, not the complete provider bill. The job creates
+no permanent environment and publishes no image.
+
+The runtime input must be the canonical image pinned by SHA256. Devfinity's
+`up --docker-runtime --prebuilt-runtime-image <reference>` verifies the pulled
+digest, Linux AMD64 architecture, flake-derived Hermes version, and source
+revision. It records `verified_prebuilt`, not an image build from the candidate
+commit. The report identifies both runtime and candidate host-service revisions.
+
+The harness creates an isolated account and trial reservation through authenticated
+Core HTTP APIs, then supplies synthetic `trialing`, `past_due` and `active`
+subscription contracts to `/api/core/v1/billing/stripe/subscription`. This is the
+same Core ingestion endpoint used by the dashboard Stripe adapter. No direct DB
+writes, Runner acknowledgements or health fixtures substitute for reconciliation.
+The real dashboard launches using the resulting trial entitlement. A local
+bounded deterministic chat-completions responder follows the existing
+`hermes-chat-interruption-docker-smoke.py` pattern through Runner's supported
+inference URL override. `DEVFINITY_FINITE_PRIVATE_CONTROL_URL` also directs
+Hermes usage-control requests to that fixture; the harness checks the effective
+container configuration before sending chat. Hermes, the chat bridge and Hosted Device remain real;
+the generated response is a fixture, not model inference. Product API credentials
+are not inherited into the stack.
+
+The test seeds a file and chat turn, injects billing suspension, requires actual
+Docker shutdown and dashboard access denial, then injects restored access. A pass
+requires a new physical start with the same Project, Runtime, Principal, Home
+chat, file checksum and ordered message IDs, plus a fresh deterministic reply
+through Hermes. The dashboard must observe recovery and update without reloading.
+Delayed and duplicate contract inputs must not unblock/restart the runtime.
+
+Only the sanitized report and four dashboard screenshots are uploaded. Private
+logs, environment, DB/chat stores and Docker environment inspection stay local.
+Scoped cleanup stops exact run-owned containers and preserves local data until
+ephemeral worker disposal. Existing Mac QA state is never read or changed.
+
+This establishes Core-to-Docker lifecycle and dashboard contract behavior. It
+**does not test Stripe, Checkout, the portal, payment processing, webhook signature
+verification/translation, real inference, real WorkOS, Kata/Phala or independent
+backup restore**. Keep real Stripe TEST validation separate: the existing manual
+`stripe-trial-test-clock-e2e.ts` and `stripe-billing-test-clock-e2e.ts` harnesses
+above exercise the external provider boundary with an explicitly authorized local
+sandbox key. Do not add a Stripe CI secret for this runtime contract test. Combining
+those results is complementary coverage, not a single continuous end-to-end pass.

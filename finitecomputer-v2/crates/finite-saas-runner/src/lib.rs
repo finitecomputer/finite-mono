@@ -6134,6 +6134,17 @@ mod tests {
 
         let mut pinned_local = config.clone();
         pinned_local.image = format!(
+            "ghcr.io/finitecomputer/agent-runtime@sha256:{}",
+            "a".repeat(64)
+        );
+        pinned_local.pull_policy = Some("missing".to_string());
+        let pinned_command = docker_run_command(&pinned_local, &plan, &lease, &options);
+        let pinned_args = os_strings_to_strings(&pinned_command.args);
+        assert_eq!(
+            pinned_args.last().map(String::as_str),
+            Some(pinned_local.image.as_str())
+        );
+        pinned_local.image = format!(
             "ghcr.io/finitecomputer/finite-chat-hermes-runtime:local@sha256:{}",
             "a".repeat(64)
         );

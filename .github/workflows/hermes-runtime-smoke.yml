@@ -14,6 +14,15 @@ run-name: Hermes runtime smoke (${{ github.ref_name }})
 on:
   workflow_dispatch:
     inputs:
+      billing_runtime_smoke:
+        description: Run deterministic billing contracts with real Docker lifecycle instead of the image smoke
+        type: boolean
+        required: true
+        default: false
+      billing_runtime_image:
+        description: Existing canonical Linux AMD64 runtime pinned by digest
+        required: true
+        default: ghcr.io/finitecomputer/agent-runtime@sha256:f8faa4bda9b0bb3b1a7105f1ebee123bcc47486d92053ee2baec04080601027a
       durable_home_docker_smoke:
         description: "Run canonical Docker Add/Welcome chat plus durable /data restart smoke"
         required: false
@@ -36,6 +45,7 @@ permissions:
 
 jobs:
   docker-runtime-smoke:
+    if: ${{ !inputs.billing_runtime_smoke }}
     name: Docker runtime smoke
     runs-on: depot-ubuntu-24.04
     timeout-minutes: 75
@@ -143,3 +153,55 @@ jobs:
             finitechat/target/hermes-durable-home-docker-smoke/report.json
             finitechat/target/hermes-chat-interruption-docker-smoke/report.json
           if-no-files-found: ignore
+
+  billing-runtime-smoke:
+    if: inputs.billing_runtime_smoke
+    permissions:
+      contents: read
+    concurrency:
+      group: billing-runtime-smoke
+      cancel-in-progress: false
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      BILLING_SMOKE_IMAGE: ${{ inputs.billing_runtime_image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select disposable state directory
+        run: echo "BILLING_SMOKE_ROOT=$RUNNER_TEMP/finite-billing-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: finite
+          skipPush: true
+      - name: Install pinned dashboard dependencies
+        run: nix develop -c pnpm --dir finitecomputer-v2/apps/dashboard install --frozen-lockfile
+      - name: Exercise synthetic billing contracts and physical runtime recovery
+        timeout-minutes: 60
+        run: |
+          nix develop -c bash -c '
+            set -euo pipefail
+            export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$(command -v chromium)"
+            cd finitecomputer-v2/apps/dashboard
+            node --import tsx scripts/billing-runtime-smoke.ts
+          '
+      - name: Retry scoped cleanup even after failed qualification
+        if: always()
+        timeout-minutes: 5
+        run: |
+          if test -f "$BILLING_SMOKE_ROOT/context.json"; then
+            nix develop -c bash -c 'cd finitecomputer-v2/apps/dashboard && node --import tsx scripts/billing-runtime-smoke.ts --cleanup'
+          fi
+      - name: Upload only sanitized proof and dashboard screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: billing-runtime-proof-${{ github.run_attempt }}
+          path: |
+            ${{ env.BILLING_SMOKE_ROOT }}/evidence/report.json
+            ${{ env.BILLING_SMOKE_ROOT }}/evidence/normal.png
+            ${{ env.BILLING_SMOKE_ROOT }}/evidence/trial-ended.png
+            ${{ env.BILLING_SMOKE_ROOT }}/evidence/payment-restored.png
+            ${{ env.BILLING_SMOKE_ROOT }}/evidence/recovered.png
+          if-no-files-found: warn
+          retention-days: 7
