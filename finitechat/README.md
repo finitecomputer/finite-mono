@@ -62,6 +62,30 @@ The `auth` family manages the shared identity, the `hermes` family owns agent
 onboarding and the message bridge, and the `http` family exposes raw server
 routes for debugging.
 
+## Recovery during sync
+
+Sync can recover from reused or expired application-message generations when
+it can validate a later Commit that advances the MLS epoch. Replay is bounded
+by the configured sync page budget and at most 64 rejected entries. Without
+that Commit, or on an invalid Commit, malformed entry, or other error, the
+recovery candidate is discarded and the room remains blocked. As in strict
+sync, newly discovered evidence that this device is behind the server is
+persisted with the safe replay prefix before returning the refusal; no skip
+without a validating Commit is committed.
+
+Recovery saves readable messages, events, the cursor and gap records in one
+SQLite transaction. `client_sync_recoveries` retains each rejected sequence,
+ciphertext SHA-256 and the validating Commit/epoch; it contains no message
+content or keys. Ciphertext stays on the server. This restores availability,
+not unreadable plaintext. Diagnostic classification and explicit operator
+repair remain available and do not silently enable automatic recovery.
+
+Sending requires reaching the log head; exhausting a page budget saves progress
+but does not authorize sending. The additive audit table leaves the existing
+device snapshot and wire formats unchanged. Older binaries can read the store,
+but lack these recovery and readiness protections. Never roll back the database
+over subsequently accepted writes.
+
 ## Your Finite Identity
 
 `finitechat` uses the current Finite Home's identity-owner key, stored

@@ -71,6 +71,8 @@ use thiserror::Error;
 
 pub mod rejected_entry_diagnostic;
 pub mod room_log_capture;
+mod sync_recovery;
+pub use sync_recovery::StoredSyncRecovery;
 
 pub const FINITECHAT_CIPHERSUITE: Ciphersuite =
     Ciphersuite::MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
@@ -1176,6 +1178,20 @@ impl FiniteChatDevice {
         config: FiniteChatDeviceConfig,
         state: FiniteChatDeviceState,
     ) -> Result<Self, ClientError> {
+        Self::from_state_for_device(
+            config.account_secret_key.public_key(),
+            config.device_id,
+            config.now_unix_seconds,
+            state,
+        )
+    }
+
+    fn from_state_for_device(
+        account_public_key: NostrPublicKey,
+        device_id: String,
+        now_unix_seconds: u64,
+        state: FiniteChatDeviceState,
+    ) -> Result<Self, ClientError> {
         state.validate_limits()?;
 
         let provider = OpenMlsRustCrypto::default();
@@ -1192,18 +1208,17 @@ impl FiniteChatDevice {
         }
 
         let credential = FiniteDeviceCredentialV1::from_identity_bytes(&state.credential_identity)?;
-        let account_public_key = config.account_secret_key.public_key();
         if credential.account_public_key() != account_public_key {
             return Err(ClientError::PersistedAccountMismatch);
         }
-        if credential.device_id() != config.device_id {
+        if credential.device_id() != device_id {
             return Err(ClientError::PersistedDeviceMismatch);
         }
         credential.verify_expected(ExpectedDeviceCredential {
             account_public_key,
-            device_id: &config.device_id,
+            device_id: &device_id,
             mls_leaf_signing_public_key: &state.signer_public_key,
-            now_unix_seconds: config.now_unix_seconds,
+            now_unix_seconds,
         })?;
 
         let signer = SignatureKeyPair::read(
@@ -1219,7 +1234,7 @@ impl FiniteChatDevice {
         let credential_with_key = credential.to_openmls_credential_with_key();
         let device_ref = DeviceRef {
             account_id: hex_lower(account_public_key.as_bytes()),
-            device_id: config.device_id,
+            device_id,
         };
         if device_ref != state.device_ref {
             return Err(ClientError::PersistedDeviceMismatch);
@@ -1273,7 +1288,7 @@ impl FiniteChatDevice {
         let device = Self {
             provider,
             device_ref,
-            now_unix_seconds: config.now_unix_seconds,
+            now_unix_seconds,
             credential,
             credential_with_key,
             signer,
@@ -2082,8 +2097,8 @@ impl FiniteChatDevice {
     // * `currency_verified` (in-memory) refuses sends from a loaded state
     //   until one sync tick has completed for the room in this process.
 
-    /// True once a sync tick has completed for `room_id` since this state
-    /// was loaded, or the room was created/joined in this process.
+    /// True once sync has reached the room's log head since the last
+    /// attempt, or the room was created/joined in this process.
     pub fn room_currency_verified(&self, room_id: &str) -> bool {
         self.rooms
             .get(room_id)
@@ -2960,8 +2975,19 @@ impl FiniteChatDevice {
                 provider,
                 protocol_message_from_bytes(&entry.envelope.payload)?,
             )
-            .map_err(|error| ClientError::ProcessMessage {
-                reason: format!("{error:?}"),
+            .map_err(|error| {
+                use openmls::framing::errors::{MessageDecryptionError, SecretTreeError};
+                use openmls::prelude::{ProcessMessageError, ValidationError};
+                let reason = format!("{error:?}");
+                match error {
+                    ProcessMessageError::ValidationError(ValidationError::UnableToDecrypt(
+                        MessageDecryptionError::SecretTreeError(
+                            SecretTreeError::TooDistantInThePast
+                            | SecretTreeError::SecretReuseError,
+                        ),
+                    )) => ClientError::ApplicationGenerationUnavailable { reason },
+                    _ => ClientError::ProcessMessage { reason },
+                }
             })?;
         let credential = FiniteDeviceCredentialV1::from_credential(processed.credential().clone())?;
         let sender = DeviceRef {
@@ -3926,6 +3952,16 @@ impl SqliteClientStore {
         messages: &[StoredAppMessage],
         events: &[StoredAppEvent],
     ) -> Result<(), ClientStoreError> {
+        self.save_sync_tick(device, messages, events, &[])
+    }
+
+    fn save_sync_tick(
+        &mut self,
+        device: &FiniteChatDevice,
+        messages: &[StoredAppMessage],
+        events: &[StoredAppEvent],
+        recoveries: &[StoredSyncRecovery],
+    ) -> Result<(), ClientStoreError> {
         let state = device.export_state()?;
         let owner = state.device_ref.clone();
         let encryption_key = self.options.encryption_key.clone();
@@ -3933,6 +3969,7 @@ impl SqliteClientStore {
             save_device_state_tx(tx, &state, &encryption_key)?;
             save_app_messages_tx(tx, &encryption_key, &owner, messages)?;
             save_app_events_tx(tx, &encryption_key, &owner, events)?;
+            sync_recovery::save_recoveries(tx, &owner, recoveries)?;
             for event in events {
                 if let Some((source, bootstrap)) =
                     device_link_bootstrap_from_stored_event(&owner, event)
@@ -6267,8 +6304,9 @@ pub fn run_room_server_sync_setup_tick<D: RuntimeDelivery>(
 /// any application rows for the attempted room; callers must discard the
 /// in-memory Device candidate because MLS processing may have changed it.
 /// The one exception is [`ClientError::DeviceStateBehindServer`]: the rewind
-/// evidence (and the entries applied before it) is persisted before the
-/// error surfaces, so the flag survives the caller's reload.
+/// evidence and safe replay prefix are persisted before the error surfaces,
+/// so the flag survives reload. Recovery never includes an unvalidated skip
+/// or its speculative suffix in that save.
 pub fn run_room_sync_tick<D: RuntimeDelivery>(
     store: &mut SqliteClientStore,
     device: &mut FiniteChatDevice,
@@ -6966,12 +7004,50 @@ fn sync_room_pages<D: RuntimeDelivery>(
     delivery: &mut D,
     options: &RuntimeSyncOptions,
     room_id: RoomId,
+    after_seq: u64,
+    report: &mut RuntimeSyncReport,
+) -> Result<(), RuntimeWorkerError<D::Error>> {
+    device.room_entry_mut(&room_id)?.currency_verified = false;
+    store.currency_verified_rooms.remove(&room_id);
+    let report_start = report.applied_entries.len();
+    match sync_room_pages_inner(
+        store,
+        device,
+        delivery,
+        options,
+        room_id.clone(),
+        after_seq,
+        report,
+    ) {
+        Err(
+            error @ RuntimeWorkerError::ClientStore(ClientStoreError::Client(
+                ClientError::ApplicationGenerationUnavailable { .. },
+            )),
+        ) => {
+            report.applied_entries.truncate(report_start);
+            if sync_recovery::recover_room(store, device, delivery, options, &room_id, report)? {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    }
+}
+
+fn sync_room_pages_inner<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut FiniteChatDevice,
+    delivery: &mut D,
+    options: &RuntimeSyncOptions,
+    room_id: RoomId,
     mut after_seq: u64,
     report: &mut RuntimeSyncReport,
 ) -> Result<(), RuntimeWorkerError<D::Error>> {
     if device.has_pending_commit(&room_id)? {
         after_seq = after_seq.saturating_sub(PENDING_COMMIT_SYNC_OVERLAP);
     }
+    let mut caught_up = false;
     let mut pages = 0u32;
     let mut dirty = false;
     let mut app_messages = Vec::new();
@@ -7053,6 +7129,7 @@ fn sync_room_pages<D: RuntimeDelivery>(
             dirty = true;
         }
         if !page.has_more {
+            caught_up = true;
             break;
         }
         if page.next_after_seq == after_seq {
@@ -7061,24 +7138,24 @@ fn sync_room_pages<D: RuntimeDelivery>(
         after_seq = page.next_after_seq;
     }
 
-    // One full bounded tick completed without rewind evidence: a pre-v10
-    // room graduates from initialization to enforcement, and the room is
-    // verified current for this process.
-    if device.complete_currency_initialization(&room_id)? {
+    // A page budget limits work, not the proof that a room is current.
+    if caught_up && device.complete_currency_initialization(&room_id)? {
         dirty = true;
     }
     // A completed tick with the epoch above the evidence epoch means the
     // healing Commit was merged by a path that never pages it (a rekey
     // one-shot on an older image); the evidence flag would otherwise
     // outlive its heal, since the cursor never returns to that Commit.
-    if device.clear_behind_server_if_healed(&room_id)? {
+    if caught_up && device.clear_behind_server_if_healed(&room_id)? {
         dirty = true;
     }
     if dirty {
         store.save_device_state_and_app_messages_and_events(device, &app_messages, &app_events)?;
     }
-    device.mark_room_currency_verified(&room_id);
-    store.note_room_currency_verified(&room_id);
+    if caught_up {
+        device.mark_room_currency_verified(&room_id);
+        store.note_room_currency_verified(&room_id);
+    }
 
     debug_assert!(pages <= options.max_sync_pages_per_room);
     Ok(())
@@ -7380,6 +7457,8 @@ pub enum ClientError {
     ParseProtocolMessage,
     #[error("failed to process MLS message: {reason}")]
     ProcessMessage { reason: String },
+    #[error("MLS application generation unavailable: {reason}")]
+    ApplicationGenerationUnavailable { reason: String },
     #[error("unexpected MLS message content")]
     UnexpectedMessage,
     #[error("group already exists: {0}")]
@@ -7629,7 +7708,7 @@ pub enum ClientError {
         observed_seq: u64,
     },
     #[error(
-        "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened; sync before sending"
+        "room {room_id} currency is unverified: sync has not caught up since the store was opened or the last sync attempt; sync before sending"
     )]
     CurrencyUnverified { room_id: RoomId },
 }
@@ -8014,6 +8093,20 @@ fn create_current_client_store_schema(conn: &Connection) -> Result<(), ClientSto
 
         CREATE INDEX IF NOT EXISTS client_app_events_owner_idx
           ON client_app_events(account_id, device_id);
+
+        CREATE TABLE IF NOT EXISTS client_sync_recoveries (
+          account_id TEXT NOT NULL,
+          device_id TEXT NOT NULL,
+          room_id TEXT NOT NULL,
+          seq INTEGER NOT NULL,
+          ciphertext_sha256 TEXT NOT NULL,
+          recovery_commit_seq INTEGER NOT NULL,
+          previous_epoch INTEGER NOT NULL,
+          recovered_epoch INTEGER NOT NULL,
+          PRIMARY KEY (account_id, device_id, room_id, seq),
+          FOREIGN KEY (account_id, device_id)
+            REFERENCES client_device_states(account_id, device_id) ON DELETE CASCADE
+        );
 
         CREATE TABLE IF NOT EXISTS client_app_rooms (
           account_id TEXT NOT NULL,

@@ -166,12 +166,14 @@ pub enum FiniteChatCoreError {
         local_mark: u64,
         observed_seq: u64,
     },
-    /// No sync tick has completed for the room since the store was opened
-    /// in this process, so the store's currency is unknown.
+    /// Sync has not reached the log head since the store was opened or
+    /// the last sync attempt, so the store's currency is unknown.
     #[error(
-        "room {room_id} currency is unverified: no sync tick has completed for it since the store was opened"
+        "room {room_id} currency is unverified: sync has not caught up since the store was opened or the last sync attempt"
     )]
     CurrencyUnverified { room_id: String },
+    #[error("chat sync failed for {room_id}: {reason}")]
+    RoomSyncBlocked { room_id: String, reason: String },
     /// The client store already holds device state, but none for the
     /// requested device id. Minting a fresh device under that id would put
     /// a generation-0 MLS sender behind a device the server already knows
@@ -289,7 +291,9 @@ impl FiniteChatCoreError {
             Self::DeviceStateBehindServer { .. } | Self::DeviceStateMissing { .. } => {
                 (ErrorKind::CurrencyBehind, false)
             }
-            Self::CurrencyUnverified { .. } => (ErrorKind::CurrencyUnverified, true),
+            Self::CurrencyUnverified { .. } | Self::RoomSyncBlocked { .. } => {
+                (ErrorKind::CurrencyUnverified, true)
+            }
             // A store or filesystem failure is deterministic for the same
             // bytes (disk full, permissions, a corrupt file) and can sit after
             // a send already left the device, so a blind repeat risks a
@@ -346,6 +350,10 @@ mod error_classification_tests {
             FiniteChatCoreError::CurrencyUnverified {
                 room_id: "room".into(),
             },
+            FiniteChatCoreError::RoomSyncBlocked {
+                room_id: "room".into(),
+                reason: "rejected ciphertext".into(),
+            },
             FiniteChatCoreError::DeviceStateMissing {
                 db_path: "db".into(),
                 requested_device_id: "device".into(),
@@ -367,7 +375,8 @@ mod error_classification_tests {
             FiniteChatCoreError::DeviceStateMissing { .. } => {
                 (ErrorKind::CurrencyBehind, false, 409)
             }
-            FiniteChatCoreError::CurrencyUnverified { .. } => {
+            FiniteChatCoreError::CurrencyUnverified { .. }
+            | FiniteChatCoreError::RoomSyncBlocked { .. } => {
                 (ErrorKind::CurrencyUnverified, true, 503)
             }
             FiniteChatCoreError::Store { .. } => (ErrorKind::Store, false, 500),
@@ -383,7 +392,7 @@ mod error_classification_tests {
     #[test]
     fn every_variant_is_classified_as_decided() {
         let variants = every_variant();
-        assert_eq!(variants.len(), 13, "every variant is listed exactly once");
+        assert_eq!(variants.len(), 14, "every variant is listed exactly once");
         for error in &variants {
             let (kind, retryable, status) = expected(error);
             let classification = error.classification();
@@ -3079,12 +3088,21 @@ impl AppRuntimeState {
             | AppAction::SendPoll { .. }
             | AppAction::StartHomeChat { .. }
             | AppAction::StartTopicChat { .. }
-                if matches!(error, FiniteChatCoreError::CurrencyUnverified { .. }) =>
+                if matches!(
+                    error,
+                    FiniteChatCoreError::CurrencyUnverified { .. }
+                        | FiniteChatCoreError::RoomSyncBlocked { .. }
+                ) =>
             {
-                // Currency-gate refusal: no sync tick has verified the store
-                // yet in this process. Nothing was encrypted or appended.
+                // Sync is incomplete or blocked. Nothing was encrypted or appended.
                 self.app.status = "waiting for sync".to_owned();
-                self.app.toast = Some("Waiting for the first sync before sending".to_owned());
+                self.app.toast = Some(
+                    if matches!(error, FiniteChatCoreError::RoomSyncBlocked { .. }) {
+                        error.to_string()
+                    } else {
+                        "Waiting for chat sync to catch up before sending".to_owned()
+                    },
+                );
                 true
             }
             _ => false,
@@ -3745,6 +3763,7 @@ impl AppRuntimeState {
                 // this tick already received, and receiving is what heals.
                 Err(
                     FiniteChatCoreError::CurrencyUnverified { .. }
+                    | FiniteChatCoreError::RoomSyncBlocked { .. }
                     | FiniteChatCoreError::DeviceStateBehindServer { .. },
                 ) => {}
                 Err(error) => return Err(error),
@@ -9631,21 +9650,29 @@ impl CoreState {
     /// Sync-before-send. Runs the targeted room sync so the currency gate
     /// (`FiniteChatDevice::ensure_current_for_send`, enforced inside
     /// `create_application_request_at`) sees the freshest evidence before
-    /// any secret-tree generation is consumed. A rewound store trips here
-    /// and the send is then refused; an unreachable server is tolerated
-    /// only once the room has already been verified current in this
-    /// process (the append then fails loudly on its own), otherwise the
-    /// delivery error surfaces and nothing is encrypted. Whatever the sync
+    /// any secret-tree generation is consumed. A rewound store or an
+    /// incomplete/failed sync refuses the send. Whatever the sync
     /// applied is deferred into the next projection the caller receives.
     fn currency_gate_before_send(&mut self, room_id: &str) -> Result<(), FiniteChatCoreError> {
         match self.sync_room_with_projection(room_id) {
             Ok(projection) => {
+                let failure = projection
+                    .room_sync_failures
+                    .iter()
+                    .find(|failure| failure.room_id == room_id)
+                    .map(|failure| failure.error.clone());
                 self.deferred_projection.merge_earlier(projection);
-                Ok(())
-            }
-            Err(FiniteChatCoreError::Delivery { .. })
-                if self.device.room_currency_verified(room_id) =>
-            {
+                if let Some(reason) = failure {
+                    if let Err(error @ ClientError::DeviceStateBehindServer { .. }) =
+                        self.device.ensure_current_for_send(room_id)
+                    {
+                        return Err(send_error(room_id, error));
+                    }
+                    return Err(FiniteChatCoreError::RoomSyncBlocked {
+                        room_id: room_id.to_owned(),
+                        reason,
+                    });
+                }
                 Ok(())
             }
             Err(error) => Err(error),
@@ -23579,6 +23606,157 @@ mod tests {
         assert!(
             !line.contains('\n'),
             "the report stays a single stderr line"
+        );
+    }
+
+    #[test]
+    fn send_gate_preserves_currency_behind_discovered_during_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let server_url = spawn_live_http_server(dir.path().join("server.sqlite3"));
+        let room = QuarantineRoomSpec {
+            room_id: "room_recovery_rewind",
+            mls_group_id: "mls_recovery_rewind",
+            key_package_id: "kp_recovery_rewind",
+            welcome_id: "welcome_recovery_rewind",
+        };
+        let alice_config = quarantine_device_config("recovery-alice", "alice");
+        let victim_config = quarantine_device_config("recovery-victim", "victim");
+        let mut alice = FiniteChatDevice::new(alice_config.clone()).unwrap();
+        let mut victim = FiniteChatDevice::new(victim_config.clone()).unwrap();
+        let victim_dir = dir.path().join("victim");
+        fs::create_dir_all(&victim_dir).unwrap();
+        let mut victim_store = SqliteClientStore::open(
+            victim_dir.join(CLIENT_STORE_FILE),
+            SqliteClientStoreOptions::from_nostr_secret(
+                &victim_config.account_secret_key,
+                "victim",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut delivery = test_quarantine_delivery(&server_url);
+        quarantine_join_room(
+            &mut delivery,
+            &mut victim,
+            &mut victim_store,
+            &mut alice,
+            &room,
+        );
+        let mut stale =
+            FiniteChatDevice::from_state(alice_config.clone(), alice.export_state().unwrap())
+                .unwrap();
+        let mut stale_store = SqliteClientStore::open(
+            dir.path().join("stale.sqlite3"),
+            SqliteClientStoreOptions::from_nostr_secret(&alice_config.account_secret_key, "alice")
+                .unwrap(),
+        )
+        .unwrap();
+        stale_store.save_device_state(&stale).unwrap();
+        let options = RuntimeSyncOptions {
+            key_package_target_available: 0,
+            max_sync_pages_per_room: 8,
+        };
+        run_room_sync_tick(
+            &mut stale_store,
+            &mut stale,
+            &mut delivery,
+            &options,
+            room.room_id,
+        )
+        .unwrap();
+        let healthy = quarantine_append_message(
+            &mut delivery,
+            &mut alice,
+            room.room_id,
+            b"consumed generation",
+            "recovery_original",
+        );
+        run_room_sync_tick(
+            &mut victim_store,
+            &mut victim,
+            &mut delivery,
+            &options,
+            room.room_id,
+        )
+        .unwrap();
+        quarantine_append_message(
+            &mut delivery,
+            &mut stale,
+            room.room_id,
+            b"reused generation",
+            "recovery_reused",
+        );
+        let own = quarantine_append_message(
+            &mut delivery,
+            &mut victim,
+            room.room_id,
+            b"accepted from another copy",
+            "recovery_unknown_own",
+        );
+        // The store predates this own send, as if a copied writer published it.
+        drop(victim_store);
+        let mut app = open_app_runtime_state_with_account_at_system_now(
+            &victim_dir,
+            &server_url,
+            "victim",
+            "recovery-victim",
+        );
+        let error = app
+            .core
+            .currency_gate_before_send(room.room_id)
+            .unwrap_err();
+        assert!(
+            matches!(error, FiniteChatCoreError::DeviceStateBehindServer { observed_seq, .. } if observed_seq == own),
+            "{error:?}"
+        );
+        assert_eq!(error.classification().kind, ErrorKind::CurrencyBehind);
+        assert!(!error.classification().retryable);
+        app.core.reload_persisted_device().unwrap();
+        assert_eq!(
+            app.core.device.last_applied_seq(room.room_id).unwrap(),
+            healthy
+        );
+        assert!(
+            app.core
+                .device
+                .room_sync_cursors()
+                .iter()
+                .any(|r| r.room_id == room.room_id && r.behind_server.is_some())
+        );
+        assert!(
+            app.core
+                .store
+                .load_sync_recoveries(app.core.device.device_ref(), room.room_id)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn send_gate_reports_quarantined_sync_failure_instead_of_currency_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let (server_url, _requests) = spawn_counting_http_server(dir.path().join("server.sqlite3"));
+        let fixture = build_quarantine_fixture(dir.path(), &server_url);
+        let mut victim = open_app_runtime_state_with_account_at_system_now(
+            &fixture.victim_data_dir,
+            &server_url,
+            &fixture.victim_device_id,
+            &fixture.victim_seed,
+        );
+        let error = victim
+            .core
+            .currency_gate_before_send(&fixture.poison_room_id)
+            .unwrap_err();
+        assert!(error.to_string().contains("chat sync failed"), "{error}");
+        assert!(
+            !error.to_string().contains("currency is unverified"),
+            "{error}"
+        );
+        assert!(
+            !victim
+                .core
+                .device
+                .room_currency_verified(&fixture.poison_room_id)
         );
     }
 

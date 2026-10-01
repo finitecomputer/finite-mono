@@ -3,8 +3,10 @@
 //! phase 2 writes the REAL client store; the operator procedure is to stop
 //! the device service, run the repair against the live store, then restart.
 //!
-//! `finitechat repair skip-entry` is the only production-sanctioned way to
-//! advance a durable room cursor past a rejected log entry. It never
+//! `finitechat repair skip-entry` is the operator path for advancing a
+//! durable room cursor past a rejected log entry. Ordinary sync separately
+//! supports bounded recovery of expired/reused application generations
+//! through a validated later Commit. It never
 //! accepts an operator-typed sequence: phase 1 (rehearsal) re-runs the
 //! `diagnose rejected-entry` classification replay in a loop against byte
 //! copies of `--store`, deriving the skip list from evidence. A replayed

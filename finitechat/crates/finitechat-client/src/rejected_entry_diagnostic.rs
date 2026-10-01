@@ -36,8 +36,8 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ClientError, ClientStoreError, FiniteChatDeviceConfig, RuntimeDelivery, RuntimeSyncOptions,
-    RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions, apply_log_entry_in_memory,
-    hex_lower, run_room_sync_tick,
+    RuntimeSyncReport, RuntimeWorkerError, SqliteClientStore, SqliteClientStoreOptions,
+    apply_log_entry_in_memory, hex_lower, sync_room_pages_inner,
 };
 
 /// Schema version of [`RejectedEntryDiagnostic`]. Bump on any field change.
@@ -341,14 +341,14 @@ pub fn run_rejected_entry_diagnostic(
         max_sync_pages_per_room: REPLAY_MAX_SYNC_PAGES_PER_ROOM,
     };
 
-    // Phase A: replay the target room through the unmodified production
-    // bounded tick against the captured log. On failure the tick persists
-    // nothing (fail closed), exactly like the production Core path.
+    // Classification must expose the first rejection even when ordinary
+    // sync could recover through a later Commit. Use the strict replay
+    // shared with production, without its automatic recovery fallback.
     let tick = {
         let mut delivery = CapturedLogDelivery {
             log: &request.target,
         };
-        run_room_sync_tick(
+        replay_without_recovery(
             &mut store,
             &mut device,
             &mut delivery,
@@ -435,7 +435,7 @@ pub fn run_rejected_entry_diagnostic(
         };
         let tick = {
             let mut delivery = CapturedLogDelivery { log: room };
-            run_room_sync_tick(
+            replay_without_recovery(
                 &mut store,
                 &mut room_device,
                 &mut delivery,
@@ -657,7 +657,9 @@ fn classify_client_error(
             RejectedEntryErrorClass::MlsApplicationCiphertext
         }
         // Raw MLS message processing: the class depends on the entry kind.
-        E::ProcessMessage { .. } | E::UnexpectedMessage => match kind {
+        E::ProcessMessage { .. }
+        | E::ApplicationGenerationUnavailable { .. }
+        | E::UnexpectedMessage => match kind {
             Some(LogEntryKind::Commit) => RejectedEntryErrorClass::CommitProposalMembership,
             Some(LogEntryKind::Application) => RejectedEntryErrorClass::MlsApplicationCiphertext,
             _ => RejectedEntryErrorClass::UnsupportedUnclassified,
@@ -684,4 +686,24 @@ fn classify_client_error(
         | E::ActivateWelcome => RejectedEntryErrorClass::CommitProposalMembership,
         _ => RejectedEntryErrorClass::UnsupportedUnclassified,
     }
+}
+
+fn replay_without_recovery<D: RuntimeDelivery>(
+    store: &mut SqliteClientStore,
+    device: &mut super::FiniteChatDevice,
+    delivery: &mut D,
+    options: &RuntimeSyncOptions,
+    room_id: &str,
+) -> Result<RuntimeSyncReport, RuntimeWorkerError<D::Error>> {
+    let mut report = RuntimeSyncReport::default();
+    sync_room_pages_inner(
+        store,
+        device,
+        delivery,
+        options,
+        room_id.to_owned(),
+        device.last_applied_seq(room_id)?,
+        &mut report,
+    )?;
+    Ok(report)
 }
