@@ -43,6 +43,7 @@ impl CoreStore {
     ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let now = input.now.clone().unwrap_or(current_time_iso()?);
         let subscription = input.stripe_subscription_id.clone();
         let account = billing::sync_stripe_subscription(&*tx, input).await?;
         if account.stripe_subscription_id.as_deref() == Some(&subscription)
@@ -51,6 +52,16 @@ impl CoreStore {
             trials::redeem(&*tx, attempt, &account).await?;
         }
         self.finish(tx).await?;
+        // Billing is durable even if a Runner capability or another control
+        // prevents an immediate stop. The background reconciliation retries.
+        drop(client);
+        if let Err(error) = self
+            .reconcile_trial_org(&account.customer_org_id, &now)
+            .await
+        {
+            tracing::error!(operation = "sync_trial_stripe_subscription", org_id = %account.customer_org_id,
+                error = %error, "trial runtime reconciliation deferred");
+        }
         Ok(account)
     }
 }
@@ -138,7 +149,7 @@ where
             name: verified_email,
             billing_class: BillingClass::Standard,
             created_at: now.clone(),
-            updated_at: now,
+            updated_at: now.clone(),
         },
     };
 
@@ -148,18 +159,22 @@ where
     let has_active_billing = billing::customer_org_has_active_billing(client, &org.id).await?;
     let active_count = postgres_active_agent_creation_entitlement_count(client, &org.id).await?;
 
-    let can_create_agent = agent_creation_entitlement
-        .as_ref()
-        .is_some_and(|entitlement| {
-            active_count < i64::from(entitlement.allowed_new_agent_runtimes)
-        })
+    let trial_access = trials_access::trial_access(client, &org.id, &now).await?;
+    let trial_blocked = trial_access.as_ref().is_some_and(|trial| trial.blocked);
+    let can_create_agent = !trial_blocked
+        && agent_creation_entitlement
+            .as_ref()
+            .is_some_and(|entitlement| {
+                active_count < i64::from(entitlement.allowed_new_agent_runtimes)
+            })
         && (has_active_billing
             || org.billing_class == BillingClass::Grandfathered
             || org.billing_class == BillingClass::Sponsored);
-    let requires_billing = !has_active_billing && org.billing_class == BillingClass::Standard;
+    let requires_billing =
+        trial_blocked || (!has_active_billing && org.billing_class == BillingClass::Standard);
 
     Ok(BillingOverview {
-        trial_access: trials_access::trial_access(client, &org.id).await?,
+        trial_access,
         customer_org: org,
         billing_account,
         agent_creation_entitlement,

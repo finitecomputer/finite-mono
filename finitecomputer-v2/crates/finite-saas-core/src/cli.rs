@@ -35,6 +35,18 @@ pub(crate) async fn serve() -> Result<()> {
     .layer(TraceLayer::new_for_http());
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
+    let trial_store = store.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(5));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            if let Err(error) = trial_store.reconcile_trial_runtimes(None).await {
+                tracing::error!(operation = "reconcile_trial_runtimes", error = %error,
+                    "trial reconciliation failed; will retry");
+            }
+        }
+    });
     if let Ok(bind) = env::var("FC_CORE_RUNTIME_BIND") {
         let runtime_listener = TcpListener::bind(bind.parse::<SocketAddr>()?).await?;
         let runtime_app = finite_saas_core::api::runtime_router(store, hosted_hermes_origins);

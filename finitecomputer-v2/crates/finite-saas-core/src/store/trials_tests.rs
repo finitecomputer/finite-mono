@@ -24,7 +24,7 @@ async fn trial_campaign_dry_run_does_not_persist_a_usable_code() {
     .await;
 }
 
-async fn customer(db: &TestDb, suffix: &str) -> String {
+pub(super) async fn customer(db: &TestDb, suffix: &str) -> String {
     db.link_stripe_customer(LinkStripeCustomerInput {
         verified_email: format!("{suffix}@example.com"),
         workos_user_id: suffix.into(),
@@ -35,7 +35,7 @@ async fn customer(db: &TestDb, suffix: &str) -> String {
     .unwrap()
     .customer_org_id
 }
-fn reservation(code: &str, org: &str, user: &str, attempt: &str) -> ReserveTrial {
+pub(super) fn reservation(code: &str, org: &str, user: &str, attempt: &str) -> ReserveTrial {
     ReserveTrial {
         code: code.into(),
         customer_org_id: org.into(),
@@ -46,7 +46,7 @@ fn reservation(code: &str, org: &str, user: &str, attempt: &str) -> ReserveTrial
         checkout_expires_at: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
     }
 }
-fn subscription(
+pub(super) fn subscription(
     org: &str,
     user: &str,
     status: BillingSubscriptionStatus,

@@ -108,6 +108,7 @@ where
         expected,
     )
     .await?;
+    record_explicit_trial_runtime_intent(client, &request).await?;
     let action = match kind {
         RuntimeControlKind::Restart => "runtime.admin_restart",
         RuntimeControlKind::RecoverKnownGoodChatRuntime => "runtime.admin_recover_known_good_chat",
