@@ -5,6 +5,8 @@ SELECT COALESCE(json_agg(record), '[]'::json) FROM (
       'reservationId', d.reservation_id, 'requestId', d.request_id,
       'apiKeyId', d.api_key_id,
       'usageUserId', d.usage_user_id,
+      'usageUserEmail', d.usage_user_email,
+      'projectDisplayName', d.project_display_name,
       'userAttribution', CASE WHEN d.usage_user_id IS NULL THEN 'unknown'
                               ELSE 'reservation_grant' END,
       'projectId', COALESCE(d.project_id, 'shared-unattributed'),

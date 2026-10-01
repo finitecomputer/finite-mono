@@ -157,6 +157,15 @@ try:
             "WHEN 1 THEN 'verify-user' WHEN 2 THEN 'verify-user-2' ELSE NULL END;",
             url(source_name),
         )
+    sql("""
+        UPDATE finite_private_request_diagnostics SET
+          usage_user_email = CASE WHEN usage_user_id IS NOT NULL
+            THEN usage_user_id || CASE WHEN right(reservation_id,4)::int > 800
+              THEN '-renamed@example.invalid' ELSE '@example.invalid' END END,
+          project_id = CASE WHEN right(reservation_id,4)::int % 4 != 0 THEN 'verify-project' END,
+          project_display_name = CASE WHEN usage_user_id IS NOT NULL AND right(reservation_id,4)::int % 4 != 0 THEN 'Synthetic agent' END,
+          agent_runtime_id = CASE WHEN right(reservation_id,4)::int % 4 = 1 THEN 'verify-runtime' END;
+    """, url(source_name))
     module_spec = importlib.util.spec_from_file_location(
         "private_export", ROOT / "infra/monitoring/private_requests/export.py"
     )
@@ -192,6 +201,7 @@ try:
             # Historical Loki records lack both fields. Replaying their new
             # shape must still count the reservation only once as unknown.
             del event["usageUserId"], event["userAttribution"]
+            del event["usageUserEmail"], event["projectDisplayName"]
     # Simulate remote success followed by crash before acknowledgement.
     push([module.stream(module.SERVICE, first)])
     total = 0
@@ -227,6 +237,8 @@ try:
         ("Input / output tokens by usage user · retained events", 0): 11,
         ("Input / output tokens by usage user · retained events", 1): 19,
         ("Requests by usage user · retained events", 0): 1,
+        ("Who is using agents? · recorded requests", 0): 1,
+        ("Who is using agents? · recorded requests", 1): None,
     }
     instant = {
         (panel["title"], index): target["expr"]
@@ -256,6 +268,21 @@ try:
             f"AND observed_at <= to_timestamp({evaluated_at}) "
             "GROUP BY owner) counts;"
         )
+        who_rows = parsed(
+            "SELECT json_agg(row) FROM (SELECT COALESCE(usage_user_id,'unknown') AS user, "
+            "COALESCE(usage_user_email,'Unknown') AS account, "
+            "COALESCE(project_id,'shared-unattributed') AS project, "
+            "COALESCE(project_display_name,project_id,'Not recorded') AS agent, "
+            "COALESCE(agent_runtime_id,'shared-unattributed') AS runtime, "
+            "CASE WHEN agent_runtime_id IS NOT NULL THEN 'Runtime' "
+            "WHEN project_id IS NOT NULL THEN 'Project' "
+            "WHEN usage_user_id IS NOT NULL THEN 'Account only' ELSE 'Unknown' END AS attribution, "
+            "COUNT(*) AS requests, MAX(EXTRACT(EPOCH FROM observed_at)::bigint)*1000 AS last_request "
+            "FROM finite_private_request_diagnostics "
+            f"WHERE observed_at > to_timestamp({evaluated_at - seconds}) "
+            f"AND observed_at <= to_timestamp({evaluated_at}) "
+            "GROUP BY 1,2,3,4,5,6) row;"
+        )
         # Every retained-event panel respects exact user filters, including
         # historical missing fields. All-user queries must preserve each group.
         for owner in (".*", "verify-user", "verify-user-2", "unknown", "absent-user"):
@@ -280,13 +307,26 @@ try:
                 )
                 with urllib.request.urlopen(endpoint, timeout=30) as response:
                     result = json.load(response)["data"]["result"]
-                expected = {
-                    key: count * per_request[(title, index)]
-                    for key, count in expected_groups.items()
-                }
-                assert sum(float(s["value"][1]) for s in result) == sum(expected.values()), (
-                    window, owner, title, result, expected
-                )
+                factor = per_request[(title, index)]
+                if factor is not None:
+                    expected = {
+                        key: count * factor for key, count in expected_groups.items()
+                    }
+                    assert sum(float(s["value"][1]) for s in result) == sum(expected.values()), (
+                        window, owner, title, result, expected
+                    )
+                if title.startswith("Who is using agents?"):
+                    fields = ("user", "account", "project", "agent", "runtime", "attribution")
+                    value_field = "requests" if index == 0 else "last_request"
+                    expected_named = {
+                        tuple(row[f] for f in fields): row[value_field]
+                        for row in who_rows if owner == ".*" or row["user"] == owner
+                    }
+                    actual = {
+                        tuple(s["metric"][f] for f in fields): float(s["value"][1])
+                        for s in result
+                    }
+                    assert actual == expected_named, (window, owner, value_field, actual, expected_named)
                 if "by usage user" in title:
                     assert {
                         s["metric"]["user"]: float(s["value"][1]) for s in result

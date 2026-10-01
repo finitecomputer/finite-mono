@@ -338,6 +338,11 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         assert_eq!(first["project_id"], "project-metrics");
         assert_eq!(first["agent_runtime_id"], serde_json::Value::Null);
         assert_eq!(first["usage_user_id"], grant.user_id);
+        assert_eq!(first["usage_user_email"], "metrics@finite.vip");
+        assert_eq!(first["project_display_name"], "Synthetic");
+        // Display labels are frozen with the diagnostic, not looked up on export.
+        db.query_json("UPDATE users SET normalized_email='renamed@example.invalid' WHERE id=$1 RETURNING to_jsonb(users)", &[&grant.user_id]).await;
+        db.query_json("UPDATE projects SET display_name='Renamed agent' WHERE id='project-metrics' RETURNING to_jsonb(projects)", &[]).await;
         // Previous Core binaries omit the additive column. New diagnostics
         // must not infer ownership for those reservations from the current grant.
         db.query_json(
@@ -354,6 +359,7 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
             &[],
         ).await.pop().unwrap();
         assert_eq!(legacy["usage_user_id"], serde_json::Value::Null);
+        assert_eq!(legacy["usage_user_email"], serde_json::Value::Null);
         let account_only = store.reserve_finite_private_usage(crate::ReserveFinitePrivateUsageInput {
             request_id: "account-only-request".into(),
             ..reserve_input
@@ -369,6 +375,8 @@ async fn finite_private_request_diagnostics_are_idempotent_and_separate_from_acc
         ).await.pop().unwrap();
         assert_eq!(account_only["usage_user_id"], "user-new-owner");
         assert_eq!(account_only["project_id"], serde_json::Value::Null);
+        assert_eq!(account_only["usage_user_email"], "new-owner@example.invalid");
+        assert_eq!(account_only["project_display_name"], serde_json::Value::Null);
         // Accounting may advance after diagnostics have been recorded/exported.
         // Replaying diagnostics must not change accounting or the diagnostic payload.
         store.settle_finite_private_reservation(crate::SettleFinitePrivateReservationInput {

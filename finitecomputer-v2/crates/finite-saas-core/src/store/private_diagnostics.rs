@@ -98,18 +98,26 @@ where
                ) issue ON true
                WHERE r.id = $1 AND r.request_id = $2
                  AND r.created_at >= CURRENT_TIMESTAMP - INTERVAL '7 days'
+             ), labeled AS (
+               SELECT source.*, u.normalized_email AS usage_user_email,
+                      p.display_name AS project_display_name
+               FROM source
+               LEFT JOIN users u ON u.id = source.usage_user_id
+               LEFT JOIN projects p ON p.id = source.project_id
              ), inserted AS (
                INSERT INTO finite_private_request_diagnostics (
                  reservation_id, request_id, api_key_id, usage_user_id, project_id, agent_runtime_id,
                  endpoint, model, prompt_tokens, completion_tokens, first_output_ms,
                  first_answer_ms, duration_ms, termination_reason, measurement_quality,
-                 upstream_status, upstream_error_class, observed_at
+                 upstream_status, upstream_error_class, observed_at,
+                 usage_user_email, project_display_name
                )
                SELECT reservation_id, request_id, api_key_id, usage_user_id, project_id, agent_runtime_id,
                       endpoint, model, prompt_tokens, completion_tokens, first_output_ms,
                       first_answer_ms, duration_ms, termination_reason, measurement_quality,
-                      upstream_status, upstream_error_class, observed_at
-               FROM source
+                      upstream_status, upstream_error_class, observed_at,
+                      usage_user_email, project_display_name
+               FROM labeled
                ON CONFLICT (reservation_id) DO NOTHING
                RETURNING reservation_id
              )

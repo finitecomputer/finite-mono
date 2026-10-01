@@ -25,7 +25,7 @@ class LokiInstantQueries(unittest.TestCase):
             for target in panel.get("targets", [])
             if target.get("queryType") == "instant"
         ]
-        self.assertEqual(len(expressions), 9)
+        self.assertEqual(len(expressions), 11)
         for expression in expressions:
             self.assertEqual(
                 re.findall(r"\b(\w+_over_time)\(", expression),

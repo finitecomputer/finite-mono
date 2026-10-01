@@ -5,4 +5,6 @@ ALTER TABLE finite_private_reservations
   ADD COLUMN IF NOT EXISTS usage_user_id TEXT;
 
 ALTER TABLE finite_private_request_diagnostics
-  ADD COLUMN IF NOT EXISTS usage_user_id TEXT;
+  ADD COLUMN IF NOT EXISTS usage_user_id TEXT,
+  ADD COLUMN IF NOT EXISTS usage_user_email TEXT,
+  ADD COLUMN IF NOT EXISTS project_display_name TEXT;
