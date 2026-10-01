@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Agent removal redirects to the public origin; 200M default friend-key label.
-    # Source f132d0b216ff55fecc7f46702c76f571c1a1e495.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/36371636580
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:dc55dea6a2bf32d23d8bb8c0e0647601bfc99f5a207f2197e57ae7c4e678dfbb";
+    # Trial access gates and payment recovery (FIN-150/151/152).
+    # Source 9feeb647ff3c2dc5b5a01af46afbfb217ca07f23.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/36901472130
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:099b26b2bf3a584f4fcc0dba99cad7bcb0790b745e0a891d6ae60279ad306e53";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
