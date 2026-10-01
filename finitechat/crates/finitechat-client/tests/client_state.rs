@@ -3135,6 +3135,8 @@ fn rekey_crosses_an_own_entry_in_the_backlog_without_skipping_it() {
     let options = pair.options();
     let (frozen_cursor, poison) =
         wedge_receiver_behind_rewound_sender(&dir, &mut pair, &options, 1);
+    // Model an entry emitted by an older image before failed sync revoked readiness.
+    pair.a.bypass_currency_gate_for_tests(ROOM_ID);
     let own = pair
         .a
         .create_application_request(ROOM_ID, b"receiver reply while wedged", "app_own_entry")
@@ -5204,4 +5206,499 @@ fn send_gate_clears_stale_but_refuses_current_behind_server_evidence() {
             .is_none()
     );
     assert!(healed.seq > 0);
+}
+
+#[test]
+fn accepted_send_before_ack_save_reconciles_persisted_pending_id() {
+    let mut f = currency_fixture("prevention_ack");
+    let request = f
+        .bob
+        .create_application_request(
+            ROOM_ID,
+            br#"{"type":"finitecomputer.command.v1","body":{"text":"accepted before crash"}}"#,
+            "prevention_ack_first",
+        )
+        .unwrap();
+    // Match Core's save-before-network order, then lose the accept response.
+    f.bob_store.save_device_state(&f.bob).unwrap();
+    let accepted = f
+        .delivery
+        .append_event(&request, DurableAppEventKind::ChatMessage.delivery_policy())
+        .unwrap();
+    drop(f.bob_store);
+    let mut store = sqlite_client_store(&f.bob_db, &f.bob_config);
+    let mut restarted = store.load_device(f.bob_config.clone()).unwrap();
+    run_runtime_sync_tick(&mut store, &mut restarted, &mut f.delivery, &f.options).unwrap();
+    assert!(room_cursor(&restarted).behind_server.is_none());
+    assert_eq!(
+        room_cursor(&restarted).own_send_high_water_seq,
+        accepted.seq
+    );
+    send_recorded(
+        &mut f.delivery,
+        &mut restarted,
+        Some(&mut store),
+        "after crash",
+        "prevention_ack_second",
+    );
+    let received = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(received.applied_entries.len(), 2);
+}
+
+#[test]
+fn page_budget_keeps_stale_copy_unverified_until_rewind_evidence() {
+    let mut f = currency_fixture("prevention_page_budget");
+    let old_db = f.dir.path().join("prevention_page_budget_old.sqlite3");
+    backup_api_copy(&f.bob_db, &old_db);
+    for i in 0..MAX_HTTP_SYNC_PAGE_ENTRIES {
+        send_recorded(
+            &mut f.delivery,
+            &mut f.alice,
+            Some(&mut f.alice_store),
+            "backlog",
+            &format!("prevention_backlog_{i}"),
+        );
+    }
+    run_runtime_sync_tick(&mut f.bob_store, &mut f.bob, &mut f.delivery, &f.options).unwrap();
+    let original = send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "original send",
+        "prevention_page_original",
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    let mut restored_store = sqlite_client_store(&old_db, &f.bob_config);
+    let mut restored = restored_store.load_device(f.bob_config.clone()).unwrap();
+    let bounded_options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 1,
+    };
+    run_runtime_sync_tick(
+        &mut restored_store,
+        &mut restored,
+        &mut f.delivery,
+        &bounded_options,
+    )
+    .unwrap();
+    assert!(restored.last_applied_seq(ROOM_ID).unwrap() < original.seq);
+    assert!(room_cursor(&restored).behind_server.is_none());
+    assert!(!restored.room_currency_verified(ROOM_ID));
+    assert!(matches!(
+        restored.create_application_request(ROOM_ID, b"must not send", "partial_sync"),
+        Err(ClientError::CurrencyUnverified { .. })
+    ));
+    let mut reloaded = restored_store.load_device(f.bob_config.clone()).unwrap();
+    assert!(!reloaded.room_currency_verified(ROOM_ID));
+    let error = run_runtime_sync_tick(
+        &mut restored_store,
+        &mut reloaded,
+        &mut f.delivery,
+        &bounded_options,
+    )
+    .unwrap_err();
+    assert!(format!("{error:?}").contains("DeviceStateBehindServer"));
+}
+
+fn forward_recovery_fixture(tag: &str) -> (CurrencyFixture, Vec<u64>, Vec<u64>) {
+    let mut f = currency_fixture(tag);
+    let mut stale =
+        FiniteChatDevice::from_state(f.bob_config.clone(), f.bob.export_state().unwrap()).unwrap();
+    stale.bypass_currency_gate_for_tests(ROOM_ID);
+    send_recorded(
+        &mut f.delivery,
+        &mut f.bob,
+        Some(&mut f.bob_store),
+        "already read",
+        "recovery_original",
+    );
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    let mut readable = Vec::new();
+    let mut rejected = Vec::new();
+    for i in 0..2 {
+        readable.push(
+            send_recorded(
+                &mut f.delivery,
+                &mut f.bob,
+                Some(&mut f.bob_store),
+                &format!("readable {i}"),
+                &format!("recovery_readable_{i}"),
+            )
+            .seq,
+        );
+        rejected.push(
+            send_recorded(
+                &mut f.delivery,
+                &mut stale,
+                None,
+                "reused generation",
+                &format!("recovery_reused_{i}"),
+            )
+            .seq,
+        );
+    }
+    readable.push(
+        send_recorded(
+            &mut f.delivery,
+            &mut f.bob,
+            Some(&mut f.bob_store),
+            "readable after",
+            "recovery_readable_after",
+        )
+        .seq,
+    );
+    (f, readable, rejected)
+}
+
+#[test]
+fn forward_recovery_preserves_interleaved_history_and_records_gaps_atomically() {
+    let (mut f, mut readable, rejected) = forward_recovery_fixture("forward_recovery");
+    let before = f
+        .alice_store
+        .load_app_messages(f.alice.device_ref(), 100)
+        .unwrap();
+    let commit = rekey_like_the_pre_fix_image(
+        &mut f.bob_store,
+        &mut f.bob,
+        &mut f.delivery,
+        "recovery_commit",
+    );
+    readable.push(
+        send_recorded(
+            &mut f.delivery,
+            &mut f.bob,
+            Some(&mut f.bob_store),
+            "new epoch",
+            "recovery_new_epoch",
+        )
+        .seq,
+    );
+    let report = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert_eq!(
+        report
+            .applied_entries
+            .iter()
+            .filter(|e| matches!(e.entry, AppliedLogEntry::Application { .. }))
+            .map(|e| e.seq)
+            .collect::<Vec<_>>(),
+        readable
+    );
+    let messages = f
+        .alice_store
+        .load_app_messages(f.alice.device_ref(), 100)
+        .unwrap();
+    assert_eq!(messages.len(), before.len() + readable.len());
+    for message in before {
+        assert!(messages.contains(&message));
+    }
+    let events = f
+        .alice_store
+        .load_app_events(f.alice.device_ref(), 100)
+        .unwrap();
+    for seq in &readable {
+        assert!(events.iter().any(|e| e.seq == *seq));
+    }
+    let gaps = f
+        .alice_store
+        .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+        .unwrap();
+    assert_eq!(gaps.iter().map(|g| g.seq).collect::<Vec<_>>(), rejected);
+    assert!(gaps.iter().all(|g| g.recovery_commit_seq == commit
+        && g.previous_epoch == 1
+        && g.recovered_epoch == 2
+        && g.ciphertext_sha256.len() == 64));
+    assert_eq!(f.alice.group_epoch(ROOM_ID).unwrap(), 2);
+    assert!(f.alice.room_currency_verified(ROOM_ID));
+    assert_eq!(
+        f.alice.last_applied_seq(ROOM_ID).unwrap(),
+        *readable.last().unwrap()
+    );
+    let again = run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert!(again.applied_entries.is_empty());
+    assert_eq!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap(),
+        gaps
+    );
+}
+
+#[test]
+fn forward_recovery_without_a_valid_commit_changes_no_durable_state() {
+    let (mut f, _, _) = forward_recovery_fixture("recovery_no_commit");
+    let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+    let before = f
+        .alice_store
+        .load_device(config.clone())
+        .unwrap()
+        .export_state()
+        .unwrap();
+    let messages = f
+        .alice_store
+        .load_app_messages(f.alice.device_ref(), 100)
+        .unwrap();
+    assert!(
+        run_runtime_sync_tick(
+            &mut f.alice_store,
+            &mut f.alice,
+            &mut f.delivery,
+            &f.options
+        )
+        .is_err()
+    );
+    assert_eq!(
+        f.alice_store
+            .load_device(config.clone())
+            .unwrap()
+            .export_state()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        f.alice_store
+            .load_app_messages(f.alice.device_ref(), 100)
+            .unwrap(),
+        messages
+    );
+    assert!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        !f.alice_store
+            .load_device(config.clone())
+            .unwrap()
+            .room_currency_verified(ROOM_ID)
+    );
+
+    let commit = rekey_like_the_pre_fix_image(
+        &mut f.bob_store,
+        &mut f.bob,
+        &mut f.delivery,
+        "invalid_recovery_commit",
+    );
+    let mut tampered = TamperedSyncDelivery {
+        inner: &mut f.delivery,
+        tamper: |page: &mut SyncEventsPage| {
+            for entry in &mut page.entries {
+                if entry.seq == commit {
+                    use openmls::prelude::tls_codec::{Deserialize, VLBytes};
+                    // Corrupt sender-data authentication while retaining a
+                    // well-formed MLS frame and matching envelope binding.
+                    let mut frame = entry.envelope.payload.as_slice();
+                    u16::tls_deserialize(&mut frame).unwrap(); // version
+                    assert_eq!(u16::tls_deserialize(&mut frame).unwrap(), 2); // private
+                    VLBytes::tls_deserialize(&mut frame).unwrap(); // group id
+                    u64::tls_deserialize(&mut frame).unwrap(); // epoch
+                    u8::tls_deserialize(&mut frame).unwrap(); // content type
+                    VLBytes::tls_deserialize(&mut frame).unwrap(); // authenticated data
+                    VLBytes::tls_deserialize(&mut frame).unwrap(); // encrypted sender data
+                    let sender_data_end = entry.envelope.payload.len() - frame.len();
+                    entry.envelope.payload[sender_data_end - 1] ^= 1;
+                    entry.message_id = entry.envelope.message_id().unwrap();
+                }
+            }
+        },
+    };
+    f.alice = f.alice_store.load_device(config.clone()).unwrap();
+    assert!(
+        run_runtime_sync_tick(&mut f.alice_store, &mut f.alice, &mut tampered, &f.options).is_err()
+    );
+    assert_eq!(
+        f.alice_store
+            .load_device(config)
+            .unwrap()
+            .export_state()
+            .unwrap(),
+        before
+    );
+    assert!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn forward_recovery_audit_write_failure_rolls_back_history_and_cursor() {
+    let (mut f, _, _) = forward_recovery_fixture("recovery_atomic");
+    let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+    let before = f
+        .alice_store
+        .load_device(config.clone())
+        .unwrap()
+        .export_state()
+        .unwrap();
+    let messages = f
+        .alice_store
+        .load_app_messages(f.alice.device_ref(), 100)
+        .unwrap();
+    rekey_like_the_pre_fix_image(
+        &mut f.bob_store,
+        &mut f.bob,
+        &mut f.delivery,
+        "recovery_atomic_commit",
+    );
+    let conn =
+        Connection::open(f.dir.path().join("currency_recovery_atomic_alice.sqlite3")).unwrap();
+    conn.execute_batch("CREATE TRIGGER fail_recovery_audit BEFORE INSERT ON client_sync_recoveries BEGIN SELECT RAISE(ABORT, 'injected audit failure'); END;").unwrap();
+    assert!(
+        run_runtime_sync_tick(
+            &mut f.alice_store,
+            &mut f.alice,
+            &mut f.delivery,
+            &f.options
+        )
+        .is_err()
+    );
+    assert_eq!(
+        f.alice_store
+            .load_device(config)
+            .unwrap()
+            .export_state()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        f.alice_store
+            .load_app_messages(f.alice.device_ref(), 100)
+            .unwrap(),
+        messages
+    );
+    assert!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn partial_sync_revokes_cached_readiness_until_the_last_page() {
+    let mut f = currency_fixture("partial_verified");
+    assert!(f.alice.room_currency_verified(ROOM_ID));
+    for i in 0..=MAX_HTTP_SYNC_PAGE_ENTRIES {
+        send_recorded(
+            &mut f.delivery,
+            &mut f.bob,
+            Some(&mut f.bob_store),
+            "backlog",
+            &format!("verified_backlog_{i}"),
+        );
+    }
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 1,
+    };
+    run_runtime_sync_tick(&mut f.alice_store, &mut f.alice, &mut f.delivery, &options).unwrap();
+    assert!(!f.alice.room_currency_verified(ROOM_ID));
+    let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+    f.alice = f.alice_store.load_device(config).unwrap();
+    assert!(matches!(
+        f.alice
+            .create_application_request(ROOM_ID, b"reply", "partial_reply"),
+        Err(ClientError::CurrencyUnverified { .. })
+    ));
+    run_runtime_sync_tick(&mut f.alice_store, &mut f.alice, &mut f.delivery, &options).unwrap();
+    assert!(f.alice.room_currency_verified(ROOM_ID));
+    f.alice
+        .create_application_request(ROOM_ID, b"reply", "caught_up_reply")
+        .unwrap();
+}
+
+#[test]
+fn forward_recovery_waits_when_the_commit_is_outside_the_page_budget() {
+    let (mut f, _, _) = forward_recovery_fixture("recovery_budget");
+    for i in 0..MAX_HTTP_SYNC_PAGE_ENTRIES {
+        send_recorded(
+            &mut f.delivery,
+            &mut f.bob,
+            Some(&mut f.bob_store),
+            "before rekey",
+            &format!("recovery_budget_{i}"),
+        );
+    }
+    rekey_like_the_pre_fix_image(
+        &mut f.bob_store,
+        &mut f.bob,
+        &mut f.delivery,
+        "recovery_budget_commit",
+    );
+    let config = test_config(ALICE_ACCOUNT_SECRET_BYTES, &f.alice.device_ref().device_id);
+    let before = f
+        .alice_store
+        .load_device(config.clone())
+        .unwrap()
+        .export_state()
+        .unwrap();
+    let options = RuntimeSyncOptions {
+        key_package_target_available: 0,
+        max_sync_pages_per_room: 1,
+    };
+    assert!(
+        run_runtime_sync_tick(&mut f.alice_store, &mut f.alice, &mut f.delivery, &options).is_err()
+    );
+    assert_eq!(
+        f.alice_store
+            .load_device(config.clone())
+            .unwrap()
+            .export_state()
+            .unwrap(),
+        before
+    );
+    assert!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap()
+            .is_empty()
+    );
+    f.alice = f.alice_store.load_device(config).unwrap();
+    run_runtime_sync_tick(
+        &mut f.alice_store,
+        &mut f.alice,
+        &mut f.delivery,
+        &f.options,
+    )
+    .unwrap();
+    assert!(f.alice.room_currency_verified(ROOM_ID));
+    assert_eq!(
+        f.alice_store
+            .load_sync_recoveries(f.alice.device_ref(), ROOM_ID)
+            .unwrap()
+            .len(),
+        2
+    );
 }
