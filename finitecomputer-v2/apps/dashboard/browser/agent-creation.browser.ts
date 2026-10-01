@@ -34,6 +34,7 @@ type AgentCreationRequest = {
 };
 
 type VisibleProject = {
+  runtime_recovery?: "restarting" | "failed" | "restart_pending" | "restart_failed" | null;
   project: {
     id: string;
     display_name: string;
@@ -438,6 +439,66 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     );
     dashboardOutput = collectOutput(dashboard);
     await waitForDashboard(dashboardPort, dashboardOutput);
+
+    // Synthetic Core recovery states; no live WorkOS or Stripe calls.
+    const recovering = visibleProject("project_payment", "Paid Agent", hostedDevice.runtimeStatusUrl, "payment-agent");
+    recovering.runtime_recovery = "restarting";
+    recovering.runtime!.runtime_status = "offline";
+    core.reset({ projects: [recovering], requests: [] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await expectVisibleText(page, "Restarting your agent. Your home, data, and history are retained.");
+      await page.reload();
+      await expectVisibleText(page, "Restarting your agent. Your home, data, and history are retained.");
+      if (process.env.FIN152_SCREENSHOT_DIR) {
+        await mkdir(process.env.FIN152_SCREENSHOT_DIR, { recursive: true });
+        await page.screenshot({ path: `${process.env.FIN152_SCREENSHOT_DIR}/restarting.png` });
+      }
+      assert.equal(await page.getByRole("button", { name: /resume/i }).count(), 0);
+      core.state.projects[0].runtime_recovery = "failed";
+      await page.getByRole("alert").filter({ hasText: "Automatic restart needs help" }).waitFor({ timeout: 40_000 });
+      await page.getByRole("alert").filter({ hasText: "Open Agent and choose Restart agent to retry." }).waitFor();
+      // Stay on the same open page while FIN-151 automatically retries.
+      core.state.projects[0].runtime_recovery = "restarting";
+      await page.getByText("Restarting your agent. Your home, data, and history are retained.", { exact: true }).waitFor({ timeout: 40_000 });
+      core.state.projects[0].runtime_recovery = null;
+      core.state.projects[0].runtime!.runtime_status = "online";
+      await page.getByText(/^Your agent is online\./).first().waitFor({ timeout: 40_000 });
+      assert.equal(new URL(page.url()).pathname, "/dashboard");
+      assert.equal(await page.getByRole("alert").filter({ hasText: "Automatic restart needs help" }).count(), 0);
+
+      // Completion precedes readiness. A not-ready (offline summary) report
+      // must keep observation alive without a reload or navigation to recover.
+      core.state.projects[0].runtime_recovery = "restart_pending";
+      core.state.projects[0].runtime!.runtime_status = "unknown";
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_payment-agent`);
+      await expectVisibleText(page, "Waiting for your agent to be ready. Your home, data, and history are retained.");
+      core.state.projects[0].runtime!.runtime_status = "offline";
+      await page.getByText("Waiting for your agent to be ready. This page updates automatically.", { exact: true }).waitFor({ timeout: 40_000 });
+      const healthRefreshCount = core.state.meGets;
+      await waitFor(() => core.state.meGets > healthRefreshCount, 40_000);
+      assert.equal(await page.getByText("Your agent is stopped.", { exact: true }).count(), 0);
+      core.state.projects[0].runtime_recovery = null;
+      core.state.projects[0].runtime!.runtime_status = "online";
+      await page.getByText(/^Your agent is online\./).first().waitFor({ timeout: 40_000 });
+      if (process.env.FIN152_SCREENSHOT_DIR) await page.screenshot({ path: `${process.env.FIN152_SCREENSHOT_DIR}/ready.png` });
+      assert.equal(new URL(page.url()).pathname, "/dashboard/machines/runtime_payment-agent");
+      assert.equal(core.state.creationPosts.length, 0);
+      assert.equal(core.state.restartPosts.length, 0, "viewing or reloading recovery must never submit restart");
+      // No marker provenance: an ordinary restart must never claim payment
+      // recovery or automatic lifecycle ownership, including terminal errors.
+      core.state.projects[0].runtime_recovery = "restart_pending";
+      core.state.projects[0].runtime!.runtime_status = "offline";
+      await waitFor(async () => {
+        await page.reload();
+        return page.getByText("Waiting for your agent to be ready. This page updates automatically.", { exact: true }).isVisible();
+      }, 20_000);
+      assert.equal(await page.getByText(/Restarting your agent automatically/).count(), 0);
+      core.state.projects[0].runtime_recovery = "restart_failed";
+      await page.getByRole("alert").filter({ hasText: "Restart needs help." }).waitFor({ timeout: 40_000 });
+      assert.equal(await page.getByText(/after payment|Automatic restart needs help/).count(), 0);
+
+    });
 
     core.reset({
       projects: [

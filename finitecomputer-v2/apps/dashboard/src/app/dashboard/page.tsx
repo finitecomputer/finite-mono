@@ -1,3 +1,5 @@
+import { PaymentRecoveryNotice } from "@/components/payment-recovery-notice";
+import { paymentRecoveryPresentation } from "@/lib/payment-recovery";
 import { ManageBillingForm } from "@/components/manage-billing-form";
 import { TrialStatusPanel } from "@/components/trial-status-panel";
 import Link from "next/link";
@@ -863,7 +865,8 @@ function CoreProjectCard({
   const chatHref = overviewHref ? `${overviewHref}/chat` : null;
   const statusLabel = coreProjectLaunchStatusLabel(project, request);
   const runtimeStatus = project.runtime?.runtime_status ?? "unknown";
-  const heroState = runtimePrismState(runtimeStatus);
+  const recovery = paymentRecoveryPresentation(project.runtime_recovery);
+  const heroState = recovery?.state ?? runtimePrismState(runtimeStatus);
   const statusDescription = request?.status === "failed"
     ? "We could not start this agent. Ask a team member to retry it."
     : statusLabel === "Online"
@@ -875,36 +878,40 @@ function CoreProjectCard({
     request?.status !== "failed"
       ? runtimeHealthAnnotation(project.runtime?.runtime_health)
       : "";
-  const description = healthAnnotation
-    ? `${statusDescription} ${healthAnnotation}`
-    : statusDescription;
+  const description = recovery?.description ?? (
+    healthAnnotation ? `${statusDescription} ${healthAnnotation}` : statusDescription
+  );
 
   return (
-    <AgentHeroCard
-      name={coreProjectLabel(project)}
-      description={accessBlocked ? "Dashboard access is paused until payment is resolved." : description}
-      state={heroState}
-      actions={
-        accessBlocked ? <ManageBillingForm /> : <>
-          {chatHref ? (
-            <Button asChild>
-              <Link href={chatHref}>
-                <MessageSquareIcon />
-                Open chat
-              </Link>
-            </Button>
-          ) : null}
-          {overviewHref ? (
-            <Button asChild variant="outline">
-              <Link href={overviewHref}>
-                <ServerIcon />
-                Agent
-              </Link>
-            </Button>
-          ) : null}
-        </>
-      }
-    />
+    <>
+      {!accessBlocked ? <PaymentRecoveryNotice recovery={project.runtime_recovery} /> : null}
+      <AgentHeroCard
+        name={coreProjectLabel(project)}
+        description={accessBlocked ? "Dashboard access is paused until payment is resolved." : description}
+        state={heroState}
+        actions={
+          accessBlocked ? <ManageBillingForm /> : <>
+            {chatHref ? (
+              <Button asChild>
+                <Link href={chatHref}>
+                  <MessageSquareIcon />
+                  Open chat
+                </Link>
+              </Button>
+            ) : null}
+            {overviewHref ? (
+              <Button asChild variant="outline">
+                <Link href={overviewHref}>
+                  <ServerIcon />
+                  Agent
+                </Link>
+              </Button>
+            ) : null}
+          </>
+        }
+      />
+    </>
+
   );
 }
 
