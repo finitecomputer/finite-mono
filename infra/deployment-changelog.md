@@ -30,3 +30,31 @@ same-volume upgrades preserve the Agent Principal and `/data`.
 Server compatibility includes fielded clients, persisted state, and supported
 recovery sets. Record required reader/writer compatibility in the owning
 contract and tests, rather than duplicating version tables here.
+
+### fbrain 0.6.0
+
+Deploy the Brain server before publishing the CLI or promoting a Runtime that
+bundles it. The server accepts signed administrator `rename-brain` records and
+atomically updates only the Brain display name with its audit record. Brain IDs,
+principals, grants, encryption keys, Folder IDs, Working Tree paths and content
+remain unchanged. Replaying an accepted record cannot restore an earlier name.
+Existing clients can continue reading and syncing; the new CLI refreshes its
+cached display name through metadata. Older non-admin clients may retain the
+previous cached label until refresh/reopen. An older server rejects rename without
+mutation and can reopen the same database after newer rename writes. Rolling
+back the server removes rename support while retaining the latest stored name;
+retain the previous closure and a consistent, verified SQLite backup.
+
+Invitation creation keeps the requested expiry and the existing maximum lifetime;
+the lower-bound tolerance admits one-hour invitations delayed in transit. Existing
+clients benefit from the server change. The CLI repairs the known invited-Folder
+cache divergence during ordinary sync and preserves unsynced local edits while
+access is unavailable. It does not grant access, bypass revocation, or repair an
+unrelated missing/corrupt key bootstrap. The fielded 0.5.0 client remains supported;
+only an updated CLI receives the cache repair.
+
+Hosted Agents keep their pinned Runtime until explicitly upgraded. An upgraded
+Runtime supplies the new CLI and invitation guidance; existing managed skills
+update with `finite skills sync`, and Working Tree guidance refreshes on a
+successful open/sync. These changes do not provision Personal Brains or repair
+Chat's Organization Brain requester lease.

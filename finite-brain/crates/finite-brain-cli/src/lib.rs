@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <email|NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|email>\ncollaborator ensure-admin --brain <brain-id> --target <email|NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|claim|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2684,6 +2684,68 @@ fn brain<W: Write>(
                 signed_json_request_to_server(env, &server_url, "POST", "/v1/brains", Some(body))?;
             write_command_response(output, json, &response)
         }
+        "rename" => {
+            let mut values = args[1..].to_vec();
+            for flag in ["--brain", "--server"] {
+                if values
+                    .iter()
+                    .filter(|arg| *arg == flag || arg.starts_with(&format!("{flag}=")))
+                    .count()
+                    > 1
+                {
+                    return Err(CliError::InvalidInput(format!(
+                        "{flag} must be supplied only once"
+                    )));
+                }
+            }
+            let explicit_brain = take_option_value(&mut values, "--brain")?;
+            let explicit_server = take_option_value(&mut values, "--server")?;
+            for (flag, value) in [("--brain", &explicit_brain), ("--server", &explicit_server)] {
+                if value
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.starts_with("--"))
+                {
+                    return Err(CliError::InvalidInput(format!("{flag} requires a value")));
+                }
+            }
+            let raw_name = values
+                .first()
+                .ok_or(CliError::MissingArgument("display-name"))?;
+            if values.len() != 1 || raw_name.starts_with("--") || raw_name.trim().is_empty() {
+                return Err(CliError::InvalidInput(
+                    "usage: fbrain brain rename <display-name> [--brain <brain-id>]".to_owned(),
+                ));
+            }
+            let name = finite_brain_core::DisplayName::new("brain_name", raw_name.clone())
+                .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+            let brain_id = match explicit_brain {
+                Some(id) => id,
+                None => command_brain_id(&[], env)?,
+            };
+            let request_args = explicit_server
+                .map(|server| vec!["--server".to_owned(), server])
+                .unwrap_or_default();
+            let event = admin_access_change_event_with_note(
+                env,
+                &brain_id,
+                AdminAccessAction::RenameBrain,
+                None,
+                None,
+                None,
+                Some(name.as_str()),
+            )?;
+            let path = format!("/v1/brains/{brain_id}/rename");
+            let response = signed_json_request(
+                env,
+                &request_args,
+                "POST",
+                &path,
+                Some(serde_json::json!({
+                    "accessChangeEvent": event,
+                })),
+            )?;
+            write_command_response(output, json, &response)
+        }
         "metadata" | "status" => {
             let explicit_brain_id = option_value(args, "--brain")
                 .or_else(|| {
@@ -4924,6 +4986,161 @@ mod tests {
         assert!(!reference.contains("`auth login` is legacy guidance"));
     }
 
+    fn normalized_invite_examples(text: &str) -> String {
+        let joined = text
+            .lines()
+            .map(|line| line.trim_end().trim_end_matches('\\'))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_lowercase();
+        let mut in_placeholder = false;
+        let compact: String = joined
+            .chars()
+            .filter(|&character| {
+                if character == '<' {
+                    in_placeholder = true;
+                } else if character == '>' {
+                    in_placeholder = false;
+                }
+                !in_placeholder || !character.is_whitespace()
+            })
+            .collect();
+        compact
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" |", "|")
+            .replace("| ", "|")
+    }
+
+    fn retired_invite_syntax(text: &str) -> Vec<String> {
+        let normalized = normalized_invite_examples(text);
+        let mut retired = [
+            "|claim|",
+            "invite folder claim",
+            "--invite-secret-file",
+            "--target <email>",
+            "preflight/commit",
+        ]
+        .into_iter()
+        .filter(|marker| normalized.contains(marker))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        if normalized.split_whitespace().any(|token| {
+            token.contains('|')
+                && token.split('|').any(|alternative| {
+                    alternative.trim_matches(|c: char| "`.,;:()[]{}".contains(c)) == "claim"
+                })
+        }) {
+            retired.push("claim command alternative".to_owned());
+        }
+        for tail in normalized.split('<').skip(1) {
+            let Some((placeholder, _)) = tail.split_once('>') else {
+                continue;
+            };
+            let alternatives = placeholder.split('|').collect::<Vec<_>>();
+            if alternatives.contains(&"email")
+                && alternatives
+                    .iter()
+                    .any(|value| matches!(*value, "npub" | "hex" | "nip05" | "nip-05"))
+            {
+                retired.push(format!("<{placeholder}>"));
+            }
+        }
+        retired
+    }
+
+    #[test]
+    fn invite_guidance_guard_handles_formatted_command_examples() {
+        for example in [
+            "fbrain invite brain create --target <email | npub>",
+            "fbrain invite brain create --target <EMAIL|NPUB>",
+            "fbrain invite folder \\\n  claim <invite-code> --email <address>",
+            "admin ensure-access --target < email >",
+            "fbrain invite folder create|list|inspect|accept|revoke|claim",
+            "fbrain invite folder claim|create|list",
+        ] {
+            assert!(
+                !retired_invite_syntax(example).is_empty(),
+                "missed {example}"
+            );
+        }
+        for example in [
+            "fbrain invite brain create --target <npub | hex | NIP-05>",
+            "fbrain invite-token create --email <address>",
+            "a single-use bearer capability",
+            "a bearer capability redeemable by one key",
+        ] {
+            assert!(
+                retired_invite_syntax(example).is_empty(),
+                "rejected {example}"
+            );
+        }
+    }
+
+    #[test]
+    fn packaged_invite_guidance_matches_the_supported_invite_surface() {
+        let skill = include_str!(
+            "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+        );
+        let reference = include_str!(
+            "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
+        );
+        let tmp = TempDir::new().unwrap();
+        let help = run(&tmp, &["help"]);
+        let guide = run(&tmp, &["--skill"]);
+        // Inspect the generated instruction template without exposing a new
+        // production API just for its prose. Unescape its line separators.
+        let generated = include_str!("../../finite-brain-core/src/portability/working_tree.rs")
+            .replace("\\n", "\n");
+
+        // The retired guest email bootstrap is not a command.
+        let error = run_with_env(
+            ["invite", "folder", "claim", "invite-code"],
+            env_for(&tmp),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, CliError::InvalidCommand(command) if command == "invite folder claim")
+        );
+        for (source, text) in [
+            ("help", help.as_str()),
+            ("--skill", guide.as_str()),
+            ("SKILL.md", skill),
+            ("fbrain-cli.md", reference),
+            ("generated AGENTS.md template", generated.as_str()),
+        ] {
+            let retired = retired_invite_syntax(text);
+            assert!(retired.is_empty(), "{source} advertises {retired:?}");
+            assert!(
+                text.contains("invite-token create"),
+                "{source} omits invite tokens"
+            );
+        }
+
+        // Syntax and terminology guards supplement source review; they cannot
+        // prove that arbitrary natural-language guidance describes the contract.
+        for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+            let normalized = normalized_invite_examples(text);
+            for contract in [
+                "--target <npub|hex|NIP-05>",
+                "invite-token create --brain <brain-id> --email <address>",
+                "bearer capability",
+                "`not_configured`",
+                "`manual`",
+                "from `1h` through `30d`",
+                "Membership and readable Folders are separate states",
+                "fbrain access explain <folder-id>",
+            ] {
+                assert!(
+                    normalized.contains(&normalized_invite_examples(contract)),
+                    "{source} omits {contract}"
+                );
+            }
+        }
+    }
+
     fn start_malformed_collaboration_success_server(
         expected_requests: usize,
         collaboration_response: String,
@@ -5093,6 +5310,45 @@ mod tests {
         };
         assert!(matches!(error, CliError::HttpStatus { status: 403, .. }));
         assert!(error.to_string().contains("rejected with 403"));
+    }
+
+    #[test]
+    fn invitation_expiry_is_client_now_plus_the_requested_whole_duration() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let expires_at = |value: &str| {
+            invitation_expires_at(&env, &["--expires-in".to_owned(), value.to_owned()])
+        };
+        assert_eq!(expires_at("1h").unwrap(), "2026-06-24T21:46:36Z");
+        assert_eq!(expires_at("30d").unwrap(), "2026-07-24T20:46:36Z");
+        assert_eq!(expires_at("720h").unwrap(), "2026-07-24T20:46:36Z");
+        assert_eq!(
+            invitation_expires_at(&env, &[]).unwrap(),
+            "2026-07-01T20:46:36Z"
+        );
+        for invalid in [
+            "0h",
+            "31d",
+            "721h",
+            "90m",
+            "1.5h",
+            "-1h",
+            "h",
+            "",
+            "18446744073709551615d",
+        ] {
+            assert!(
+                matches!(expires_at(invalid), Err(CliError::InvalidInput(_))),
+                "{invalid:?} must be rejected"
+            );
+        }
+        assert!(matches!(
+            invitation_expires_at(
+                &env,
+                &["--expires".to_owned(), "2026-06-25T00:00:00Z".to_owned()]
+            ),
+            Err(CliError::InvalidInput(_))
+        ));
     }
 
     fn env_for(tmp: &TempDir) -> CliEnvironment {
@@ -8145,6 +8401,41 @@ mod tests {
             assert_eq!(post_body["kind"], kind);
             assert_eq!(post_body["name"], name);
             assert!(post_body["bootstrapGrants"].as_array().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn brain_rename_requires_an_unambiguous_target_and_valid_arguments() {
+        let tmp = TempDir::new().unwrap();
+        for args in [
+            vec!["brain", "rename", "New name"],
+            vec!["brain", "rename", "New name", "--brain"],
+            vec![
+                "brain", "rename", "New name", "--brain", "a", "--brain", "b",
+            ],
+            vec![
+                "brain",
+                "rename",
+                "New name",
+                "--brain",
+                "--server",
+                "http://localhost",
+            ],
+            vec!["brain", "rename", "New name", "--brain", "a", "extra"],
+            vec!["brain", "rename", "New name", "--unknown", "a"],
+            vec!["brain", "rename", "   ", "--brain", "a"],
+            vec!["brain", "rename", "bad/name", "--brain", "a"],
+        ] {
+            let mut output = Vec::new();
+            let result = run_with_env(args, env_for(&tmp), &mut output);
+            assert!(
+                matches!(
+                    result,
+                    Err(CliError::InvalidInput(_) | CliError::MissingArgument(_))
+                ),
+                "{result:?}"
+            );
+            assert!(output.is_empty());
         }
     }
 
@@ -11929,7 +12220,8 @@ mod tests {
                 } else if request_line.contains("/metadata") {
                     (
                         "200 OK",
-                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                        serde_json::json!({ "name": "Renamed Brain", "mountedFolders": [] })
+                            .to_string(),
                     )
                 } else {
                     (
@@ -11983,6 +12275,16 @@ mod tests {
         );
         let tree_state = read_working_tree_state(&tree).unwrap();
         assert_eq!(tree_state.sync.latest_sequence, 8);
+
+        // Members do not receive administrative history: refreshed metadata
+        // must update the cached label without an export or bootstrap request.
+        let export: Value =
+            read_json_file(&tree.join(".finitebrain/encrypted-sync/export.json")).unwrap();
+        assert_eq!(export["brain"]["name"], "Renamed Brain");
+        let directory: Value =
+            read_json_file(&tree.join(".finitebrain/brain-directory.json")).unwrap();
+        assert_eq!(directory["brain"]["name"], "Renamed Brain");
+        assert_eq!(directory["brain"]["id"], "brain");
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);

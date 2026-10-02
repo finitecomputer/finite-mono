@@ -62,9 +62,9 @@ skills.
 
 - If you want to customize a Finite-managed skill for one machine, copy it into
   `~/.hermes/skills/...` and edit the local copy there.
-- Do not edit the mounted managed copy in place under
-  `~/.finite/managed-skills/finite/current` or the content-addressed revision
-  tree behind it.
+- Do not edit the managed copy in place under
+  `/data/agent/managed-skills/finite/current`; `finite skills sync` replaces it
+  as a whole.
 - Prefer giving the local copy a new name while experimenting so you can still
   compare it against the shipped baseline.
 - Only shadow the managed skill with the same name when you intentionally want

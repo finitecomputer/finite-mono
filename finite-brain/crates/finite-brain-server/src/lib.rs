@@ -448,6 +448,7 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route("/identities/resolve", post(resolve_identity_handler))
         .route("/my-invitations", get(list_my_invitations_handler))
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
+        .route("/brains/{brain_id}/rename", post(rename_brain_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access",
@@ -7192,6 +7193,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn offer_creation_accepts_one_hour_from_a_client_at_the_auth_skew_edge() {
+        // The test server clock is TEST_NOW with a 60 second auth skew. A
+        // client whose clock trails by the full skew computes `--expires-in 1h`
+        // from its own clock and signs the request at that same instant.
+        let admin_keys = Keys::generate();
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let create_folder_body = serde_json::json!({
+            "folderId": "strategy",
+            "name": "Strategy",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": "getting-started",
+            "path": "getting-started/Strategy",
+            "accessUserIds": [],
+            "grants": [
+                folder_key_grant_value("grant-strategy-admin-v1", 1, npub(&admin_keys).as_str())
+            ],
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "change_create_strategy_expiry",
+                AdminAccessAction::SetFolderAccessMode,
+                Some("strategy"),
+                None,
+                Some(1),
+            ),
+        })
+        .to_string();
+        let create_folder = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders",
+            Some(create_folder_body),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(create_folder.status(), StatusCode::OK);
+
+        let lagging_client_now = TEST_NOW - 60;
+        let one_hour = format_unix_timestamp(lagging_client_now + 60 * 60).unwrap();
+        let brain_target = npub(&Keys::generate());
+        let invitation = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({ "targetNpub": brain_target, "expiresAt": one_hour })
+                    .to_string(),
+            ),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(invitation.status(), StatusCode::OK);
+        let invitation: BrainInvitationResponse = read_json(invitation).await;
+        assert_eq!(invitation.expires_at, one_hour);
+
+        let folder_target = npub(&Keys::generate());
+        let folder_invitation = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/folders/strategy/invitations",
+            Some(
+                serde_json::json!({
+                    "recipientNpub": folder_target,
+                    "grant": folder_key_grant_value(
+                        "grant-strategy-expiry-v1",
+                        1,
+                        folder_target.as_str(),
+                    ),
+                    "accessChangeEvent": admin_event(
+                        &admin_keys,
+                        "acme",
+                        "change_share_strategy_expiry",
+                        AdminAccessAction::GrantFolderAccess,
+                        Some("strategy"),
+                        Some(folder_target.as_str()),
+                        Some(1),
+                    ),
+                    "expiresAt": one_hour,
+                })
+                .to_string(),
+            ),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(folder_invitation.status(), StatusCode::OK);
+        let folder_invitation: FolderInvitationResponse = read_json(folder_invitation).await;
+        assert_eq!(folder_invitation.expires_at, one_hour);
+
+        let token = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invite-tokens",
+            Some(serde_json::json!({ "role": "member", "expiresAt": one_hour }).to_string()),
+            lagging_client_now,
+        )
+        .await;
+        assert_eq!(token.status(), StatusCode::OK);
+        let token: CreateBrainInviteTokenResponse = read_json(token).await;
+        assert_eq!(token.expires_at, one_hour);
+
+        // The thirty-day ceiling gets no allowance: a client whose clock leads
+        // the server cannot stretch an offer past thirty days of server time.
+        let leading_client_now = TEST_NOW + 60;
+        let thirty_days = format_unix_timestamp(leading_client_now + 30 * 24 * 60 * 60).unwrap();
+        let too_long = authed_request(
+            router.clone(),
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&Keys::generate()),
+                    "expiresAt": thirty_days,
+                })
+                .to_string(),
+            ),
+            leading_client_now,
+        )
+        .await;
+        assert_error(
+            too_long,
+            StatusCode::BAD_REQUEST,
+            "invitation expiry must be between 55 minutes and thirty days from creation",
+        )
+        .await;
+
+        let too_short = format_unix_timestamp(TEST_NOW + 55 * 60 - 1).unwrap();
+        let too_short = authed_request(
+            router,
+            &admin_keys,
+            "POST",
+            "/v1/brains/acme/invitations",
+            Some(
+                serde_json::json!({
+                    "targetNpub": npub(&Keys::generate()),
+                    "expiresAt": too_short,
+                })
+                .to_string(),
+            ),
+            TEST_NOW,
+        )
+        .await;
+        assert_error(
+            too_short,
+            StatusCode::BAD_REQUEST,
+            "invitation expiry must be between 55 minutes and thirty days from creation",
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn brain_invitation_create_rejects_existing_members() {
         let admin_keys = Keys::generate();
         let admin_npub = npub(&admin_keys);
@@ -8272,6 +8429,239 @@ mod tests {
             vec!["object".to_owned(), input.object_id.as_str().to_owned()],
             vec!["operation".to_owned(), "delete".to_owned()],
         ]
+    }
+
+    fn rename_event(keys: &Keys, brain_id: &str, name: Option<&str>, change_id: &str) -> Event {
+        let expected = AdminAccessChangeValidation {
+            brain_id: BrainId::new(brain_id).unwrap(),
+            change_id: change_id.to_owned(),
+            action: AdminAccessAction::RenameBrain,
+            admin_npub: npub(keys),
+            folder_id: None,
+            target_npub: None,
+            key_version: None,
+            note: name.map(ToOwned::to_owned),
+            created_at: test_rfc3339(),
+        };
+        sign_app_event(
+            keys,
+            AdminAccessChangePayload::new(&expected).canonical_json(),
+            admin_access_change_tags(&expected),
+        )
+    }
+
+    #[tokio::test]
+    async fn brain_rename_preserves_existing_state_and_audits_without_replaying_old_names() {
+        let admin = Keys::generate();
+        let member = Keys::generate();
+        let outsider = Keys::generate();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        assert_eq!(
+            post_brain(
+                router.clone(),
+                &admin,
+                &create_brain_body("acme", "organization"),
+                TEST_NOW,
+                None,
+                None,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        add_test_org_folders(&router, &admin).await;
+        let id = BrainId::new("acme").unwrap();
+        state
+            .store
+            .lock()
+            .unwrap()
+            .add_member(&id, &UserId::new(npub(&member)).unwrap())
+            .unwrap();
+        let before = state.store.lock().unwrap().load_brain(&id).unwrap();
+        let mut notifications = state.brain_updates.subscribe();
+        let first = rename_event(&admin, "acme", Some("Renamed Brain"), "rename-first");
+        let body = serde_json::json!({"accessChangeEvent": first}).to_string();
+        for actor in [&member, &outsider] {
+            let rejected = authed_request(router.clone(), actor, "POST", "/v1/brains/acme/rename", Some(serde_json::json!({"accessChangeEvent": rename_event(actor, "acme", Some("Forbidden"), "denied")}).to_string()), TEST_NOW).await;
+            assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        }
+        let renamed = authed_request(
+            router.clone(),
+            &admin,
+            "POST",
+            "/v1/brains/acme/rename",
+            Some(body.clone()),
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(renamed.status(), StatusCode::OK);
+        let response: BrainMetadataResponse = read_json(renamed).await;
+        assert_eq!(response.name, "Renamed Brain");
+        assert_eq!(response.brain_id, "acme");
+        let update = notifications.try_recv().unwrap();
+        assert_eq!(
+            update.latest_sequence,
+            state.store.lock().unwrap().latest_sequence(&id).unwrap()
+        );
+        let mut expected = before.clone();
+        expected.brain.name =
+            finite_brain_core::DisplayName::new("brain_name", "Renamed Brain").unwrap();
+        assert_eq!(
+            state.store.lock().unwrap().load_brain(&id).unwrap(),
+            expected
+        );
+        let records = state
+            .store
+            .lock()
+            .unwrap()
+            .pull_sync_records(&id, 0, 1000)
+            .unwrap();
+        let audit = records.records.last().unwrap();
+        assert_eq!(audit.record_type, SyncRecordType::BrainAdminAccessChange);
+        assert_eq!(audit.actor_npub.as_str(), npub(&admin));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&audit.payload_json).unwrap()["note"],
+            "Renamed Brain"
+        );
+
+        let second = serde_json::json!({"accessChangeEvent": rename_event(&admin, "acme", Some("Latest name"), "rename-second")}).to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin,
+                "POST",
+                "/v1/brains/acme/rename",
+                Some(second),
+                TEST_NOW + 1
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let cursor = state.store.lock().unwrap().latest_sequence(&id).unwrap();
+        let replay = authed_request(
+            router.clone(),
+            &admin,
+            "POST",
+            "/v1/brains/acme/rename",
+            Some(body),
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        let replay: BrainMetadataResponse = read_json(replay).await;
+        assert_eq!(replay.name, "Latest name");
+        assert_eq!(
+            state.store.lock().unwrap().latest_sequence(&id).unwrap(),
+            cursor
+        );
+        let listed = authed_request(
+            router.clone(),
+            &member,
+            "GET",
+            "/v1/brains",
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        let listed: VisibleBrainsResponse = read_json(listed).await;
+        assert_eq!(listed.brains[0].name, "Latest name");
+        let export = authed_request(
+            router,
+            &admin,
+            "GET",
+            "/v1/brains/acme/export",
+            None,
+            TEST_NOW + 4,
+        )
+        .await;
+        let export: serde_json::Value = read_json(export).await;
+        assert_eq!(export["brain"]["id"], "acme");
+        assert_eq!(export["brain"]["name"], "Latest name");
+    }
+
+    #[tokio::test]
+    async fn brain_rename_rejects_invalid_names_and_misbound_events_without_mutation() {
+        let owner = Keys::generate();
+        let agent = Keys::generate();
+        let state = personal_test_state(&owner, &agent);
+        let router = router_with_state(state.clone());
+        let id = BrainId::new("personal").unwrap();
+        let before = state.store.lock().unwrap().load_brain(&id).unwrap();
+        for (index, name) in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("bad/name"),
+            Some("bad\nname"),
+            Some(".."),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let body = serde_json::json!({"accessChangeEvent": rename_event(&owner, "personal", name, &format!("invalid-{index}"))}).to_string();
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    &owner,
+                    "POST",
+                    "/v1/brains/personal/rename",
+                    Some(body),
+                    TEST_NOW + index as u64
+                )
+                .await
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for (actor, event) in [
+            (
+                &owner,
+                rename_event(&owner, "other", Some("Wrong Brain"), "wrong-brain"),
+            ),
+            (
+                &owner,
+                rename_event(&agent, "personal", Some("Wrong actor"), "wrong-actor"),
+            ),
+        ] {
+            let body = serde_json::json!({"accessChangeEvent": event}).to_string();
+            assert_ne!(
+                authed_request(
+                    router.clone(),
+                    actor,
+                    "POST",
+                    "/v1/brains/personal/rename",
+                    Some(body),
+                    TEST_NOW + 10
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        assert_eq!(state.store.lock().unwrap().load_brain(&id).unwrap(), before);
+        assert_eq!(state.store.lock().unwrap().latest_sequence(&id).unwrap(), 0);
+        for (index, actor) in [&owner, &agent].into_iter().enumerate() {
+            let body = serde_json::json!({"accessChangeEvent": rename_event(actor, "personal", Some("Personal renamed"), &format!("allowed-{index}"))}).to_string();
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    actor,
+                    "POST",
+                    "/v1/brains/personal/rename",
+                    Some(body),
+                    TEST_NOW + 20 + index as u64
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        let after = state.store.lock().unwrap().load_brain(&id).unwrap();
+        assert_eq!(after.brain.owner_user_id, before.brain.owner_user_id);
+        assert_eq!(after.personal_agent, before.personal_agent);
     }
 
     fn admin_event(

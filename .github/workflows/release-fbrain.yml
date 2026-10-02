@@ -51,10 +51,10 @@ jobs:
             *) echo "::error::release workflow must run at an fbrain/v* tag"; exit 1 ;;
           esac
           python3 scripts/delivery.py verify-component-version --component fbrain --version "$version"
-      - name: Install Rust
+      - name: Set up pinned Rust toolchain
+        # Resolve rust-toolchain.toml, shared with Nix and CI, on first use.
         run: |
-          rustup toolchain install 1.88.0 --profile minimal
-          rustup default 1.88.0
+          cargo --version
           rustup target add "${{ matrix.target }}"
       - name: Build fbrain
         run: cargo build --locked --release --target "${{ matrix.target }}" --package finite-brain-cli --bin fbrain

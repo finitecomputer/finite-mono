@@ -74,12 +74,52 @@ Agent Home automatically. An existing agent keeps the revision it was seeded
 with until the user or agent runs `finite skills sync` in a Runtime image that
 contains the newer tested bundle. The command replaces only
 `managed-skills/finite/current`; it never rewrites the user-owned Hermes skills
-directory. New skill names require Hermes `/reload-skills`, while updated
-content at an existing skill path is available from the new baseline without a
-Runtime reboot.
+directory. Updated content at an existing skill path is available when the
+agent rereads it. Changes to names or index descriptions require an authorized
+gateway restart to clear the process cache; `/reload-skills` alone does not
+refresh that index. Follow the verification steps below.
 
 Component trees still contain historical/reference skill snapshots. They are
 not deployment sources. The Finite Sites and FiniteBrain contract deltas have
 been reconciled into this baseline; future component contract changes must land
 here before promotion. The dashboard catalog also still has local-sibling and
 GitHub fallback behavior instead of a release-bound catalog source.
+
+## Correcting Guidance On Existing Agents
+
+A merged skill correction reaches an existing agent only after all of these
+steps. Stop at the first one that fails and record where the rollout stands.
+
+1. Merge the correction to `main`.
+2. Build and promote a Runtime image from a revision that contains it, per
+   `infra/runbooks/runtime-image.md` sections 2 through 4. Record the bundled
+   Finite Skills revision beside the image.
+3. Move the agent's Runtime to that image with an explicit Runtime Upgrade
+   (`infra/runbooks/runtime-image.md` section 4a). The upgrade preserves
+   `/data`, so the old managed baseline is still in place afterwards.
+4. Have the user ask the agent to run `finite skills sync`, or run it in the
+   agent's Runtime with the user's agreement. It prints the adopted tree as
+   `sha256:<digest>`.
+5. Verify from the agent's Runtime:
+
+   ```sh
+   diff -rq -x __pycache__ /runtime/finite-skills /data/agent/managed-skills/finite/current
+   ```
+
+   No output means the managed baseline matches the image. Also hash any file
+   the correction changed and compare it with `git show <revision>:<path> |
+   sha256sum`.
+6. Have the agent reread the corrected skill body before retesting in a new
+   conversation. `skill_view` reads an existing path from disk. Hermes also
+   caches its skills index in the gateway process: a new conversation or
+   `/reload-skills` alone does not clear that cache. If skill names or index
+   descriptions changed, arrange an authorized gateway restart and verify
+   the new index. This correction retains the existing name and description.
+7. Leave user-owned skills in `$HERMES_HOME/skills` as they are. When one
+   contradicts the corrected guidance, give the user its name, path, and the
+   conflicting sentence; the user decides whether to edit or remove it.
+
+The updated `fbrain --skill` guide is available after step 3. Existing Brain
+Working Tree `AGENTS.md` files regenerate on the next successful open or sync
+with authoritative Brain metadata from the updated binary. Inspect the
+regenerated file before claiming that its instructions have been updated.
