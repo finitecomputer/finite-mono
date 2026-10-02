@@ -35,3 +35,18 @@ export function sidebarTopics(topics: HostedChatTopic[]): SidebarTopic[] {
   }
   return folders;
 }
+
+export function sidebarKeyboardMove(topics: SidebarTopic[], chat: SidebarChat, key: string) {
+  const topicIndex = topics.findIndex((topic) => topic.chats.some((item) => sidebarChatKey(item) === sidebarChatKey(chat)));
+  if (topicIndex < 0 || chat.archived || !chat.placement) return null;
+  const topic = topics[topicIndex];
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    const destination = topics[topicIndex + (key === "ArrowLeft" ? -1 : 1)];
+    return destination ? { topicId: destination.topic_id, before: null } : null;
+  }
+  const chats = topic.chats.filter((item) => !item.archived);
+  const index = chats.findIndex((item) => sidebarChatKey(item) === sidebarChatKey(chat));
+  if (key === "ArrowUp" && index > 0) return { topicId: topic.topic_id, before: chats[index - 1] };
+  if (key === "ArrowDown" && index < chats.length - 1) return { topicId: topic.topic_id, before: chats[index + 2] ?? null };
+  return null;
+}

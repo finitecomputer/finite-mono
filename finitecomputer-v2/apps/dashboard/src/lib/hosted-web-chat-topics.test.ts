@@ -59,3 +59,23 @@ test("sidebar placement keeps canonical identity and handles Home, empty, unavai
   const legacy = { ...topic("room", "legacy"), chats: [chat("z"), chat("a")] };
   assert.deepEqual(sidebarTopics([legacy])[0].chats.map((item) => item.chat_id), ["z", "a"]);
 });
+
+test("keyboard movement handles adjacent positions and topics without changing chat identity", async () => {
+  const { sidebarTopics, sidebarKeyboardMove } = await import("@/lib/hosted-web-chat-topics");
+  const chats = ["a", "b", "c"].map((chat_id) => ({
+    chat_id, title: chat_id, archived: false, active: false, unread_count: 0,
+    message_count: 0, started_seq: 1, updated_seq: 1, last_message_preview: "",
+    placement: { topic_id: "home", position: chat_id },
+  }));
+  const topics = sidebarTopics([{ ...topic("room", "home"), chats }, topic("room", "empty")]);
+  const [a, b, c] = topics[0].chats;
+  assert.equal(sidebarKeyboardMove(topics, a, "ArrowUp"), null);
+  assert.equal(sidebarKeyboardMove(topics, c, "ArrowDown"), null);
+  assert.deepEqual(sidebarKeyboardMove(topics, a, "ArrowDown"), { topicId: "home", before: c });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowDown"), { topicId: "home", before: null });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowUp"), { topicId: "home", before: a });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowRight"), { topicId: "empty", before: null });
+  assert.equal(sidebarKeyboardMove(topics, b, "ArrowLeft"), null);
+  assert.equal(sidebarKeyboardMove(topics, { ...b, archived: true }, "ArrowUp"), null);
+  assert.equal(sidebarKeyboardMove(topics, { ...b, placement: null }, "ArrowUp"), null);
+});

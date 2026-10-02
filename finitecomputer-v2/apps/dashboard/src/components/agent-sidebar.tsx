@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, DragEvent, FormEvent, ReactNode } from "react";
+import type { CSSProperties, DragEvent, FormEvent, KeyboardEvent, ReactNode } from "react";
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -8,7 +8,6 @@ import {
   ArchiveRestoreIcon,
   ChevronRightIcon,
   HashIcon,
-  GripVerticalIcon,
   LogInIcon,
   MessageSquarePlusIcon,
   PanelLeftIcon,
@@ -29,14 +28,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { ChatMoveDialog } from "@/components/chat-move-dialog";
+import { useChatTouchDrag } from "@/components/use-chat-touch-drag";
 import { Input } from "@/components/ui/input";
 import { CHAT_TOPIC_DESCRIPTION } from "@/lib/chat-product-copy";
 import type {
   HostedChatAction,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
-import { sidebarTopics, sidebarChatKey, type SidebarChat, canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
+import { sidebarTopics, sidebarChatKey, sidebarKeyboardMove, type SidebarChat, canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 
 const subscribeHydration = () => () => undefined;
 
@@ -94,7 +93,6 @@ export function AgentSidebar({
     chat: SidebarChat;
   } | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
-  const [moveTarget, setMoveTarget] = useState<SidebarChat | null>(null);
   const [draggedChat, setDraggedChat] = useState<SidebarChat | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null>(null);
   const moving = useRef(false);
@@ -285,6 +283,51 @@ export function AgentSidebar({
     if (chat) void moveChat(chat, topicId, before);
   }
 
+  function touchTarget(target: Element | null) {
+    const folder = target?.closest<HTMLElement>("[data-topic-id]");
+    if (!folder || !navRef.current?.contains(folder)) return null;
+    const topic = topics.find((topic) => topic.topic_id === folder.dataset.topicId);
+    if (!topic) return null;
+    const row = target?.closest<HTMLElement>("[data-chat-id]");
+    const before = row ? topic.chats.find((chat) =>
+      chat.chat_id === row.dataset.chatId && chat.source_topic_id === row.dataset.sourceTopicId) : null;
+    if (row && (!before || before.archived)) return null;
+    return { topicId: topic.topic_id, before: before ?? null };
+  }
+
+  const navRef = useChatTouchDrag({
+    findChat: (row) => busy ? undefined : topics.flatMap((topic) => topic.chats).find((chat) =>
+      !chat.archived && chat.placement && chat.chat_id === row.dataset.chatId && chat.source_topic_id === row.dataset.sourceTopicId),
+    start: (chat) => { setDraggedChat(chat); setMoveStatus(`Picked up ${chat.title || "chat"}. Drag to a chat or topic, then release.`); },
+    hover: (element) => {
+      const target = touchTarget(element);
+      setDropTarget(target ? JSON.stringify([target.topicId, target.before ? sidebarChatKey(target.before) : null]) : null);
+    },
+    drop: (chat, element) => {
+      const target = touchTarget(element);
+      setDraggedChat(null);
+      setDropTarget(null);
+      if (target) void moveChat(chat, target.topicId, target.before);
+    },
+    cancel: () => { setDraggedChat(null); setDropTarget(null); },
+  });
+
+  async function moveWithKeyboard(event: KeyboardEvent<HTMLButtonElement>, chat: SidebarChat) {
+    if (!event.altKey || !event.shiftKey || !["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) return;
+    event.preventDefault();
+    const origin = event.currentTarget;
+    const target = sidebarKeyboardMove(topics, chat, event.key);
+    if (!target || !await moveChat(chat, target.topicId, target.before)) return;
+    // A cross-topic move remounts the row; keep keyboard focus on the same chat.
+    requestAnimationFrame(() => {
+      // A slow save must not steal focus if the user moved to another control.
+      if (document.activeElement !== origin && document.activeElement !== document.body) return;
+      const row = Array.from(navRef.current?.querySelectorAll<HTMLElement>("[data-chat-id]") ?? [])
+        .find((row) => row.dataset.chatId === chat.chat_id && row.dataset.sourceTopicId === chat.source_topic_id);
+      row?.querySelector<HTMLButtonElement>(".finite-chat__thread-open")?.focus();
+    });
+  }
+
   return (
     <>
       {mobileOpen ? (
@@ -319,7 +362,7 @@ export function AgentSidebar({
 
         <div className="finite-agent-shell__machine">{machineSwitcher}</div>
 
-        <nav className="finite-chat__sidebar-nav" aria-label="Agent, topics, and chats">
+        <nav ref={navRef} className="finite-chat__sidebar-nav" aria-label="Agent, topics, and chats" data-chat-dragging={Boolean(draggedChat) || undefined}>
           <AgentNavigation
             machineId={machineId}
             onNavigate={() => onMobileOpenChange(false)}
@@ -370,6 +413,7 @@ export function AgentSidebar({
             </div>
           ) : null}
           <span className="sr-only" role="status">{moveStatus}</span>
+          <span className="sr-only" id="chat-move-instructions">To move this chat, hold Alt and Shift and press Up or Down to reorder, or Left or Right to move to the previous or next topic.</span>
           {topics.map((topic) => {
             const topicKey = `${topic.room_id}:${topic.topic_id}`;
             const topicBodyId = `finite-chat-topic-${safeDomId(topicKey)}`;
@@ -445,7 +489,8 @@ export function AgentSidebar({
                         setDraggedChat(chat);
                       }}
                       onDragEnd={() => { setDraggedChat(null); setDropTarget(null); }}
-                      onMove={chat.placement ? () => setMoveTarget(chat) : undefined}
+                      dragging={Boolean(draggedChat && sidebarChatKey(draggedChat) === sidebarChatKey(chat))}
+                      onMoveKeyDown={(event) => void moveWithKeyboard(event, chat)}
                       chat={chat}
                       disabled={busy}
                       onArchiveChange={supportsChatArchive
@@ -503,8 +548,6 @@ export function AgentSidebar({
         </div>
       </aside>
 
-      <ChatMoveDialog chat={moveTarget} topics={topics} busy={busy}
-        onClose={() => setMoveTarget(null)} onMove={moveChat} />
       <Dialog open={createTopicOpen} onOpenChange={setCreateTopicOpen}>
         <DialogContent>
           <form className="finite-chat__rename-form" onSubmit={createTopic}>
@@ -576,7 +619,7 @@ function ChatRow({
   onArchiveChange,
   onOpen,
   onRename,
-  onMove, onDragStart, onDragEnd, onDragOver, onDrop, dropTarget,
+  onMoveKeyDown, onDragStart, onDragEnd, onDragOver, onDrop, dropTarget, dragging,
 }: {
   active: boolean;
   archived: boolean;
@@ -585,7 +628,8 @@ function ChatRow({
   onArchiveChange?: (archived: boolean) => void;
   onOpen: () => void;
   onRename: () => void;
-  onMove?: () => void;
+  onMoveKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  dragging?: boolean;
   onDragStart?: (event: DragEvent) => void;
   onDragEnd?: () => void;
   onDragOver?: (event: DragEvent) => void;
@@ -593,20 +637,26 @@ function ChatRow({
   dropTarget?: boolean;
 }) {
   const title = chat.title || "New chat";
+  const canDrag = !archived && !disabled && Boolean(chat.placement);
+  const dragFromAction = useRef(false);
   return (
     <div className={`finite-chat__thread-row ${active ? "is-active" : ""}`}
       data-chat-id={chat.chat_id} data-source-topic-id={chat.source_topic_id}
-      data-drop-target={dropTarget || undefined} onDragOver={onDragOver} onDrop={onDrop}>
-      {onMove ? <button type="button" className="finite-chat__thread-action finite-chat__drag-handle"
-        aria-label={`Move ${title}`} title="Drag to move, or click for options"
-        draggable={!disabled} disabled={disabled} onClick={onMove}
-        onDragStart={onDragStart} onDragEnd={onDragEnd}>
-        <GripVerticalIcon className="size-3.5" aria-hidden />
-      </button> : null}
+      data-drop-target={dropTarget || undefined} data-dragging={dragging || undefined}
+      draggable={canDrag}
+      onPointerDownCapture={(event) => { dragFromAction.current = event.target instanceof Element && Boolean(event.target.closest(".finite-chat__thread-actions")); }}
+      onDragStart={(event) => {
+        if (!canDrag || dragFromAction.current) { event.preventDefault(); return; }
+        onDragStart?.(event);
+      }}
+      onDragEnd={onDragEnd} onDragOver={onDragOver} onDrop={onDrop}>
       <button
         type="button"
         className="finite-chat__thread-open"
         aria-current={active ? "page" : undefined}
+        aria-describedby={canDrag ? "chat-move-instructions" : undefined}
+        aria-keyshortcuts={canDrag ? "Alt+Shift+ArrowUp Alt+Shift+ArrowDown Alt+Shift+ArrowLeft Alt+Shift+ArrowRight" : undefined}
+        onKeyDown={canDrag ? onMoveKeyDown : undefined}
         onClick={onOpen}
       >
         <span className="finite-chat__thread-indicator" aria-hidden />
