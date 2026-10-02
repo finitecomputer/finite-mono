@@ -21,6 +21,56 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
+    def test_exec_observation_hashes_args_and_distinguishes_fifo_writer_from_path_pin(self) -> None:
+        container = "a" * 64
+        command = b"nerdctl\0--namespace\0finite\0exec\0-i\0" + container.encode() + b"\0python3\0-c\0PRIVATE_PAYLOAD\0"
+        with tempfile.TemporaryDirectory() as temporary:
+            process = Path(temporary)
+            (process / "fd").mkdir()
+            (process / "fdinfo").mkdir()
+            for number, flags in (("7", getattr(os, "O_PATH", 0o10000000)), ("9", os.O_WRONLY | os.O_NONBLOCK)):
+                os.mkfifo(process / "fd" / number)
+                (process / "fdinfo" / number).write_text(f"flags:\t{flags:o}\n")
+            target = "/run/containerd/fifo/123/exec-" + "b" * 64 + "-stdin"
+            with mock.patch.object(finite_status.os, "readlink", return_value=target):
+                observation = finite_status.observe_nerdctl_exec(process, command, container)
+        self.assertEqual(observation["argv_sha256"], hashlib.sha256(command).hexdigest())
+        self.assertTrue(observation["interactive"])
+        self.assertEqual(observation["command_classification"], "other")
+        self.assertEqual({row["fd"]: row["holds_writer"] for row in observation["stdio_fifos"]}, {"7": False, "9": True})
+        self.assertFalse(observation["observation_grants_cancel_authority"])
+        self.assertNotIn("PRIVATE_PAYLOAD", json.dumps(observation))
+
+    def test_exec_observation_requires_an_exact_container_argument(self) -> None:
+        container = "a" * 64
+        for command in (b"nerdctl\0exec\0" + container.encode() + b"-suffix\0fbrain\0--version\0",
+                        b"nerdctl\0" + container.encode() + b"\0exec\0fbrain\0--version\0",
+                        b"nerdctl\0--namespace\0exec\0run\0" + container.encode() + b"\0fbrain\0--version\0"):
+            self.assertIsNone(finite_status.observe_nerdctl_exec(Path("/nonexistent"), command, container))
+
+    def test_exec_version_classification_does_not_accept_extra_shell_commands(self) -> None:
+        container = "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            process = Path(temporary)
+            (process / "fd").mkdir()
+            prefix = b"nerdctl\0exec\0" + container.encode() + b"\0sh\0-c\0"
+            safe = finite_status.observe_nerdctl_exec(process, prefix + b"fbrain --version\0", container)
+            other = finite_status.observe_nerdctl_exec(process, prefix + b"fbrain --version; PRIVATE_PAYLOAD\0", container)
+        self.assertEqual(safe["command_classification"], "version_only")
+        self.assertEqual(other["command_classification"], "other")
+        self.assertNotIn("PRIVATE_PAYLOAD", json.dumps(other))
+
+    def test_exec_observation_refuses_redirected_non_fifo_stream(self) -> None:
+        container = "a" * 64
+        with tempfile.TemporaryDirectory() as temporary:
+            process = Path(temporary)
+            (process / "fd").mkdir()
+            (process / "fd" / "9").write_text("PRIVATE_PAYLOAD")
+            target = "/run/containerd/fifo/123/exec-" + "b" * 64 + "-stdin"
+            with mock.patch.object(finite_status.os, "readlink", return_value=target):
+                with self.assertRaisesRegex(ValueError, "not a FIFO"):
+                    finite_status.observe_nerdctl_exec(process, b"nerdctl\0exec\0" + container.encode() + b"\0fbrain\0--version\0", container)
+
     def test_recovery_receipts_distinguish_absent_empty_and_used(self) -> None:
         for state, count in [("absent", ""), ("present", "0"), ("present", "2")]:
             with self.subTest(state=state, count=count):
