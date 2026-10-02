@@ -324,7 +324,11 @@ fn fbrain() -> PathBuf {
 }
 
 fn command(home: &Path, cwd: &Path) -> Command {
-    let mut command = Command::new(fbrain());
+    command_for(&fbrain(), home, cwd)
+}
+
+fn command_for(binary: &Path, home: &Path, cwd: &Path) -> Command {
+    let mut command = Command::new(binary);
     command
         .current_dir(cwd)
         .env_clear()
@@ -4518,4 +4522,842 @@ fn built_fbrain_pending_wraps_complete_on_admin_sync_unlock_invited_member() {
 
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
+}
+
+/// One step of the invited-member journey observed live in FIN-146.
+#[derive(Clone, Copy, Debug)]
+enum InviteJourneyStep {
+    /// The invited member opens the Brain; open runs the first sync.
+    MemberOpens,
+    /// The invited member runs an ordinary sync.
+    MemberSync,
+    /// The owner's ordinary sync wraps the pending Folder Key for the member.
+    OwnerDeliversKey,
+    /// The owner rewrites the verification marker and appends the log.
+    OwnerRevisesPages(&'static str),
+    /// The owner creates a second restricted Folder the member has no grant for.
+    OwnerCreatesControlFolder,
+}
+
+const INVITED_FOLDER_ID: &str = "team-folder";
+const CONTROL_FOLDER_ID: &str = "control-folder";
+
+fn verification_page(marker: &str) -> String {
+    format!("# Verification\n\nMarker {marker}.\n")
+}
+
+/// Owner and invited member Finite Homes against one real Brain server. The
+/// member has accepted a Folder-limited member invitation but has not opened
+/// the Brain; nobody has wrapped the Folder Key for them yet.
+struct InvitedMemberJourney {
+    _scratch: TempDir,
+    home_a: PathBuf,
+    home_b: PathBuf,
+    tree_a: PathBuf,
+    member_tree: PathBuf,
+    target_npub: String,
+    server_url: String,
+    shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    server_thread: Option<thread::JoinHandle<()>>,
+}
+
+impl InvitedMemberJourney {
+    fn start() -> Self {
+        let scratch = TempDir::new().unwrap();
+        let home_a = scratch.path().join("home-a");
+        let home_b = scratch.path().join("home-b");
+        let mut npubs = Vec::new();
+        for (home, suffix) in [(&home_a, "0001"), (&home_b, "0002")] {
+            fs::create_dir_all(home).unwrap();
+            let secret_path = home.join("import-key");
+            fs::write(
+                &secret_path,
+                format!("000000000000000000000000000000000000000000000000000000000000{suffix}\n"),
+            )
+            .unwrap();
+            let imported = run(
+                home,
+                home,
+                &[
+                    "auth",
+                    "import",
+                    "--file",
+                    secret_path.to_str().unwrap(),
+                    "--json",
+                ],
+            );
+            assert!(
+                imported.status.success(),
+                "{}",
+                String::from_utf8_lossy(&imported.stderr)
+            );
+            fs::remove_file(secret_path).unwrap();
+            let signer = run(home, home, &["signer", "public-key", "--json"]);
+            assert!(signer.status.success());
+            let signer: Value = serde_json::from_slice(&signer.stdout).unwrap();
+            npubs.push(signer["npub"].as_str().unwrap().to_owned());
+        }
+        let fixed_npub = |secret: &str| {
+            NostrPublicKey::from_protocol(Keys::parse(secret).unwrap().public_key())
+                .to_npub()
+                .unwrap()
+        };
+        let (server_url, shutdown, server_thread) = spawn_real_brain_server(
+            &npubs[1],
+            &fixed_npub("0000000000000000000000000000000000000000000000000000000000000003"),
+            &npubs[0],
+            &fixed_npub("0000000000000000000000000000000000000000000000000000000000000004"),
+        );
+        let journey = Self {
+            _scratch: scratch,
+            tree_a: home_a.join("personal-a-tree"),
+            member_tree: home_b.join("personal-a-member-tree"),
+            home_a,
+            home_b,
+            target_npub: npubs[1].clone(),
+            server_url,
+            shutdown: Some(shutdown),
+            server_thread: Some(server_thread),
+        };
+
+        // The owner creates a restricted Folder with three pages and syncs.
+        journey.owner_json(&[
+            "open",
+            "personal-a",
+            journey.tree_a.to_str().unwrap(),
+            "--json",
+        ]);
+        journey.owner_json(&[
+            "folder",
+            "create",
+            INVITED_FOLDER_ID,
+            "--access",
+            "restricted",
+            "--name",
+            "Team Folder",
+            "--path",
+            "Team Folder",
+            "--json",
+        ]);
+        journey.owner_json(&["sync", "now", "--json"]);
+        let folder = journey.tree_a.join("Team Folder");
+        fs::write(folder.join("index.md"), "# Team Folder\n\nInvite test.\n").unwrap();
+        fs::write(folder.join("log.md"), "# Log\n\n- created amberorchidone\n").unwrap();
+        fs::write(
+            folder.join("wiki/verification.md"),
+            verification_page("amberorchidone"),
+        )
+        .unwrap();
+        journey.owner_json(&["sync", "now", "--json"]);
+
+        // A member invitation limited to that Folder; the member accepts.
+        let invitation = journey.owner_json(&[
+            "invite",
+            "brain",
+            "create",
+            "--target",
+            &journey.target_npub,
+            "--folder",
+            INVITED_FOLDER_ID,
+            "--json",
+        ]);
+        let accepted = journey.run(
+            &fbrain(),
+            &journey.home_b,
+            &journey.home_b,
+            &[
+                "invite",
+                "brain",
+                "accept",
+                invitation["id"].as_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            accepted.status.success(),
+            "{}",
+            String::from_utf8_lossy(&accepted.stderr)
+        );
+        journey
+    }
+
+    fn run(&self, binary: &Path, home: &Path, cwd: &Path, args: &[&str]) -> Output {
+        command_for(binary, home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &self.server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &self.server_url)
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    fn owner_json(&self, args: &[&str]) -> Value {
+        let cwd = if self.tree_a.exists() {
+            &self.tree_a
+        } else {
+            &self.home_a
+        };
+        let output = self.run(&fbrain(), &self.home_a, cwd, args);
+        assert!(
+            output.status.success(),
+            "owner {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap_or(Value::Null)
+    }
+
+    fn member_open(&self, binary: &Path, tree: &Path) {
+        let opened = self.run(
+            binary,
+            &self.home_b,
+            &self.home_b,
+            &["open", "personal-a", tree.to_str().unwrap(), "--json"],
+        );
+        assert!(
+            opened.status.success(),
+            "{}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+    }
+
+    fn member_sync(&self, binary: &Path, tree: &Path) -> Value {
+        let synced = self.run(binary, &self.home_b, tree, &["sync", "now", "--json"]);
+        assert!(
+            synced.status.success(),
+            "{}",
+            String::from_utf8_lossy(&synced.stderr)
+        );
+        serde_json::from_slice(&synced.stdout).unwrap()
+    }
+
+    fn step(&self, member_binary: &Path, step: InviteJourneyStep) {
+        match step {
+            InviteJourneyStep::MemberOpens => {
+                self.member_open(member_binary, &self.member_tree);
+            }
+            InviteJourneyStep::MemberSync => {
+                self.member_sync(member_binary, &self.member_tree);
+            }
+            InviteJourneyStep::OwnerDeliversKey => {
+                let owner_sync = self.run(
+                    &fbrain(),
+                    &self.home_a,
+                    &self.tree_a,
+                    &["sync", "now", "--summary"],
+                );
+                assert!(
+                    owner_sync.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&owner_sync.stderr)
+                );
+                let summary = String::from_utf8_lossy(&owner_sync.stdout);
+                assert!(
+                    summary.contains(&format!(
+                        "wrapped {INVITED_FOLDER_ID} key for {}",
+                        self.target_npub
+                    )),
+                    "the owner's ordinary sync must wrap the pending key: {summary}"
+                );
+            }
+            InviteJourneyStep::OwnerRevisesPages(marker) => {
+                let folder = self.tree_a.join("Team Folder");
+                fs::write(
+                    folder.join("wiki/verification.md"),
+                    verification_page(marker),
+                )
+                .unwrap();
+                let mut log = fs::read_to_string(folder.join("log.md")).unwrap();
+                log.push_str(&format!("- revised to {marker}\n"));
+                fs::write(folder.join("log.md"), log).unwrap();
+                let pushed = self.owner_json(&["sync", "now", "--json"]);
+                assert_eq!(pushed["conflicts"], json!([]), "owner revision: {pushed}");
+                assert_eq!(
+                    pushed["localChanges"].as_array().map(Vec::len),
+                    Some(2),
+                    "owner revision: {pushed}"
+                );
+            }
+            InviteJourneyStep::OwnerCreatesControlFolder => {
+                self.owner_json(&[
+                    "folder",
+                    "create",
+                    CONTROL_FOLDER_ID,
+                    "--access",
+                    "restricted",
+                    "--name",
+                    "Control Folder",
+                    "--path",
+                    "Control Folder",
+                    "--json",
+                ]);
+                self.owner_json(&["sync", "now", "--json"]);
+                fs::write(
+                    self.tree_a.join("Control Folder/wiki/control-page.md"),
+                    "# Control\n\nMarker controlonly.\n",
+                )
+                .unwrap();
+                self.owner_json(&["sync", "now", "--json"]);
+            }
+        }
+    }
+
+    fn tree_state(tree: &Path) -> Value {
+        serde_json::from_slice(
+            &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn invited_root(state: &Value) -> Value {
+        state["folderRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|root| root["folderId"] == INVITED_FOLDER_ID)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    fn invited_revisions(objects: &Value) -> std::collections::BTreeMap<String, u64> {
+        objects
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|object| object["folderId"] == INVITED_FOLDER_ID && object["deleted"] != true)
+            .map(|object| {
+                (
+                    object["objectId"].as_str().unwrap().to_owned(),
+                    object["revision"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// The member reads the current revision of every invited page, finds the
+    /// current marker through lexical search, and has nothing of the control
+    /// Folder. Cached plaintext alone never satisfies this: the manifest
+    /// revisions must match the owner's authoritative export.
+    fn assert_member_reads_current_folder(&self, tree: &Path, moment: &str) {
+        let state = Self::tree_state(tree);
+        let invited = Self::invited_root(&state);
+        assert_eq!(
+            (invited["canRead"].clone(), invited["metadataOnly"].clone()),
+            (json!(true), json!(false)),
+            "{moment}: invited Folder must be readable: {invited}"
+        );
+        // A Working Tree may name the control Folder as metadata-only, but
+        // never readable and never with its content.
+        assert!(
+            state["folderRoots"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|root| root["folderId"] == CONTROL_FOLDER_ID)
+                .all(|root| root["canRead"] == false && root["metadataOnly"] == true),
+            "{moment}: control Folder must stay excluded: {state}"
+        );
+        assert!(
+            state["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|object| object["folderId"] != CONTROL_FOLDER_ID),
+            "{moment}: {state}"
+        );
+        assert!(
+            !tree.join("Control Folder/wiki/control-page.md").exists(),
+            "{moment}"
+        );
+        let export = self.owner_json(&["brain", "export", "--json"]);
+        assert_eq!(
+            Self::invited_revisions(&state["objects"]),
+            Self::invited_revisions(&export["objects"]),
+            "{moment}: member manifest must hold the current revisions"
+        );
+        for page in ["index.md", "log.md", "wiki/verification.md"] {
+            assert_eq!(
+                fs::read_to_string(tree.join("Team Folder").join(page)).unwrap(),
+                fs::read_to_string(self.tree_a.join("Team Folder").join(page)).unwrap(),
+                "{moment}: {page} must match the current revision"
+            );
+        }
+        let verification =
+            fs::read_to_string(self.tree_a.join("Team Folder/wiki/verification.md")).unwrap();
+        let marker = verification
+            .split("Marker ")
+            .nth(1)
+            .unwrap()
+            .trim_end()
+            .trim_end_matches('.');
+        let search = self.run(
+            &fbrain(),
+            &self.home_b,
+            tree,
+            &["search", marker, "--lexical-only", "--json"],
+        );
+        assert!(
+            search.status.success(),
+            "{moment}: lexical search failed: {}",
+            String::from_utf8_lossy(&search.stderr)
+        );
+        let search: Value = serde_json::from_slice(&search.stdout).unwrap();
+        assert_eq!(
+            search["searchedFolders"],
+            json!([INVITED_FOLDER_ID]),
+            "{moment}: {search}"
+        );
+        assert_eq!(
+            search["results"][0]["folderId"], INVITED_FOLDER_ID,
+            "{moment}: {search}"
+        );
+        let control = self.run(
+            &fbrain(),
+            &self.home_b,
+            tree,
+            &["search", "controlonly", "--lexical-only", "--json"],
+        );
+        assert!(control.status.success(), "{moment}");
+        let control: Value = serde_json::from_slice(&control.stdout).unwrap();
+        assert_eq!(control["results"], json!([]), "{moment}: {control}");
+    }
+
+    /// The steps run, then readability, current revisions,
+    /// search and control-Folder exclusion must hold across repeated syncs, a
+    /// later writer revision and a fresh Working Tree. Every fbrain invocation
+    /// is a new process that trusts only persisted client state, so each sync
+    /// here is also a client restart.
+    fn run_ordering(&self, steps: &[InviteJourneyStep]) {
+        let binary = fbrain();
+        for step in steps {
+            self.step(&binary, *step);
+        }
+        for round in 1..=3 {
+            self.member_sync(&binary, &self.member_tree);
+            self.assert_member_reads_current_folder(
+                &self.member_tree,
+                &format!("{steps:?}: member sync {round} after the journey"),
+            );
+        }
+        self.step(
+            &binary,
+            InviteJourneyStep::OwnerRevisesPages("amberorchidthree"),
+        );
+        self.member_sync(&binary, &self.member_tree);
+        self.assert_member_reads_current_folder(
+            &self.member_tree,
+            &format!("{steps:?}: member sync after a later revision"),
+        );
+        let fresh_tree = self.home_b.join("fresh-member-tree");
+        self.member_open(&binary, &fresh_tree);
+        self.member_sync(&binary, &fresh_tree);
+        self.assert_member_reads_current_folder(&fresh_tree, &format!("{steps:?}: fresh tree"));
+    }
+}
+
+impl Drop for InvitedMemberJourney {
+    fn drop(&mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        if let Some(server_thread) = self.server_thread.take() {
+            let _ = server_thread.join();
+        }
+    }
+}
+
+/// FIN-146 as reported: the member opens and syncs before key delivery, the
+/// owner delivers, revises and adds a control Folder, then the member syncs.
+#[test]
+fn built_fbrain_invited_member_reads_later_revisions_after_live_ordering() {
+    use InviteJourneyStep::*;
+    InvitedMemberJourney::start().run_ordering(&[
+        MemberOpens,
+        MemberSync,
+        OwnerDeliversKey,
+        OwnerRevisesPages("amberorchidtwo"),
+        OwnerCreatesControlFolder,
+    ]);
+}
+
+/// The live ordering with a member sync (for example the daemon) between key
+/// delivery and the writer revision: revision 1 materializes first.
+#[test]
+fn built_fbrain_invited_member_reads_later_revisions_after_interleaved_sync() {
+    use InviteJourneyStep::*;
+    InvitedMemberJourney::start().run_ordering(&[
+        MemberOpens,
+        MemberSync,
+        OwnerDeliversKey,
+        MemberSync,
+        OwnerRevisesPages("amberorchidtwo"),
+        OwnerCreatesControlFolder,
+    ]);
+}
+
+/// Repeated member syncs after delivery with no writer change in between.
+#[test]
+fn built_fbrain_invited_member_stays_readable_across_idle_syncs_after_delivery() {
+    use InviteJourneyStep::*;
+    InvitedMemberJourney::start().run_ordering(&[
+        MemberOpens,
+        OwnerDeliversKey,
+        MemberSync,
+        MemberSync,
+    ]);
+}
+
+/// The member first opens only after the key was delivered, so the first
+/// export it caches already carries the grant.
+#[test]
+fn built_fbrain_invited_member_opened_after_delivery_reads_later_revisions() {
+    use InviteJourneyStep::*;
+    InvitedMemberJourney::start().run_ordering(&[
+        OwnerDeliversKey,
+        MemberOpens,
+        OwnerRevisesPages("amberorchidtwo"),
+        OwnerCreatesControlFolder,
+    ]);
+}
+
+impl InvitedMemberJourney {
+    fn member_json_file(&self, name: &str) -> Value {
+        serde_json::from_slice(
+            &fs::read(
+                self.member_tree
+                    .join(".finitebrain/encrypted-sync")
+                    .join(name),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// Drive the member into the on-disk shape fbrain 0.5.0 leaves behind and
+    /// that the live FIN-146 tree reported: the cached export predates the
+    /// grant, the cached bootstrap holds the grant record and revision-2
+    /// ciphertext at the latest cursor, and the Working Tree marks the Folder
+    /// metadata-only over revision-1 manifest entries and plaintext.
+    fn assert_stuck_shape(&self) {
+        let export = self.member_json_file("export.json");
+        assert!(
+            export["keyGrants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|grant| grant["folderId"] != INVITED_FOLDER_ID),
+            "stuck shape: cached export must predate the grant: {}",
+            export["keyGrants"]
+        );
+        let bootstrap = self.member_json_file("bootstrap.json");
+        let grant_records = bootstrap["controlRecords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|record| {
+                record["recordType"] == "folder_key_grant"
+                    && serde_json::from_str::<Value>(record["payloadJson"].as_str().unwrap())
+                        .unwrap()["recipientNpub"]
+                        == self.target_npub.as_str()
+            })
+            .count();
+        assert_eq!(grant_records, 1, "stuck shape: cached grant record");
+        assert!(
+            Self::invited_revisions(&bootstrap["objects"])
+                .values()
+                .any(|revision| *revision == 2),
+            "stuck shape: cached bootstrap must hold revision-2 ciphertext"
+        );
+        let state = Self::tree_state(&self.member_tree);
+        assert_eq!(
+            state["sync"]["latestSequence"], bootstrap["latestSequence"],
+            "stuck shape: cursor at the cached bootstrap"
+        );
+        let invited = Self::invited_root(&state);
+        assert_eq!(
+            (invited["canRead"].clone(), invited["metadataOnly"].clone()),
+            (json!(false), json!(true)),
+            "stuck shape: {invited}"
+        );
+        assert!(
+            Self::invited_revisions(&state["objects"])
+                .values()
+                .all(|revision| *revision == 1),
+            "stuck shape: revision-1 manifest: {state}"
+        );
+        assert_eq!(
+            fs::read_to_string(self.member_tree.join("Team Folder/wiki/verification.md")).unwrap(),
+            verification_page("amberorchidone")
+        );
+    }
+
+    /// One ordinary sync with the current CLI recovers the stuck tree; the
+    /// recovered state then holds across syncs, a later revision and search.
+    fn assert_ordinary_sync_recovers(&self) {
+        let binary = fbrain();
+        let recovered = self.member_sync(&binary, &self.member_tree);
+        assert_eq!(recovered["conflicts"], json!([]));
+        self.assert_member_reads_current_folder(&self.member_tree, "first sync after recovery");
+        self.member_sync(&binary, &self.member_tree);
+        self.assert_member_reads_current_folder(&self.member_tree, "second sync after recovery");
+        self.step(
+            &binary,
+            InviteJourneyStep::OwnerRevisesPages("amberorchidthree"),
+        );
+        self.member_sync(&binary, &self.member_tree);
+        self.assert_member_reads_current_folder(&self.member_tree, "later revision after recovery");
+    }
+}
+
+/// A tree already stuck by fbrain 0.5.0 recovers on the next ordinary sync.
+/// The current CLI never produces the stuck shape, so this rebuilds it from
+/// the member's own persisted files exactly as 0.5.0 leaves them: the export
+/// cached at first open, the bootstrap the member cached at the latest cursor,
+/// and the Working Tree state and plaintext from the revision-1 sync with the
+/// Folder marked metadata-only.
+#[test]
+fn built_fbrain_sync_recovers_invited_folder_stuck_by_stale_cached_export() {
+    use InviteJourneyStep::*;
+    let journey = InvitedMemberJourney::start();
+    let binary = fbrain();
+    let sync_dir = journey.member_tree.join(".finitebrain/encrypted-sync");
+    let state_path = journey
+        .member_tree
+        .join(".finitebrain/working-tree-state.json");
+    journey.member_open(&binary, &journey.member_tree);
+    journey.step(&binary, MemberSync);
+    let export_before_delivery = fs::read(sync_dir.join("export.json")).unwrap();
+    journey.step(&binary, OwnerDeliversKey);
+    journey.step(&binary, MemberSync);
+    journey.assert_member_reads_current_folder(&journey.member_tree, "revision 1 delivered");
+    let revision_one_state = InvitedMemberJourney::tree_state(&journey.member_tree);
+    let revision_one_pages = ["index.md", "log.md", "wiki/verification.md"].map(|page| {
+        let path = journey.member_tree.join("Team Folder").join(page);
+        (path.clone(), fs::read(path).unwrap())
+    });
+    journey.step(&binary, OwnerRevisesPages("amberorchidtwo"));
+    journey.step(&binary, OwnerCreatesControlFolder);
+    journey.step(&binary, MemberSync);
+
+    fs::write(sync_dir.join("export.json"), export_before_delivery).unwrap();
+    let bootstrap = journey.member_json_file("bootstrap.json");
+    let mut stuck_state = revision_one_state;
+    stuck_state["sync"]["latestSequence"] = bootstrap["latestSequence"].clone();
+    for root in stuck_state["folderRoots"].as_array_mut().unwrap() {
+        if root["folderId"] == INVITED_FOLDER_ID {
+            root["canRead"] = json!(false);
+            root["metadataOnly"] = json!(true);
+        }
+    }
+    write_json(&state_path, &stuck_state);
+    for (path, bytes) in &revision_one_pages {
+        fs::write(path, bytes).unwrap();
+    }
+    journey.assert_stuck_shape();
+
+    journey.assert_ordinary_sync_recovers();
+}
+
+/// Recovery must not silently overwrite an unsynced edit to a page retained
+/// in the stuck, metadata-only Folder. The edit reaches conflict handling
+/// against the newer server revision instead of being replaced by it.
+#[test]
+fn built_fbrain_sync_recovery_preserves_unsynced_edit_in_stuck_folder() {
+    use InviteJourneyStep::*;
+    let journey = InvitedMemberJourney::start();
+    let binary = fbrain();
+    let sync_dir = journey.member_tree.join(".finitebrain/encrypted-sync");
+    let state_path = journey
+        .member_tree
+        .join(".finitebrain/working-tree-state.json");
+    journey.member_open(&binary, &journey.member_tree);
+    journey.step(&binary, MemberSync);
+    let export_before_delivery = fs::read(sync_dir.join("export.json")).unwrap();
+    journey.step(&binary, OwnerDeliversKey);
+    journey.step(&binary, MemberSync);
+    let revision_one_state = InvitedMemberJourney::tree_state(&journey.member_tree);
+    let revision_one_pages = ["index.md", "log.md", "wiki/verification.md"].map(|page| {
+        let path = journey.member_tree.join("Team Folder").join(page);
+        (path.clone(), fs::read(path).unwrap())
+    });
+    journey.step(&binary, OwnerRevisesPages("amberorchidtwo"));
+    journey.step(&binary, MemberSync);
+
+    fs::write(sync_dir.join("export.json"), export_before_delivery).unwrap();
+    let bootstrap = journey.member_json_file("bootstrap.json");
+    let mut stuck_state = revision_one_state;
+    stuck_state["sync"]["latestSequence"] = bootstrap["latestSequence"].clone();
+    for root in stuck_state["folderRoots"].as_array_mut().unwrap() {
+        if root["folderId"] == INVITED_FOLDER_ID {
+            root["canRead"] = json!(false);
+            root["metadataOnly"] = json!(true);
+        }
+    }
+    write_json(&state_path, &stuck_state);
+    for (path, bytes) in &revision_one_pages {
+        fs::write(path, bytes).unwrap();
+    }
+    let edited = journey.member_tree.join("Team Folder/wiki/verification.md");
+    let marker = "unsynced-member-note-vermilionquartz";
+    fs::write(
+        &edited,
+        format!(
+            "{}\n{marker}\n",
+            String::from_utf8_lossy(&revision_one_pages[2].1)
+        ),
+    )
+    .unwrap();
+
+    let result = journey.member_sync(&binary, &journey.member_tree);
+    assert_ne!(
+        result["conflicts"],
+        json!([]),
+        "an edit against revision 1 must conflict with server revision 2: {result}"
+    );
+    let mut preserved = Vec::new();
+    let mut pending = vec![journey.member_tree.clone()];
+    while let Some(dir) = pending.pop() {
+        for entry in fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if fs::read(&path)
+                .map(|bytes| String::from_utf8_lossy(&bytes).contains(marker))
+                .unwrap_or(false)
+            {
+                preserved.push(path);
+            }
+        }
+    }
+    assert!(
+        preserved.iter().any(|path| !path.starts_with(&sync_dir)),
+        "the unsynced edit must remain in the Working Tree: {preserved:?}"
+    );
+}
+
+/// Cross-version proof: the member runs the pre-fix CLI named by
+/// `FBRAIN_PRE_FIX_BIN` (for example fbrain 0.5.0 built from
+/// `fbrain/v0.5.0`) against the current server until it reaches the FIN-146
+/// stuck shape on its own, then one ordinary sync with the current CLI
+/// recovers it.
+#[test]
+#[ignore = "needs FBRAIN_PRE_FIX_BIN pointing at a pre-fix fbrain build"]
+fn built_fbrain_sync_recovers_invited_folder_stuck_by_pre_fix_cli() {
+    use InviteJourneyStep::*;
+    let pre_fix = PathBuf::from(
+        std::env::var_os("FBRAIN_PRE_FIX_BIN").expect("FBRAIN_PRE_FIX_BIN must name a binary"),
+    );
+    let journey = InvitedMemberJourney::start();
+    journey.member_open(&pre_fix, &journey.member_tree);
+    for step in [
+        MemberSync,
+        OwnerDeliversKey,
+        MemberSync,
+        OwnerRevisesPages("amberorchidtwo"),
+        OwnerCreatesControlFolder,
+        MemberSync,
+        MemberSync,
+    ] {
+        journey.step(&pre_fix, step);
+    }
+    journey.assert_stuck_shape();
+
+    journey.assert_ordinary_sync_recovers();
+}
+
+impl InvitedMemberJourney {
+    /// Removing the member's Folder access removes readable state: the
+    /// rotated revision stays undecryptable and search no longer admits the
+    /// Folder. Restoring access then delivers the rotated key and the member
+    /// reads the current revision again.
+    fn assert_folder_access_revoke_and_regrant(&self) {
+        let binary = fbrain();
+        self.assert_member_reads_current_folder(&self.member_tree, "before revoke");
+        let folder_access = |action: &str| {
+            self.owner_json(&[
+                "admin",
+                "folder-access",
+                action,
+                "--folder",
+                INVITED_FOLDER_ID,
+                "--target",
+                &self.target_npub,
+                "--json",
+            ])
+        };
+        assert_eq!(folder_access("revoke")["state"], "complete");
+        // Revocation rotates the key and re-encrypts the Folder's objects.
+        self.owner_json(&["sync", "now", "--json"]);
+        self.step(
+            &binary,
+            InviteJourneyStep::OwnerRevisesPages("amberorchidrevoked"),
+        );
+        for round in 1..=2 {
+            self.member_sync(&binary, &self.member_tree);
+            let state = Self::tree_state(&self.member_tree);
+            let invited = Self::invited_root(&state);
+            assert_eq!(
+                (invited["canRead"].clone(), invited["metadataOnly"].clone()),
+                (json!(false), json!(true)),
+                "member sync {round} after revoke must not keep the Folder readable"
+            );
+            assert_ne!(
+                fs::read_to_string(self.member_tree.join("Team Folder/wiki/verification.md"))
+                    .unwrap_or_default(),
+                verification_page("amberorchidrevoked"),
+                "member sync {round} after revoke must not decrypt the rotated revision"
+            );
+            let search = self.run(
+                &binary,
+                &self.home_b,
+                &self.member_tree,
+                &["search", "amberorchidone", "--lexical-only", "--json"],
+            );
+            assert!(
+                search.status.success(),
+                "member sync {round} after revoke: {}",
+                String::from_utf8_lossy(&search.stderr)
+            );
+            let search: Value = serde_json::from_slice(&search.stdout).unwrap();
+            assert_eq!(
+                search["searchedFolders"],
+                json!([]),
+                "member sync {round} after revoke: {search}"
+            );
+            assert_eq!(search["results"], json!([]));
+        }
+
+        folder_access("grant");
+        for round in 1..=2 {
+            self.member_sync(&binary, &self.member_tree);
+            self.assert_member_reads_current_folder(
+                &self.member_tree,
+                &format!("member sync {round} after regrant"),
+            );
+        }
+    }
+}
+
+/// Revocation reaches a member whose key arrived as a sync record.
+#[test]
+fn built_fbrain_invited_member_revoke_and_regrant_after_record_delivered_key() {
+    use InviteJourneyStep::*;
+    let journey = InvitedMemberJourney::start();
+    for step in [MemberOpens, OwnerDeliversKey, MemberSync, MemberSync] {
+        journey.step(&fbrain(), step);
+    }
+    journey.assert_folder_access_revoke_and_regrant();
+}
+
+/// Revocation reaches a member whose first export already held the key.
+#[test]
+fn built_fbrain_invited_member_revoke_and_regrant_after_export_delivered_key() {
+    use InviteJourneyStep::*;
+    let journey = InvitedMemberJourney::start();
+    for step in [OwnerDeliversKey, MemberOpens, MemberSync] {
+        journey.step(&fbrain(), step);
+    }
+    journey.assert_folder_access_revoke_and_regrant();
 }
