@@ -1606,6 +1606,7 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     restart_fence = None
     cleanup_layout = None
     network_probe = None
+    shim_exit_log = None
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
         writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
@@ -1620,6 +1621,9 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
             from kata_network_probe import collect_kata_network_probe
         guest_agent = collect_guest_agent_probe(agent.get("report", {}))
         network_probe = collect_kata_network_probe(agent.get("report", {}))
+        shim_exit_log = writer_topology.get("shim_exit_log_observation") if writer_topology else None
+        if shim_exit_log is None:
+            shim_exit_log = collect_runtime_shim_exit_log(agent.get("report", {}))
     return {
         "schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
         "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
@@ -1633,6 +1637,7 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
             "restart_fence": restart_fence,
             "cleanup_layout": cleanup_layout,
             "network_probe": network_probe,
+            "shim_exit_log_observation": shim_exit_log,
         }},
     }
 
@@ -1902,6 +1907,200 @@ def observe_nerdctl_exec(process: Path, command: bytes, container: str) -> dict[
         "observation_grants_cancel_authority": False}
 
 
+def collect_runtime_shim_exit_log(report: dict[str, Any]) -> dict[str, Any]:
+    """Observe exact shim zombie children and default log metadata; no authority.
+
+    Child wait status belongs to the leader, not necessarily the whole thread
+    group. Neither child identity nor historical logger identity is inferred.
+    The log path is the unique default full-CID nerdctl layout, not a claim that
+    a current logger is connected to it. No log contents or environments read.
+    """
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
+        "historical_logger_identity_established": False, "exited_children": []}
+    phase = "canonical_handle"
+    detail = None
+    failure_gate = None
+    try:
+        checks = [check for check in report["checks"] if check["name"] == "canonical_handle" and check["status"] == "pass"]
+        if len(checks) != 1:
+            raise ValueError("canonical handle unavailable")
+        cid = checks[0]["evidence"]["container_id"]
+        root = checks[0]["evidence"]["state_root"]
+        if not isinstance(cid, str) or not re.fullmatch(r"[a-f0-9]{64}", cid) or not isinstance(root, str) or not re.fullmatch(r"/data/finite-saas-runner/kata/[A-Za-z0-9_.-]+", root):
+            raise ValueError("canonical target invalid")
+        deadline = time.monotonic() + 10
+
+        def read(path: Path, limit: int) -> bytes:
+            if time.monotonic() > deadline:
+                raise ValueError("observation deadline")
+            with path.open("rb") as stream:
+                data = stream.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("observation read bound")
+            return data
+
+        def process_fields(path: Path) -> list[str]:
+            fields = read(path / "stat", 4096).rsplit(b")", 1)[1].decode("ascii").split()
+            if len(fields) < 50 or not all(fields[index].isascii() and fields[index].isdecimal() for index in (1, 19, 49)):
+                raise ValueError("invalid process fields")
+            return fields
+
+        phase = "namespace"
+        self_pid_namespace = os.readlink(Path("/proc/self/ns/pid"))
+        init_pid_namespace = os.readlink(Path("/proc/1/ns/pid"))
+        if not all(re.fullmatch(r"pid:\[[0-9]+\]", value) for value in (self_pid_namespace, init_pid_namespace)):
+            raise ValueError("invalid PID namespace observation")
+        init_comm = read(Path("/proc/1/comm"), 64).decode().strip()
+        init_executable = Path(os.readlink(Path("/proc/1/exe"))).name
+        host_context = {"self_pid_namespace": self_pid_namespace, "pid1_pid_namespace": init_pid_namespace,
+            "same_pid_namespace_as_visible_pid1": self_pid_namespace == init_pid_namespace,
+            "pid1_comm_kind": init_comm if init_comm in ("systemd", "init") else "other",
+            "pid1_executable_kind": init_executable if init_executable in ("systemd", "init") else "other",
+            "host_namespace_authority_established": False}
+        phase = "process_inventory"
+        processes = [path for path in Path("/proc").iterdir() if path.name.isdecimal()]
+        if len(processes) > 32768:
+            raise ValueError("process inventory bound")
+        snapshots = []
+        candidates = []
+        for process in processes:
+            phase = "process_inventory"
+            detail = None
+            failure_gate = None
+            try:
+                fields = process_fields(process)
+                snapshots.append((process, fields))
+                if fields[0] in ("Z", "X"):
+                    continue
+                executable = os.readlink(process / "exe")
+                if not re.fullmatch(r"/nix/store/[a-z0-9]{32}-[A-Za-z0-9+._-]+/bin/containerd-shim-kata-v2", executable):
+                    continue
+                phase = "shim_bind"
+                raw = read(process / "cmdline", 65536)
+                argv = raw.rstrip(b"\0").decode("utf-8").split("\0")
+                if cid not in argv:
+                    continue
+                detail = "shim_options"
+                options = argv[1:]
+                expected = {"-namespace": "finite", "-id": cid, "-address": "/run/containerd/containerd.sock"}
+                selected_options = dict(zip(options[::2], options[1::2]))
+                if len(options) not in (6, 8) or len(selected_options) != len(options) // 2 or Path(argv[0]).name != "containerd-shim-kata-v2":
+                    failure_gate = "shim_option_shape"
+                    raise ValueError("ambiguous shim arguments")
+                publisher = selected_options.pop("-publish-binary", None)
+                if selected_options != expected:
+                    failure_gate = "shim_option_values"
+                    raise ValueError("unknown or mismatched shim arguments")
+                # The shim owns this vendor argument. This observer neither
+                # follows nor executes it, so it confers no filesystem trust.
+                if publisher is not None and len(publisher.encode("utf-8")) > 4096:
+                    detail = "publisher_argument"
+                    failure_gate = "publisher_argument_bound"
+                    raise ValueError("opaque publisher argument exceeds bound")
+                detail = "shim_executable"
+                executable_path = Path(executable)
+                metadata = executable_path.stat()
+                if executable_path.resolve() != executable_path or not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or metadata.st_mode & 0o022:
+                    failure_gate = "shim_file_properties"
+                    raise ValueError("unsafe shim executable")
+                candidates.append((process, fields, executable, raw, publisher))
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+        phase = "shim_bind"
+        if len(candidates) != 1:
+            detail = "shim_selection"
+            failure_gate = "shim_candidate_count"
+            raise ValueError("exact shim unavailable or ambiguous")
+        shim, original, executable, command, publisher = candidates[0]
+        phase = "child_bind"
+        children = []
+        for process, fields in snapshots:
+            if fields[0] not in ("Z", "X") or int(fields[1]) != int(shim.name):
+                continue
+            if len(children) >= 256:
+                raise ValueError("child inventory bound")
+            current = process_fields(process)
+            if [current[index] for index in (0, 1, 19, 49)] != [fields[index] for index in (0, 1, 19, 49)]:
+                raise ValueError("child lifetime changed")
+            children.append({"pid": int(process.name), "parent_pid": int(fields[1]),
+                "starttime_ticks": fields[19], "leader_state": fields[0],
+                "exit_wait_status": int(fields[49]), "wait_status_scope": "leader_only"})
+
+        def safe_directory(path: Path) -> None:
+            info = path.lstat()
+            if path.resolve() != path or not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
+                raise ValueError("unsafe log directory")
+
+        phase = "log_directory"
+        datastore = Path("/var/lib/nerdctl")
+        for path in (Path("/var"), Path("/var/lib"), datastore):
+            safe_directory(path)
+        stores = list(datastore.iterdir())
+        if len(stores) > 128:
+            raise ValueError("datastore inventory bound")
+        matches = []
+        for store in stores:
+            if not re.fullmatch(r"[a-f0-9]{8,64}", store.name):
+                continue
+            directory = store / "containers" / "finite" / cid
+            if not directory.exists():
+                continue
+            for path in (store, store / "containers", store / "containers" / "finite", directory):
+                safe_directory(path)
+            matches.append(directory)
+        if len(matches) != 1:
+            raise ValueError("default log layout ambiguous")
+        phase = "log_file"
+        log = matches[0] / (cid + "-json.log")
+        info = log.lstat()
+        if log.resolve() != log or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
+            raise ValueError("unsafe default log file")
+        phase = "final_lifetime"
+        final = process_fields(shim)
+        if final[0] in ("Z", "X") or final[19] != original[19] or os.readlink(shim / "exe") != executable or read(shim / "cmdline", 65536) != command:
+            raise ValueError("shim identity drift")
+        if time.monotonic() > deadline:
+            raise ValueError("observation deadline")
+        phase = "filesystem"
+        filesystem_matches = []
+        for line in read(Path("/proc/self/mountinfo"), 4 * 1024 * 1024).decode("utf-8").splitlines():
+            before, after = line.split(" - ", 1)
+            fields, trailing = before.split(), after.split()
+            mountpoint = Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4]))
+            if log.parent == mountpoint or mountpoint in log.parent.parents:
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", trailing[0]):
+                    raise ValueError("invalid filesystem type")
+                filesystem_matches.append((len(mountpoint.parts), trailing[0]))
+        if not filesystem_matches:
+            raise ValueError("log filesystem observation unavailable")
+        deepest = max(depth for depth, _ in filesystem_matches)
+        filesystem_types = {kind for depth, kind in filesystem_matches if depth == deepest}
+        if len(filesystem_types) != 1:
+            raise ValueError("log filesystem type ambiguous")
+        space = os.statvfs(log.parent)
+        result.update(status="observed", container_id=cid, host_context=host_context,
+            log_filesystem_type=next(iter(filesystem_types)),
+            log_filesystem_available_bytes=space.f_bavail * space.f_frsize,
+            shim={"pid": int(shim.name), "starttime_ticks": original[19],
+                "publisher_argument_present": publisher is not None,
+                "publisher_argument_sha256": hashlib.sha256(publisher.encode("utf-8")).hexdigest() if publisher is not None else None},
+            exited_children=sorted(children, key=lambda child: child["pid"]),
+            default_json_log={"layout": "unique_full_cid_default_path", "current_logger_connection_established": False,
+                "size_bytes": info.st_size, "mtime_unix_ns": info.st_mtime_ns,
+                "device": info.st_dev, "inode": info.st_ino})
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
+        result["reason"] = "exact shim exit or default log metadata unavailable"
+        result["observation_phase"] = phase
+        result["error_kind"] = type(error).__name__
+        if phase == "shim_bind" and detail is not None:
+            result["observation_detail"] = detail
+        if phase == "shim_bind" and failure_gate is not None:
+            result["failure_gate"] = failure_gate
+        if isinstance(error, OSError) and isinstance(error.errno, int):
+            result["error_errno"] = error.errno
+    return result
+
+
 def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
     """Bounded point-in-time process/mount observations, never an absence attestation."""
     result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
@@ -2035,6 +2234,7 @@ def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
         result.update(processes_examined=len(identifiers), mount_namespaces_examined=len(namespaces),
                       vanished_processes=vanished, container_id=container, state_root=state_root)
         result["status"] = "observed" if not result["errors"] else "unknown"
+        result["shim_exit_log_observation"] = collect_runtime_shim_exit_log(report)
         try:
             task_read = run_read_only(["ctr", "-n", CONTRACT["runner"]["namespace"], "tasks", "ps", container], timeout=5)
             result["targeted_task_read"] = {"exit_code": task_read.returncode,
