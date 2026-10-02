@@ -751,7 +751,10 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 },
                 "verdict": verdict,
                 "reason": reason,
-                "checks": [],
+                "checks": [
+                    {"name": name, "status": "pass", "detail": "qualified", "evidence": {}}
+                    for name in ["canonical_handle", "containerd_task", "sandbox_state", "duplicate_writers", "cni_namespace", "vmm_process"]
+                ],
             }
         )
 
@@ -801,15 +804,16 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
 
     def test_target_lifecycle_preserves_findings_and_exit_severity(self) -> None:
         for verdict, status, code in [("operable", "green", 0), ("inoperable", "red", 1), ("unknown", "unknown", 2)]:
-            probe = json.loads(self.probe_report(verdict, "control_channel_unavailable"))
-            probe["checks"] = [{"name": "shim_control", "status": "fail", "detail": "bounded timeout"}]
+            probe = json.loads(self.probe_report(verdict, None if verdict == "operable" else "control_channel_unavailable"))
+            if verdict != "operable":
+                probe["checks"][1].update(status="fail", detail="bounded timeout", finding="control_channel_unavailable")
             with (
                 mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
                 mock.patch.object(finite_status.socket, "gethostname", return_value="finite-lat-1"),
                 mock.patch.object(finite_status, "read_environment_values", return_value={}),
                 mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, json.dumps(probe), "")) as run,
             ):
-                report = finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a")
+                report = finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a", "finite-lat-1")
             self.assertEqual(report["overall_status"], status)
             self.assertEqual(report["exit_code"], code)
             self.assertEqual(report["sections"]["runtime_lifecycle"]["probe"]["report"], probe)
@@ -819,7 +823,19 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
     def test_target_lifecycle_rejects_malformed_or_wrong_target_green_reports(self) -> None:
         wrong = json.loads(self.probe_report("operable"))
         wrong["runtime"]["source_machine_id"] = "other-machine"
-        for probe in [[], wrong, {"schema": finite_status.LIFECYCLE_PROBE_SCHEMA, "verdict": "operable"}]:
+        contradictory = json.loads(self.probe_report("operable"))
+        contradictory["checks"][1].update(status="fail", finding="orphaned_task")
+        empty = json.loads(self.probe_report("operable"))
+        empty["checks"] = []
+        malformed = json.loads(self.probe_report("operable"))
+        malformed["checks"][0] = "invalid"
+        duplicate = json.loads(self.probe_report("operable"))
+        duplicate["checks"].append(duplicate["checks"][0])
+        missing = json.loads(self.probe_report("operable"))
+        missing["checks"].pop()
+        mismatch = json.loads(self.probe_report("inoperable", "orphaned_task"))
+        mismatch["checks"][1].update(status="fail", finding="control_channel_unavailable")
+        for probe in [[], wrong, contradictory, empty, malformed, duplicate, missing, mismatch, {"schema": finite_status.LIFECYCLE_PROBE_SCHEMA, "verdict": "operable"}]:
             with (
                 mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
                 mock.patch.object(finite_status, "read_environment_values", return_value={}),
@@ -831,11 +847,55 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
 
     def test_target_lifecycle_cli_rejects_unsafe_identifiers_and_conflicting_modes(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
-            for arguments in [["--runtime-lifecycle", "project", "runtime", "../machine"],
-                              ["--runtime-lifecycle", "project", "runtime", "machine", "--runtime-route", "machine"]]:
+            for arguments in [["--runtime-lifecycle", "project", "runtime", "../machine", "finite-lat-1"],
+                              ["--runtime-lifecycle", "project", "runtime", "machine", "finite-lat-1", "--runtime-route", "machine"],
+                              ["--runtime-lifecycle", "project", "runtime", "machine"]]:
                 with self.assertRaises(SystemExit) as failure:
                     finite_status.parse_args(arguments)
                 self.assertEqual(failure.exception.code, 2)
+
+    def test_target_lifecycle_rejects_wrong_host_before_provider_access(self) -> None:
+        with (
+            mock.patch.object(finite_status.socket, "gethostname", return_value="finite-lat-5"),
+            mock.patch.object(finite_status, "run_read_only") as run,
+        ):
+            with self.assertRaises(finite_status.CollectionError):
+                finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a", "finite-lat-3")
+        run.assert_not_called()
+
+    def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
+        row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
+               "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-3",
+               "source_machine_id": "machine-a", "expected_agent_npub": "npub-a",
+               "runtime_artifact_id": "artifact-a", "image_reference": "image-a",
+               "state_schema_version": "runtime-state-v1", "retirement_snapshots": 0,
+               "creation_lineage": [{"status": "running", "relocation": False}],
+               "credentials": [{"agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-3",
+                                "source_machine_id": "machine-a", "owner_user_id": "user-a",
+                                "activated": True, "revoked": False}]}
+        self.assertEqual(finite_status.build_runtime_assignment("project-a", [row])["exit_code"], 0)
+        for rows in [[], [row, row]]:
+            self.assertEqual(finite_status.build_runtime_assignment("project-a", rows)["exit_code"], 2)
+        for override in [{"project_id": "other-project"}, {"active_controls": [{"kind": "upgrade"}]},
+                         {"offboarding_phase": "retirement_requested"}, {"credentials": []},
+                         {"creation_lineage": [{"status": "launching", "relocation": True}]},
+                         {"credentials": [{**row["credentials"][0], "revoked": True}]},
+                         {"credentials": [{**row["credentials"][0], "source_machine_id": "other-machine"}]}]:
+            self.assertEqual(finite_status.build_runtime_assignment("project-a", [{**row, **override}])["exit_code"], 2)
+
+    def test_runtime_assignment_query_uses_read_only_transaction_and_safe_metadata(self) -> None:
+        with (
+            mock.patch.object(finite_status, "postgres_environment", return_value={"PGPASSWORD": "test-secret"}),
+            mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, "[]", "")) as run,
+        ):
+            self.assertEqual(finite_status.collect_runtime_assignment("project-a")["exit_code"], 2)
+        self.assertNotIn("test-secret", str(run.call_args.args))
+        query = run.call_args.kwargs["input_text"]
+        self.assertIn("BEGIN READ ONLY", query)
+        self.assertIn("ROLLBACK", query)
+        self.assertNotIn("bootstrap_secret", query)
+        self.assertNotIn("token_sha256", query)
+        self.assertNotIn("lease_token", query)
 
     def test_orphan_vmm_observation_is_bounded_and_does_not_authorize_repair(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -874,6 +934,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 # A reused PID or unrelated process is never identified as this sandbox.
                 (process / "cmdline").write_bytes(b"qemu\0other-sandbox")
                 self.assertFalse(finite_status.collect_orphan_vmm(report)["matches_sandbox"])
+                self.assertEqual(finite_status.collect_orphan_vmm(report)["status"], "unknown")
                 persist["SandboxContainer"] = "b" * 64
                 (sandbox / "persist.json").write_text(json.dumps(persist))
                 self.assertEqual(finite_status.collect_orphan_vmm(report)["status"], "unknown")

@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -265,6 +266,33 @@ RUNTIME_DETAILS_QUERY = """select ar.source_host_id,
 LIFECYCLE_PROBE_BINARY = "/run/current-system/sw/bin/finite-saas-runner"
 LIFECYCLE_PROBE_SCHEMA = "finite.lifecycle-probe.v1"
 LIFECYCLE_VERDICTS = ("operable", "degraded", "inoperable", "unknown")
+
+
+def valid_target_probe_checks(report: dict[str, Any]) -> bool:
+    checks = report.get("checks")
+    if not isinstance(checks, list) or not checks:
+        return False
+    names = set()
+    failures = []
+    for check in checks:
+        if (not isinstance(check, dict) or not isinstance(check.get("name"), str)
+                or not check["name"] or check["name"] in names
+                or check.get("status") not in ("pass", "fail", "skip")
+                or not isinstance(check.get("detail"), str)
+                or not isinstance(check.get("evidence"), dict)):
+            return False
+        names.add(check["name"])
+        if check["status"] == "fail":
+            if not isinstance(check.get("finding"), str) or not check["finding"]:
+                return False
+            failures.append(check["finding"])
+    required = {"canonical_handle", "containerd_task", "sandbox_state",
+                "duplicate_writers", "cni_namespace", "vmm_process"}
+    if not required <= names:
+        return False
+    if report["verdict"] == "operable":
+        return not failures and report.get("reason") is None
+    return bool(failures) and report.get("reason") in failures
 
 # Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice 3).
 # These constants mirror Core's project_runtime_health exactly: a runtime is
@@ -607,6 +635,148 @@ def psql_query_sets(environment: dict[str, str]) -> dict[str, list[dict[str, Any
 def collect_core() -> dict[str, Any]:
     environment = postgres_environment()
     return psql_query_sets(environment)
+
+
+RUNTIME_ASSIGNMENT_QUERY = """
+BEGIN READ ONLY;
+SET LOCAL statement_timeout = '10s';
+WITH assignments AS (
+ SELECT p.id AS project_id, p.display_name, p.owner_user_id,
+        u.normalized_email AS owner_email, u.link_status AS owner_link_status,
+        ar.id AS agent_runtime_id, ar.source_host_id, ar.source_machine_id,
+        ar.runtime_artifact_id, ar.state_schema_version, ar.runtime_capabilities,
+        ar.health_reporting_npub AS expected_agent_npub, ar.contact_endpoint,
+        ar.host_facts->>'runtime_status' AS runtime_status,
+        ar.health_ready, ar.health_reported_at, ar.offboarding_phase,
+        ra.reference AS image_reference,
+        (SELECT jsonb_agg(jsonb_build_object(
+          'id', c.id, 'status', c.status, 'kind', c.kind,
+          'source_host_id', c.source_host_id, 'source_machine_id', c.source_machine_id))
+         FROM runtime_control_requests c WHERE c.agent_runtime_id=ar.id
+          AND c.status IN ('requested','launching','compute_up','ready','running')) AS active_controls,
+        (SELECT jsonb_agg(jsonb_build_object(
+          'id', c.id, 'status', c.status, 'owner_user_id', c.owner_user_id,
+          'agent_runtime_id', c.agent_runtime_id, 'runner_class', c.runner_class,
+          'target_source_host_id', c.target_source_host_id,
+          'relocation', c.relocation_spec IS NOT NULL))
+         FROM agent_creation_requests c WHERE c.project_id=p.id) AS creation_lineage,
+        (SELECT jsonb_agg(jsonb_build_object(
+          'creation_request_id', c.creation_request_id,
+          'agent_runtime_id', c.agent_runtime_id, 'source_host_id', c.source_host_id,
+          'source_machine_id', c.source_machine_id, 'owner_user_id', c.owner_user_id,
+          'activated', c.activated, 'revoked', c.revoked,
+          'hosted_enabled', c.hosted_enabled, 'hosted_apply_status', c.hosted_apply_status,
+          'hosted_generation', c.hosted_generation,
+          'hosted_applied_generation', c.hosted_applied_generation))
+         FROM runtime_core_credentials c WHERE c.agent_runtime_id=ar.id) AS credentials,
+        (SELECT count(*) FROM runtime_retirement_snapshots s
+         WHERE s.agent_runtime_id=ar.id) AS retirement_snapshots
+ FROM projects p JOIN users u ON u.id=p.owner_user_id
+ JOIN project_runtime_links l ON l.project_id=p.id AND l.active
+ JOIN agent_runtimes ar ON ar.id=l.agent_runtime_id AND ar.project_id=p.id
+ LEFT JOIN runtime_artifacts ra ON ra.id=ar.runtime_artifact_id
+ WHERE p.id=:'project_id'
+)
+SELECT coalesce(jsonb_agg(to_jsonb(assignments)), '[]'::jsonb) FROM assignments;
+ROLLBACK;
+"""
+
+
+def build_runtime_assignment(project: str, assignments: Any) -> dict[str, Any]:
+    """Expose explicit non-secret recovery inputs without choosing an ambiguous row."""
+    if not isinstance(assignments, list) or any(not isinstance(row, dict) for row in assignments):
+        raise CollectionError("Runtime assignment query returned an invalid shape")
+    errors = []
+    if len(assignments) != 1:
+        errors.append("expected exactly one active assignment")
+    else:
+        row = assignments[0]
+        if row.get("project_id") != project:
+            errors.append("assignment belongs to another Project")
+        for key in ("owner_user_id", "agent_runtime_id", "source_host_id", "source_machine_id", "expected_agent_npub", "runtime_artifact_id", "image_reference", "state_schema_version"):
+            if not isinstance(row.get(key), str) or not row[key]:
+                errors.append(f"missing {key}")
+        if row.get("owner_link_status") != "linked" or row.get("offboarding_phase") is not None or row.get("retirement_snapshots") != 0:
+            errors.append("owner or retirement state is unsuitable for live recovery")
+        if row.get("active_controls"):
+            errors.append("active lifecycle control exists")
+        lineage = row.get("creation_lineage") or []
+        if not isinstance(lineage, list) or any(not isinstance(item, dict) for item in lineage):
+            errors.append("invalid creation lineage")
+        elif (any(item.get("status") in {"requested", "launching", "compute_up", "ready"} for item in lineage)
+              or sum(item.get("status") == "running" and item.get("relocation") is False for item in lineage) != 1):
+            errors.append("creation lineage is active or ambiguous")
+        credentials = row.get("credentials") or []
+        if not isinstance(credentials, list) or len(credentials) != 1 or not isinstance(credentials[0], dict):
+            errors.append("expected exactly one bound credential")
+        else:
+            credential = credentials[0]
+            if (credential.get("activated") is not True or credential.get("revoked") is not False
+                or any(credential.get(key) != row.get(key) for key in ("agent_runtime_id", "source_host_id", "source_machine_id", "owner_user_id"))):
+                errors.append("credential does not match the active assignment")
+    status = "green" if not errors else "unknown"
+    return {"schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
+            "overall_status": status, "exit_code": 0 if not errors else 2,
+            "sections": {"runtime_assignment": {"status": status, "project_id": project,
+                "assignments": assignments, "errors": errors, "repair_authority": False}}}
+
+
+def collect_runtime_assignment(project: str) -> dict[str, Any]:
+    result = run_read_only(["psql", "-X", "-qAt", "-v", "ON_ERROR_STOP=1",
+                           "-v", f"project_id={project}"],
+                          environment=postgres_environment(), input_text=RUNTIME_ASSIGNMENT_QUERY)
+    if result.returncode:
+        raise CollectionError("Core Runtime assignment query failed")
+    try:
+        return build_runtime_assignment(project, json.loads(result.stdout))
+    except json.JSONDecodeError as error:
+        raise CollectionError("Core Runtime assignment query returned invalid JSON") from error
+
+
+def collect_kata_recovery_host() -> dict[str, Any]:
+    """Read inputs needed to qualify an isolated recovery rehearsal on this host."""
+    import tomllib
+
+    with Path("/etc/kata-containers/configuration.toml").open("rb") as source:
+        configuration = tomllib.load(source)
+    allowed = {"path", "kernel", "image", "initrd", "firmware", "virtio_fs_daemon",
+               "shared_fs", "default_vcpus", "default_memory", "enable_annotations",
+               "sandbox_cgroup_only", "enable_vcpus_pinning", "enable_iothreads",
+               "enable_template", "enable_vfio_mode", "disable_guest_seccomp",
+               "template_path", "vm_cache_number", "vm_cache_endpoint", "guest_hook_path",
+               "vfio_mode", "static_sandbox_resource_mgmt"}
+    evidence: dict[str, Any] = {
+        "host": socket.gethostname(), "repair_authority": False,
+        "configuration": {section: {kind: ({key: value for key, value in settings.items() if key in allowed}
+            if isinstance(settings, dict) else settings)
+            for kind, settings in values.items() if isinstance(settings, dict) or kind in allowed}
+            for section, values in configuration.items() if isinstance(values, dict)},
+        "kvm_present": Path("/dev/kvm").exists(),
+        "cgroup_type": Path("/sys/fs/cgroup/cgroup.type").read_text().strip() if Path("/sys/fs/cgroup/cgroup.type").exists() else None,
+        "cgroup_controllers": Path("/sys/fs/cgroup/cgroup.controllers").read_text().split() if Path("/sys/fs/cgroup/cgroup.controllers").exists() else None,
+        "cgroup_mounts": [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if " - cgroup" in line],
+        "memory_available_kib": next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:")),
+        "tmp_disk_free_bytes": shutil.disk_usage("/tmp").free,
+        "tools": {},
+    }
+    for binary in ("kata-runtime", "containerd-shim-kata-v2", "containerd", "nerdctl", "python3", "unshare", "mount", "systemd-run", "tar"):
+        path = shutil.which(binary)
+        evidence["tools"][binary] = os.path.realpath(path) if path else None
+    for binary, argument in (("kata-runtime", "--version"), ("containerd", "--version"), ("nerdctl", "--version")):
+        if evidence["tools"][binary]:
+            result = run_read_only([evidence["tools"][binary], argument], timeout=10)
+            evidence[binary + "_version"] = result.stdout.strip() if result.returncode == 0 else "unavailable"
+    service = run_read_only(["systemctl", "show", CONTRACT["runner"]["service"],
+                            "--property=ActiveState,SubState,MainPID"], timeout=10)
+    evidence["runner_service"] = service.stdout.strip()
+    timer = run_read_only(["systemctl", "show", CONTRACT["runner"]["timer"], "--property=ActiveState,SubState"], timeout=10)
+    evidence["runner_timer"] = timer.stdout.strip()
+    result = run_read_only(["ctr", "-n", CONTRACT["runner"]["namespace"], "images", "ls", "-q"], timeout=15)
+    evidence["cached_runtime_image_references"] = [line for line in result.stdout.splitlines() if line.startswith("ghcr.io/finitecomputer/agent-runtime@sha256:")] if result.returncode == 0 else None
+    return {"schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
+            "overall_status": "unknown", "exit_code": 2,
+            "sections": {"kata_recovery_host": {"status": "unknown", "evidence": evidence,
+                "reason": "observations do not qualify lab containment or production repair"}}}
 
 
 # Aggregates only: no emails, keys, prompts, or per-grant rows leave the host.
@@ -1347,7 +1517,7 @@ def collect_lifecycle_probe(
             not isinstance(report.get("runtime"), dict)
             or any(report["runtime"].get(key) != row.get(key)
                    for key in ("project_id", "agent_runtime_id", "source_machine_id"))
-            or not isinstance(report.get("checks"), list)
+            or not valid_target_probe_checks(report)
         ):
             raw["agents"][runtime_id] = probe_agent_entry(
                 "unknown", "probe_invalid", "probe target does not match requested Runtime"
@@ -1361,9 +1531,11 @@ def collect_lifecycle_probe(
     return raw
 
 
-def collect_runtime_lifecycle(project: str, runtime: str, machine: str) -> dict[str, Any]:
+def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected_host: str) -> dict[str, Any]:
     """Inspect one exact provider assignment without requiring Core credentials."""
     hostname = socket.gethostname().split(".", 1)[0]
+    if hostname != expected_host:
+        raise CollectionError("runtime lifecycle target host does not match this host")
     raw = collect_lifecycle_probe([{
         "project_id": project, "agent_runtime_id": runtime,
         "source_machine_id": machine, "source_host_id": hostname,
@@ -1375,8 +1547,10 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str) -> dict[
     verdict = agent["verdict"]
     status = "green" if verdict == "operable" else "unknown" if verdict == "unknown" else "red"
     orphan_vmm = None
+    writer_topology = None
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
+        writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
     return {
         "schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
         "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
@@ -1385,8 +1559,135 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str) -> dict[
             "source_machine_id": machine, "source_host_id": hostname,
             "probe": agent, "collection_errors": raw["errors"],
             "orphan_vmm": orphan_vmm,
+            "writer_topology": writer_topology,
         }},
     }
+
+
+def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
+    """Bounded point-in-time process/mount observations, never an absence attestation."""
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
+        "coverage": "point_in_time", "processes": [], "mounts": [], "errors": []}
+    try:
+        check = next(item for item in report["checks"]
+                     if item["name"] == "canonical_handle" and item["status"] == "pass")
+        container = check["evidence"]["container_id"]
+        state_root = check["evidence"]["state_root"]
+        if not isinstance(container, str) or not re.fullmatch(r"[a-f0-9]{64}", container):
+            raise ValueError("invalid full container ID")
+        if not isinstance(state_root, str) or not re.fullmatch(r"/data/finite-saas-runner/kata/[A-Za-z0-9_.-]+", state_root):
+            raise ValueError("unexpected canonical durable root")
+        proc_root = Path("/proc")
+        deadline = time.monotonic() + 15
+
+        def read(path: Path, limit: int) -> bytes:
+            with path.open("rb") as source:
+                data = source.read(limit + 1)
+            if len(data) > limit:
+                raise ValueError("topology observation exceeded its read limit")
+            return data
+
+        def starttime(stat: bytes) -> str:
+            value = stat.rsplit(b")", 1)[1].split()[19].decode("ascii")
+            if not value.isdecimal():
+                raise ValueError("invalid process starttime")
+            return value
+
+        result["boot_id"] = read(proc_root / "sys/kernel/random/boot_id", 128).decode().strip()
+        identifiers = [path for path in proc_root.iterdir() if path.name.isdecimal()]
+        if len(identifiers) > 32768:
+            raise ValueError("process inventory exceeds its bound")
+        namespaces: set[str] = set()
+        vanished = 0
+        for process in identifiers:
+            if time.monotonic() > deadline:
+                raise ValueError("topology observation exceeded its time limit")
+            try:
+                before = starttime(read(process / "stat", 4096))
+                command = read(process / "cmdline", 65536)
+                arguments = command.decode("utf-8", "replace").split("\0")
+                executable = os.readlink(process / "exe") if command else None
+                namespace = os.readlink(process / "ns/mnt")
+                matches = any(container in argument or state_root in argument for argument in arguments)
+                references = []
+                matching_descriptors = 0
+                descriptor_count = None
+                if matches and executable and re.search(r"qemu-system|virtiofsd|containerd-shim", executable):
+                    descriptors = list((process / "fd").iterdir())
+                    descriptor_count = len(descriptors)
+                    if len(descriptors) > 131072:
+                        raise ValueError("descriptor inventory exceeds its bound")
+                    for descriptor in descriptors:
+                        if time.monotonic() > deadline:
+                            raise ValueError("descriptor observation exceeded its time limit")
+                        try:
+                            target = os.readlink(descriptor)
+                        except FileNotFoundError:
+                            continue
+                        if state_root in target or container in target:
+                            matching_descriptors += 1
+                            # Keep control paths only; user filenames need not leave the host.
+                            if len(references) < 64 and target.startswith(("/run/", state_root)):
+                                references.append({"fd": descriptor.name, "path": target})
+                    matches = matches or matching_descriptors > 0
+                if namespace not in namespaces:
+                    lines = read(process / "mountinfo", 4 * 1024 * 1024).decode("utf-8", "replace").splitlines()
+                    for line in lines:
+                        if container in line or state_root in line:
+                            # Mount metadata contains no process environment or credentials.
+                            result["mounts"].append({"namespace": namespace, "observer_pid": int(process.name), "mountinfo": line})
+                    namespaces.add(namespace)
+                if matches:
+                    sockets = []
+                    for argument in arguments:
+                        for candidate in re.findall(r"(/[^,;\s]+)", argument):
+                            if container in candidate:
+                                sockets.append(candidate)
+                    qmp_arguments = [arguments[index + 1] for index, value in enumerate(arguments[:-1])
+                        if value in {"-qmp", "-monitor", "-mon"}
+                        or value == "-chardev" and "qmp" in arguments[index + 1]]
+                    qmp_sockets = []
+                    for argument in qmp_arguments:
+                        descriptor = re.search(r"(?:^|[:,])fd=([0-9]+)(?:,|$)", argument)
+                        if descriptor:
+                            link = os.readlink(process / "fd" / descriptor[1])
+                            inode = re.fullmatch(r"socket:\[([0-9]+)\]", link)
+                            if inode:
+                                for line in read(process / "net/unix", 4 * 1024 * 1024).decode().splitlines()[1:]:
+                                    fields = line.split(maxsplit=7)
+                                    if len(fields) >= 7 and fields[6] == inode[1]:
+                                        qmp_sockets.append({"fd": descriptor[1], "inode": inode[1],
+                                            "path": fields[7] if len(fields) == 8 else None})
+                    process_stat = read(process / "stat", 4096).rsplit(b")", 1)[1].split()
+                    result["processes"].append({"pid": int(process.name), "starttime_ticks": before,
+                        "process_state": process_stat[0].decode(), "descriptor_count": descriptor_count,
+                        "matching_descriptor_count": matching_descriptors,
+                        "qmp_arguments": qmp_arguments, "qmp_socket_observations": qmp_sockets,
+                        "nerdctl_operation": next((value for value in arguments if value in {"exec", "wait", "start", "stop", "restart"}), None) if executable and "nerdctl" in executable else None,
+                        "wait_channel": read(process / "wchan", 4096).decode().strip(),
+                        "executable": executable, "mount_namespace": namespace,
+                        "cgroup": read(process / "cgroup", 65536).decode().splitlines(),
+                        "socket_paths": sorted(set(sockets)), "path_references": references,
+                        "matches_full_container_id": any(container in argument for argument in arguments)})
+                if starttime(read(process / "stat", 4096)) != before:
+                    raise ValueError("process identity changed during observation")
+            except (FileNotFoundError, ProcessLookupError):
+                vanished += 1
+            except (OSError, ValueError, IndexError) as error:
+                result["errors"].append({"pid": int(process.name), "detail": str(error)})
+        result.update(processes_examined=len(identifiers), mount_namespaces_examined=len(namespaces),
+                      vanished_processes=vanished, container_id=container, state_root=state_root)
+        result["status"] = "observed" if not result["errors"] else "unknown"
+        try:
+            task_read = run_read_only(["ctr", "-n", CONTRACT["runner"]["namespace"], "tasks", "ps", container], timeout=5)
+            result["targeted_task_read"] = {"exit_code": task_read.returncode,
+                "stdout": task_read.stdout[:4096], "stderr": task_read.stderr[:4096],
+                "absence_proven": False}
+        except CollectionError:
+            result["targeted_task_read"] = {"status": "unavailable", "absence_proven": False}
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, IndexError) as error:
+        result["errors"].append({"detail": str(error)})
+    return result
 
 
 def collect_orphan_vmm(report: dict[str, Any]) -> dict[str, Any]:
@@ -1434,7 +1735,7 @@ def collect_orphan_vmm(report: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("VMM PID changed identity during observation")
         identified = bool(re.fullmatch(r"\.?qemu-system-[A-Za-z0-9_-]+", Path(executable).name)
                           and container.encode() in command)
-        return {**unknown, "status": "observed", "container_id": container,
+        return {**unknown, "status": "observed" if identified else "unknown", "container_id": container,
                 "pid": pid, "comm": comm, "executable": executable,
                 "starttime_ticks": start_before.decode(), "matches_sandbox": identified}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, StopIteration, CollectionError) as error:
@@ -3397,10 +3698,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--runtime-assignment", metavar="PROJECT_ID",
+                      help="read one Project's exact Core recovery inputs without credential values; emits JSON")
+    mode.add_argument("--kata-recovery-host", action="store_true",
+                      help="read host prerequisites for an isolated Kata recovery rehearsal; emits JSON")
     mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
                       help="compare one owned Kata Runtime's direct and published identity routes")
-    mode.add_argument("--runtime-lifecycle", nargs=3,
-                      metavar=("PROJECT_ID", "AGENT_RUNTIME_ID", "SOURCE_MACHINE_ID"),
+    mode.add_argument("--runtime-lifecycle", nargs=4,
+                      metavar=("PROJECT_ID", "AGENT_RUNTIME_ID", "SOURCE_MACHINE_ID", "SOURCE_HOST_ID"),
                       help="inspect one exact Kata assignment's lifecycle control without stopping it; emits JSON")
     parser.add_argument("--expected-agent-principal-sha256",
                         help="compare both routes against an independently established Principal hash")
@@ -3431,11 +3736,13 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.runtime_assignment and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_assignment):
+        parser.error("--runtime-assignment requires a simple Project identifier")
     if options.runtime_lifecycle and any(
         not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value)
         for value in options.runtime_lifecycle
     ):
-        parser.error("--runtime-lifecycle requires three simple identifiers")
+        parser.error("--runtime-lifecycle requires four simple identifiers")
     if options.runtime_route and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_route):
         parser.error("--runtime-route requires a simple source machine identifier")
     if options.expected_agent_principal_sha256 and (
@@ -3454,7 +3761,14 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.runtime_route:
+        if options.runtime_assignment:
+            report = collect_runtime_assignment(options.runtime_assignment)
+        elif options.kata_recovery_host:
+            try:
+                report = collect_kata_recovery_host()
+            except (OSError, ValueError, StopIteration) as error:
+                raise CollectionError(f"Kata recovery host evidence unavailable: {error}") from error
+        elif options.runtime_route:
             report = collect_runtime_route(options.runtime_route, options.expected_agent_principal_sha256)
         elif options.runtime_lifecycle:
             report = collect_runtime_lifecycle(*options.runtime_lifecycle)
@@ -3497,6 +3811,8 @@ def main(arguments: list[str] | None = None) -> None:
         or options.finite_private_usage
         or options.runtime_route
         or options.runtime_lifecycle
+        or options.runtime_assignment
+        or options.kata_recovery_host
     ):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:
