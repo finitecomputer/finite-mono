@@ -402,6 +402,38 @@ runs normally once the probe is green. If prepare-time or execute-time
 provider facts drifted instead, re-`--prepare` and approve the new hash;
 never edit retained evidence.
 
+To investigate one skipped assignment on its Runner host, use
+`scripts/finite-status --runtime-lifecycle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_ID SOURCE_HOST_ID`.
+Establish all four identifiers from Core and the retained plan first. This
+read-only mode reports the full lifecycle probe, including failed checks,
+without requiring a local Core database credential or stopping the guest. It
+reports unknown if the probe is unavailable, malformed, or names a different
+assignment. A serving `/contact` endpoint does not override a failed control
+channel check. For an orphaned task, it also reads bounded retained sandbox
+and `/proc` metadata to observe the VMM's executable, sandbox match and process
+start time. These observations never confer authority to signal a PID. The
+command diagnoses provider state; it does not authorize repair or replacement.
+Duplicate-writer and CNI passes cover provider records only. They do not prove
+absence of an orphan VM, virtiofsd writer or retained bind mounts. In particular,
+the installed probe can label sandbox state stale and skip its VMM check while
+a surviving VM continues serving. Preserve the sandbox identity evidence until
+the complete writer and resource topology is established and recovery qualified.
+On containerd 2.3, task listing calls each shim and can omit a task whose shim
+times out. The `orphaned_task` finding therefore means the task was not reported;
+it is not proof that its shim or task is absent. Never use it to authorize an
+absent-compute relocation. The target mode also captures bounded process and
+mount observations, explicitly labelled as point-in-time evidence without
+repair authority.
+
+Use `scripts/finite-status --runtime-assignment PROJECT_ID` on Core to capture
+the active assignment, owner, Principal, image, creation lineage and credential
+state without credential values. Missing or ambiguous assignment, active
+controls, retirement state or a mismatched credential returns unknown. It does
+not select a recovery target or authorize mutation. For an isolated Kata
+rehearsal, `scripts/finite-status --kata-recovery-host` reads installed versions,
+cached image references, configuration and capacity; its observations do not
+qualify containment or a production repair.
+
 For an exactly-one-agent emergency where the probe verdict is understood and
 the upgrade must proceed anyway, add `--probe-override` to the execute
 command. It requires exactly one `--roll-project-id`, hard-refuses

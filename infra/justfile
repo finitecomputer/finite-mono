@@ -10,6 +10,8 @@ default:
 finite-status-contract:
     cd .. && python3 scripts/check_finite_status_contract.py
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_status.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_kata_guest_probe.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_kata_network_probe.py'
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_runtime_route_status.py'
     cd .. && python3 -m unittest discover -s infra/nixos/tests -p 'test_finite_runtime_metrics.py'
 
