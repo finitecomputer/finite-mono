@@ -802,6 +802,7 @@ def collect_kata_recovery_host() -> dict[str, Any]:
         "memory_shmem_kib": next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("Shmem:")),
         "memory_available_kib": next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:")),
         "tmp_disk_free_bytes": shutil.disk_usage("/tmp").free,
+        "data_disk_free_bytes": shutil.disk_usage("/data").free,
         "tools": {},
     }
     for binary in ("kata-runtime", "containerd-shim-kata-v2", "containerd", "nerdctl", "python3", "unshare", "mount", "systemd-run", "tar"):
