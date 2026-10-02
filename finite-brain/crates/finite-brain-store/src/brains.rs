@@ -1,6 +1,34 @@
 use crate::*;
 
 impl BrainStore {
+    /// Change only the display name and atomically append the signed admin record.
+    /// Replaying an accepted event must not undo a later rename.
+    pub fn rename_brain(
+        &mut self,
+        brain_id: &BrainId,
+        name: &DisplayName,
+        record: &SyncRecordInput,
+    ) -> Result<(), StoreError> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if sync_records::existing_sequence(&tx, brain_id, record.record_event_id())?.is_some() {
+            return Ok(());
+        }
+        let changed = tx.execute(
+            "UPDATE brains SET name = ?2 WHERE id = ?1",
+            params![brain_id.as_str(), name.as_str()],
+        )?;
+        if changed == 0 {
+            return Err(StoreError::MissingBrain {
+                brain_id: brain_id.to_string(),
+            });
+        }
+        sync_records::append_sync_records(&tx, brain_id, std::slice::from_ref(record))?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Atomically create a Personal Brain and its Personal Agent.
     pub fn create_personal_brain_bootstrap(
         &mut self,

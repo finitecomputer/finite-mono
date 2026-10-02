@@ -253,6 +253,15 @@ pub(crate) fn run_working_tree_sync(
             open_export_folder_key_grants_into_session(&auth, &mounted.export, &mut session_keys)?;
         }
     }
+    // Display metadata is authoritative even when content uses a cached export.
+    // Preserve the Working Tree path and stable Brain ID across a rename.
+    if let Some(name) = mounted_discovery
+        .as_ref()
+        .and_then(|discovery| discovery.metadata.as_ref())
+        .and_then(|metadata| metadata.name.as_ref())
+    {
+        export.brain.name = name.clone();
+    }
     // Opportunistically deliver pending grant wraps: invitees waiting on a
     // wrapped current Folder Key get their grants from any key-holding client
     // that syncs. The freshest wrap markers win: authoritative metadata is
@@ -3569,6 +3578,8 @@ struct CliSyncObject {
 #[serde(rename_all = "camelCase")]
 struct CliBrainMetadata {
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     personal_agent: Option<CliPersonalAgent>,
     #[serde(default)]
     mounted_folders: Vec<CliMountedFolder>,
@@ -4231,6 +4242,7 @@ mod tests {
             admins: Vec::new(),
         };
         let metadata = CliBrainMetadata {
+            name: None,
             personal_agent: Some(CliPersonalAgent {
                 agent_npub: "npub-agent".to_owned(),
             }),

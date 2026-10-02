@@ -306,6 +306,189 @@ fn fbrain() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fbrain"))
 }
 
+#[test]
+fn built_fbrain_rename_preserves_an_open_tree_and_survives_server_restart() {
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let signer = run(&home, &home, &["signer", "public-key", "--json"]);
+    assert!(
+        signer.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signer.stderr)
+    );
+    let signer: Value = serde_json::from_slice(&signer.stdout).unwrap();
+    let owner = signer["npub"].as_str().unwrap();
+    let db = scratch.path().join("brain.sqlite3");
+    let (server, shutdown, thread) = spawn_file_backed_brain_server(owner, db.clone());
+    let tree = home.join("unchanged-tree-path");
+    let execute = |cwd: &Path, args: &[&str], server: &str| {
+        let result = command(&home, cwd)
+            .env("FINITE_BRAIN_SERVER_URL", server)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        serde_json::from_slice::<Value>(&result.stdout).unwrap()
+    };
+    execute(
+        &home,
+        &["open", "roundtrip-org", tree.to_str().unwrap(), "--json"],
+        &server,
+    );
+    execute(&tree, &["folder", "create", "Knowledge", "--json"], &server);
+    execute(&tree, &["sync", "now", "--json"], &server);
+    let page = tree.join("Knowledge/wiki/keep.md");
+    let contents = "# Existing knowledge\n\nKeep this content across rename.\n";
+    fs::write(&page, contents).unwrap();
+    execute(&tree, &["sync", "now", "--json"], &server);
+    let prior_agent_state: Value =
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/agent-state.json")).unwrap())
+            .unwrap();
+    let renamed = execute(
+        &home,
+        &[
+            "brain",
+            "rename",
+            "Renamed Knowledge",
+            "--brain",
+            "roundtrip-org",
+            "--json",
+        ],
+        &server,
+    );
+    assert_eq!(renamed["brainId"], "roundtrip-org");
+    assert_eq!(renamed["name"], "Renamed Knowledge");
+
+    // Optional pre-change client proof: the caller supplies a built old CLI.
+    // It reads existing content and catches up through its original sync path.
+    if let Some(binary) = std::env::var_os("FBRAIN_COMPAT_BINARY") {
+        let old = Command::new(binary)
+            .current_dir(&tree)
+            .env_clear()
+            .env("HOME", &home)
+            .env("FINITE_HOME", home.join("finite-home"))
+            .env("FBRAIN_CONFIG_DIR", home.join("fbrain-config"))
+            .env("FINITE_BRAIN_SERVER_URL", &server)
+            .args(["sync", "now", "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            old.status.success(),
+            "{}",
+            String::from_utf8_lossy(&old.stderr)
+        );
+        let export: Value = serde_json::from_slice(
+            &fs::read(tree.join(".finitebrain/encrypted-sync/export.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(export["brain"]["name"], "Renamed Knowledge");
+        assert_eq!(fs::read_to_string(&page).unwrap(), contents);
+    }
+
+    execute(&tree, &["sync", "now", "--json"], &server);
+    let export: Value = serde_json::from_slice(
+        &fs::read(tree.join(".finitebrain/encrypted-sync/export.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(export["brain"]["name"], "Renamed Knowledge");
+    let directory: Value =
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/brain-directory.json")).unwrap())
+            .unwrap();
+    assert_eq!(directory["brain"]["name"], "Renamed Knowledge");
+    assert_eq!(directory["brain"]["id"], "roundtrip-org");
+    assert_eq!(fs::read_to_string(&page).unwrap(), contents);
+    let agent_state: Value =
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/agent-state.json")).unwrap())
+            .unwrap();
+    assert_eq!(agent_state["brainId"], prior_agent_state["brainId"]);
+    // A second rename from the open tree exercises the remembered Brain target.
+    execute(&tree, &["brain", "rename", "Final name", "--json"], &server);
+    // Distinct commands may deliberately restore earlier names, even with
+    // the fixed FBRAIN_NOW used by this process fixture.
+    let restored = execute(
+        &tree,
+        &["brain", "rename", "Renamed Knowledge", "--json"],
+        &server,
+    );
+    assert_eq!(restored["name"], "Renamed Knowledge");
+    let final_name = execute(&tree, &["brain", "rename", "Final name", "--json"], &server);
+    assert_eq!(final_name["name"], "Final name");
+    execute(&tree, &["sync", "now", "--json"], &server);
+    shutdown.send(()).unwrap();
+    thread.join().unwrap();
+    let (server, shutdown, thread) = spawn_file_backed_brain_server(owner, db.clone());
+    let metadata = execute(
+        &home,
+        &["brain", "metadata", "roundtrip-org", "--json"],
+        &server,
+    );
+    assert_eq!(metadata["name"], "Final name");
+    assert_eq!(metadata["brainId"], "roundtrip-org");
+    assert_eq!(fs::read_to_string(&page).unwrap(), contents);
+    shutdown.send(()).unwrap();
+    thread.join().unwrap();
+
+    if let Some(binary) = std::env::var_os("FBRAIN_COMPAT_SERVER_BINARY") {
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = reservation.local_addr().unwrap();
+        drop(reservation);
+        let server = format!("http://{addr}");
+        let _old_server = ChildGuard(
+            Command::new(binary)
+                .env_clear()
+                .env("FINITE_BRAIN_ADDR", addr.to_string())
+                .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server)
+                .env("FINITE_BRAIN_DB", &db)
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while TcpStream::connect(addr).is_err() {
+            assert!(Instant::now() < deadline, "old server did not start");
+            thread::sleep(Duration::from_millis(20));
+        }
+        let metadata = execute(
+            &home,
+            &["brain", "metadata", "roundtrip-org", "--json"],
+            &server,
+        );
+        assert_eq!(metadata["name"], "Final name");
+        let rejected = command(&home, &home)
+            .env("FINITE_BRAIN_SERVER_URL", &server)
+            .args([
+                "brain",
+                "rename",
+                "Must not apply",
+                "--brain",
+                "roundtrip-org",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("404"));
+        let metadata = execute(
+            &home,
+            &["brain", "metadata", "roundtrip-org", "--json"],
+            &server,
+        );
+        assert_eq!(metadata["name"], "Final name");
+        execute(
+            &tree,
+            &["sync", "now", "--server", &server, "--json"],
+            &server,
+        );
+        assert_eq!(fs::read_to_string(&page).unwrap(), contents);
+    }
+}
+
 fn command(home: &Path, cwd: &Path) -> Command {
     let mut command = Command::new(fbrain());
     command

@@ -45,7 +45,7 @@ fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disab
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list
-fbrain brain list|create|bootstrap-personal|metadata|export
+fbrain brain list|create|rename|bootstrap-personal|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
@@ -64,6 +64,26 @@ the empty user-owned Personal Brain and establishes the authenticated agent as
 its Personal Agent through Brain's account-bound authority. Direct `brain
 create` is for Organization Brains and is not a substitute for this Personal
 Agent bootstrap flow.
+
+## Rename a Brain
+
+With a server and CLI release that support rename, use:
+
+```sh
+fbrain brain rename "New display name" --brain <brain-id> --json
+# From inside the intended Brain Working Tree:
+fbrain brain rename "New display name" --json
+fbrain sync now --summary
+```
+
+An Organization Brain admin, Personal Brain owner, or active Personal Agent
+may rename it. Choose the Brain by stable ID or its already-open Working Tree;
+if the intended Brain is ambiguous, resolve it with `brain list --json` first.
+The display name changes; the Brain ID, Working Tree path, Folders, content,
+membership, and key grants stay intact. The rename is signed and appears in
+administrative sync history. Other clients receive the name on refresh or sync.
+An older server rejects this command without mutation; upgrade the server
+before promoting the matching CLI and managed skill revision.
 
 ## Identity
 
