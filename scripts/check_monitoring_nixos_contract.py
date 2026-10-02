@@ -394,6 +394,17 @@ def check_mvp_dashboard_contract() -> None:
     )
     panels = list(all_panels(dashboard["panels"]))
     panels_by_title = {panel["title"]: panel for panel in panels}
+    panels_by_id = {panel["id"]: panel for panel in panels}
+    for panel_id, window in ((2, "24h"), (3, "7d")):
+        panel = panels_by_id[panel_id]
+        require(
+            panel["type"] == "state-timeline" and panel["timeFrom"] == window,
+            "public availability must retain separate service lanes and time windows",
+        )
+        require(
+            panel["fieldConfig"]["defaults"]["custom"]["spanNulls"] is False,
+            "public availability must not bridge missing data",
+        )
     for title in HOST_PANEL_TITLES:
         require(title in panels_by_title, f"missing Grafana host panel {title!r}")
     for title in LOG_PANEL_TITLES:

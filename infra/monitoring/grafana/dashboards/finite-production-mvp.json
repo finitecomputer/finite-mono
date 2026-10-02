@@ -144,7 +144,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 5
       },
@@ -164,7 +164,11 @@
         },
         "showPercentChange": false,
         "textMode": "name_and_value",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 11,
+          "valueSize": 22
+        }
       },
       "pluginVersion": "13.0.2",
       "targets": [
@@ -180,6 +184,92 @@
       "title": "LAT Host Scrape Health",
       "type": "stat",
       "description": "Current scrape status for every expected LAT host. Missing host series remain DOWN via the explicit fallback; check this before interpreting missing host metrics."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Heuristic, not a hardware throttle counter. LIKELY requires temperature >= 95 C, CPU busy >= 70%, and average current frequency <= 70% of the exported maximum.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "NO"
+                },
+                "1": {
+                  "color": "red",
+                  "text": "LIKELY"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "id": 26,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true,
+        "text": {
+          "titleSize": 11,
+          "valueSize": 22
+        }
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})) <= bool 0.70)",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "LAT Thermal Throttling Heuristic",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -226,8 +316,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 5
       },
       "id": 29,
@@ -308,7 +398,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
+        "w": 24,
         "x": 0,
         "y": 9
       },
@@ -328,7 +418,11 @@
         },
         "showPercentChange": false,
         "textMode": "name_and_value",
-        "wideLayout": true
+        "wideLayout": true,
+        "text": {
+          "titleSize": 12,
+          "valueSize": 24
+        }
       },
       "pluginVersion": "13.0.2",
       "targets": [
@@ -349,125 +443,20 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Heuristic, not a hardware throttle counter. LIKELY requires temperature >= 95 C, CPU busy >= 70%, and average current frequency <= 70% of the exported maximum.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "text": "NO"
-                },
-                "1": {
-                  "color": "red",
-                  "text": "LIKELY"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 12,
-        "y": 9
-      },
-      "id": 26,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "name_and_value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})) <= bool 0.70)",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "LAT Thermal Throttling Heuristic",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
+            "lineWidth": 0,
+            "fillOpacity": 85,
+            "spanNulls": false,
+            "insertNulls": false,
             "hideFrom": {
               "legend": false,
               "tooltip": false,
               "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
             }
           },
           "max": 1,
@@ -484,7 +473,22 @@
                 "value": 1
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
+            }
+          ]
         },
         "overrides": []
       },
@@ -496,19 +500,17 @@
       },
       "id": 2,
       "options": {
-        "annotations": {
-          "clustering": -1,
-          "multiLane": false
-        },
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "showValue": "auto",
+        "alignValue": "left",
         "legend": {
-          "calcs": [],
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": true
+          "showLegend": false
         },
         "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
+          "mode": "single",
           "sort": "none"
         }
       },
@@ -525,8 +527,8 @@
       ],
       "timeFrom": "24h",
       "title": "Public Uptime - 24 Hours",
-      "type": "timeseries",
-      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
+      "type": "state-timeline",
+      "description": "Availability by service: UP = successful probe, DOWN = failed probe; missing samples remain gaps. Defaults to the last 24 hours for relative time ranges. An absolute dashboard range overrides this panel window. Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
       "datasource": {
@@ -599,11 +601,9 @@
         },
         "legend": {
           "calcs": [
-            "lastNotNull",
-            "mean",
-            "max"
+            "lastNotNull"
           ],
-          "displayMode": "table",
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
@@ -1389,40 +1389,17 @@
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "palette-classic"
+                "mode": "thresholds"
               },
               "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "barWidthFactor": 0.6,
-                "drawStyle": "line",
-                "fillOpacity": 12,
-                "gradientMode": "none",
+                "lineWidth": 0,
+                "fillOpacity": 85,
+                "spanNulls": false,
+                "insertNulls": false,
                 "hideFrom": {
                   "legend": false,
                   "tooltip": false,
                   "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "stepAfter",
-                "lineWidth": 1,
-                "pointSize": 3,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "never",
-                "showValues": false,
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
                 }
               },
               "max": 1,
@@ -1439,7 +1416,22 @@
                     "value": 1
                   }
                 ]
-              }
+              },
+              "mappings": [
+                {
+                  "options": {
+                    "0": {
+                      "color": "red",
+                      "text": "DOWN"
+                    },
+                    "1": {
+                      "color": "green",
+                      "text": "UP"
+                    }
+                  },
+                  "type": "value"
+                }
+              ]
             },
             "overrides": []
           },
@@ -1451,19 +1443,17 @@
           },
           "id": 3,
           "options": {
-            "annotations": {
-              "clustering": -1,
-              "multiLane": false
-            },
+            "mergeValues": true,
+            "rowHeight": 0.8,
+            "showValue": "auto",
+            "alignValue": "left",
             "legend": {
-              "calcs": [],
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": true
+              "showLegend": false
             },
             "tooltip": {
-              "hideZeros": false,
-              "mode": "multi",
+              "mode": "single",
               "sort": "none"
             }
           },
@@ -1480,8 +1470,8 @@
           ],
           "timeFrom": "7d",
           "title": "Public Uptime - 7 Days",
-          "type": "timeseries",
-          "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
+          "type": "state-timeline",
+          "description": "Availability by service: UP = successful probe, DOWN = failed probe; missing samples remain gaps. Defaults to the last 7 days for relative time ranges. An absolute dashboard range overrides this panel window. Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
         }
       ],
       "title": "Public availability \u00b7 7-day history",
