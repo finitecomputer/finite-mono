@@ -879,6 +879,18 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertFalse(result["repair_authority"])
         self.assertEqual(run.call_count, 1)
 
+    def test_retained_port_claims_bind_exact_full_container_and_keep_wildcard(self) -> None:
+        cid = "a" * 64
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, "8080/tcp -> 0.0.0.0:49155\n", "")) as run:
+            result = finite_status.collect_runtime_port_claims(cid)
+        self.assertEqual(run.call_args.args[0], ["nerdctl", "--namespace", "finite", "port", cid])
+        self.assertEqual(result["bindings"], [{"HostIp": "0.0.0.0", "HostPort": "49155", "ContainerPort": 8080, "Protocol": "tcp"}])
+        self.assertFalse(result["repair_authority"])
+
+    def test_retained_port_claims_fail_closed_on_malformed_output(self) -> None:
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, "8080/tcp -> arbitrary:49155\n", "")):
+            self.assertEqual(finite_status.collect_runtime_port_claims("a" * 64)["status"], "unknown")
+
     def test_cleanup_layout_selects_network_facts_and_omits_secret_hook_arguments(self) -> None:
         cid = "a" * 64
         report = {"checks": [{"name": "canonical_handle", "status": "pass",

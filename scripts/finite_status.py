@@ -1699,6 +1699,7 @@ def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
                       oci_config_sha256=config_sha, network_id=string(network["NetworkID"]),
                       network_created=network["NetworkCreated"], endpoints=selected,
                       oci_network_namespace_paths=network_paths, oci_hook_paths=hook_paths)
+        result["published_port_claims"] = collect_runtime_port_claims(cid)
         cgroups = {"sandbox": persist.get("SandboxCgroupPath"),
                    "overhead": persist.get("OverheadCgroupPath"),
                    "oci": config.get("linux", {}).get("cgroupsPath")}
@@ -1707,6 +1708,26 @@ def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
             for key, value in cgroups.items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, CollectionError):
         result["reason"] = "exact retained cleanup layout unavailable"
+    return result
+
+
+def collect_runtime_port_claims(cid: str) -> dict[str, Any]:
+    """Observe the exact retained container's saved published TCP claims."""
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
+                              "container_id": cid, "bindings": []}
+    if not re.fullmatch(r"[a-f0-9]{64}", cid):
+        return result
+    try:
+        observed = run_read_only(["nerdctl", "--namespace", CONTRACT["runner"]["namespace"],
+                                  "port", cid], timeout=5)
+        if observed.returncode or len(observed.stdout) > 65536:
+            return result
+        bindings = runtime_saved_port_bindings(observed.stdout, set(range(1, 65536)))
+        if len(bindings) > 128:
+            return result
+        result.update(status="observed", bindings=bindings)
+    except (CollectionError, ValueError, OSError):
+        pass
     return result
 
 
