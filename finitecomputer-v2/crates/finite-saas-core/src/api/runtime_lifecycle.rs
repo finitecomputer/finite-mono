@@ -117,13 +117,16 @@ pub(super) async fn cancel_agent_creation_request(
     Json(input): Json<CancelAgentCreationRequest>,
 ) -> Result<Json<AgentCreationRequest>, ApiError> {
     require_service_auth(&state, &headers)?;
-    Ok(Json(
-        state
-            .store
-            .cancel_agent_creation_request(CancelAgentCreationRequestInput {
-                request_id,
-                now: input.now,
-            })
-            .await?,
-    ))
+    let mut request = state
+        .store
+        .cancel_agent_creation_request(CancelAgentCreationRequestInput {
+            request_id,
+            now: input.now,
+        })
+        .await?;
+    // A cancelled launching relocation keeps its target Runner's lease in
+    // Core. The token stays out of this response, as it did when every cancel
+    // cleared it.
+    request.lease_token = None;
+    Ok(Json(request))
 }

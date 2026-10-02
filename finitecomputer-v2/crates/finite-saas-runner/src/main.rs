@@ -9,9 +9,9 @@ use finite_saas_runner::{
     AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
     DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
-    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
-    KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
-    RuntimeLauncher, durable_state_manifest_sha256,
+    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataHostView,
+    KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
+    RunOnceOutcome, RuntimeLauncher, durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -61,6 +61,14 @@ enum Command {
         #[arg(long)]
         path: PathBuf,
     },
+    /// Prove, read-only, that every compute a relocation attempt record names
+    /// is gone from this host. Exits 0 only on positive proof; any failed or
+    /// impossible observation is reported as unproved.
+    #[command(name = "relocation-target-proof")]
+    RelocationTargetProof {
+        #[arg(long)]
+        record: PathBuf,
+    },
     /// Probe one Kata Runtime's lifecycle-control health without mutating it.
     ///
     /// The probe is read-only by construction and exits 0 with a
@@ -90,11 +98,36 @@ fn main() -> Result<()> {
             println!("{}", durable_state_manifest_sha256(&path)?);
             Ok(())
         }
+        Command::RelocationTargetProof { record } => relocation_target_proof(&record),
         Command::LifecycleProbe {
             project_id,
             agent_runtime_id,
             source_machine_id,
         } => lifecycle_probe(&project_id, &agent_runtime_id, &source_machine_id),
+    }
+}
+
+fn relocation_target_proof(record: &std::path::Path) -> Result<()> {
+    let launcher = KataLauncher::new(KataConfig {
+        nerdctl_bin: optional_path("FC_RUNNER_KATA_NERDCTL_BIN", "nerdctl"),
+        namespace: optional_env("FC_RUNNER_KATA_NAMESPACE", "finite"),
+        ..KataConfig::default()
+    });
+    match launcher.prove_relocation_record(record) {
+        Ok(()) => {
+            println!(
+                "{}",
+                serde_json::json!({ "record": record, "proved": true })
+            );
+            Ok(())
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({ "record": record, "proved": false, "reason": error.to_string() })
+            );
+            std::process::exit(1)
+        }
     }
 }
 
@@ -412,6 +445,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 readiness_interval: runtime_ready_interval,
                 stop_timeout_secs: optional_u64("FC_RUNNER_KATA_STOP_TIMEOUT_SECS", 180)?,
                 durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
+                host_view: KataHostView::default(),
                 retirement: optional_kata_retirement_config()?,
                 hosted_hermes: hosted_hermes.clone(),
             });

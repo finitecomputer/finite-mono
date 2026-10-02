@@ -224,6 +224,50 @@ pub struct CancelAgentCreationRequestInput {
     pub now: Option<String>,
 }
 
+/// Operator cancel of one exact relocation. Releasing a cancelled
+/// relocation whose target Runner is gone requires the attestation that
+/// target compute is stopped, and an expired lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelRelocationExactInput {
+    pub relocation_request_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_target_source_host_id: String,
+    pub confirm_target_compute_stopped: bool,
+    pub now: Option<String>,
+}
+
+/// What the exact relocation cancel reports. It names the request and the
+/// lease state but never carries the lease token, which Core keeps for the
+/// target Runner while a cancelled relocation still holds its target.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RelocationCancelOutcome {
+    pub relocation_request_id: String,
+    pub agent_runtime_id: Option<String>,
+    pub target_source_host_id: Option<String>,
+    pub status: AgentCreationRequestStatus,
+    pub runner_id: Option<String>,
+    pub lease_held: bool,
+    pub lease_expires_at: Option<String>,
+    /// True when this call released a held lease on the operator's
+    /// attestation that target compute is stopped. Core did not verify it.
+    pub released_on_attestation: bool,
+}
+
+impl From<AgentCreationRequest> for RelocationCancelOutcome {
+    fn from(request: AgentCreationRequest) -> Self {
+        Self {
+            relocation_request_id: request.id,
+            agent_runtime_id: request.agent_runtime_id,
+            target_source_host_id: request.target_source_host_id,
+            status: request.status,
+            runner_id: request.runner_id,
+            lease_held: request.lease_token.is_some(),
+            lease_expires_at: request.lease_expires_at,
+            released_on_attestation: false,
+        }
+    }
+}
+
 /// End one exact host reservation after a completed, healthy targeted canary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

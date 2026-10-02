@@ -113,14 +113,21 @@ where
     }) {
         return Err(CoreError::RuntimeSpecMismatch);
     }
+    // A relocation owns the Runtime from enqueue until it ends, and a
+    // cancelled one until its target Runner has released target compute. A
+    // control enqueued sooner would target the source binding while target
+    // compute may run. The relocation enqueue holds the same Runtime row lock.
+    if relocation_holds_runtime(client, &runtime.id).await? {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
     if kind == RuntimeControlKind::Destroy
         && let Some(phase) = postgres_offboarding_phase(client, &runtime.id).await?
         && phase.reached(OffboardingPhase::ReceiptVerified)
     {
         // A verified retirement receipt is already stored, so the destroy
         // boundary is behind this Runtime. Enqueueing a fresh destroy mints a
-        // new request id whose retirement archive can never exist — the
-        // uncapped retry wedge. The recorded phase is the resume point
+        // new request id whose retirement archive can never exist, which is
+        // the uncapped retry wedge. The recorded phase is the resume point
         // instead: finish offboarding through runtime-offboard-retired-exact.
         return Err(CoreError::RuntimeOffboardingResumeRequired { phase });
     }

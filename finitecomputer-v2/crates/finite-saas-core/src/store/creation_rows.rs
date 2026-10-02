@@ -1,6 +1,6 @@
 use super::*;
 
-/// Idempotency lookup by the natural key `(owner_user_id, idempotency_key)` —
+/// Idempotency lookup by the natural key `(owner_user_id, idempotency_key)`,
 /// the same tuple the `agent_creation_requests` UNIQUE constraint enforces. The
 /// request's primary key is a surrogate, so dedupe is done by looking the row up
 /// here, never by rederiving the id from the idempotency inputs.

@@ -78,10 +78,10 @@ lifecycle operation (`0022_runtime_health_reports.sql`).
 
 - Core names the poll targets. Every cycle the Runner fetches the
   runner-authed, host-scoped `GET /api/core/v1/runtime-health-targets`
-  listing — every live runtime on the credential's host whose lifecycle latch
-  is not `offline`, with its contact endpoint, `source_machine_id`, the Agent
-  Principal npub Core last observed for it, and its declared report cadence —
-  and polls exactly those. The Runner keeps no registry of its own: launches,
+  listing and polls exactly those runtimes. The listing names every live
+  runtime on the credential's host whose lifecycle latch is not `offline`, with
+  its contact endpoint, `source_machine_id`, the Agent Principal npub Core last
+  observed for it, and its declared report cadence. The Runner keeps no registry of its own: launches,
   upgrades, relocations, stops and destroys are already Core facts. The only
   runner-side state is the per-runtime poll throttle, in memory, reset on
   process start. A Core without the listing route (N-1) turns reporting off
@@ -100,14 +100,14 @@ lifecycle operation (`0022_runtime_health_reports.sql`).
   a runner can only report for runtimes on its own host.
 - **Transport failure is reported, not skipped.** When nobody answers, the
   Runner posts `ready: false` with reason `unreachable`, so a dead runtime
-  reads `not_ready` immediately. Staleness then means exactly one thing — the
-  Runner stopped reporting — and reads `stale` (never reported reads
+  reads `not_ready` immediately. Staleness then means exactly one thing: the
+  Runner stopped reporting. It reads `stale` (never reported reads
   `unknown`). The two failure classes stay distinguishable.
 - Core stores only the latest report on the runtime row and projects at read
   time (no sweeper, no history table): `ready` iff the latest report says
   ready and is fresher than 3x the reported poll cadence; a fresh `not_ready`
-  surfaces its reason; no/stale report — or a runtime Core does not consider
-  `online` — is the named `unknown` state. Freshness is measured from Core's
+  surfaces its reason; a missing or stale report, or a runtime Core does not
+  consider `online`, is the named `unknown` state. Freshness is measured from Core's
   receive clock, so runner clock skew cannot extend it.
 - The projection lands in the admin runtime overview
   (`AdminRuntimeOverview.runtime_health`) and in `scripts/finite-status`,
@@ -197,9 +197,29 @@ for the exact lease before launch, and completion revokes the predecessor in
 the same transaction that switches the binding. If the successor cannot also be
 activated in that transaction, the whole completion rolls back. A revoked
 current credential fails closed.
+While a relocation is requested or launching, or cancelled while its target
+Runner still holds the lease, Core refuses every new control request for that
+Runtime. Such a control would target the source binding while target compute
+may run.
 
-A failed pre-commit relocation removes target compute but preserves Core's
-existing Runtime/link and both durable trees. The stopped source remains the
+Before a relocation reaches a terminal state that reopens source controls, the
+target Runner removes the compute the request started, by the container and
+sandbox identity it recorded before provider work, and positively proves it
+gone: containerd has no container for that id, no process belongs to the
+sandbox by cgroup, containerd bundle or Kata runtime directory, and no process
+has the durable tree mounted or open. A missing record, an unreadable tree or
+procfs, a quiet tree, or any failed observation leaves the hold in place;
+durable-tree evidence can only refuse. It records a failure only after that
+proof. After an ambiguous completion it stops and keeps the target and records
+nothing, because a kept container is not proof. The Runner
+never starts a stopped target itself; a relocation whose completion committed is
+brought back by an ordinary typed restart through Core. Core cannot verify the
+Runner's proof, and a Runner from before this contract does not make it. A
+cancelled request that still holds its lease, or a running one, is never leased
+again, so an unproved shutdown there is resolved by an operator. A
+Core-terminal request is not proof that compute is absent: removal can fail
+after a stop and leave a stopped container. Core
+preserves the existing Runtime/link and both durable trees. The stopped source remains the
 rollback boundary and must not be started concurrently. This contract does not
 delete source state, select a winner after both copies have changed, restore an
 off-host Recovery Set, or make relocation a fleet scheduler. The exact operator
