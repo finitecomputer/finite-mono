@@ -835,7 +835,9 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         missing["checks"].pop()
         mismatch = json.loads(self.probe_report("inoperable", "orphaned_task"))
         mismatch["checks"][1].update(status="fail", finding="control_channel_unavailable")
-        for probe in [[], wrong, contradictory, empty, malformed, duplicate, missing, mismatch, {"schema": finite_status.LIFECYCLE_PROBE_SCHEMA, "verdict": "operable"}]:
+        skipped = json.loads(self.probe_report("operable"))
+        skipped["checks"][1]["status"] = "skip"
+        for probe in [[], wrong, contradictory, empty, malformed, duplicate, missing, mismatch, skipped, {"schema": finite_status.LIFECYCLE_PROBE_SCHEMA, "verdict": "operable"}]:
             with (
                 mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
                 mock.patch.object(finite_status, "read_environment_values", return_value={}),
@@ -845,9 +847,43 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
             self.assertEqual(raw["agents"]["runtime-a"]["verdict"], "unknown")
             self.assertEqual(raw["agents"]["runtime-a"]["reason"], "probe_invalid")
 
+    def test_restart_owner_probe_filters_metadata_without_granting_control_authority(self) -> None:
+        cid = "a" * 64
+        report = {"checks": [{"name": "canonical_handle", "status": "pass",
+                               "evidence": {"container_id": cid}}]}
+        metadata = {"ID": cid, "Labels": {"containerd.io/restart.policy": "unless-stopped",
+                    "containerd.io/restart.count": "12061", "unrelated-secret": "private"}}
+        def respond(command, **kwargs):
+            output = json.dumps(metadata) if command[0] == "ctr" else "MainPID=0\nActiveState=failed\nEnvironment=private\n"
+            return subprocess.CompletedProcess(command, 0, output, "")
+        with mock.patch.object(finite_status, "run_read_only", side_effect=respond) as run:
+            result = finite_status.collect_runtime_restart_fence(report)
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["labels"], {"containerd.io/restart.policy": "unless-stopped",
+                                         "containerd.io/restart.count": "12061"})
+        self.assertEqual(set(result["units"]), {cid + ".service", "nerdctl-" + cid + ".service"})
+        self.assertTrue(all(value == {"MainPID": "0", "ActiveState": "failed"} for value in result["units"].values()))
+        self.assertFalse(result["repair_authority"])
+        self.assertFalse(result["in_flight_controls_absent"])
+        self.assertNotIn("private", json.dumps(result))
+        self.assertEqual(run.call_count, 3)
+
+    def test_restart_owner_probe_rejects_wrong_container_before_unit_queries(self) -> None:
+        cid = "a" * 64
+        report = {"checks": [{"name": "canonical_handle", "status": "pass",
+                               "evidence": {"container_id": cid}}]}
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"ID": "b" * 64, "Labels": {}}), "")) as run:
+            result = finite_status.collect_runtime_restart_fence(report)
+        self.assertEqual(result["status"], "unknown")
+        self.assertFalse(result["repair_authority"])
+        self.assertEqual(run.call_count, 1)
+
     def test_target_lifecycle_cli_rejects_unsafe_identifiers_and_conflicting_modes(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             for arguments in [["--runtime-lifecycle", "project", "runtime", "../machine", "finite-lat-1"],
+                              ["--guest-agent-probe"],
+                              ["--runtime-assignment", "project", "--guest-agent-probe"],
                               ["--runtime-lifecycle", "project", "runtime", "machine", "finite-lat-1", "--runtime-route", "machine"],
                               ["--runtime-lifecycle", "project", "runtime", "machine"]]:
                 with self.assertRaises(SystemExit) as failure:
@@ -860,7 +896,8 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
             mock.patch.object(finite_status, "run_read_only") as run,
         ):
             with self.assertRaises(finite_status.CollectionError):
-                finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a", "finite-lat-3")
+                finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a", "finite-lat-3",
+                                                       guest_agent_probe=True)
         run.assert_not_called()
 
     def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
@@ -869,10 +906,11 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                "source_machine_id": "machine-a", "expected_agent_npub": "npub-a",
                "runtime_artifact_id": "artifact-a", "image_reference": "image-a",
                "state_schema_version": "runtime-state-v1", "retirement_snapshots": 0,
-               "creation_lineage": [{"status": "running", "relocation": False}],
+               "creation_lineage": [{"id": "creation-a", "status": "running", "relocation": False,
+                                     "agent_runtime_id": "runtime-a", "owner_user_id": "user-a"}],
                "credentials": [{"agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-3",
                                 "source_machine_id": "machine-a", "owner_user_id": "user-a",
-                                "activated": True, "revoked": False}]}
+                                "activated": True, "revoked": False, "creation_request_id": "creation-a"}]}
         self.assertEqual(finite_status.build_runtime_assignment("project-a", [row])["exit_code"], 0)
         for rows in [[], [row, row]]:
             self.assertEqual(finite_status.build_runtime_assignment("project-a", rows)["exit_code"], 2)

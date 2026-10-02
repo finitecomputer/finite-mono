@@ -291,7 +291,9 @@ def valid_target_probe_checks(report: dict[str, Any]) -> bool:
     if not required <= names:
         return False
     if report["verdict"] == "operable":
-        return not failures and report.get("reason") is None
+        return (not failures and report.get("reason") is None
+                and all(next(check for check in checks if check["name"] == name)["status"] == "pass"
+                        for name in ("canonical_handle", "containerd_task", "duplicate_writers")))
     return bool(failures) and report.get("reason") in failures
 
 # Runner-ferried standing readiness (2026-08 audit synthesis, H1 slice 3).
@@ -714,6 +716,12 @@ def build_runtime_assignment(project: str, assignments: Any) -> dict[str, Any]:
             if (credential.get("activated") is not True or credential.get("revoked") is not False
                 or any(credential.get(key) != row.get(key) for key in ("agent_runtime_id", "source_host_id", "source_machine_id", "owner_user_id"))):
                 errors.append("credential does not match the active assignment")
+            if (not isinstance(lineage, list) or not any(isinstance(item, dict)
+                and item.get("id") == credential.get("creation_request_id")
+                and item.get("status") == "running"
+                and item.get("agent_runtime_id") == row.get("agent_runtime_id")
+                and item.get("owner_user_id") == row.get("owner_user_id") for item in lineage)):
+                errors.append("credential creation lineage does not match the active assignment")
     status = "green" if not errors else "unknown"
     return {"schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
             "overall_status": status, "exit_code": 0 if not errors else 2,
@@ -771,6 +779,12 @@ def collect_kata_recovery_host() -> dict[str, Any]:
     evidence["runner_service"] = service.stdout.strip()
     timer = run_read_only(["systemctl", "show", CONTRACT["runner"]["timer"], "--property=ActiveState,SubState"], timeout=10)
     evidence["runner_timer"] = timer.stdout.strip()
+    daemon = run_read_only(["systemctl", "show", "containerd.service",
+        "--property=ActiveState,SubState,MainPID,ControlGroup,KillMode,TimeoutStopUSec,SendSIGKILL,Restart,FragmentPath,DropInPaths"], timeout=10)
+    evidence["containerd_service"] = dict(line.split("=", 1) for line in daemon.stdout.splitlines() if "=" in line) if daemon.returncode == 0 else None
+    plugins = run_read_only(["ctr", "plugins", "list"], timeout=10)
+    evidence["containerd_restart_plugin"] = [line for line in plugins.stdout.splitlines()
+        if "restart" in line.split()] if plugins.returncode == 0 else None
     result = run_read_only(["ctr", "-n", CONTRACT["runner"]["namespace"], "images", "ls", "-q"], timeout=15)
     evidence["cached_runtime_image_references"] = [line for line in result.stdout.splitlines() if line.startswith("ghcr.io/finitecomputer/agent-runtime@sha256:")] if result.returncode == 0 else None
     return {"schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
@@ -1531,7 +1545,8 @@ def collect_lifecycle_probe(
     return raw
 
 
-def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected_host: str) -> dict[str, Any]:
+def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected_host: str,
+                              guest_agent_probe: bool = False) -> dict[str, Any]:
     """Inspect one exact provider assignment without requiring Core credentials."""
     hostname = socket.gethostname().split(".", 1)[0]
     if hostname != expected_host:
@@ -1548,9 +1563,18 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     status = "green" if verdict == "operable" else "unknown" if verdict == "unknown" else "red"
     orphan_vmm = None
     writer_topology = None
+    guest_agent = None
+    restart_fence = None
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
         writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
+        restart_fence = collect_runtime_restart_fence(agent.get("report", {}))
+    if guest_agent_probe:
+        if __package__:
+            from .kata_guest_probe import collect_guest_agent_probe
+        else:
+            from kata_guest_probe import collect_guest_agent_probe
+        guest_agent = collect_guest_agent_probe(agent.get("report", {}))
     return {
         "schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
         "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
@@ -1560,8 +1584,47 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
             "probe": agent, "collection_errors": raw["errors"],
             "orphan_vmm": orphan_vmm,
             "writer_topology": writer_topology,
+            "guest_agent": guest_agent,
+            "restart_fence": restart_fence,
         }},
     }
+
+
+def collect_runtime_restart_fence(report: dict[str, Any]) -> dict[str, Any]:
+    """Read exact restart owners without claiming queued controls are absent."""
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
+                             "in_flight_controls_absent": False}
+    try:
+        check = next(item for item in report["checks"] if item["name"] == "canonical_handle" and item["status"] == "pass")
+        cid = check["evidence"]["container_id"]
+        if not isinstance(cid, str) or not re.fullmatch("[a-f0-9]{64}", cid):
+            raise ValueError("invalid full container ID")
+        observed = run_read_only(["ctr", "-n", CONTRACT["runner"]["namespace"], "containers", "info", cid], timeout=5)
+        if observed.returncode != 0 or len(observed.stdout) > 2 * 1024 * 1024:
+            raise ValueError("container metadata unavailable")
+        metadata = json.loads(observed.stdout)
+        if metadata.get("ID") != cid or not isinstance(metadata.get("Labels"), dict):
+            raise ValueError("container metadata target mismatch")
+        selected = {key: value for key, value in metadata["Labels"].items()
+            if key in {"containerd.io/restart.policy", "containerd.io/restart.status",
+                       "containerd.io/restart.count", "containerd.io/restart.explicitly-stopped"}}
+        if any(not isinstance(value, str) or len(value) > 256 for value in selected.values()):
+            raise ValueError("invalid restart metadata")
+        units = {}
+        properties = {"LoadState", "ActiveState", "SubState", "MainPID", "ControlGroup",
+                      "KillMode", "Restart", "FragmentPath"}
+        for unit in (cid + ".service", "nerdctl-" + cid + ".service"):
+            value = run_read_only(["systemctl", "show", unit,
+                "--property=LoadState,ActiveState,SubState,MainPID,ControlGroup,KillMode,Restart,FragmentPath"], timeout=5)
+            if value.returncode != 0 or len(value.stdout) > 16384:
+                units[unit] = None
+                continue
+            units[unit] = {key: item for line in value.stdout.splitlines() if "=" in line
+                           for key, item in [line.split("=", 1)] if key in properties}
+        result.update(status="observed", container_id=cid, labels=selected, units=units)
+    except (OSError, ValueError, KeyError, TypeError, StopIteration, CollectionError):
+        result["reason"] = "exact restart-owner metadata unavailable"
+    return result
 
 
 def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
@@ -1616,7 +1679,8 @@ def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
                     descriptors = list((process / "fd").iterdir())
                     descriptor_count = len(descriptors)
                     if len(descriptors) > 131072:
-                        raise ValueError("descriptor inventory exceeds its bound")
+                        result["errors"].append({"pid": int(process.name), "detail": "descriptor inventory exceeds its bound"})
+                        descriptors = []
                     for descriptor in descriptors:
                         if time.monotonic() > deadline:
                             raise ValueError("descriptor observation exceeded its time limit")
@@ -1659,10 +1723,26 @@ def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
                                         qmp_sockets.append({"fd": descriptor[1], "inode": inode[1],
                                             "path": fields[7] if len(fields) == 8 else None})
                     process_stat = read(process / "stat", 4096).rsplit(b")", 1)[1].split()
+                    thread_waits = []
+                    if executable and "containerd-shim" in executable:
+                        threads = list((process / "task").iterdir())
+                        if len(threads) > 256:
+                            raise ValueError("shim thread inventory exceeds its bound")
+                        for thread in threads:
+                            channel = read(thread / "wchan", 4096).decode().strip()
+                            try:
+                                stack = read(thread / "stack", 65536).decode().splitlines()
+                                functions = [line.split("]", 1)[-1].strip().split("+", 1)[0] for line in stack]
+                            except OSError:
+                                functions = None
+                            thread_waits.append({"tid": int(thread.name), "wait_channel": channel,
+                                                 "kernel_stack_functions": functions})
                     result["processes"].append({"pid": int(process.name), "starttime_ticks": before,
                         "process_state": process_stat[0].decode(), "descriptor_count": descriptor_count,
+                        "descriptor_scan_complete": descriptor_count is not None and descriptor_count <= 131072,
                         "matching_descriptor_count": matching_descriptors,
                         "qmp_arguments": qmp_arguments, "qmp_socket_observations": qmp_sockets,
+                        "shim_thread_waits": thread_waits,
                         "nerdctl_operation": next((value for value in arguments if value in {"exec", "wait", "start", "stop", "restart"}), None) if executable and "nerdctl" in executable else None,
                         "wait_channel": read(process / "wchan", 4096).decode().strip(),
                         "executable": executable, "mount_namespace": namespace,
@@ -3709,6 +3789,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
                       help="inspect one exact Kata assignment's lifecycle control without stopping it; emits JSON")
     parser.add_argument("--expected-agent-principal-sha256",
                         help="compare both routes against an independently established Principal hash")
+    parser.add_argument("--guest-agent-probe", action="store_true",
+                        help="with --runtime-lifecycle, read exact Kata guest Health and container Stats without changing guest state")
     mode.add_argument(
         "--tinfoil",
         action="store_true",
@@ -3736,6 +3818,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.guest_agent_probe and not options.runtime_lifecycle:
+        parser.error("--guest-agent-probe requires --runtime-lifecycle")
     if options.runtime_assignment and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_assignment):
         parser.error("--runtime-assignment requires a simple Project identifier")
     if options.runtime_lifecycle and any(
@@ -3771,7 +3855,8 @@ def main(arguments: list[str] | None = None) -> None:
         elif options.runtime_route:
             report = collect_runtime_route(options.runtime_route, options.expected_agent_principal_sha256)
         elif options.runtime_lifecycle:
-            report = collect_runtime_lifecycle(*options.runtime_lifecycle)
+            report = collect_runtime_lifecycle(*options.runtime_lifecycle,
+                                               guest_agent_probe=options.guest_agent_probe)
         elif options.tinfoil:
             from finite_tinfoil_status import collect
 
