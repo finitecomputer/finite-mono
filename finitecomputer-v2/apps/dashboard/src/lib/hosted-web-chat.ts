@@ -525,6 +525,20 @@ export function parseHostedChatAction(payload: unknown): HostedChatAction {
         },
       };
     }
+    case "MoveChat": {
+      const value = objectRecord(input, operation);
+      const before = value.before === null ? null : objectRecord(value.before, "before");
+      return { MoveChat: {
+        room_id: boundedString(value.room_id, "room_id"),
+        topic_id: boundedString(value.topic_id, "topic_id"),
+        chat_id: boundedString(value.chat_id, "chat_id"),
+        destination_topic_id: boundedString(value.destination_topic_id, "destination_topic_id"),
+        before: before ? {
+          topic_id: boundedString(before.topic_id, "before.topic_id"),
+          chat_id: boundedString(before.chat_id, "before.chat_id"),
+        } : null,
+      } };
+    }
     case "RenameChat": {
       const value = objectRecord(input, operation);
       return {

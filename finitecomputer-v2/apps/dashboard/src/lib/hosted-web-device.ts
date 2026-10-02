@@ -34,6 +34,7 @@ export type HostedChatRoom = {
 };
 
 export type HostedChatSummary = {
+  placement?: { topic_id: string; position: string } | null;
   chat_id: string;
   title: string;
   last_message_preview: string;
@@ -183,6 +184,11 @@ export type HostedChatAction =
   | { OpenRoom: { room_id: string } }
   | { OpenTopic: { room_id: string; topic_id: string } }
   | { OpenChat: { room_id: string; topic_id: string; chat_id: string } }
+  | { MoveChat: {
+      room_id: string; topic_id: string; chat_id: string;
+      destination_topic_id: string;
+      before: { topic_id: string; chat_id: string } | null;
+    } }
   | { CreateTopic: { room_id: string; title: string } }
   | {
       StartTopicChat: {

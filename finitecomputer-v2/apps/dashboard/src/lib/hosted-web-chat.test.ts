@@ -709,3 +709,14 @@ test("binding recovery selection fails closed without a live request", () => {
     "a dead original cannot be replaced by a live relocation row"
   );
 });
+
+test("chat moves validate original routes, destination, and explicit before address", () => {
+  const move = { room_id: "room", topic_id: "original", chat_id: "chat", destination_topic_id: "home", before: null };
+  assert.deepEqual(parseHostedChatAction({ MoveChat: move }), { MoveChat: move });
+  const before = { topic_id: "other-original", chat_id: "other-chat" };
+  assert.deepEqual(parseHostedChatAction({ MoveChat: { ...move, before } }), { MoveChat: { ...move, before } });
+  for (const invalid of [
+    { ...move, destination_topic_id: "" }, { ...move, before: undefined },
+    { ...move, before: { chat_id: "missing-topic" } }, { ...move, topic_id: "a".repeat(5000) },
+  ]) assert.throws(() => parseHostedChatAction({ MoveChat: invalid }), HostedWebChatError);
+});

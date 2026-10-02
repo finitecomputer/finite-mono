@@ -1,13 +1,14 @@
 "use client";
 
-import type { CSSProperties, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState, useSyncExternalStore } from "react";
+import type { CSSProperties, DragEvent, FormEvent, ReactNode } from "react";
+import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
   ChevronRightIcon,
   HashIcon,
+  GripVerticalIcon,
   LogInIcon,
   MessageSquarePlusIcon,
   PanelLeftIcon,
@@ -28,14 +29,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ChatMoveDialog } from "@/components/chat-move-dialog";
 import { Input } from "@/components/ui/input";
 import { CHAT_TOPIC_DESCRIPTION } from "@/lib/chat-product-copy";
 import type {
   HostedChatAction,
-  HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
-import { canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
+import { sidebarTopics, sidebarChatKey, type SidebarChat, canonicalNewChatTopic, HOME_TOPIC_ID } from "@/lib/hosted-web-chat-topics";
 
 const subscribeHydration = () => () => undefined;
 
@@ -90,19 +91,24 @@ export function AgentSidebar({
   );
   const [renameTarget, setRenameTarget] = useState<{
     topic: HostedChatTopic;
-    chat: HostedChatSummary;
+    chat: SidebarChat;
   } | null>(null);
   const [renameTitle, setRenameTitle] = useState("");
+  const [moveTarget, setMoveTarget] = useState<SidebarChat | null>(null);
+  const [draggedChat, setDraggedChat] = useState<SidebarChat | null>(null);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const moving = useRef(false);
+  const [moveStatus, setMoveStatus] = useState("");
 
   const canonicalRoomId = state?.hosted_agent_binding?.canonical_room_id ?? null;
   const topics = useMemo(
-    () => (state?.topics ?? [])
+    () => sidebarTopics((state?.topics ?? [])
       .filter((topic) => topic.room_id === canonicalRoomId && !topic.archived)
       .sort((left, right) => {
         if (left.topic_id === HOME_TOPIC_ID) return -1;
         if (right.topic_id === HOME_TOPIC_ID) return 1;
         return right.updated_seq - left.updated_seq || left.title.localeCompare(right.title);
-      }),
+      })),
     [canonicalRoomId, state?.topics]
   );
   const selectedTopicId = state?.selected_topic_id ?? null;
@@ -141,11 +147,11 @@ export function AgentSidebar({
     }
   }, [dispatch, machineId, onMobileOpenChange, pathname, reportSessionAuthFailure, router]);
 
-  function openChat(topic: HostedChatTopic, chat: HostedChatSummary) {
+  function openChat(topic: HostedChatTopic, chat: SidebarChat) {
     void act({
       OpenChat: {
         room_id: topic.room_id,
-        topic_id: topic.topic_id,
+        topic_id: chat.source_topic_id,
         chat_id: chat.chat_id,
       },
     });
@@ -177,7 +183,7 @@ export function AgentSidebar({
 
   function setChatArchived(
     topic: HostedChatTopic,
-    chat: HostedChatSummary,
+    chat: SidebarChat,
     archived: boolean
   ) {
     if (archived) {
@@ -187,14 +193,14 @@ export function AgentSidebar({
     void act({
       SetChatArchived: {
         room_id: topic.room_id,
-        topic_id: topic.topic_id,
+        topic_id: chat.source_topic_id,
         chat_id: chat.chat_id,
         archived,
       },
     });
   }
 
-  function openRename(topic: HostedChatTopic, chat: HostedChatSummary) {
+  function openRename(topic: HostedChatTopic, chat: SidebarChat) {
     setRenameTarget({ topic, chat });
     setRenameTitle(chat.title || "New chat");
   }
@@ -206,7 +212,7 @@ export function AgentSidebar({
     const next = await act({
       RenameChat: {
         room_id: renameTarget.topic.room_id,
-        topic_id: renameTarget.topic.topic_id,
+        topic_id: renameTarget.chat.source_topic_id,
         chat_id: renameTarget.chat.chat_id,
         title,
       },
@@ -236,6 +242,47 @@ export function AgentSidebar({
     if (!next) return;
     setCreateTopicTitle("");
     setCreateTopicOpen(false);
+  }
+
+  async function moveChat(chat: SidebarChat, destinationTopicId: string, before: SidebarChat | null) {
+    if (busy || moving.current || !canonicalRoomId || !chat.placement) return false;
+    const source = topics.flatMap((topic) => topic.chats).find((item) => sidebarChatKey(item) === sidebarChatKey(chat));
+    const destination = topics.find((topic) => topic.topic_id === destinationTopicId);
+    if (!source || source.archived || !destination || (before &&
+      (sidebarChatKey(before) === sidebarChatKey(source) || !destination.chats.some((item) =>
+        !item.archived && sidebarChatKey(item) === sidebarChatKey(before))))) return false;
+    moving.current = true;
+    const next = await act({ MoveChat: {
+      room_id: canonicalRoomId, topic_id: source.source_topic_id, chat_id: source.chat_id,
+      destination_topic_id: destinationTopicId,
+      before: before ? { topic_id: before.source_topic_id, chat_id: before.chat_id } : null,
+    } });
+    moving.current = false;
+    if (!next) { void load(false); return false; }
+    setCollapsedTopicKeys((current) => {
+      const expanded = new Set(current);
+      expanded.delete(`${canonicalRoomId}:${destinationTopicId}`);
+      return expanded;
+    });
+    setMoveStatus(`${source.title || "Chat"} moved to ${destination.title}.`);
+    return true;
+  }
+
+  function dragOver(event: DragEvent, topicId: string, before: SidebarChat | null) {
+    event.stopPropagation();
+    if (!draggedChat || busy || (before && sidebarChatKey(before) === sidebarChatKey(draggedChat))) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(JSON.stringify([topicId, before ? sidebarChatKey(before) : null]));
+  }
+
+  function dropChat(event: DragEvent, topicId: string, before: SidebarChat | null) {
+    event.preventDefault();
+    event.stopPropagation();
+    const chat = draggedChat;
+    setDraggedChat(null);
+    setDropTarget(null);
+    if (chat) void moveChat(chat, topicId, before);
   }
 
   return (
@@ -315,13 +362,14 @@ export function AgentSidebar({
             </div>
           ) : null}
           {actionError ? (
-            <div className="finite-agent-sidebar__error">
+            <div className="finite-agent-sidebar__error" role="alert">
               <span>{actionError}</span>
               <Button type="button" variant="ghost" size="sm" onClick={() => setActionError(null)}>
                 Dismiss
               </Button>
             </div>
           ) : null}
+          <span className="sr-only" role="status">{moveStatus}</span>
           {topics.map((topic) => {
             const topicKey = `${topic.room_id}:${topic.topic_id}`;
             const topicBodyId = `finite-chat-topic-${safeDomId(topicKey)}`;
@@ -334,12 +382,20 @@ export function AgentSidebar({
               ? topic.chats.filter((chat) => chat.archived)
               : [];
             const selectedChatIsArchived = archivedChats.some(
-              (chat) => topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId
+              (chat) => chat.source_topic_id === selectedTopicId && chat.chat_id === selectedChatId
             );
             const archiveExpanded =
               expandedArchiveKeys.has(topicKey) || selectedChatIsArchived;
             return (
-              <div className="finite-chat__folder" key={topicKey}>
+              <div className="finite-chat__folder" key={topicKey}
+                data-topic-id={topic.topic_id}
+                data-drop-target={dropTarget === JSON.stringify([topic.topic_id, null]) || undefined}
+                onDragOver={(event) => dragOver(event, topic.topic_id, null)}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropTarget(null);
+                }}
+                onDrop={(event) => dropChat(event, topic.topic_id, null)}
+              >
                 <div className="finite-chat__folder-header">
                   <button
                     type="button"
@@ -377,9 +433,19 @@ export function AgentSidebar({
                 >
                   {visibleChats.map((chat) => (
                     <ChatRow
-                      key={chat.chat_id}
-                      active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                      key={sidebarChatKey(chat)}
+                      active={chat.source_topic_id === selectedTopicId && chat.chat_id === selectedChatId}
                       archived={false}
+                      dropTarget={dropTarget === JSON.stringify([topic.topic_id, sidebarChatKey(chat)])}
+                      onDragOver={(event) => dragOver(event, topic.topic_id, chat)}
+                      onDrop={(event) => dropChat(event, topic.topic_id, chat)}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("application/x-finite-chat", sidebarChatKey(chat));
+                        setDraggedChat(chat);
+                      }}
+                      onDragEnd={() => { setDraggedChat(null); setDropTarget(null); }}
+                      onMove={chat.placement ? () => setMoveTarget(chat) : undefined}
                       chat={chat}
                       disabled={busy}
                       onArchiveChange={supportsChatArchive
@@ -403,8 +469,8 @@ export function AgentSidebar({
                       <div id={archiveBodyId} hidden={!archiveExpanded}>
                         {archivedChats.map((chat) => (
                           <ChatRow
-                            key={chat.chat_id}
-                            active={topic.topic_id === selectedTopicId && chat.chat_id === selectedChatId}
+                            key={sidebarChatKey(chat)}
+                            active={chat.source_topic_id === selectedTopicId && chat.chat_id === selectedChatId}
                             archived
                             chat={chat}
                             disabled={busy}
@@ -437,6 +503,8 @@ export function AgentSidebar({
         </div>
       </aside>
 
+      <ChatMoveDialog chat={moveTarget} topics={topics} busy={busy}
+        onClose={() => setMoveTarget(null)} onMove={moveChat} />
       <Dialog open={createTopicOpen} onOpenChange={setCreateTopicOpen}>
         <DialogContent>
           <form className="finite-chat__rename-form" onSubmit={createTopic}>
@@ -508,18 +576,33 @@ function ChatRow({
   onArchiveChange,
   onOpen,
   onRename,
+  onMove, onDragStart, onDragEnd, onDragOver, onDrop, dropTarget,
 }: {
   active: boolean;
   archived: boolean;
-  chat: HostedChatSummary;
+  chat: SidebarChat;
   disabled: boolean;
   onArchiveChange?: (archived: boolean) => void;
   onOpen: () => void;
   onRename: () => void;
+  onMove?: () => void;
+  onDragStart?: (event: DragEvent) => void;
+  onDragEnd?: () => void;
+  onDragOver?: (event: DragEvent) => void;
+  onDrop?: (event: DragEvent) => void;
+  dropTarget?: boolean;
 }) {
   const title = chat.title || "New chat";
   return (
-    <div className={`finite-chat__thread-row ${active ? "is-active" : ""}`}>
+    <div className={`finite-chat__thread-row ${active ? "is-active" : ""}`}
+      data-chat-id={chat.chat_id} data-source-topic-id={chat.source_topic_id}
+      data-drop-target={dropTarget || undefined} onDragOver={onDragOver} onDrop={onDrop}>
+      {onMove ? <button type="button" className="finite-chat__thread-action finite-chat__drag-handle"
+        aria-label={`Move ${title}`} title="Drag to move, or click for options"
+        draggable={!disabled} disabled={disabled} onClick={onMove}
+        onDragStart={onDragStart} onDragEnd={onDragEnd}>
+        <GripVerticalIcon className="size-3.5" aria-hidden />
+      </button> : null}
       <button
         type="button"
         className="finite-chat__thread-open"

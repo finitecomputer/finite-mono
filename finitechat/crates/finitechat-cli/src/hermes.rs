@@ -5756,6 +5756,7 @@ mod tests {
             chats: chat_ids
                 .iter()
                 .map(|id| AppChatSummary {
+                    placement: None,
                     chat_id: (*id).to_owned(),
                     title: (*id).to_owned(),
                     last_message_preview: String::new(),

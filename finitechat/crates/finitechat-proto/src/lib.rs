@@ -92,6 +92,7 @@ pub const FINITECHAT_ACTIVITY_TYPING_EXPIRY_MILLIS: u64 = 30 * 1000;
 pub const FINITECHAT_ACTIVITY_PRESENT_EXPIRY_MILLIS: u64 = 2 * 60 * 1000;
 pub const FINITECHAT_ACTIVITY_WORKING_EXPIRY_MILLIS: u64 = 5 * 60 * 1000;
 pub const FINITECHAT_CHAT_ARCHIVE_EVENT_V1: &str = "finitechat.chat.archive.v1";
+pub const FINITECHAT_CHAT_PLACEMENT_EVENT_V1: &str = "finitechat.chat.placement.v1";
 pub const FINITECHAT_CHAT_RENAME_EVENT_V1: &str = "finitechat.chat.rename.v1";
 pub const FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2: &str = "finitechat.device-link.bootstrap.v2";
 pub const DEVICE_LINK_BOOTSTRAP_VERSION_V2: u16 = 2;
@@ -2597,6 +2598,35 @@ impl ChatReactionV1 {
         let emoji = self.emoji.trim();
         validate_bytes_non_empty("chat_reaction.emoji", emoji.len())?;
         validate_string_bytes("chat_reaction.emoji", emoji, MAX_CHAT_REACTION_EMOJI_BYTES)?;
+        Ok(())
+    }
+}
+
+/// Sidebar organization only: the envelope and original chat route never change.
+/// Accepted room sequence resolves concurrent placements of the same chat.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPlacementV1 {
+    pub topic_id: ConversationId,
+    pub chat_id: ConversationSegmentId,
+    pub destination_topic_id: ConversationId,
+    pub position: String,
+}
+
+impl ChatPlacementV1 {
+    pub fn validate_limits(&self) -> Result<(), ProtocolLimitError> {
+        for (field, value) in [
+            ("chat_placement.topic_id", &self.topic_id),
+            ("chat_placement.chat_id", &self.chat_id),
+            (
+                "chat_placement.destination_topic_id",
+                &self.destination_topic_id,
+            ),
+        ] {
+            validate_bytes_non_empty(field, value.len())?;
+            validate_string_bytes(field, value, MAX_OBJECT_ID_BYTES)?;
+        }
+        validate_bytes_non_empty("chat_placement.position", self.position.len())?;
+        validate_string_bytes("chat_placement.position", &self.position, 512)?;
         Ok(())
     }
 }
