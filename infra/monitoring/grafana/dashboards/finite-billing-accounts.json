@@ -18,16 +18,16 @@
     {
       "id": 1,
       "type": "text",
-      "title": "Billing state • customer organizations",
+      "title": "Billing state \u2022 customer organizations",
       "gridPos": {
         "x": 0,
         "y": 0,
         "w": 24,
-        "h": 3
+        "h": 4
       },
       "options": {
         "mode": "markdown",
-        "content": "One customer organization = one billing account, including missing billing rows. **These are not users or engaged humans. Active subscription ≠ confirmed cash payment.** Core-recorded state can lag Stripe webhooks. Refreshed every 5 minutes; failed, missing, future-dated or ≥10-minute-old snapshots are unavailable. Counts are not filled with zero during outages."
+        "content": "One customer organization = one billing account, including missing billing rows. **These are not users or engaged humans. Active subscription \u2260 confirmed cash payment.** Core-recorded state can lag Stripe webhooks. Refreshed every 5 minutes; failed, missing, future-dated or \u226510-minute-old snapshots are unavailable. Counts are not filled with zero during outages."
       }
     },
     {
@@ -41,7 +41,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -52,7 +52,8 @@
           "min": 0,
           "noValue": "Unavailable",
           "color": {
-            "mode": "palette-classic"
+            "mode": "fixed",
+            "fixedColor": "blue"
           },
           "thresholds": {
             "mode": "absolute",
@@ -100,7 +101,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -159,7 +160,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -170,14 +171,18 @@
           "min": 0,
           "noValue": "Unavailable",
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "blue",
+                "color": "green",
                 "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
               }
             ]
           }
@@ -211,14 +216,14 @@
       "id": 5,
       "title": "Collection",
       "type": "stat",
-      "description": "UNAVAILABLE means failure, missing scrape/export, a future timestamp, or age ≥10 minutes. Current is collection freshness, not Stripe synchronization freshness.",
+      "description": "UNAVAILABLE means failure, missing scrape/export, a future timestamp, or age \u226510 minutes. Current is collection freshness, not Stripe synchronization freshness.",
       "datasource": {
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
       "gridPos": {
         "x": 18,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -292,9 +297,9 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 8,
         "w": 12,
-        "h": 12
+        "h": 15
       },
       "fieldConfig": {
         "defaults": {
@@ -315,7 +320,143 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "subscribed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trial"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sponsored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "grandfathered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "cyan"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expired_past_due"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incomplete"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no_subscription"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "missing_billing_account"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "orientation": "horizontal",
@@ -346,13 +487,13 @@
       "title": "Category definitions and precedence",
       "gridPos": {
         "x": 12,
-        "y": 7,
+        "y": 8,
         "w": 12,
-        "h": 12
+        "h": 15
       },
       "options": {
         "mode": "markdown",
-        "content": "Every organization appears once. Evaluation order:\n\n1. **missing_billing_account** — no billing row.\n2. **unknown** — unknown billing class/status, blank subscription ID, or only one of subscription ID/status present.\n3. **subscribed** — stored status `active`, even if cancellation is scheduled. No receipt or invoice verification.\n4. **sponsored / grandfathered** — matching billing class, after the checks above; exemptions take precedence over trial/inactive status.\n5. **trial** — standard, `trialing`, deadline in the future. Deadline is period end, falling back to redeemed-at + campaign days for a redeemed trial. Unknown if neither exists.\n6. **expired_past_due** — standard with elapsed trial (deadline inclusive), `past_due`, `unpaid`, `canceled`, `paused`, or `incomplete_expired`.\n7. **incomplete** — standard, checkout subscription is `incomplete`.\n8. **no_subscription** — standard, billing row exists with both subscription ID and status absent. A customer ID alone does not imply a subscription.\n\nTrial reservations alone do not prove a trial. Historical snapshots reflect recorded billing state, not revenue or human engagement."
+        "content": "Every organization appears once. Evaluation order:\n\n1. **missing_billing_account** \u2014 no billing row.\n2. **unknown** \u2014 unknown billing class/status, blank subscription ID, or only one of subscription ID/status present.\n3. **subscribed** \u2014 stored status `active`, even if cancellation is scheduled. No receipt or invoice verification.\n4. **sponsored / grandfathered** \u2014 matching billing class, after the checks above; exemptions take precedence over trial/inactive status.\n5. **trial** \u2014 standard, `trialing`, deadline in the future. Deadline is period end, falling back to redeemed-at + campaign days for a redeemed trial. Unknown if neither exists.\n6. **expired_past_due** \u2014 standard with elapsed trial (deadline inclusive), `past_due`, `unpaid`, `canceled`, `paused`, or `incomplete_expired`.\n7. **incomplete** \u2014 standard, checkout subscription is `incomplete`.\n8. **no_subscription** \u2014 standard, billing row exists with both subscription ID and status absent. A customer ID alone does not imply a subscription.\n\nTrial reservations alone do not prove a trial. Historical snapshots reflect recorded billing state, not revenue or human engagement."
       }
     },
     {
@@ -366,7 +507,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 19,
+        "y": 23,
         "w": 24,
         "h": 8
       },
@@ -401,7 +542,143 @@
             }
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "subscribed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trial"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sponsored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "grandfathered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "cyan"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expired_past_due"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incomplete"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no_subscription"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "missing_billing_account"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
