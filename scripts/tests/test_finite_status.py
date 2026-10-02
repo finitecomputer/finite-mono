@@ -21,6 +21,142 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
+    def _shim_exit_fixture(self, *, duplicate=False, drift=False, unsafe_log=False, missing_handle=False, fail_read=None, publisher=None, publisher_drift=False, extra_options=()):
+        container = "a" * 64
+        executable = "/nix/store/" + "b" * 32 + "-kata/bin/containerd-shim-kata-v2"
+        report = {"checks": [] if missing_handle else [{"name": "canonical_handle", "status": "pass",
+            "evidence": {"container_id": container, "state_root": "/data/finite-saas-runner/kata/runtime_fixture"}}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            def path(value):
+                value = str(value)
+                return base / value.lstrip("/") if value.startswith(("/proc", "/var", "/nix")) else Path(value)
+            def stat_bytes(state, parent, start, wait=0):
+                fields = [state, str(parent)] + ["0"] * 48
+                fields[19] = str(start); fields[49] = str(wait)
+                return ("99 (PRIVATE_COMM_λ) " + " ".join(fields)).encode()
+            path(executable).parent.mkdir(parents=True)
+            path(executable).touch(mode=0o755)
+            path("/proc/self/ns").mkdir(parents=True)
+            path("/proc/self/ns/pid").symlink_to("pid:[100]")
+            path("/proc/self/mountinfo").write_text("1 0 8:1 / /var rw - ext4 /dev/example rw\n")
+            path("/proc/1/ns").mkdir(parents=True)
+            path("/proc/1/ns/pid").symlink_to("pid:[100]")
+            path("/proc/1/stat").write_bytes(stat_bytes("S", 0, 1))
+            path("/proc/1/comm").write_text("systemd")
+            path("/proc/1/exe").symlink_to("/nix/store/systemd/bin/systemd")
+            options = ["-namespace", "finite", "-address", "/run/containerd/containerd.sock"]
+            if publisher is not None:
+                options += ["-publish-binary", publisher]
+            options += ["-id", container] + list(extra_options)
+            command = ("\0".join([executable] + options) + "\0").encode()
+            for pid in ([100, 102] if duplicate else [100]):
+                path(f"/proc/{pid}").mkdir()
+                path(f"/proc/{pid}/stat").write_bytes(stat_bytes("S", 1, pid))
+                path(f"/proc/{pid}/cmdline").write_bytes(command)
+                path(f"/proc/{pid}/exe").symlink_to(executable)
+            for pid, parent in ((101, 100), (103, 999)):
+                path(f"/proc/{pid}").mkdir()
+                path(f"/proc/{pid}/stat").write_bytes(stat_bytes("Z", parent, pid, 15))
+            log = path("/var/lib/nerdctl/01234567/containers/finite/" + container + "/" + container + "-json.log")
+            log.parent.mkdir(parents=True);log.write_text("PRIVATE_LOG_CONTENT")
+            if unsafe_log:log.chmod(0o666)
+            real_stat, real_lstat, real_open = Path.stat, Path.lstat, Path.open
+            reads = []
+            command_reads = 0
+            def root_info(method, value, *args, **kwargs):
+                if "PRIVATE_PUBLISHER" in str(value):
+                    raise AssertionError("opaque publisher must not be inspected")
+                info = method(value, *args, **kwargs)
+                fields = list(info); fields[4] = 0
+                return os.stat_result(fields)
+            def guarded_open(value, *args, **kwargs):
+                nonlocal command_reads
+                reads.append(str(value))
+                if fail_read and value == path(fail_read):
+                    raise PermissionError(13, "PRIVATE_EXCEPTION_PAYLOAD")
+                if "PRIVATE_PUBLISHER" in str(value):
+                    raise AssertionError("opaque publisher must not be opened")
+                if value == log:
+                    raise AssertionError("log contents must never be opened")
+                if value == path("/proc/100/cmdline"):
+                    command_reads += 1
+                    if drift and command_reads > 1:return io.BytesIO(b"changed")
+                    if publisher_drift and command_reads > 1:
+                        return io.BytesIO(command.replace(publisher.encode(), b"DIFFERENT_OPAQUE_PUBLISHER"))
+                return real_open(value, *args, **kwargs)
+            with mock.patch.object(finite_status, "Path", side_effect=path), \
+                 mock.patch.object(Path, "stat", lambda value, *a, **kw: root_info(real_stat, value, *a, **kw)), \
+                 mock.patch.object(Path, "lstat", lambda value, *a, **kw: root_info(real_lstat, value, *a, **kw)), \
+                 mock.patch.object(Path, "open", guarded_open), \
+                 mock.patch.object(finite_status, "run_read_only", side_effect=AssertionError("no runtime commands required")):
+                result = finite_status.collect_runtime_shim_exit_log(report)
+            return result, reads
+
+    def test_shim_exit_log_metadata_is_exact_read_only_and_redacted(self) -> None:
+        result, reads = self._shim_exit_fixture()
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["exited_children"], [{"pid": 101, "parent_pid": 100,
+            "starttime_ticks": "101", "leader_state": "Z", "exit_wait_status": 15, "wait_status_scope": "leader_only"}])
+        self.assertEqual(result["default_json_log"]["size_bytes"], len("PRIVATE_LOG_CONTENT"))
+        self.assertEqual(result["log_filesystem_type"], "ext4")
+        self.assertFalse(result["repair_authority"])
+        self.assertFalse(result["historical_logger_identity_established"])
+        self.assertFalse(result["host_context"]["host_namespace_authority_established"])
+        self.assertFalse(any(value.endswith("environ") for value in reads))
+        self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_shim_exit_log_accepts_opaque_vendor_publisher_without_access(self) -> None:
+        for publisher in ("/tmp/PRIVATE_PUBLISHER", "binary://PRIVATE_PUBLISHER?literal=value", "PRIVATE_PUBLISHER --literal", ""):
+            with self.subTest(publisher=publisher):
+                result, reads = self._shim_exit_fixture(publisher=publisher)
+                self.assertEqual(result["status"], "observed")
+                self.assertEqual(result["shim"], {"pid": 100, "starttime_ticks": "100", "publisher_argument_present": True,
+                    "publisher_argument_sha256": hashlib.sha256(publisher.encode()).hexdigest()})
+                self.assertFalse(any("PRIVATE_PUBLISHER" in value for value in reads))
+                self.assertNotIn("PRIVATE_PUBLISHER", json.dumps(result))
+
+    def test_shim_exit_log_refuses_oversized_publisher_and_unknown_duplicate_flags(self) -> None:
+        cases = [({"publisher": "x" * 4097}, "publisher_argument", "publisher_argument_bound"),
+                 ({"extra_options": ("-namespace", "finite")}, "shim_options", "shim_option_shape"),
+                 ({"extra_options": ("-unknown", "PRIVATE_VALUE")}, "shim_options", "shim_option_values"),
+                 ({"publisher": "opaque", "extra_options": ("-publish-binary", "PRIVATE_VALUE")}, "shim_options", "shim_option_shape")]
+        for options, detail, gate in cases:
+            with self.subTest(detail=detail, gate=gate):
+                result, _ = self._shim_exit_fixture(**options)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["observation_phase"], "shim_bind")
+                self.assertEqual((result["observation_detail"], result["failure_gate"]), (detail, gate))
+                self.assertNotIn("PRIVATE_VALUE", json.dumps(result))
+
+    def test_shim_exit_log_opaque_publisher_drift_refuses_observation(self) -> None:
+        result, _ = self._shim_exit_fixture(publisher="PRIVATE_PUBLISHER", publisher_drift=True)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["observation_phase"], "final_lifetime")
+        self.assertNotIn("PRIVATE_PUBLISHER", json.dumps(result))
+
+    def test_shim_exit_log_ambiguity_drift_and_unsafe_layout_are_unknown(self) -> None:
+        for options, phase in (({"duplicate": True}, "shim_bind"), ({"drift": True}, "final_lifetime"),
+                               ({"unsafe_log": True}, "log_file"), ({"missing_handle": True}, "canonical_handle")):
+            with self.subTest(options=options):
+                result, _ = self._shim_exit_fixture(**options)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["exited_children"], [])
+                self.assertEqual(result["observation_phase"], phase)
+                self.assertEqual(result["error_kind"], "ValueError")
+
+    def test_shim_exit_log_failure_phase_and_errno_do_not_leak_exception_payload(self) -> None:
+        for target, phase in (("/proc/1/comm", "namespace"), ("/proc/100/stat", "process_inventory"),
+                              ("/proc/self/mountinfo", "filesystem")):
+            with self.subTest(phase=phase):
+                result, _ = self._shim_exit_fixture(fail_read=target)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["observation_phase"], phase)
+                self.assertEqual(result["error_kind"], "PermissionError")
+                self.assertEqual(result["error_errno"], 13)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                self.assertNotIn(target, json.dumps(result))
+
     def test_exec_observation_hashes_args_and_distinguishes_fifo_writer_from_path_pin(self) -> None:
         container = "a" * 64
         command = b"nerdctl\0--namespace\0finite\0exec\0-i\0" + container.encode() + b"\0python3\0-c\0PRIVATE_PAYLOAD\0"
@@ -985,6 +1121,27 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 with self.assertRaises(SystemExit) as failure:
                     finite_status.parse_args(arguments)
                 self.assertEqual(failure.exception.code, 2)
+
+    def test_operable_guest_probe_collects_direct_shim_exit_log_observation(self) -> None:
+        probe = json.loads(self.probe_report("operable", None))
+        observation = {"status": "observed", "repair_authority": False, "exited_children": []}
+        raw = {"agents": {"runtime-a": {"verdict": "operable", "reason": None, "report": probe}}, "errors": []}
+        for enabled in (False, True):
+            with (
+                self.subTest(guest_agent_probe=enabled),
+                mock.patch.object(finite_status.socket, "gethostname", return_value="finite-lat-1"),
+                mock.patch.object(finite_status, "collect_lifecycle_probe", return_value=raw),
+                mock.patch("scripts.kata_guest_probe.collect_guest_agent_probe", return_value={}),
+                mock.patch("scripts.kata_network_probe.collect_kata_network_probe", return_value={}),
+                mock.patch.object(finite_status, "collect_runtime_shim_exit_log", return_value=observation) as diagnostic,
+            ):
+                result = finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a", "finite-lat-1", guest_agent_probe=enabled)
+                section = result["sections"]["runtime_lifecycle"]
+                self.assertEqual(result["overall_status"], "green")
+                self.assertIsNone(section["writer_topology"])
+                self.assertEqual(section["shim_exit_log_observation"], observation if enabled else None)
+                if enabled:diagnostic.assert_called_once_with(probe)
+                else:diagnostic.assert_not_called()
 
     def test_target_lifecycle_rejects_wrong_host_before_provider_access(self) -> None:
         with (

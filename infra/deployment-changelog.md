@@ -27,9 +27,23 @@ production state.
 Shipped [fbrain 0.6.0](https://github.com/finitecomputer/finite-releases/releases/tag/fbrain/v0.6.0)
 for administrator Brain renaming, invited-Folder sync recovery and one-hour
 invitation transit tolerance ([source PR #1037](https://github.com/finitecomputer/finite-mono/pull/1037)).
-The approved existing-Agent rollout completed at 2026-10-02T10:59:44Z, preserving four
-explicitly excluded Runtimes. Core's per-Runtime records remain the image
-authority; the retained compatibility boundaries below apply to this release.
+The initial approved existing-Agent rollout completed at 2026-10-02T10:59:44Z,
+preserving four excluded Runtimes. The subsequently authorized BrainBot, Jules,
+and Cornelius work completed at 2026-10-02T23:06:35Z. BrainBot and Jules passed
+cold backup and off-host restoration before retained-identity restart; after
+daemon resume restored Cornelius's provider control path, it passed the supported
+single-Agent upgrade. All three retain their original Principals, data roots,
+and every baseline history row and run `fbrain 0.6.0`.
+
+Final Core observations show 86 of 87 active Kata Agents on the release image
+and all 87 ready. Only the explicitly excluded “testing again” remains on its
+earlier image with a revoked credential and pending upgrade control. All three
+Runner hosts retain the release pin and are undrained. Live-stream chat and
+prior-history preservation passed after the final upgrade; the earlier fresh
+Zen Dashboard launch and first reply qualify this same published digest. All
+eight public release assets were independently downloaded and checksum-verified.
+Core's per-Runtime records remain the image authority; aggregate status still
+includes the excluded Runtime and pre-existing host-health findings.
 
 ## Compatibility boundaries
 
