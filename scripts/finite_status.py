@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1849,6 +1850,58 @@ def collect_runtime_restart_fence(report: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def observe_nerdctl_exec(process: Path, command: bytes, container: str) -> dict[str, Any] | None:
+    """Observe an exact exec client's FIFO ownership without opening its streams."""
+    arguments = command.decode("utf-8", "strict").rstrip("\0").split("\0")
+    if arguments.count(container) != 1 or "exec" not in arguments:
+        return None
+    target = arguments.index(container)
+    operation = arguments.index("exec")
+    # Only these unambiguous, deployed prefixes are understood. A global
+    # option value named "exec" must never stand in for the subcommand.
+    if operation >= target or arguments[1:operation] not in ([], ["--namespace", "finite"], ["-n", "finite"]):
+        return None
+    options = arguments[operation + 1:target]
+    program = arguments[target + 1:]
+    program_kind = Path(program[0]).name if program and Path(program[0]).name in ("fbrain", "finitechat", "python3", "python", "sh", "bash", "cat") else "other"
+    classification = "other"
+    if program in (["fbrain", "--version"], ["finitechat", "--version"]):
+        classification = "version_only"
+    elif len(program) == 3 and program[0] in ("sh", "/bin/sh", "bash", "/bin/bash") and program[1] == "-c" and program[2].strip() in ("fbrain --version", "finitechat --version"):
+        classification = "version_only"
+    descriptors = list((process / "fd").iterdir())
+    if len(descriptors) > 256:
+        raise ValueError("exec descriptor inventory exceeds its bound")
+    streams = []
+    pattern = re.compile(r"/run/containerd/fifo/[0-9]+/exec-([a-f0-9]{64})-(stdin|stdout|stderr)")
+    for descriptor in descriptors:
+        try:
+            match = pattern.fullmatch(os.readlink(descriptor))
+            if not match:
+                continue
+            info = descriptor.stat()
+            if not stat.S_ISFIFO(info.st_mode):
+                raise ValueError("exec stream is not a FIFO")
+            with (process / "fdinfo" / descriptor.name).open("rb") as source:
+                raw = source.read(4097)
+            if len(raw) > 4096:
+                raise ValueError("exec fdinfo exceeds its bound")
+            flags = [line.split()[1] for line in raw.splitlines() if line.startswith(b"flags:")]
+            if len(flags) != 1 or not re.fullmatch(b"[0-7]+", flags[0]):
+                raise ValueError("exec descriptor flags malformed")
+            value = int(flags[0], 8)
+            access = value & os.O_ACCMODE
+            streams.append({"fd": descriptor.name, "exec_id": match[1], "stream": match[2],
+                "device": info.st_dev, "inode": info.st_ino, "flags_octal": flags[0].decode(),
+                "holds_writer": not value & getattr(os, "O_PATH", 0o10000000) and access in (os.O_WRONLY, os.O_RDWR)})
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return {"argv_sha256": hashlib.sha256(command).hexdigest(), "exact_container_argument": True,
+        "interactive": any(value in ("-i", "-it", "-ti", "--interactive", "--interactive=true") for value in options),
+        "program_kind": program_kind, "command_classification": classification, "stdio_fifos": streams,
+        "observation_grants_cancel_authority": False}
+
+
 def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
     """Bounded point-in-time process/mount observations, never an absence attestation."""
     result: dict[str, Any] = {"status": "unknown", "repair_authority": False,
@@ -1959,6 +2012,7 @@ def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
                                 functions = None
                             thread_waits.append({"tid": int(thread.name), "wait_channel": channel,
                                                  "kernel_stack_functions": functions})
+                    exec_observation = observe_nerdctl_exec(process, command, container) if executable and "nerdctl" in executable else None
                     result["processes"].append({"pid": int(process.name), "starttime_ticks": before,
                         "process_state": process_stat[0].decode(), "descriptor_count": descriptor_count,
                         "descriptor_scan_complete": descriptor_count is not None and descriptor_count <= 131072,
@@ -1966,6 +2020,7 @@ def collect_runtime_writer_topology(report: dict[str, Any]) -> dict[str, Any]:
                         "qmp_arguments": qmp_arguments, "qmp_socket_observations": qmp_sockets,
                         "shim_thread_waits": thread_waits,
                         "nerdctl_operation": next((value for value in arguments if value in {"exec", "wait", "start", "stop", "restart"}), None) if executable and "nerdctl" in executable else None,
+                        "nerdctl_exec": exec_observation,
                         "wait_channel": read(process / "wchan", 4096).decode().strip(),
                         "executable": executable, "mount_namespace": namespace,
                         "cgroup": read(process / "cgroup", 65536).decode().splitlines(),
