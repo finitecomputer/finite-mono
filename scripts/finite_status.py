@@ -790,6 +790,7 @@ def collect_kata_recovery_host() -> dict[str, Any]:
                "vfio_mode", "static_sandbox_resource_mgmt"}
     evidence: dict[str, Any] = {
         "host": socket.gethostname(), "repair_authority": False,
+        "kernel_release": os.uname().release,
         "configuration": {section: {kind: ({key: value for key, value in settings.items() if key in allowed}
             if isinstance(settings, dict) else settings)
             for kind, settings in values.items() if isinstance(settings, dict) or kind in allowed}
@@ -1600,10 +1601,12 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     writer_topology = None
     guest_agent = None
     restart_fence = None
+    cleanup_layout = None
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
         writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
         restart_fence = collect_runtime_restart_fence(agent.get("report", {}))
+        cleanup_layout = collect_runtime_cleanup_layout(agent.get("report", {}))
     if guest_agent_probe:
         if __package__:
             from .kata_guest_probe import collect_guest_agent_probe
@@ -1621,8 +1624,79 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
             "writer_topology": writer_topology,
             "guest_agent": guest_agent,
             "restart_fence": restart_fence,
+            "cleanup_layout": cleanup_layout,
         }},
     }
+
+
+def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
+    """Select retained network/namespace facts; never expose OCI env or hook args."""
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False}
+    try:
+        check = next(item for item in report["checks"]
+                     if item["name"] == "canonical_handle" and item["status"] == "pass")
+        cid = check["evidence"]["container_id"]
+        if not isinstance(cid, str) or not re.fullmatch("[a-f0-9]{64}", cid):
+            raise ValueError("invalid full container ID")
+        roots = {"FC_RUNNER_KATA_SANDBOX_ROOT": "/run/vc/sbs"}
+        for key in ("shared_environment_file", "environment_file"):
+            roots.update(read_environment_values(Path(CONTRACT["runner"][key]), set(roots)))
+
+        def read(path: Path) -> tuple[dict[str, Any], str]:
+            with path.open("rb") as stream:
+                data = stream.read(2 * 1024 * 1024 + 1)
+            if len(data) > 2 * 1024 * 1024:
+                raise ValueError("layout exceeds read bound")
+            parsed = json.loads(data)
+            if not isinstance(parsed, dict):
+                raise ValueError("invalid layout")
+            return parsed, hashlib.sha256(data).hexdigest()
+
+        def string(value: Any) -> str:
+            if not isinstance(value, str) or len(value) > 4096 or "\x00" in value:
+                raise ValueError("invalid layout field")
+            return value
+
+        persist, persist_sha = read(Path(roots["FC_RUNNER_KATA_SANDBOX_ROOT"]) / cid / "persist.json")
+        if persist.get("SandboxContainer") != cid:
+            raise ValueError("sandbox target mismatch")
+        network = persist["Network"]
+        if type(network["NetworkCreated"]) is not bool:
+            raise ValueError("invalid network ownership flag")
+        endpoints = network["Endpoints"]
+        if not isinstance(endpoints, list) or len(endpoints) > 64:
+            raise ValueError("invalid endpoint list")
+        selected = []
+        for endpoint in endpoints:
+            variants = sorted(key for key in endpoint if key != "Type")
+            item: dict[str, Any] = {"type": string(endpoint["Type"]), "variants": variants}
+            if "Veth" in endpoint:
+                pair = endpoint["Veth"]["NetPair"]
+                if type(pair["NetInterworkingModel"]) is not int:
+                    raise ValueError("invalid network model")
+                item["veth"] = {"id": string(pair["ID"]), "name": string(pair["Name"]),
+                    "model": pair["NetInterworkingModel"],
+                    "tap": {key: string(pair["TAPIface"][key]) for key in ("Name", "HardAddr")},
+                    "virtual": {key: string(pair["VirtIface"][key]) for key in ("Name", "HardAddr")}}
+            selected.append(item)
+        bundle = Path("/run/containerd/io.containerd.runtime.v2.task") / CONTRACT["runner"]["namespace"] / cid
+        config, config_sha = read(bundle / "config.json")
+        namespaces = config.get("linux", {}).get("namespaces", [])
+        if not isinstance(namespaces, list) or len(namespaces) > 32:
+            raise ValueError("invalid namespace list")
+        network_paths = [string(item.get("path", "")) for item in namespaces if item["type"] == "network"]
+        hooks = config.get("hooks", {})
+        if not isinstance(hooks, dict):
+            raise ValueError("invalid hook list")
+        hook_paths = {string(kind): [string(item["path"]) for item in items]
+                      for kind, items in hooks.items() if isinstance(items, list) and len(items) <= 32}
+        result.update(status="observed", container_id=cid, persist_sha256=persist_sha,
+                      oci_config_sha256=config_sha, network_id=string(network["NetworkID"]),
+                      network_created=network["NetworkCreated"], endpoints=selected,
+                      oci_network_namespace_paths=network_paths, oci_hook_paths=hook_paths)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, CollectionError):
+        result["reason"] = "exact retained cleanup layout unavailable"
+    return result
 
 
 def collect_runtime_restart_fence(report: dict[str, Any]) -> dict[str, Any]:

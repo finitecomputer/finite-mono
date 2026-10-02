@@ -879,6 +879,40 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertFalse(result["repair_authority"])
         self.assertEqual(run.call_count, 1)
 
+    def test_cleanup_layout_selects_network_facts_and_omits_secret_hook_arguments(self) -> None:
+        cid = "a" * 64
+        report = {"checks": [{"name": "canonical_handle", "status": "pass",
+                              "evidence": {"container_id": cid}}]}
+        persist = {"SandboxContainer": cid, "Network": {"NetworkID": "/run/netns/exact",
+            "NetworkCreated": False, "Endpoints": [{"Type": "virtual", "Veth": {"NetPair": {
+                "ID": "pair", "Name": "tap0", "NetInterworkingModel": 2,
+                "TAPIface": {"Name": "tap0", "HardAddr": "02:00:00:00:00:01", "Addrs": ["private"]},
+                "VirtIface": {"Name": "eth0", "HardAddr": "02:00:00:00:00:02"}}}}]}}
+        config = {"process": {"env": ["SECRET=private"]}, "linux": {"namespaces": [
+            {"type": "network", "path": "/run/netns/exact"}]}, "hooks": {"poststop": [
+                {"path": "/nix/store/nerdctl", "args": ["private"], "env": ["private"]}]}}
+        with (mock.patch.object(finite_status, "read_environment_values", return_value={}),
+              mock.patch.object(finite_status.Path, "open", side_effect=[
+                  io.BytesIO(json.dumps(persist).encode()), io.BytesIO(json.dumps(config).encode())])):
+            result = finite_status.collect_runtime_cleanup_layout(report)
+        self.assertEqual(result["status"], "observed")
+        self.assertFalse(result["repair_authority"])
+        self.assertFalse(result["network_created"])
+        self.assertEqual(result["endpoints"][0]["veth"]["model"], 2)
+        self.assertEqual(result["oci_hook_paths"], {"poststop": ["/nix/store/nerdctl"]})
+        self.assertNotIn("private", json.dumps(result))
+
+    def test_cleanup_layout_rejects_cross_container_persist_before_oci_read(self) -> None:
+        report = {"checks": [{"name": "canonical_handle", "status": "pass",
+                              "evidence": {"container_id": "a" * 64}}]}
+        with (mock.patch.object(finite_status, "read_environment_values", return_value={}),
+              mock.patch.object(finite_status.Path, "open", return_value=io.BytesIO(
+                  json.dumps({"SandboxContainer": "b" * 64}).encode())) as read):
+            result = finite_status.collect_runtime_cleanup_layout(report)
+        self.assertEqual(result["status"], "unknown")
+        self.assertFalse(result["repair_authority"])
+        self.assertEqual(read.call_count, 1)
+
     def test_target_lifecycle_cli_rejects_unsafe_identifiers_and_conflicting_modes(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             for arguments in [["--runtime-lifecycle", "project", "runtime", "../machine", "finite-lat-1"],
