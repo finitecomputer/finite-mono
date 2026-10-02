@@ -156,7 +156,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2682,6 +2682,68 @@ fn brain<W: Write>(
             let server_url = server_url_for_command(env, args)?;
             let response =
                 signed_json_request_to_server(env, &server_url, "POST", "/v1/brains", Some(body))?;
+            write_command_response(output, json, &response)
+        }
+        "rename" => {
+            let mut values = args[1..].to_vec();
+            for flag in ["--brain", "--server"] {
+                if values
+                    .iter()
+                    .filter(|arg| *arg == flag || arg.starts_with(&format!("{flag}=")))
+                    .count()
+                    > 1
+                {
+                    return Err(CliError::InvalidInput(format!(
+                        "{flag} must be supplied only once"
+                    )));
+                }
+            }
+            let explicit_brain = take_option_value(&mut values, "--brain")?;
+            let explicit_server = take_option_value(&mut values, "--server")?;
+            for (flag, value) in [("--brain", &explicit_brain), ("--server", &explicit_server)] {
+                if value
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.starts_with("--"))
+                {
+                    return Err(CliError::InvalidInput(format!("{flag} requires a value")));
+                }
+            }
+            let raw_name = values
+                .first()
+                .ok_or(CliError::MissingArgument("display-name"))?;
+            if values.len() != 1 || raw_name.starts_with("--") || raw_name.trim().is_empty() {
+                return Err(CliError::InvalidInput(
+                    "usage: fbrain brain rename <display-name> [--brain <brain-id>]".to_owned(),
+                ));
+            }
+            let name = finite_brain_core::DisplayName::new("brain_name", raw_name.clone())
+                .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+            let brain_id = match explicit_brain {
+                Some(id) => id,
+                None => command_brain_id(&[], env)?,
+            };
+            let request_args = explicit_server
+                .map(|server| vec!["--server".to_owned(), server])
+                .unwrap_or_default();
+            let event = admin_access_change_event_with_note(
+                env,
+                &brain_id,
+                AdminAccessAction::RenameBrain,
+                None,
+                None,
+                None,
+                Some(name.as_str()),
+            )?;
+            let path = format!("/v1/brains/{brain_id}/rename");
+            let response = signed_json_request(
+                env,
+                &request_args,
+                "POST",
+                &path,
+                Some(serde_json::json!({
+                    "accessChangeEvent": event,
+                })),
+            )?;
             write_command_response(output, json, &response)
         }
         "metadata" | "status" => {
@@ -8343,6 +8405,41 @@ mod tests {
     }
 
     #[test]
+    fn brain_rename_requires_an_unambiguous_target_and_valid_arguments() {
+        let tmp = TempDir::new().unwrap();
+        for args in [
+            vec!["brain", "rename", "New name"],
+            vec!["brain", "rename", "New name", "--brain"],
+            vec![
+                "brain", "rename", "New name", "--brain", "a", "--brain", "b",
+            ],
+            vec![
+                "brain",
+                "rename",
+                "New name",
+                "--brain",
+                "--server",
+                "http://localhost",
+            ],
+            vec!["brain", "rename", "New name", "--brain", "a", "extra"],
+            vec!["brain", "rename", "New name", "--unknown", "a"],
+            vec!["brain", "rename", "   ", "--brain", "a"],
+            vec!["brain", "rename", "bad/name", "--brain", "a"],
+        ] {
+            let mut output = Vec::new();
+            let result = run_with_env(args, env_for(&tmp), &mut output);
+            assert!(
+                matches!(
+                    result,
+                    Err(CliError::InvalidInput(_) | CliError::MissingArgument(_))
+                ),
+                "{result:?}"
+            );
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
     fn brain_create_rejects_the_retired_raw_requester_flag() {
         let tmp = TempDir::new().unwrap();
         let requester_keys = Keys::generate();
@@ -12123,7 +12220,8 @@ mod tests {
                 } else if request_line.contains("/metadata") {
                     (
                         "200 OK",
-                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                        serde_json::json!({ "name": "Renamed Brain", "mountedFolders": [] })
+                            .to_string(),
                     )
                 } else {
                     (
@@ -12177,6 +12275,16 @@ mod tests {
         );
         let tree_state = read_working_tree_state(&tree).unwrap();
         assert_eq!(tree_state.sync.latest_sequence, 8);
+
+        // Members do not receive administrative history: refreshed metadata
+        // must update the cached label without an export or bootstrap request.
+        let export: Value =
+            read_json_file(&tree.join(".finitebrain/encrypted-sync/export.json")).unwrap();
+        assert_eq!(export["brain"]["name"], "Renamed Brain");
+        let directory: Value =
+            read_json_file(&tree.join(".finitebrain/brain-directory.json")).unwrap();
+        assert_eq!(directory["brain"]["name"], "Renamed Brain");
+        assert_eq!(directory["brain"]["id"], "brain");
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);

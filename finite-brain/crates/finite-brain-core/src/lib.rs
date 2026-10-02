@@ -1610,6 +1610,8 @@ pub fn validate_tombstone_event(
 /// Admin access-change action.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AdminAccessAction {
+    /// Rename a Brain; the signed note carries its new display name.
+    RenameBrain,
     /// Add member.
     AddMember,
     /// Remove member.
@@ -1634,6 +1636,7 @@ impl AdminAccessAction {
     /// String representation.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::RenameBrain => "rename-brain",
             Self::AddMember => "add-member",
             Self::RemoveMember => "remove-member",
             Self::AddAdmin => "add-admin",
@@ -1652,6 +1655,7 @@ impl TryFrom<&str> for AdminAccessAction {
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
+            "rename-brain" => Ok(Self::RenameBrain),
             "add-member" => Ok(Self::AddMember),
             "remove-member" => Ok(Self::RemoveMember),
             "add-admin" => Ok(Self::AddAdmin),

@@ -66,6 +66,21 @@ identity and role, and the same orientation in short form. Never edit
 `.finitebrain/`, generated `_index.md` / `_wiki/` files, or locked
 metadata-only Folders.
 
+## Rename a Brain
+
+```sh
+fbrain brain rename "New display name" --brain <brain-id> --json
+# Inside the intended open Working Tree, --brain may be omitted.
+fbrain sync now --summary
+```
+
+Organization admins, Personal Brain owners, and active Personal Agents may
+rename a Brain. Resolve an ambiguous target with `brain list --json` first.
+Rename preserves the stable Brain ID, Working Tree path, content, membership,
+and key grants. The signed rename appears in administrative sync history;
+clients learn the new display name on refresh or sync. The server must support
+rename before this CLI command is used.
+
 ## Sharing: inviting someone (admin)
 
 Creating and revoking invitations require Brain admin standing. Invitees

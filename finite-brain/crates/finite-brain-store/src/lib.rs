@@ -9121,6 +9121,29 @@ mod tests {
         })
     }
 
+    #[test]
+    fn brain_rename_rolls_back_when_its_audit_record_is_invalid() {
+        let mut store = empty_org_store();
+        let id = BrainId::new("acme").unwrap();
+        let before = store.load_brain(&id).unwrap();
+        let cursor = store.latest_sequence(&id).unwrap();
+        let mut record = brain_admin_control_record("rename-invalid", "npub-admin");
+        if let SyncRecordInput::Control(control) = &mut record {
+            control.payload_json = "invalid JSON".to_owned();
+        }
+        assert!(
+            store
+                .rename_brain(
+                    &id,
+                    &DisplayName::new("brain_name", "New name").unwrap(),
+                    &record
+                )
+                .is_err()
+        );
+        assert_eq!(store.load_brain(&id).unwrap(), before);
+        assert_eq!(store.latest_sequence(&id).unwrap(), cursor);
+    }
+
     fn brain_admin_control_record(event_id: &str, actor_npub: &str) -> SyncRecordInput {
         SyncRecordInput::Control(ControlSyncRecord {
             record_event_id: event_id.to_owned(),

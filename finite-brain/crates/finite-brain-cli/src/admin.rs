@@ -461,18 +461,44 @@ pub(crate) fn admin_access_change_event(
     target_npub: Option<&str>,
     key_version: Option<u32>,
 ) -> Result<serde_json::Value, CliError> {
+    admin_access_change_event_with_note(
+        env,
+        brain_id,
+        action,
+        folder_id,
+        target_npub,
+        key_version,
+        None,
+    )
+}
+
+pub(crate) fn admin_access_change_event_with_note(
+    env: &CliEnvironment,
+    brain_id: &str,
+    action: AdminAccessAction,
+    folder_id: Option<&str>,
+    target_npub: Option<&str>,
+    key_version: Option<u32>,
+    note: Option<&str>,
+) -> Result<serde_json::Value, CliError> {
     let auth = load_signer(env)?;
     let keys = auth.keys.clone();
-    let change_id = deterministic_id(
-        "access-change",
-        &[
-            brain_id,
-            action.as_str(),
-            folder_id.unwrap_or("-"),
-            target_npub.unwrap_or("-"),
-            &timestamp(env),
-        ],
-    );
+    let now = timestamp(env);
+    let nonce = crate::auth_nonce();
+    let mut change_fields = vec![
+        brain_id,
+        action.as_str(),
+        folder_id.unwrap_or("-"),
+        target_npub.unwrap_or("-"),
+        &now,
+    ];
+    if let Some(note) = note {
+        // Keep name-carrying commands distinct so restoring an earlier name
+        // within the same clock second is not mistaken for an accepted replay.
+        change_fields.push(note);
+        change_fields.push(&nonce);
+    }
+    let change_id = deterministic_id("access-change", &change_fields);
     let validation = AdminAccessChangeValidation {
         brain_id: BrainId::new(brain_id.to_owned())
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
@@ -485,7 +511,7 @@ pub(crate) fn admin_access_change_event(
             .map_err(|error| CliError::InvalidInput(error.to_string()))?,
         target_npub: target_npub.map(ToOwned::to_owned),
         key_version,
-        note: None,
+        note: note.map(ToOwned::to_owned),
         // The signed event's Nostr timestamp is produced from the process
         // clock in `sign_event`; derive the payload timestamp from that same
         // clock so the server's canonical event validation cannot reject a

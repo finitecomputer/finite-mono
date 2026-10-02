@@ -1,6 +1,51 @@
 use crate::*;
 use finite_brain_store::{MemberFolderRotation, MemberMountRotation};
 
+/// Rename the display name using the existing signed administrative contract.
+pub(crate) async fn rename_brain_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath(brain_id): AxumPath<String>,
+    body: Bytes,
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: AdminEventRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let (event, payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &brain_id,
+        &actor,
+        AdminAccessAction::RenameBrain,
+        None,
+        None,
+        None,
+    )?;
+    let raw_name = payload.note.as_deref().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "rename-brain requires a signed display name in note",
+        )
+    })?;
+    if raw_name.trim().is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Brain name cannot be blank",
+        ));
+    }
+    let name = finite_brain_core::DisplayName::new("brain_name", raw_name)?;
+    let record = admin_access_change_sync_record(&actor, &event, &payload)?;
+    let notification_state = state.clone();
+    let notification_brain_id = brain_id.clone();
+    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
+        store.rename_brain(brain_id, &name, &record)
+    })?;
+    notification_state.publish_access_update(&notification_brain_id);
+    Ok(Json(response))
+}
+
 pub(crate) async fn list_brains_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
