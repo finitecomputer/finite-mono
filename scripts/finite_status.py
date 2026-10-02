@@ -799,6 +799,7 @@ def collect_kata_recovery_host() -> dict[str, Any]:
         "cgroup_type": Path("/sys/fs/cgroup/cgroup.type").read_text().strip() if Path("/sys/fs/cgroup/cgroup.type").exists() else None,
         "cgroup_controllers": Path("/sys/fs/cgroup/cgroup.controllers").read_text().split() if Path("/sys/fs/cgroup/cgroup.controllers").exists() else None,
         "cgroup_mounts": [line for line in Path("/proc/self/mountinfo").read_text().splitlines() if " - cgroup" in line],
+        "memory_shmem_kib": next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("Shmem:")),
         "memory_available_kib": next(int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines() if line.startswith("MemAvailable:")),
         "tmp_disk_free_bytes": shutil.disk_usage("/tmp").free,
         "tools": {},
@@ -1065,7 +1066,7 @@ def collect_host_capacity(proc: Path = Path("/proc")) -> dict[str, Any]:
         memory = {}
         for line in (proc / "meminfo").read_text().splitlines():
             key, value = line.split(":", 1)
-            if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
+            if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree", "Shmem"}:
                 memory[key] = int(value.split()[0]) * 1024
         result["memory_bytes"] = memory
         result["load_average"] = [float(value) for value in (proc / "loadavg").read_text().split()[:3]]
@@ -1700,14 +1701,93 @@ def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
                       network_created=network["NetworkCreated"], endpoints=selected,
                       oci_network_namespace_paths=network_paths, oci_hook_paths=hook_paths)
         result["published_port_claims"] = collect_runtime_port_claims(cid)
+        memory = persist.get("Config", {}).get("HypervisorConfig", {}).get("MemorySize")
+        result["guest_memory_mib"] = memory if type(memory) is int and 0 < memory <= 524288 else None
         cgroups = {"sandbox": persist.get("SandboxCgroupPath"),
                    "overhead": persist.get("OverheadCgroupPath"),
                    "oci": config.get("linux", {}).get("cgroupsPath")}
         result["cgroup_paths"] = {key: value if isinstance(value, str) and
             re.fullmatch(r"[A-Za-z0-9_./:-]{0,4096}", value) else None
             for key, value in cgroups.items()}
+        result["cgroup_members"] = collect_runtime_cgroup_members(cid, result["cgroup_paths"], hooks)
     except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, CollectionError):
         result["reason"] = "exact retained cleanup layout unavailable"
+    return result
+
+
+def collect_runtime_cgroup_members(cid: str, paths: dict[str, str | None], hooks: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Read exact full-CID cleanup cgroup members, excluding raw arguments."""
+    result: dict[str, Any] = {"status": "unknown", "repair_authority": False, "groups": []}
+    if paths != {"sandbox": "/system.slice:nerdctl:" + cid,
+                 "overhead": "/kata_overhead/" + cid,
+                 "oci": "system.slice:nerdctl:" + cid} or not re.fullmatch(r"[a-f0-9]{64}", cid):
+        return result
+    try:
+        groups = []
+        for relative in (paths["sandbox"], paths["overhead"]):
+            root = Path("/sys/fs/cgroup") / relative.lstrip("/")
+            if root.resolve() != root:
+                return result
+            directories = [root] + [entry for entry in root.rglob("*") if entry.is_dir()]
+            if len(directories) > 128:
+                return result
+            members = []
+            for directory in directories:
+                for value in (directory / "cgroup.procs").read_text().split():
+                    if len(members) >= 512 or not value.isdecimal():
+                        return result
+                    process = Path("/proc") / value
+                    try:
+                        before = (process / "stat").read_text().rsplit(")", 1)[1].split()
+                        executable = os.readlink(process / "exe")
+                        with (process / "cmdline").open("rb") as stream:
+                            raw = stream.read(65537)
+                        if len(raw) > 65536:
+                            return result
+                        after = (process / "stat").read_text().rsplit(")", 1)[1].split()
+                        if before[19] != after[19]:
+                            return result
+                        argv = raw.rstrip(b"\0").decode().split("\0")
+                        logger = False
+                        if (len(argv) == 3 and argv[1] == "_NERDCTL_INTERNAL_LOGGING"
+                                and re.fullmatch(r"/var/lib/nerdctl/[a-f0-9]{8,64}", argv[2])
+                                and "nerdctl" in Path(executable).name):
+                            with (process / "environ").open("rb") as stream:
+                                identity_env = stream.read(65537)
+                            if len(identity_env) > 65536:
+                                return result
+                            selected = {key: val for field in identity_env.split(b"\0")
+                                        for key, sep, val in [field.partition(b"=")]
+                                        if sep and key in (b"CONTAINER_ID", b"CONTAINER_NAMESPACE")}
+                            logger = selected == {b"CONTAINER_ID": cid.encode(), b"CONTAINER_NAMESPACE": b"finite"}
+                        logger_config = None
+                        if logger:
+                            config_path = Path(argv[2]) / "containers" / "finite" / cid / "log-config.json"
+                            with config_path.open("rb") as stream:
+                                config_raw = stream.read(65537)
+                            if len(config_raw) > 65536:
+                                return result
+                            log_config = json.loads(config_raw)
+                            driver = log_config.get("driver")
+                            if not isinstance(driver, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", driver):
+                                return result
+                            address = log_config.get("address", "")
+                            if not isinstance(address, str) or len(address) > 4096:
+                                return result
+                            logger_config = {"driver": driver, "address_empty": address == "", "address_sha256": hashlib.sha256(address.encode()).hexdigest()}
+
+                        members.append({"pid": int(value), "start": before[19], "state": before[0],
+                            "parent_pid": int(before[1]), "executable": executable if executable.startswith("/nix/store/") else Path(executable).name,
+                            "argument_target_match": cid.encode() in raw.split(b"\0"),
+                            "argv_sha256": hashlib.sha256(raw).hexdigest(),
+                            "runtime_logging_identity_matches_target": logger, "logging_config": logger_config,
+                            "exact_oci_hook_kinds": [kind for kind, entries in (hooks or {}).items() if isinstance(entries, list) and any(entry.get("args") == raw.rstrip(b"\0").decode().split("\0") for entry in entries)]})
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+            groups.append({"path": str(root), "members": members})
+        result.update(status="observed", groups=groups)
+    except (OSError, ValueError, IndexError):
+        pass
     return result
 
 
