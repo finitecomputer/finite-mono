@@ -274,7 +274,48 @@ def parse_args() -> argparse.Namespace:
         help="Depot build metadata path; required with --save",
     )
     parser.add_argument("--report", type=Path, help="optional build report JSON path")
+    parser.add_argument(
+        "--requester-diagnostics",
+        action="store_true",
+        help=(
+            "build a non-production diagnostic canary with the Brain "
+            "requester-lease diagnostic on; the image tag must contain "
+            "'diagnostic'"
+        ),
+    )
+    parser.add_argument(
+        "--publish-production",
+        action="store_true",
+        help="this build may be promoted to production tags",
+    )
     return parser.parse_args()
+
+
+def validate_requester_diagnostics(
+    image_ref: str, *, requester_diagnostics: bool, publish_production: bool
+) -> None:
+    """Keep a diagnostic image a clearly named, non-production canary."""
+    if not requester_diagnostics:
+        return
+    if publish_production:
+        raise SystemExit(
+            "--requester-diagnostics builds a non-production canary; "
+            "it cannot be combined with --publish-production"
+        )
+    name = image_ref.rsplit("/", 1)[-1]
+    tag = name.split(":", 1)[1] if ":" in name else ""
+    if "diagnostic" not in tag:
+        raise SystemExit(
+            "--requester-diagnostics needs an image tag whose version contains "
+            f"'diagnostic'; got {image_ref!r}"
+        )
+
+
+def requester_diagnostics_build_args(requester_diagnostics: bool) -> list[str]:
+    # The Dockerfile selects its final stage from this argument; "off" is the
+    # normal runtime stage unchanged.
+    value = "on" if requester_diagnostics else "off"
+    return ["--build-arg", f"REQUESTER_DIAGNOSTICS={value}"]
 
 
 def build_image(
@@ -322,6 +363,7 @@ def build_image(
             f"FINITE_MONO_REV={mono_sha}",
             "--build-arg",
             f"RUST_TOOLCHAIN={rust_toolchain_channel(MONOREPO_ROOT)}",
+            *requester_diagnostics_build_args(args.requester_diagnostics),
         ]
     )
     build.extend(["--platform", platform])
@@ -420,6 +462,11 @@ def main() -> int:
         raise SystemExit("--save is supported only with --engine depot")
     if args.save != bool(args.metadata_file):
         raise SystemExit("--save and --metadata-file must be provided together")
+    validate_requester_diagnostics(
+        args.image_ref,
+        requester_diagnostics=args.requester_diagnostics,
+        publish_production=args.publish_production,
+    )
 
     source_facts = repo_metadata("finite-mono", MONOREPO_ROOT)
     mono_sha = source_facts.pop("head", None)
@@ -453,6 +500,7 @@ def main() -> int:
         "engine": args.engine,
         "mono_sha": mono_sha,
         "pushed": bool(args.push),
+        "requester_diagnostics": bool(args.requester_diagnostics),
         "platform": platform,
         "source": source_facts,
         "image_metadata": image_metadata,
