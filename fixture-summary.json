@@ -1,0 +1,18 @@
+{
+  "synthetic": true,
+  "series": 193,
+  "samples_per_series": 4609,
+  "from": 1790374980,
+  "to": 1790979780,
+  "conditions": [
+    "finite.site has no probe_success samples between 16:23 and 17:23 UTC (synthetic missing-data gap)",
+    "brain public endpoint down in last hour",
+    "chat latency elevated in last two hours",
+    "finite-lat-5 scrape down in last 90 minutes",
+    "finite-lat-3 high CPU and thermal pressure",
+    "finite-lat-2 high memory use",
+    "finite-lat-4 /data 96% used and read only; network errors",
+    "sites counts and 30 daily cohorts",
+    "one old runtime artifact and component version drift"
+  ]
+}

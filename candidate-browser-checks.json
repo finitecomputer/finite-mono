@@ -1,0 +1,161 @@
+{
+  "synthetic": true,
+  "checks": [
+    {
+      "visible_panel": "LAT Filesystem Used",
+      "rendered": true,
+      "text": "LAT Filesystem Used\nfinite-lat-1 /\nfinite-lat-1 /data\nfinite-lat-2 /\nfinite-lat-2 /data\nfinite-lat-3 /\nfinite-lat-3 /data\nfinite-lat-4 /\nfinite-lat-4 /data\nfinite-lat-5 /\nfinite-lat-5 /data"
+    },
+    {
+      "visible_panel": "LAT Network Errors",
+      "rendered": true,
+      "text": "LAT Network Errors\nfinite-lat-1 eth0 rx errors\nfinite-lat-2 eth0 rx errors\nfinite-lat-3 eth0 rx errors\nfinite-lat-4 eth0 rx errors\nfinite-lat-5 eth0 rx errors\nfinite-lat-1 eth0 tx errors\nfinite-lat-2 eth0 tx errors\nfinite-lat-3 eth0 tx errors\nfinite-lat-4 eth0 tx errors\nfinite-lat-5 eth0 tx errors"
+    },
+    {
+      "visible_panel": "LAT Recent Warning Logs",
+      "rendered": true,
+      "text": "LAT Recent Warning Logs\n2026-10-02 22:21:30.000 \n \nhost=finite-lat-5\npriority=warning\nsource=nixos-activation\nsynthetic fixture: unit restart queued for investigation \n2026-10-02 22:21:30.000 \n \nhost=finite-lat-5\npriority=warning\nsource=auth\nsynthetic fixture: unsuccessful SSH authentication for fixture-user \n2026-10-02 22:21:30.000 \n \nhost=finite-"
+    },
+    {
+      "row_id": 32,
+      "title": "Public availability \u00b7 7-day history",
+      "children_absent_before_expansion": true,
+      "children": [
+        {
+          "id": 3,
+          "title": "Public Uptime - 7 Days",
+          "visible": true,
+          "text": "Public Uptime - 7 Days"
+        }
+      ]
+    },
+    {
+      "row_id": 33,
+      "title": "Sites usage \u00b7 registry totals & 90 UTC days",
+      "children_absent_before_expansion": true,
+      "children": [
+        {
+          "id": 27,
+          "title": "Total Existing Sites",
+          "visible": true,
+          "text": "Total Existing Sites\n428"
+        },
+        {
+          "id": 28,
+          "title": "Published Sites",
+          "visible": true,
+          "text": "Published Sites\n311"
+        },
+        {
+          "id": 30,
+          "title": "Sites Created per Day \u2014 90 Days (UTC)",
+          "visible": true,
+          "text": "Sites Created per Day \u2014 90 Days (UTC)"
+        }
+      ]
+    },
+    {
+      "row_id": 34,
+      "title": "Version inventories \u00b7 running components & runtime artifacts",
+      "children_absent_before_expansion": true,
+      "children": [
+        {
+          "id": 5,
+          "title": "Running Versions",
+          "visible": true,
+          "text": "Running Versions\nComponent\nHost\nVersion\nObserved\nbuild_time\ncommit\nrevision\nbrain\nfinite-lat-2\n2026.10.02-fixture\n2026-10-02 22:23:00\n2026-10-01T09:00:00Z\nsynthetic-a1b2c3\nsynthetic-a1b2c3\nchat\nfinite-lat-1\n2026.10.02-fixture\n2026-10-02 22:23:00\n2026-10-01T09:00:00Z\nsynthetic-a1b2c3\nsynthetic-a1b2c3\ncore\nfinite-lat-4\n2026.10.02-fixture\n2026-10-02 22:23:00\n2026-10-01T09:00:00Z\nsynthetic-a1b2c3\nsynt"
+        },
+        {
+          "id": 6,
+          "title": "Runtime Artifacts",
+          "visible": true,
+          "text": "Runtime Artifacts\nArtifact\nVersion\nPromoted\nActive agents\nsynthetic-artifact-1\n2026.10.02\ntrue\n24\nsynthetic-artifact-2\n2026.10.01\nfalse\n3"
+        }
+      ]
+    },
+    {
+      "row_id": 35,
+      "title": "Host diagnostics \u00b7 load, swap, throughput & clocks",
+      "children_absent_before_expansion": true,
+      "children": [
+        {
+          "id": 10,
+          "title": "LAT Load Average",
+          "visible": true,
+          "text": "LAT Load Average\nfinite-lat-1 load1\nfinite-lat-2 load1\nfinite-lat-3 load1\nfinite-lat-4 load1\nfinite-lat-5 load1\nfinite-lat-1 load5\nfinite-lat-2 load5\nfinite-lat-3 load5\nfinite-lat-4 load5\nfinite-lat-5 load5\nfinite-lat-1 load15\nfinite-lat-2 load15\nfinite-lat-3 load15\nfinite-lat-4 load15\nfinite-lat-5 load15"
+        },
+        {
+          "id": 12,
+          "title": "LAT Swap Used",
+          "visible": true,
+          "text": "LAT Swap Used\nfinite-lat-1\nfinite-lat-2\nfinite-lat-3\nfinite-lat-4\nfinite-lat-5"
+        },
+        {
+          "id": 14,
+          "title": "LAT Disk Throughput",
+          "visible": true,
+          "text": "LAT Disk Throughput\nfinite-lat-1 nvme0n1 read\nfinite-lat-2 nvme0n1 read\nfinite-lat-3 nvme0n1 read\nfinite-lat-4 nvme0n1 read\nfinite-lat-5 nvme0n1 read\nfinite-lat-1 nvme0n1 write\nfinite-lat-2 nvme0n1 write\nfinite-lat-3 nvme0n1 write\nfinite-lat-4 nvme0n1 write\nfinite-lat-5 nvme0n1 write"
+        },
+        {
+          "id": 16,
+          "title": "LAT Network Throughput",
+          "visible": true,
+          "text": "LAT Network Throughput\nfinite-lat-1 eth0 rx\nfinite-lat-2 eth0 rx\nfinite-lat-3 eth0 rx\nfinite-lat-4 eth0 rx\nfinite-lat-5 eth0 rx\nfinite-lat-1 eth0 tx\nfinite-lat-2 eth0 tx\nfinite-lat-3 eth0 tx\nfinite-lat-4 eth0 tx\nfinite-lat-5 eth0 tx"
+        },
+        {
+          "id": 25,
+          "title": "LAT CPU Clock",
+          "visible": true,
+          "text": "LAT CPU Clock\nName\tLast *\n\nfinite-lat-1 current\n\t3.70 GHz\n\nfinite-lat-2 current\n\t3.70 GHz\n\nfinite-lat-3 current\n\t1.80 GHz\n\nfinite-lat-4 current\n\t3.70 GHz\n\nfinite-lat-5 current\n\t3.70 GHz\n\nfinite-lat-1 maximum\n\t4 GHz\n\nfinite-lat-2 maximum\n\t4 GHz\n\nfinite-lat-3 maximum\n\t4 GHz\n\nfinite-lat-4 maximum\n\t4 GHz\n\nfinite-lat-5 maximum\n\t4 GHz"
+        }
+      ]
+    },
+    {
+      "row_id": 36,
+      "title": "Focused warning logs \u00b7 host, kernel, lifecycle & access",
+      "children_absent_before_expansion": true,
+      "children": [
+        {
+          "id": 20,
+          "title": "LAT Host Incident Logs",
+          "visible": true,
+          "text": "LAT Host Incident Logs\n2026-10-02 22:21:30.000 \n \nhost=finite-lat-5\npriority=warning\nsource=nixos-activation\nsynthetic fixture: unit restart queued for investigation \n2026-10-02 22:21:30.000 \n \nhost=finite-lat-5\npriority=warning\nsource=auth\nsynthetic fixture: unsuccessful SSH authentication for fixture-user \n2026-10-02 22:21:30.000 \n \nhost=finite-lat-5\npriority=error\nsource=systemd\nsynthetic fixtu"
+        },
+        {
+          "id": 21,
+          "title": "LAT Kernel Warning Logs",
+          "visible": true,
+          "text": "LAT Kernel Warning Logs\n2026-10-02 22:21:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 22:06:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:51:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:36:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n"
+        },
+        {
+          "id": 22,
+          "title": "LAT Activation And Unit Lifecycle",
+          "visible": true,
+          "text": "LAT Activation And Unit Lifecycle\n2026-10-02 22:21:30.000 \n \npriority=warning\nsource=nixos-activation\nsynthetic fixture: unit restart queued for investigation \n2026-10-02 22:21:30.000 \n \npriority=error\nsource=systemd\nsynthetic fixture: finite-healthcheck.service failed on finite-lat-5 \n2026-10-02 22:06:30.000 \n \npriority=warning\nsource=nixos-activation\nsynthetic fixture: unit restart queued for in"
+        },
+        {
+          "id": 23,
+          "title": "LAT SSH And Sudo Logs",
+          "visible": true,
+          "text": "LAT SSH And Sudo Logs\n2026-10-02 22:21:30.000 \n \nsynthetic fixture: unsuccessful SSH authentication for fixture-user \n2026-10-02 22:06:30.000 \n \nsynthetic fixture: unsuccessful SSH authentication for fixture-user \n2026-10-02 21:51:30.000 \n \nsynthetic fixture: unsuccessful SSH authentication for fixture-user \n2026-10-02 21:36:30.000 \n \nsynthetic fixture: unsuccessful SSH authentication for fixture-"
+        }
+      ]
+    },
+    {
+      "deep_link": 30,
+      "title": "Sites Created per Day \u2014 90 Days (UTC)",
+      "visible": true,
+      "url": "http://127.0.0.1:13000/d/finite-production-mvp/finite-production-mvp?orgId=1&from=2026-10-01T22:23:00.000Z&to=2026-10-02T22:23:00.000Z&timezone=utc&refresh=30s&viewPanel=30",
+      "text": "Sites Created per Day \u2014 90 Days (UTC)"
+    },
+    {
+      "deep_link": 21,
+      "title": "LAT Kernel Warning Logs",
+      "visible": true,
+      "url": "http://127.0.0.1:13000/d/finite-production-mvp/finite-production-mvp?orgId=1&from=2026-10-01T22:23:00.000Z&to=2026-10-02T22:23:00.000Z&timezone=utc&refresh=30s&viewPanel=21",
+      "text": "LAT Kernel Warning Logs\n2026-10-02 22:21:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 22:06:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:51:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:36:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:21:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 \n2026-10-02 21:06:30.000 \n \nsynthetic fixture: temperature threshold exceeded on finite-lat-3 "
+    }
+  ],
+  "page_errors": [],
+  "query_errors": []
+}

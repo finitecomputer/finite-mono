@@ -1,0 +1,39 @@
+{
+  "synthetic": true,
+  "prometheus_missing_data_checks": [
+    {
+      "check": "before_gap",
+      "time": 1790958120,
+      "series": 1
+    },
+    {
+      "check": "inside_gap",
+      "time": 1790959980,
+      "series": 0
+    },
+    {
+      "check": "after_gap",
+      "time": 1790961840,
+      "series": 1
+    }
+  ],
+  "browser_requests": [
+    {
+      "from": "1790375749018",
+      "to": "1790980549018",
+      "queries": [
+        {
+          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
+          "panelId": null,
+          "range": true
+        }
+      ]
+    }
+  ],
+  "range_durations_ms": [
+    604800000
+  ],
+  "five_services_rendered": true,
+  "page_errors": [],
+  "panel_text": "Public Uptime - 7 Days\nLast 7 days"
+}

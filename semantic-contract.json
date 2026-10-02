@@ -1,0 +1,156 @@
+{
+  "base": "ec5668b4645c7b6004c0ff1df9221e67adcbc982",
+  "candidate": "9c0277ad2f1629dc2dedde29aef5decaa62684bd",
+  "existingPanelIds": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30
+  ],
+  "allTargetsTransformsDatasourceUnitsThresholdsTimeOverridesLinksAlertsUnchanged": true,
+  "topLevelMetadataUnchanged": true,
+  "visiblePanelCount": 15,
+  "baseGridRows": 151,
+  "candidateGridRows": 65,
+  "presentationFieldsChanged": {
+    "2": [
+      "description",
+      "fieldConfig",
+      "gridPos",
+      "options",
+      "type"
+    ],
+    "3": [
+      "description",
+      "fieldConfig",
+      "gridPos",
+      "options",
+      "type"
+    ],
+    "4": [
+      "description",
+      "gridPos",
+      "options"
+    ],
+    "27": [
+      "gridPos"
+    ],
+    "28": [
+      "gridPos"
+    ],
+    "29": [
+      "gridPos"
+    ],
+    "30": [
+      "gridPos"
+    ],
+    "5": [
+      "gridPos"
+    ],
+    "6": [
+      "gridPos"
+    ],
+    "7": [
+      "description",
+      "gridPos"
+    ],
+    "8": [
+      "description",
+      "gridPos",
+      "options"
+    ],
+    "9": [
+      "description",
+      "gridPos"
+    ],
+    "10": [
+      "description",
+      "gridPos"
+    ],
+    "11": [
+      "description",
+      "gridPos"
+    ],
+    "12": [
+      "description",
+      "gridPos"
+    ],
+    "13": [
+      "description",
+      "gridPos"
+    ],
+    "14": [
+      "description",
+      "gridPos"
+    ],
+    "15": [
+      "description",
+      "gridPos"
+    ],
+    "16": [
+      "description",
+      "gridPos"
+    ],
+    "17": [
+      "description",
+      "fieldConfig",
+      "gridPos"
+    ],
+    "24": [
+      "gridPos"
+    ],
+    "25": [
+      "gridPos"
+    ],
+    "26": [
+      "gridPos",
+      "options"
+    ],
+    "18": [
+      "gridPos",
+      "options"
+    ],
+    "19": [
+      "description",
+      "gridPos"
+    ],
+    "20": [
+      "gridPos"
+    ],
+    "21": [
+      "gridPos"
+    ],
+    "22": [
+      "gridPos"
+    ],
+    "23": [
+      "gridPos"
+    ]
+  }
+}
