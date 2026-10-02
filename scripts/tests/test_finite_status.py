@@ -970,6 +970,17 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertNotIn("private", json.dumps(result))
         self.assertNotIn(principal, json.dumps(result))
 
+    def test_assignment_contact_malformed_bracket_returns_unknown_without_network(self) -> None:
+        with mock.patch.object(finite_status, "run_read_only") as run:
+            result = finite_status.collect_assignment_contact({
+                "source_host_id": "finite-lat-3", "contact_endpoint": "http://[",
+            })
+        run.assert_not_called()
+        self.assertEqual(result, {
+            "status": "unknown", "repair_authority": False,
+            "agent_principal_sha256": None, "matches_core_principal": False,
+        })
+
     def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
         row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
                "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-3",

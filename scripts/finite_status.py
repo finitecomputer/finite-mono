@@ -754,8 +754,8 @@ def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
     endpoint = assignment.get("contact_endpoint")
     if not isinstance(endpoint, str):
         return result
-    parsed = urlparse(endpoint)
     try:
+        parsed = urlparse(endpoint)
         if (parsed.scheme != "http" or parsed.hostname != addresses.get(assignment.get("source_host_id"))
                 or not parsed.port or not 49152 <= parsed.port <= 65535 or parsed.path != "/contact"
                 or parsed.username or parsed.password or parsed.query or parsed.fragment):
