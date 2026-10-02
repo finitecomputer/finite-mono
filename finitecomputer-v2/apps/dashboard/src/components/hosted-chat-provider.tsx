@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { sendError } from "@finite/chat-ui";
 
 import {
   CHAT_INVALID_UPDATE_MESSAGE,
@@ -348,21 +349,33 @@ export function HostedChatProvider({
     path: string,
     init: RequestInit,
     allowEqualRevision = true,
-    adoptSelection?: (next: HostedChatState) => boolean
+    adoptSelection?: (next: HostedChatState) => boolean,
+    sendAction = false
   ) => {
     const next = await hostedChatRequest<HostedChatState>(`${apiBase}${path}`, init);
     // Typing/read receipts do not replace the transcript. For a user mutation,
     // read the current view: the mutation response belongs to the shared Device
     // cursor and may have a different Chat or history window.
     if (!allowEqualRevision || (adoptSelection && !adoptSelection(next))) return next;
-    try {
-      await requestViewSnapshot(init.signal, next);
-    } catch (caught) {
-      // The action already succeeded. A refresh outage must not report a
-      // failed send and invite a duplicate; retain the coherent transcript
-      // while the stream reconnects.
-      if (!reportSessionAuthFailure(caught)) setTransportError(hostedChatErrorMessage(caught));
+    const refreshView = async (actionSnapshot?: HostedChatState) => {
+      try {
+        await requestViewSnapshot(init.signal, actionSnapshot);
+      } catch (caught) {
+        // A refresh outage is not this action's outcome. Reporting a failed
+        // send would invite a duplicate; retain the coherent transcript while
+        // the stream reconnects.
+        if (!reportSessionAuthFailure(caught)) setTransportError(hostedChatErrorMessage(caught));
+      }
+    };
+    // Refusal feedback must not wait for a refresh. A refused send returns its
+    // response at once and the scoped view read catches up in the background.
+    // The refusal response describes the shared Device cursor, so it is never
+    // applied as this tab's transcript.
+    if (sendAction && sendError(next) !== null) {
+      void refreshView();
+      return next;
     }
+    await refreshView(next);
     // The view's status/toast may belong to another tab's later action.
     // Callers decide whether to clear a draft from this action's own outcome.
     return next;
@@ -419,7 +432,7 @@ export function HostedChatProvider({
       localSelectionRef.current = selection;
       selectionIntentRef.current = { ...selection, token: token! };
       return true;
-    } : undefined);
+    } : undefined, isHostedChatSendAction(action));
 
     if (!navigationAction) return request();
 
@@ -507,7 +520,7 @@ export function HostedChatProvider({
     requestMutationSnapshot("/attachments", {
       method: "POST",
       body: formData,
-    }), [requestMutationSnapshot]);
+    }, true, undefined, true), [requestMutationSnapshot]);
 
   const attachmentUrl = useCallback((address: {
     room_id: string;
@@ -704,6 +717,12 @@ class HostedChatHttpError extends Error {
 export function hostedChatErrorMessage(error: unknown) {
   if (typeof error === "string") return error;
   return error instanceof Error ? error.message : CHAT_UNAVAILABLE_MESSAGE;
+}
+
+function isHostedChatSendAction(action: HostedChatAction) {
+  return "SendMessage" in action
+    || "SendTopicMessage" in action
+    || "SendChatMessage" in action;
 }
 
 function isHostedChatNavigationAction(action: HostedChatAction) {

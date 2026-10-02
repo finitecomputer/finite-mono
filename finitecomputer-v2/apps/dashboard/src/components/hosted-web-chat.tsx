@@ -74,6 +74,7 @@ import type {
 import { formatLocalMessageTime } from "@/lib/date-time";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
+import { hostedChatAlert, type HostedChatComposerError } from "@/lib/hosted-chat-alert";
 import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
 import {
   BrainApprovalCards,
@@ -177,7 +178,12 @@ export function HostedWebChat({
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
-  const [actionError, setActionError] = useState<string | null>(null);
+  // One composer error slot, as before. A send's own result is tagged with
+  // the chat it went to, so it alone can take the alert over connection and
+  // claim errors, and only while that chat is selected.
+  const [composerError, setComposerError] = useState<HostedChatComposerError | null>(null);
+  const setActionError = (message: string | null) =>
+    setComposerError(message === null ? null : { message, sentTo: null });
   // Send feedback comes from this composer's action response. Stream and
   // view status/toast fields can describe another tab's action on the Device.
   const [sending, setSending] = useState(false);
@@ -607,6 +613,11 @@ export function HostedWebChat({
       || sending
       || audioRecordingState !== "idle"
     ) return;
+    const sentTo = {
+      room_id: selectedRoom.room_id,
+      topic_id: selectedTopic.topic_id,
+      chat_id: selectedChat.chat_id,
+    };
     setSending(true);
     setActionError(null);
     stopTyping(selectedRoom.room_id);
@@ -649,7 +660,7 @@ export function HostedWebChat({
         setPendingAgentTurns((turns) => turns.filter((turn) => turn !== pendingTurn));
       }
       if (reportSessionAuthFailure(caught)) return;
-      setActionError(hostedChatErrorMessage(caught));
+      setComposerError({ message: hostedChatErrorMessage(caught), sentTo });
     } finally {
       setSending(false);
     }
@@ -900,6 +911,15 @@ export function HostedWebChat({
     }
   }
 
+  const chatAlert = hostedChatAlert({
+    sessionError,
+    transportError,
+    claimError,
+    composerError,
+    selectedChat: selectedRoom && selectedTopic && selectedChat
+      ? { room_id: selectedRoom.room_id, topic_id: selectedTopic.topic_id, chat_id: selectedChat.chat_id }
+      : null,
+  });
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
     && Boolean(selectedTopic && selectedChat);
@@ -1097,36 +1117,38 @@ export function HostedWebChat({
                 </button>
               ) : null}
 
-              {sessionError || transportError || claimError || actionError ? (
+              {chatAlert ? (
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
-                  <span>{sessionError ?? transportError ?? claimError ?? actionError}</span>
+                  <span>{chatAlert.message}</span>
                   <Button
                     type="button"
                     variant="outline"
                     size="sm"
                     onClick={() => {
-                      if (sessionError) {
+                      if (chatAlert.kind === "session") {
                         signInAgain();
-                      } else if (transportError) {
+                      } else if (chatAlert.kind === "transport") {
                         void (bindingRecoveryRequired
                           ? recoverBinding()
                           : load(true));
-                      } else if (claimError) {
+                      } else if (chatAlert.kind === "claim") {
                         void claimOwner();
                       } else {
-                        setActionError(null);
+                        setComposerError(null);
                       }
                     }}
                   >
-                    {sessionError ? <LogInIcon /> : transportError || claimError ? <RotateCcwIcon /> : null}
-                    {sessionError
+                    {chatAlert.kind === "session"
+                      ? <LogInIcon />
+                      : chatAlert.kind === "transport" || chatAlert.kind === "claim" ? <RotateCcwIcon /> : null}
+                    {chatAlert.kind === "session"
                       ? "Sign in again"
-                      : transportError
+                      : chatAlert.kind === "transport"
                       ? bindingRecoveryRequired
                         ? "Finish chat setup"
                         : "Retry load"
-                      : claimError
+                      : chatAlert.kind === "claim"
                         ? "Retry claim"
                         : "Dismiss"}
                   </Button>
