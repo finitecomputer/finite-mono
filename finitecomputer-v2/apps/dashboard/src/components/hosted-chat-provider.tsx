@@ -63,8 +63,14 @@ type MutationSnapshotRequest = {
   sequence: number;
 };
 
-type HostedChatContextValue = {
+export type HostedChatContextValue = {
   apiBase: string;
+  /** Submitting into a topic with no selected chat starts a chat. */
+  canSendToTopic?: boolean;
+  supportsAttachments?: boolean;
+  supportsChatArchive?: boolean;
+  /** When set, the selected chat is readable but the composer is closed. */
+  composerDisabledReason?: string | null;
   state: HostedChatState | null;
   transportError: string | null;
   claimError: string | null;
@@ -98,7 +104,9 @@ type HostedChatContextValue = {
   }) => string;
 };
 
-const HostedChatContext = createContext<HostedChatContextValue | null>(null);
+// Exported so the Hermes chat provider supplies the same context the chat
+// components already consume.
+export const HostedChatContext = createContext<HostedChatContextValue | null>(null);
 
 export function HostedChatProvider({
   children,

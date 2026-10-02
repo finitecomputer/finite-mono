@@ -25,10 +25,14 @@ import {
 } from "@/components/agent-onboarding-progress";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
+import { HermesChatProvider } from "@/components/hermes-chat-provider";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
 import { activeNavigationMachine, type MachineNavItem } from "@/lib/dashboard-machine-navigation";
-import { dashboardChatMachineIdFromPath } from "@/lib/dashboard-chat-route";
+import {
+  dashboardChatMachineIdFromPath,
+  dashboardChatSurfaceFromPath,
+} from "@/lib/dashboard-chat-route";
 import { dashboardMachineStatusPresentation } from "@/lib/dashboard-machine-status";
 import { cn } from "@/lib/utils";
 import "@/styles/ocean-shell.css";
@@ -372,14 +376,43 @@ function OnboardingAppSection({
   );
 }
 
+/** The Hermes chat surface swaps only the chat backend; the same sidebar and
+ * transcript components render over the agent's native Hermes server. */
+function ChatProviderForSurface({
+  children,
+  machineId,
+  machineLabel,
+  pathname,
+}: {
+  children: React.ReactNode;
+  machineId: string;
+  machineLabel: string;
+  pathname: string;
+}) {
+  if (dashboardChatSurfaceFromPath(pathname) === "hermes-chat") {
+    return (
+      <HermesChatProvider key={machineId} runtimeId={machineId} agentName={machineLabel}>
+        {children}
+      </HermesChatProvider>
+    );
+  }
+  return (
+    <HostedChatProvider key={machineId} machineId={machineId}>
+      {children}
+    </HostedChatProvider>
+  );
+}
+
 function AgentAppSection({
   children,
+  isAdmin,
   isChatSurface,
   machine,
   machines,
   viewerEmail,
 }: {
   children: React.ReactNode;
+  isAdmin: boolean;
   isChatSurface: boolean;
   machine: MachineNavItem;
   machines: MachineNavItem[];
@@ -403,10 +436,11 @@ function AgentAppSection({
   }, []);
 
   return (
-    <HostedChatProvider key={machine.id} machineId={machine.id}>
+    <ChatProviderForSurface machineId={machine.id} machineLabel={machine.ownerLabel} pathname={pathname}>
       <div className={`finite-agent-shell ${collapsed ? "is-sidebar-collapsed" : ""}`}>
         <AgentSidebar
           collapsed={collapsed}
+          isAdmin={isAdmin}
           machineId={machine.id}
           machineLabel={machine.ownerLabel}
           machineSwitcher={
@@ -440,7 +474,7 @@ function AgentAppSection({
           {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
         </main>
       </div>
-    </HostedChatProvider>
+    </ChatProviderForSurface>
   );
 }
 
@@ -491,6 +525,7 @@ export function DashboardShell({
     return (
       <div className="ocean-shell ocean-shell--agent">
         <AgentAppSection
+          isAdmin={isAdmin}
           isChatSurface={isChatSurface}
           machine={activeMachine}
           machines={machines}
@@ -515,9 +550,13 @@ export function DashboardShell({
         viewerEmail={viewerEmail}
       >
         {chatMachineId ? (
-          <HostedChatProvider key={chatMachineId} machineId={chatMachineId}>
+          <ChatProviderForSurface
+            machineId={chatMachineId}
+            machineLabel={activeMachine?.ownerLabel ?? "Agent"}
+            pathname={pathname}
+          >
             {children}
-          </HostedChatProvider>
+          </ChatProviderForSurface>
         ) : children}
       </DashboardAppSection>
     </div>

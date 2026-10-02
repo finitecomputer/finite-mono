@@ -158,6 +158,9 @@ export function HostedWebChat({
 }) {
   const {
     state,
+    canSendToTopic = false,
+    supportsAttachments = true,
+    composerDisabledReason = null,
     transportError,
     claimError,
     sessionError,
@@ -603,7 +606,8 @@ export function HostedWebChat({
       (!text && attachments.length === 0)
       || !selectedRoom
       || !selectedTopic
-      || !selectedChat
+      || (!selectedChat && !canSendToTopic)
+      || composerDisabledReason
       || sending
       || audioRecordingState !== "idle"
     ) return;
@@ -656,6 +660,10 @@ export function HostedWebChat({
   }
 
   function addFiles(files: FileList | File[]) {
+    if (!supportsAttachments) {
+      setActionError("Attachments are not available in this chat yet.");
+      return;
+    }
     if (audioRecordingState !== "idle") {
       setActionError("Stop the audio recording before adding another attachment.");
       return;
@@ -902,7 +910,8 @@ export function HostedWebChat({
 
   const connected = ownerClaimed
     && selectedRoom?.state === "Connected"
-    && Boolean(selectedTopic && selectedChat);
+    && !composerDisabledReason
+    && Boolean(selectedTopic && (selectedChat || canSendToTopic));
   const activityLabel = runtimeCanPresentActivity(runtimeStatus)
     ? sharedLiveActivityLabel(liveMembers, machineLabel, awaitingReply)
     : null;
@@ -1173,7 +1182,9 @@ export function HostedWebChat({
                   <textarea
                     ref={textareaRef}
                     aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
+                    placeholder={connected
+                      ? `Ask ${machineLabel} anything`
+                      : composerDisabledReason ?? CHAT_WAITING_FOR_AGENT_MESSAGE}
                     value={draft}
                     disabled={!connected || sending}
                     rows={1}
@@ -1208,6 +1219,7 @@ export function HostedWebChat({
                         type="button"
                         className="finite-chat__tool-button"
                         disabled={!connected || sending}
+                        hidden={!supportsAttachments}
                         aria-label="Attach files"
                         onClick={() => fileInputRef.current?.click()}
                       >
@@ -1230,6 +1242,7 @@ export function HostedWebChat({
                             ? "Stop audio recording"
                             : "Start audio recording"
                         }
+                        hidden={!supportsAttachments}
                         aria-pressed={audioRecordingState === "recording"}
                         title={
                           audioRecordingState === "recording"

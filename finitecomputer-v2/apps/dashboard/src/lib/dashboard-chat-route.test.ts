@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-import { dashboardChatMachineIdFromPath } from "./dashboard-chat-route";
+import { dashboardChatMachineIdFromPath, dashboardChatSurfaceFromPath } from "./dashboard-chat-route";
 
 test("extracts a machine id from an exact dashboard chat route", () => {
   assert.equal(
@@ -44,10 +44,20 @@ test("direct chat provides context from the route before the machine list refres
   );
   assert.match(
     dashboardShellSource,
-    /<HostedChatProvider key=\{chatMachineId\} machineId=\{chatMachineId\}>/u,
+    /<ChatProviderForSurface\s+machineId=\{chatMachineId\}/u,
   );
   assert.doesNotMatch(
     dashboardShellSource,
     /isChatSurface && activeMachine[\s\S]*<HostedChatProvider/u,
   );
+});
+
+test("the admin Hermes chat surface is a chat route with its own surface", () => {
+  assert.equal(
+    dashboardChatMachineIdFromPath("/dashboard/machines/runtime_example/hermes-chat"),
+    "runtime_example",
+  );
+  assert.equal(dashboardChatSurfaceFromPath("/dashboard/machines/runtime_example/hermes-chat/"), "hermes-chat");
+  assert.equal(dashboardChatSurfaceFromPath("/dashboard/machines/runtime_example/chat"), "chat");
+  assert.equal(dashboardChatSurfaceFromPath("/dashboard/machines/runtime_example/connections"), null);
 });
