@@ -1,0 +1,41 @@
+{
+  "description": "Stripped singleton; pool entry in a quota cooldown",
+  "auth": {
+    "version": 1,
+    "providers": {
+      "openai-codex": {
+        "tokens": {},
+        "last_refresh": "2026-09-27T00:00:00Z",
+        "auth_mode": "chatgpt"
+      }
+    },
+    "credential_pool": {
+      "openai-codex": [
+        {
+          "id": "fxquot",
+          "label": "fixture-quota",
+          "auth_type": "oauth",
+          "priority": 0,
+          "source": "device_code",
+          "access_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsInN1YiI6InF1b3RhLXBvb2wifQ.fixture-signature",
+          "refresh_token": "fixture-refresh-quota-pool",
+          "last_status": "exhausted",
+          "last_status_at": 1700000000.0,
+          "last_error_code": 429,
+          "last_error_reason": "usage_limit_reached",
+          "last_error_message": null,
+          "last_error_reset_at": 4102444800.0,
+          "base_url": "https://chatgpt.com/backend-api/codex",
+          "last_refresh": "2026-09-27T00:00:00Z",
+          "request_count": 0
+        }
+      ]
+    }
+  },
+  "expected": {
+    "state": "quota_limited",
+    "quota_reset_at": 4102444800.0,
+    "reported_quota_reset_at": null,
+    "resolver": "rate_limited"
+  }
+}

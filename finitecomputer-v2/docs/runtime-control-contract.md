@@ -282,7 +282,216 @@ Managed Skills Baseline. `/runtime` is immutable; `/data` is user state.
 Generated config references `${FINITE_PRIVATE_API_KEY}` without storing its
 value. First seed requires the selected provider's credential; after config
 exists, its model/provider choice is user-owned and is not overwritten by a
-stale Runner default. Hermes currently runs as root.
+stale Runner default. The image does own the named `providers.finite-private`
+entry and the Finite Private backup entry in `fallback_providers`; see
+[Inference Connections](#inference-connections). Hermes currently runs as
+root.
+
+## Inference Connections
+
+The dashboard changes which model provider an agent uses through typed Finite
+Agent Daemon commands carried by Finite Chat
+([ADR 0003](../../docs/adr/0003-agentd-is-the-agent-owned-platform-boundary.md)).
+Core, the Runner and the Runtime Management Pipe take no part. Command schemas
+are in `finite-agentd/src/inference_commands.rs`, capabilities in
+`finite-agentd/src/inference.rs`, and error codes and messages in
+`finite-agentd/src/lib.rs`. Commands no agent
+advertises answer `unsupported_command`. TODO:
+[FIN-129](https://linear.app/finitecomputer/issue/FIN-129),
+[FIN-130](https://linear.app/finitecomputer/issue/FIN-130).
+
+The **Saved Default** is the `model` block of the agent's Hermes
+`config.yaml`: the model new conversations use. A conversation's own `/model`
+choice (a session override) wins over it for that conversation. It is
+user-owned after the first seed, and agentd writes it only for an explicit
+owner action.
+
+### Status reports stored facts, never validity
+
+`agent.connections.status` keeps its legacy `inference` fields unchanged and
+adds fields that say what is stored: a saved key is `key_saved`, a complete
+Finite Private setup is `configured`. Nothing in status says a route works, a
+key is valid or a provider will answer; only a request to the provider shows
+that. A fact that could not be read is `unknown`, never absent, and the legacy
+fields are served even then.
+
+Hermes-side facts come from the helper `hermes_cli.finite_inference_helper
+inference-facts`, run in the environment Hermes gets from agentd. It parses
+`config.yaml`, `.env` and `auth.json` itself and reads the session store
+read-only, because Hermes's own loaders write while they load (the `.env`
+sanitizer, a corrupt-file backup, session pruning), and a status read must
+never be a writer. A read a reply waits on has a short deadline, so status fits
+the Hosted Web Device's wait; the executor's reads allow longer, because no
+reply waits on them and a busy Agent Runtime makes the helper slow. The
+deadlines are in `finite-agentd/src/helper.rs`.
+
+### v1 apply
+
+`agent.inference.apply` v1 is what every existing dashboard calls, and it keeps
+today's wire format, synchronous reply and failure behavior. It is also how
+the dashboard saves a pasted OpenRouter key while no agent advertises
+`openrouter.connect.v1`.
+
+- **It keeps its `.env` snapshot restore.** v1 writes a key it has not checked.
+  Without the restore, a failed write or restart would leave that unchecked
+  key in place of a working one.
+- **It verifies with one immediate read and never re-applies.** The dashboard
+  waits for v1's reply, so anything slower than today's single restart would
+  report a timeout for a change that was applied. A mismatch is reported as
+  `config_conflict`, with status showing the state as found.
+
+### Select and disconnect
+
+`agent.inference.select` and `agent.inference.disconnect` validate everything
+the user controls before any file is touched, then record an Inference Intent
+and reply at once. The **Inference Intent** is agentd's single-slot,
+secret-free record of an unfinished inference change
+(`$FINITECHAT_HOME/agentd/inference-intent.json`; schema and admission in
+`finite-agentd/src/intent.rs`). A background executor then writes the
+credential, then `model`, restarts, and verifies.
+
+- **Keys are checked only from OpenRouter's key metadata** (`GET /key`). No
+  completion request is ever sent to test one: it would spend the user's money
+  without consent and still could not promise the next request.
+- **One change at a time.** While an intent is running, or a disconnect has
+  failed, agentd refuses every other change. A failed select blocks nothing:
+  the next change replaces it.
+- **Hermes starts first.** At agentd startup the executor resumes only after
+  Hermes has been started, so a pending, failing or unreadable intent never
+  delays chat.
+- **Only a running intent or a failed disconnect is resumed at startup.** A
+  failed select or activate is left as it is until the user's next change
+  replaces it: the user may have chosen another model in chat since, and
+  re-running a stale switch would overwrite that choice. A failed disconnect
+  removes only a credential the user asked to remove, and the launcher's
+  clears depend on it finishing.
+- **Verification compares parsed values, never file bytes.** Hermes rewrites
+  `config.yaml` on an agent's first chat turn.
+- **Disconnect verification waits for the launcher.** A spawned process can
+  still be clearing credentials and overrides before gateway startup. The
+  executor polls for a bounded window without restarting it; unknown or failed
+  reads mean "not yet". Only an uncleared window triggers a bounded retry.
+- **Failed checks undo only agentd's model change.** Daemon configuration
+  writers share a lock. If an external writer changes unrelated settings while
+  the check runs, those settings survive the undo. If the model itself changed,
+  agentd leaves it alone and reports `config_conflict`. Hermes and terminal
+  writers do not take this lock; it is not a cross-process transaction.
+- **Spawn-failure rollback** restores `config.yaml` only while it still holds
+  exactly the bytes agentd wrote. A different file is left intact.
+- **Select verification preserves a later model choice.** A retry may replace
+  only the model value this attempt originally replaced, checked again under
+  the daemon's config lock. Any other value, or an unknown before-image after
+  daemon recovery, produces `config_conflict` without a write. It never repeats
+  credential migration just to retry the model write.
+
+An operation can outlast dashboard polling; admission stays locked until it
+ends. Timing and retry limits are in `finite-agentd/src/executor.rs`.
+
+Disconnecting the Saved Default requires Finite Private settings and a key
+known present, without a live probe. Missing setup returns
+`finite_private_unavailable`; a failed helper read returns `facts_unavailable`.
+Both refusals leave files unchanged.
+
+### What a partial state leaves
+
+A **configured** route has stored settings and credentials; it does not promise
+provider availability or credit. Provider failure uses the configured fallback,
+or fails the turn. Critical partial states:
+
+- A crash after v1 staged a key, before its restore could run, leaves the
+  unchecked key in `.env`, as v1 always has.
+- A disconnect interrupted before its cleanup phase leaves the route and
+  credential in place; the launcher skips its clears until the intent reaches
+  cleanup and the Saved Default is no longer the route.
+- A launcher step cut short by its own time limit clears part of what it
+  should. Hermes still starts; a remaining OpenRouter override has no key, so
+  the patched gateway uses the backup or fails the turn. The next restart
+  finishes the clears.
+
+### What disconnect guarantees
+
+During cleanup restart, the launcher runs `apply-pending-disconnect` before the
+gateway. It clears the provider's credentials and session overrides only after
+the intent reaches cleanup and the Saved Default has moved away. Running these
+clears while a gateway exists would let its cached stores restore removed
+entries. Failure never prevents Hermes startup.
+
+After the operation succeeds, this is guaranteed for this agent:
+
+- no `OPENROUTER_API_KEY` line remains in `.env`, and `auth.json` holds no
+  OpenRouter pool entry except ones Hermes seeds from its environment;
+- the gateway was restarted after the removal, and the agentd-launched
+  `hermes serve` was stopped and started again only after verification;
+- conversations that had an override to the provider follow the Saved Default
+  from their next message, and their history is untouched;
+- this was verified from fresh facts.
+
+It is not guaranteed that:
+
+- processes the agent or the user started earlier hold no copy. Terminal
+  workers started in their own session outlive the gateway, and shells opened
+  with `nerdctl exec` are outside agentd;
+- the key stops working. It stays valid at OpenRouter until it is revoked
+  there;
+- no OpenRouter key remains. An `OPENROUTER_API_KEY` in the agent's process
+  environment cannot be removed; status then reports it as coming from the
+  environment.
+
+While a disconnect is running or failed, the connection may still be in use,
+and the dashboard says so. agentd does not start `hermes serve` while any
+disconnect intent exists, so the optional native Hermes dashboard is
+unavailable until the disconnect succeeds.
+
+### What is not fenced
+
+agentd does not stop other writers while it changes a route. A `/model …
+--global` in chat, a terminal worker that outlives the gateway, or an operator
+shell can write `config.yaml` or `.env` at any time. Verification catches a
+write that lands before it finishes. A later write can undo a verified change;
+status then shows the state as found, and the user can repeat the operation.
+
+### Persisted state
+
+| State | Writers | Readers |
+| --- | --- | --- |
+| `config.yaml` `model` (the Saved Default) | the startup reconciler (first seed, exact legacy Finite Private migrations); agentd v1 apply, select and disconnect; Hermes `/model … --global`, CLI and native API | Hermes; agentd; the helper; the launcher's disconnect step |
+| `config.yaml` `providers.finite-private` | the reconciler, on every normal start | Hermes; the helper; the chat notice observer |
+| `config.yaml` `fallback_providers` / `fallback_model` | the reconciler seeds the Finite Private backup only when neither key exists, then refreshes only its own entries; the user or Hermes for everything else. agentd never writes them | Hermes; the helper |
+| `$HERMES_HOME/.env` `OPENROUTER_API_KEY` | agentd v1 apply, select (legacy key migration), disconnect (removal); Hermes and its native API | Hermes, on every turn; agentd; the helper |
+| `auth.json` | Hermes; the helper's `clear-auth`, run only by the launcher's disconnect step | Hermes; the helper, read-only |
+| Hermes session store | Hermes; the helper's `clear-session-overrides`, run only by the launcher's disconnect step with no gateway running | Hermes; the helper, read-only |
+| the Inference Intent | agentd; any agentd read renames a corrupt record aside | agentd, including the `hermes serve` gate; the launcher's disconnect step, read-only |
+
+The Runner passes the Finite Private key as both `FINITE_PRIVATE_API_KEY` and
+`OPENAI_API_KEY`. Every Finite launch point of Hermes code drops that alias;
+see
+the [Hermes integration](../../finitechat/integrations/hermes/README.md#inference-routes-backup-and-notices).
+
+### Mixed versions
+
+An Agent Runtime keeps the image it launched with until a Runtime Upgrade, so
+a new dashboard meets old agents indefinitely. The dashboard ships first,
+offers a control only when the agent advertises the capability behind it,
+disables change controls while it sees an operation running or a disconnect
+failed, and never promises that the chat will show a notice when the backup
+answers.
+
+| Dashboard | Agent Runtime | What the user sees |
+| --- | --- | --- |
+| new | old agentd (no `capabilities`) | The saved route comes from the raw `model.provider`, never from `profile`, so a ChatGPT default shows as ChatGPT and a user's own `custom` endpoint as Finite Private. Finite Private and OpenRouter switch through v1 apply. No backup details, operation line or disconnect; no ChatGPT card unless ChatGPT is the Saved Default |
+| old | new agentd | The old panel behaves as before. A ChatGPT default shows as Finite Private. v1 answers `operation_in_progress` while a new dashboard's operation runs or a disconnect has failed. Backup notices appear as ordinary agent messages |
+| any | new image, config written by an old one | The first normal start adds `providers.finite-private`, and the backup only if no fallback is configured and the Finite Private key is present. The Saved Default and credentials are not rewritten. A key kept only as a legacy `model.api_key` is not read by Hermes for OpenRouter, so such an agent gets the backup's answer, with no notice, or the gateway's authentication error, until the owner selects OpenRouter again, which checks the key and moves it into `.env` |
+| any | rolled back below the Inference Compatibility Floor | Unsupported. See below |
+
+### Rollback
+
+After a Runtime has run an image with this contract, only images at or above
+the Inference Compatibility Floor are supported rollback targets; the floor
+and the gate are defined in the
+[runtime-image runbook](../../infra/runbooks/runtime-image.md#inference-compatibility-floor).
+An older image has no Hermes session-route patch and no launch-point rule, so
+credentials cross routes again, and it does not know the Inference Intent: a
+pending disconnect stops where it was.
 
 ## Validation
 
@@ -291,3 +500,9 @@ completion. Image and integration tests cover startup/readiness, preserved
 identity and durable state, and explicit-only skills updates. Use the current
 [test matrix](hermes-runtime-test-matrix.md) and
 [recovery runbook](../../infra/runbooks/hosted-web-chat-recovery.md).
+
+Inference Connections have a host harness, E-0, which runs the real
+`finite-agentd serve`, reconciler, launcher step and packaged helper against a
+stub gateway and fake providers. It does not run chat turns, the real gateway
+or real providers. What it proves and how to run it are in
+[`finite-agentd/README.md`](../../finite-agentd/README.md#e-0-host-harness).

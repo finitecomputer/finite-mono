@@ -32,7 +32,12 @@ Platform Channel:
 - `agent.status.inspect`
 - `agent.owner.claim`
 - `agent.connections.status`
-- `agent.inference.apply`
+- `agent.inference.apply` (v1), `agent.inference.select`, and
+  `agent.inference.disconnect`
+- `agent.openrouter.usage`, `agent.openrouter.connect`,
+  `agent.codex.login.start`, `agent.codex.login.cancel`, and
+  `agent.codex.models` (dispatched and admitted; they answer
+  `unsupported_command` until the provider handlers are implemented)
 - `agent.telegram.connect`, `agent.telegram.approve`, `agent.telegram.home`,
   and `agent.telegram.disconnect`
 - `agent.google.apply` and `agent.google.disconnect`
@@ -68,6 +73,48 @@ an empty target. Local Hermes CI runs the encrypted bridge flow, but its
 wrapper can still synthesize the passing report artifact when the richer
 in-test report hook is absent; that report is not independent live-runtime
 evidence.
+
+## Inference connections
+
+The [runtime control contract](../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections)
+owns command semantics, status facts, compatibility, and recovery guarantees.
+The inference handlers live in `src/inference_commands.rs`; the background
+executor lives in `src/executor.rs`.
+
+Test-only environment, never set in production:
+`FINITE_AGENTD_OPENROUTER_API_BASE` (`https://…` or
+`http://127.0.0.1:<port>` only), and `FINITE_AGENTD_INFERENCE_HELPER_PYTHON` /
+`FINITE_AGENTD_INFERENCE_HELPER_MODULE`. agentd removes the helper's own test
+variables (`FINITE_CODEX_AUTH_ISSUER`, `FINITE_CODEX_LOGIN_DEADLINE_S`,
+`FINITE_HELPER_TEST_BARRIER`, `FINITE_HELPER_TEST_BARRIER_FILE`) from the
+helper's environment.
+
+## E-0 host harness
+
+`examples/inference_host_harness.rs` runs real `finite-agentd serve` in
+`.local-state/e0/`, with loopback bridge, HWD, OpenRouter and Core fakes. The
+stub gateway runs the real reconciler and packaged disconnect helper, then
+sleeps. `smoke` tests recovery and process ordering; it does not run chat turns
+or contact real gateways/providers. `serve` exposes the same runtime to the
+real dashboard through `FC_DESIGN_RUNTIME_COMMANDS_URL`.
+
+Run it from the repository root, inside the Nix dev shell (the launcher step
+needs coreutils `timeout`). It needs the patched Hermes environment in
+`.local-state/hermes-env`; build it there once (the out-link keeps it from
+garbage collection):
+
+```sh
+nix build --out-link .local-state/hermes-env \
+  ".#packages.$(nix eval --impure --raw --expr builtins.currentSystem).hermes-agent-python"
+scripts/with-dev-env bash -c 'cargo build -p finite-agentd --bins --examples && \
+  target/debug/examples/inference_host_harness smoke'
+```
+
+`smoke` runs the E-0 proofs (P1–P10) and exits non-zero if one fails. `serve
+--port <port>` keeps the agent up for the dashboard:
+`FC_DESIGN_RUNTIME_COMMANDS_URL=http://127.0.0.1:<port> just dev web-design`.
+Ctrl-C stops agentd and everything it started. `--hermes-env` and `--agentd`
+override the patched env (`.local-state/hermes-env`) and the agentd binary.
 
 ## Optional hosted Hermes process
 

@@ -1,0 +1,12 @@
+{
+  "description": "Bare block on the retired kimi-k2-6 URL",
+  "fp_base_url": null,
+  "model": {
+    "default": "kimi-k2-6",
+    "provider": "custom",
+    "base_url": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+    "api_key": "${FINITE_PRIVATE_API_KEY}",
+    "api_mode": "chat_completions"
+  },
+  "expected": "finite_private"
+}
