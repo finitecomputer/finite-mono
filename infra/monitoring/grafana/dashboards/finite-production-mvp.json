@@ -107,42 +107,23 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
+            "mode": "thresholds"
           },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "DOWN"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "UP"
+                }
+              },
+              "type": "value"
             }
-          },
+          ],
           "max": 1,
           "min": 0,
           "thresholds": {
@@ -162,44 +143,288 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 4,
         "w": 12,
         "x": 0,
         "y": 5
       },
-      "id": 2,
+      "id": 8,
       "options": {
-        "annotations": {
-          "clustering": -1,
-          "multiLane": false
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
         },
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true
       },
       "pluginVersion": "13.0.2",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
-          "instant": false,
-          "legendFormat": "{{job}}",
-          "range": true,
+          "expr": "up{job=\"finite-internal-health\",instance=~\"finite-lat-[1-5]\"} or on(instance) (label_replace(vector(0), \"instance\", \"finite-lat-1\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-2\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-3\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-4\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-5\", \"__name__\", \".*\"))",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "range": false,
           "refId": "A"
         }
       ],
-      "timeFrom": "24h",
-      "title": "Public Uptime - 24 Hours",
-      "type": "timeseries",
-      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
+      "title": "LAT Host Scrape Health",
+      "type": "stat",
+      "description": "Current scrape status for every expected LAT host. Missing host series remain DOWN via the explicit fallback; check this before interpreting missing host metrics."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "red",
+                  "text": "UNAVAILABLE"
+                },
+                "1": {
+                  "color": "green",
+                  "text": "FRESH"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 29,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)) or vector(0)",
+          "instant": true,
+          "range": false,
+          "editorMode": "code",
+          "legendFormat": "Collection"
+        }
+      ],
+      "title": "Sites Metrics Collection",
+      "type": "stat",
+      "description": "Monitoring data availability, separate from Sites public uptime. Requires a successful scrape and registry snapshot less than 3 minutes old."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "RW"
+                },
+                "1": {
+                  "color": "red",
+                  "text": "RO"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "max by (instance, mountpoint) (node_filesystem_readonly{instance=~\"finite-lat-[1-5]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"})",
+          "instant": true,
+          "legendFormat": "{{instance}} {{mountpoint}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "LAT Filesystem Read-only",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "description": "Heuristic, not a hardware throttle counter. LIKELY requires temperature >= 95 C, CPU busy >= 70%, and average current frequency <= 70% of the exported maximum.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "options": {
+                "0": {
+                  "color": "green",
+                  "text": "NO"
+                },
+                "1": {
+                  "color": "red",
+                  "text": "LIKELY"
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": 0
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "id": 26,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "name_and_value",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.2",
+      "targets": [
+        {
+          "editorMode": "code",
+          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})) <= bool 0.70)",
+          "instant": true,
+          "legendFormat": "{{instance}}",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "LAT Thermal Throttling Heuristic",
+      "type": "stat"
     },
     {
       "datasource": {
@@ -266,10 +491,10 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 12,
-        "y": 5
+        "x": 0,
+        "y": 13
       },
-      "id": 3,
+      "id": 2,
       "options": {
         "annotations": {
           "clustering": -1,
@@ -298,8 +523,8 @@
           "refId": "A"
         }
       ],
-      "timeFrom": "7d",
-      "title": "Public Uptime - 7 Days",
+      "timeFrom": "24h",
+      "title": "Public Uptime - 24 Hours",
       "type": "timeseries",
       "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
@@ -362,8 +587,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
-        "x": 0,
+        "w": 12,
+        "x": 12,
         "y": 13
       },
       "id": 4,
@@ -401,670 +626,20 @@
       ],
       "title": "Public Response Time",
       "type": "timeseries",
-      "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
+      "description": "Blackbox probe duration in seconds over the selected dashboard range; this is probe latency, not application request latency. Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
     },
     {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "mappings": [],
-          "min": 0,
-          "decimals": 0,
-          "unit": "short",
-          "noValue": "Unavailable"
-        },
-        "overrides": []
-      },
+      "collapsed": false,
       "gridPos": {
-        "h": 4,
-        "w": 8,
+        "h": 1,
+        "w": 24,
         "x": 0,
         "y": 21
       },
-      "id": 27,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(finite_sites_existing{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
-          "instant": true,
-          "range": false,
-          "legendFormat": "Total Existing Sites",
-          "editorMode": "code"
-        }
-      ],
-      "title": "Total Existing Sites",
-      "type": "stat",
-      "description": "Sites in the retained registry excluding soft-deleted sites; includes unpublished and disabled sites. Bare Project Repositories are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "mappings": [],
-          "min": 0,
-          "decimals": 0,
-          "unit": "short",
-          "noValue": "Unavailable"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 8,
-        "y": 21
-      },
-      "id": 28,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max(finite_sites_published{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
-          "instant": true,
-          "range": false,
-          "legendFormat": "Published Sites",
-          "editorMode": "code"
-        }
-      ],
-      "title": "Published Sites",
-      "type": "stat",
-      "description": "Sites whose current status is published, including private, shared and public sites. Disabled and deleted sites are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "text": "UNAVAILABLE"
-                },
-                "1": {
-                  "color": "green",
-                  "text": "FRESH"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 16,
-        "y": 21
-      },
-      "id": 29,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "name_and_value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)) or vector(0)",
-          "instant": true,
-          "range": false,
-          "editorMode": "code",
-          "legendFormat": "Collection"
-        }
-      ],
-      "title": "Sites Metrics Collection",
-      "type": "stat",
-      "description": "Monitoring data availability, separate from Sites public uptime. Requires a successful scrape and registry snapshot less than 3 minutes old."
-    },
-    {
-      "id": 30,
-      "title": "Sites Created per Day \u2014 90 Days (UTC)",
-      "description": "Calendar-day allocation counts from stored creation dates, including soft-deleted Sites. Republishes and bare Project Repositories do not count. Today is partial; zero bars are real zero-creation days. Uses the registry snapshot at the selected end time, covering 90 days regardless of the selected duration. Retained history is available on the first scrape; end times before collection began have no data. Purged legacy rows cannot be reconstructed. No data means collection is unavailable.",
-      "type": "barchart",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 25
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "fixed",
-            "fixedColor": "blue"
-          },
-          "min": 0,
-          "decimals": 0,
-          "unit": "short",
-          "noValue": "Unavailable"
-        },
-        "overrides": []
-      },
-      "targets": [
-        {
-          "refId": "A",
-          "expr": "max by (date) (finite_sites_created_by_day{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
-          "instant": true,
-          "range": false,
-          "format": "table",
-          "editorMode": "code"
-        }
-      ],
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true
-            },
-            "indexByName": {
-              "date": 0,
-              "Value": 1
-            },
-            "renameByName": {
-              "date": "UTC date",
-              "Value": "Sites created"
-            }
-          }
-        },
-        {
-          "id": "sortBy",
-          "options": {
-            "sort": [
-              {
-                "field": "UTC date",
-                "desc": false
-              }
-            ]
-          }
-        },
-        {
-          "id": "convertFieldType",
-          "options": {
-            "conversions": [
-              {
-                "targetField": "UTC date",
-                "destinationType": "time",
-                "dateFormat": "YYYY-MM-DD"
-              }
-            ]
-          }
-        }
-      ],
-      "options": {
-        "orientation": "vertical",
-        "xField": "UTC date",
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 100,
-        "showValue": "never",
-        "groupWidth": 0.8,
-        "barWidth": 0.9,
-        "stacking": "none",
-        "legend": {
-          "showLegend": false
-        },
-        "tooltip": {
-          "mode": "single",
-          "sort": "none"
-        }
-      }
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "footer": {
-              "reducers": []
-            },
-            "inspect": false
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Observed"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "dateTimeAsIso"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 34
-      },
-      "id": 5,
-      "options": {
-        "cellHeight": "sm",
-        "enablePagination": false,
-        "showHeader": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_build_info))",
-          "format": "table",
-          "instant": true,
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Running Versions",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "component": 0,
-              "host": 1,
-              "version": 2,
-              "git_sha": 3,
-              "image_digest": 4,
-              "source": 5,
-              "Value": 6
-            },
-            "renameByName": {
-              "Value": "Observed",
-              "component": "Component",
-              "git_sha": "Git SHA",
-              "host": "Host",
-              "image_digest": "Image digest",
-              "source": "Source",
-              "version": "Version"
-            }
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 43
-      },
-      "id": 6,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "12.2.0",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "sort_desc(sum by (artifact_id, version_label, promoted) (max by (source_host_id, artifact_id, version_label, promoted) (finite_runtime_artifact_active_agents)))",
-          "format": "table",
-          "instant": true,
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Runtime Artifacts",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "artifact_id": 0,
-              "version_label": 1,
-              "promoted": 2,
-              "Value": 3
-            },
-            "renameByName": {
-              "Value": "Active agents",
-              "artifact_id": "Artifact",
-              "promoted": "Promoted",
-              "version_label": "Version"
-            }
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 43
-      },
-      "id": 7,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "enablePagination": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true
-      },
-      "pluginVersion": "12.2.0",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "sort_desc(max by (component, host) (finite_component_version_mismatched_active_agents) > 0)",
-          "format": "table",
-          "instant": true,
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "Version Drift",
-      "transformations": [
-        {
-          "id": "labelsToFields",
-          "options": {
-            "mode": "columns"
-          }
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "__name__": true,
-              "instance": true,
-              "job": true
-            },
-            "indexByName": {
-              "component": 0,
-              "host": 1,
-              "Value": 2
-            },
-            "renameByName": {
-              "Value": "Drifted active agents",
-              "component": "Component",
-              "host": "Host"
-            }
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "red",
-                  "text": "DOWN"
-                },
-                "1": {
-                  "color": "green",
-                  "text": "UP"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "red",
-                "value": 0
-              },
-              {
-                "color": "green",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 51
-      },
-      "id": 8,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "name_and_value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "up{job=\"finite-internal-health\",instance=~\"finite-lat-[1-5]\"} or on(instance) (label_replace(vector(0), \"instance\", \"finite-lat-1\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-2\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-3\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-4\", \"__name__\", \".*\") or label_replace(vector(0), \"instance\", \"finite-lat-5\", \"__name__\", \".*\"))",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "LAT Host Scrape Health",
-      "type": "stat"
+      "id": 31,
+      "panels": [],
+      "title": "Capacity & host errors",
+      "type": "row"
     },
     {
       "datasource": {
@@ -1133,7 +708,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 55
+        "y": 22
       },
       "id": 9,
       "options": {
@@ -1161,118 +736,8 @@
         }
       ],
       "title": "LAT CPU Busy",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "short"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 55
-      },
-      "id": 10,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "node_load1{instance=~\"finite-lat-[1-5]\"}",
-          "instant": false,
-          "legendFormat": "{{instance}} load1",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "node_load5{instance=~\"finite-lat-[1-5]\"}",
-          "instant": false,
-          "legendFormat": "{{instance}} load5",
-          "range": true,
-          "refId": "B"
-        },
-        {
-          "editorMode": "code",
-          "expr": "node_load15{instance=~\"finite-lat-[1-5]\"}",
-          "instant": false,
-          "legendFormat": "{{instance}} load15",
-          "range": true,
-          "refId": "C"
-        }
-      ],
-      "title": "LAT Load Average",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "CPU non-idle percentage per host, averaged across CPUs with a 5-minute rate window."
     },
     {
       "datasource": {
@@ -1340,8 +805,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 63
+        "x": 12,
+        "y": 22
       },
       "id": 11,
       "options": {
@@ -1369,104 +834,8 @@
         }
       ],
       "title": "LAT Memory Used",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "percent",
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 63
-      },
-      "id": 12,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "(100 * (1 - (node_memory_SwapFree_bytes{instance=~\"finite-lat-[1-5]\"} / node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"}))) and on(instance) node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"} > 0",
-          "instant": false,
-          "legendFormat": "{{instance}}",
-          "range": true,
-          "refId": "A"
-        }
-      ],
-      "title": "LAT Swap Used",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Memory used as a percentage of total, based on MemAvailable (includes reclaimable memory)."
     },
     {
       "datasource": {
@@ -1535,7 +904,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 30
       },
       "id": 13,
       "options": {
@@ -1563,110 +932,8 @@
         }
       ],
       "title": "LAT Filesystem Used",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "Bps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 71
-      },
-      "id": 14,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "rate(node_disk_read_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} read",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "rate(node_disk_written_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} write",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "LAT Disk Throughput",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Used filesystem capacity on / and /data, based on bytes available to non-root users."
     },
     {
       "datasource": {
@@ -1733,8 +1000,8 @@
       "gridPos": {
         "h": 8,
         "w": 12,
-        "x": 0,
-        "y": 79
+        "x": 12,
+        "y": 30
       },
       "id": 15,
       "options": {
@@ -1762,214 +1029,8 @@
         }
       ],
       "title": "LAT Disk I/O Time",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "bps"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 79
-      },
-      "id": 16,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "8 * rate(node_network_receive_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} rx",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "8 * rate(node_network_transmit_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} tx",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "LAT Network Throughput",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 12,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "linear",
-            "lineWidth": 1,
-            "pointSize": 3,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "showValues": false,
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "ops",
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 87
-      },
-      "id": 17,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "rate(node_network_receive_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} rx errors",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "editorMode": "code",
-          "expr": "rate(node_network_transmit_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
-          "instant": false,
-          "legendFormat": "{{instance}} {{device}} tx errors",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "LAT Network Errors",
-      "type": "timeseries"
+      "type": "timeseries",
+      "description": "Percentage of time each block device was busy with I/O, using a 5-minute rate window. Distinct from filesystem capacity and read/write throughput."
     },
     {
       "datasource": {
@@ -2047,7 +1108,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 38
       },
       "id": 24,
       "options": {
@@ -2085,7 +1146,6 @@
         "type": "prometheus",
         "uid": "finite-prometheus"
       },
-      "description": "Average current CPU frequency compared with the average scaling maximum exported by each host.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -2095,7 +1155,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "errors/s",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -2125,17 +1185,21 @@
               "mode": "off"
             }
           },
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": 0
+              },
+              {
+                "color": "red",
+                "value": 80
               }
             ]
           },
-          "unit": "hertz"
+          "unit": "ops",
+          "min": 0
         },
         "overrides": []
       },
@@ -2143,127 +1207,44 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 95
+        "y": 38
       },
-      "id": 25,
+      "id": 17,
       "options": {
         "legend": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "displayMode": "table",
+          "calcs": [],
+          "displayMode": "list",
           "placement": "bottom",
           "showLegend": true
         },
         "tooltip": {
           "hideZeros": false,
           "mode": "multi",
-          "sort": "desc"
+          "sort": "none"
         }
       },
       "pluginVersion": "13.0.2",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"})",
+          "expr": "rate(node_network_receive_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
-          "legendFormat": "{{instance}} current",
+          "legendFormat": "{{instance}} {{device}} rx errors",
           "range": true,
           "refId": "A"
         },
         {
           "editorMode": "code",
-          "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})",
+          "expr": "rate(node_network_transmit_errs_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
           "instant": false,
-          "legendFormat": "{{instance}} maximum",
+          "legendFormat": "{{instance}} {{device}} tx errors",
           "range": true,
           "refId": "B"
         }
       ],
-      "title": "LAT CPU Clock",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "finite-prometheus"
-      },
-      "description": "Heuristic, not a hardware throttle counter. LIKELY requires temperature >= 95 C, CPU busy >= 70%, and average current frequency <= 70% of the exported maximum.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "text": "NO"
-                },
-                "1": {
-                  "color": "red",
-                  "text": "LIKELY"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 1
-              }
-            ]
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 103
-      },
-      "id": 26,
-      "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "name_and_value",
-        "wideLayout": true
-      },
-      "pluginVersion": "13.0.2",
-      "targets": [
-        {
-          "editorMode": "code",
-          "expr": "(max by (instance) (node_hwmon_temp_celsius{instance=~\"finite-lat-[1-5]\"} * on (instance, chip, sensor) group_left(label) node_hwmon_sensor_label{instance=~\"finite-lat-[1-5]\",label=~\"Tctl|Tccd[0-9]+\"}) >= bool 95) * on (instance) (100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{instance=~\"finite-lat-[1-5]\",mode=\"idle\"}[1m]))) >= bool 70) * on (instance) ((avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"}) / avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})) <= bool 0.70)",
-          "instant": true,
-          "legendFormat": "{{instance}}",
-          "range": false,
-          "refId": "A"
-        }
-      ],
-      "title": "LAT Thermal Throttling Heuristic",
-      "type": "stat"
+      "title": "LAT Network Errors",
+      "type": "timeseries",
+      "description": "Receive and transmit errors per second by host and interface, using a 5-minute rate window."
     },
     {
       "datasource": {
@@ -2272,36 +1253,20 @@
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "thresholds"
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
           },
-          "mappings": [
-            {
-              "options": {
-                "0": {
-                  "color": "green",
-                  "text": "RW"
-                },
-                "1": {
-                  "color": "red",
-                  "text": "RO"
-                }
-              },
-              "type": "value"
-            }
-          ],
-          "max": 1,
-          "min": 0,
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
-                "value": 0
-              },
-              {
-                "color": "red",
-                "value": 1
+                "value": null
               }
             ]
           }
@@ -2309,42 +1274,68 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 6,
         "w": 24,
         "x": 0,
-        "y": 107
+        "y": 46
       },
-      "id": 18,
+      "id": 7,
       "options": {
-        "colorMode": "background",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "enablePagination": false,
           "fields": "",
-          "values": false
+          "reducer": [
+            "sum"
+          ],
+          "show": false
         },
-        "showPercentChange": false,
-        "textMode": "name_and_value",
-        "wideLayout": true
+        "showHeader": true
       },
-      "pluginVersion": "13.0.2",
+      "pluginVersion": "12.2.0",
       "targets": [
         {
           "editorMode": "code",
-          "expr": "max by (instance, mountpoint) (node_filesystem_readonly{instance=~\"finite-lat-[1-5]\",mountpoint=~\"/|/data\",fstype!~\"tmpfs|devtmpfs|overlay|squashfs\"})",
+          "expr": "sort_desc(max by (component, host) (finite_component_version_mismatched_active_agents) > 0)",
+          "format": "table",
           "instant": true,
-          "legendFormat": "{{instance}} {{mountpoint}}",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "LAT Filesystem Read-only",
-      "type": "stat"
+      "title": "Version Drift",
+      "transformations": [
+        {
+          "id": "labelsToFields",
+          "options": {
+            "mode": "columns"
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true,
+              "__name__": true,
+              "instance": true,
+              "job": true
+            },
+            "indexByName": {
+              "component": 0,
+              "host": 1,
+              "Value": 2
+            },
+            "renameByName": {
+              "Value": "Drifted active agents",
+              "component": "Component",
+              "host": "Host"
+            }
+          }
+        }
+      ],
+      "type": "table",
+      "description": "Only component/host pairs with active agents on mismatched versions are returned. An empty table can mean no drift or missing telemetry; check LAT Host Scrape Health and the version inventories below."
     },
     {
       "datasource": {
@@ -2355,7 +1346,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 52
       },
       "id": 19,
       "options": {
@@ -2377,139 +1368,1243 @@
         }
       ],
       "title": "LAT Recent Warning Logs",
-      "type": "logs"
+      "type": "logs",
+      "description": "All warning-and-higher LAT logs over the selected range. The collapsed focused views below retain source-specific queries and direct panel links."
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
+      "collapsed": true,
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
-        "y": 119
+        "y": 60
       },
-      "id": 20,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": false,
-        "showCommonLabels": false,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": false
-      },
-      "targets": [
+      "id": 32,
+      "panels": [
         {
-          "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-5]\", source=~\"kernel|systemd|nixos-activation|auth\", priority=~\"warning|error|crit|alert|emerg\"}",
-          "queryType": "range",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "stepAfter",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "max": 1,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": 0
+                  },
+                  {
+                    "color": "green",
+                    "value": 1
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 61
+          },
+          "id": 3,
+          "options": {
+            "annotations": {
+              "clustering": -1,
+              "multiLane": false
+            },
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "probe_success{job=~\"finite[.]computer|chat[.]finite[.]computer|brain[.]finite[.]computer|finite[.]site|uptime-probe[.]finite[.]site\"}",
+              "instant": false,
+              "legendFormat": "{{job}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "timeFrom": "7d",
+          "title": "Public Uptime - 7 Days",
+          "type": "timeseries",
+          "description": "Finite Sites: finite.site checks API health (HTTP 200); uptime-probe.finite.site checks wildcard DNS/TLS and routing to an unallocated site (expected HTTP 404). Both run every minute. These are availability checks, not publishing or private viewer tests. New Sites history starts when the probes are deployed."
         }
       ],
-      "title": "LAT Host Incident Logs",
-      "type": "logs"
+      "title": "Public availability \u00b7 7-day history",
+      "type": "row"
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
+      "collapsed": true,
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
-        "y": 127
+        "y": 61
       },
-      "id": 21,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": false,
-        "showCommonLabels": false,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": false
-      },
-      "targets": [
+      "id": 33,
+      "panels": [
         {
-          "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-5]\", source=\"kernel\", priority=~\"warning|error|crit|alert|emerg\"}",
-          "queryType": "range",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "mappings": [],
+              "min": 0,
+              "decimals": 0,
+              "unit": "short",
+              "noValue": "Unavailable"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 12,
+            "x": 0,
+            "y": 62
+          },
+          "id": 27,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "value",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max(finite_sites_existing{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+              "instant": true,
+              "range": false,
+              "legendFormat": "Total Existing Sites",
+              "editorMode": "code"
+            }
+          ],
+          "title": "Total Existing Sites",
+          "type": "stat",
+          "description": "Sites in the retained registry excluding soft-deleted sites; includes unpublished and disabled sites. Bare Project Repositories are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "mappings": [],
+              "min": 0,
+              "decimals": 0,
+              "unit": "short",
+              "noValue": "Unavailable"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 4,
+            "w": 12,
+            "x": 12,
+            "y": 62
+          },
+          "id": 28,
+          "options": {
+            "colorMode": "value",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto",
+            "percentChangeColorMode": "standard",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "showPercentChange": false,
+            "textMode": "value",
+            "wideLayout": true
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max(finite_sites_published{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+              "instant": true,
+              "range": false,
+              "legendFormat": "Published Sites",
+              "editorMode": "code"
+            }
+          ],
+          "title": "Published Sites",
+          "type": "stat",
+          "description": "Sites whose current status is published, including private, shared and public sites. Disabled and deleted sites are excluded. Unavailable when the metrics scrape fails or its registry snapshot is older than 3 minutes."
+        },
+        {
+          "id": 30,
+          "title": "Sites Created per Day \u2014 90 Days (UTC)",
+          "description": "Calendar-day allocation counts from stored creation dates, including soft-deleted Sites. Republishes and bare Project Repositories do not count. Today is partial; zero bars are real zero-creation days. Uses the registry snapshot at the selected end time, covering 90 days regardless of the selected duration. Retained history is available on the first scrape; end times before collection began have no data. Purged legacy rows cannot be reconstructed. No data means collection is unavailable.",
+          "type": "barchart",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 66
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "blue"
+              },
+              "min": 0,
+              "decimals": 0,
+              "unit": "short",
+              "noValue": "Unavailable"
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "expr": "max by (date) (finite_sites_created_by_day{job=\"finite-sites-metrics\"} and on(job, instance) ((up{job=\"finite-sites-metrics\"} == 1) and on(job, instance) ((time() - finite_sites_metrics_collected_at_seconds{job=\"finite-sites-metrics\"} >= 0) < 180)))",
+              "instant": true,
+              "range": false,
+              "format": "table",
+              "editorMode": "code"
+            }
+          ],
+          "transformations": [
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true
+                },
+                "indexByName": {
+                  "date": 0,
+                  "Value": 1
+                },
+                "renameByName": {
+                  "date": "UTC date",
+                  "Value": "Sites created"
+                }
+              }
+            },
+            {
+              "id": "sortBy",
+              "options": {
+                "sort": [
+                  {
+                    "field": "UTC date",
+                    "desc": false
+                  }
+                ]
+              }
+            },
+            {
+              "id": "convertFieldType",
+              "options": {
+                "conversions": [
+                  {
+                    "targetField": "UTC date",
+                    "destinationType": "time",
+                    "dateFormat": "YYYY-MM-DD"
+                  }
+                ]
+              }
+            }
+          ],
+          "options": {
+            "orientation": "vertical",
+            "xField": "UTC date",
+            "xTickLabelRotation": 0,
+            "xTickLabelSpacing": 100,
+            "showValue": "never",
+            "groupWidth": 0.8,
+            "barWidth": 0.9,
+            "stacking": "none",
+            "legend": {
+              "showLegend": false
+            },
+            "tooltip": {
+              "mode": "single",
+              "sort": "none"
+            }
+          }
         }
       ],
-      "title": "LAT Kernel Warning Logs",
-      "type": "logs"
+      "title": "Sites usage \u00b7 registry totals & 90 UTC days",
+      "type": "row"
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
+      "collapsed": true,
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
-        "y": 135
+        "y": 62
       },
-      "id": 22,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": false,
-        "showCommonLabels": false,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": false
-      },
-      "targets": [
+      "id": 34,
+      "panels": [
         {
-          "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-5]\", source=~\"systemd|nixos-activation\", priority=~\"warning|error|crit|alert|emerg\"}",
-          "queryType": "range",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "footer": {
+                  "reducers": []
+                },
+                "inspect": false
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              }
+            },
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "Observed"
+                },
+                "properties": [
+                  {
+                    "id": "unit",
+                    "value": "dateTimeAsIso"
+                  }
+                ]
+              }
+            ]
+          },
+          "gridPos": {
+            "h": 9,
+            "w": 24,
+            "x": 0,
+            "y": 63
+          },
+          "id": 5,
+          "options": {
+            "cellHeight": "sm",
+            "enablePagination": false,
+            "showHeader": true
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "1000 * topk by (component, host) (1, timestamp(finite_component_build_info))",
+              "format": "table",
+              "instant": true,
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Running Versions",
+          "transformations": [
+            {
+              "id": "labelsToFields",
+              "options": {
+                "mode": "columns"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true
+                },
+                "indexByName": {
+                  "component": 0,
+                  "host": 1,
+                  "version": 2,
+                  "git_sha": 3,
+                  "image_digest": 4,
+                  "source": 5,
+                  "Value": 6
+                },
+                "renameByName": {
+                  "Value": "Observed",
+                  "component": "Component",
+                  "git_sha": "Git SHA",
+                  "host": "Host",
+                  "image_digest": "Image digest",
+                  "source": "Source",
+                  "version": "Version"
+                }
+              }
+            }
+          ],
+          "type": "table"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "align": "auto",
+                "cellOptions": {
+                  "type": "auto"
+                },
+                "inspect": false
+              },
+              "mappings": [],
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 72
+          },
+          "id": 6,
+          "options": {
+            "cellHeight": "sm",
+            "footer": {
+              "countRows": false,
+              "enablePagination": false,
+              "fields": "",
+              "reducer": [
+                "sum"
+              ],
+              "show": false
+            },
+            "showHeader": true
+          },
+          "pluginVersion": "12.2.0",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "sort_desc(sum by (artifact_id, version_label, promoted) (max by (source_host_id, artifact_id, version_label, promoted) (finite_runtime_artifact_active_agents)))",
+              "format": "table",
+              "instant": true,
+              "range": false,
+              "refId": "A"
+            }
+          ],
+          "title": "Runtime Artifacts",
+          "transformations": [
+            {
+              "id": "labelsToFields",
+              "options": {
+                "mode": "columns"
+              }
+            },
+            {
+              "id": "organize",
+              "options": {
+                "excludeByName": {
+                  "Time": true,
+                  "__name__": true,
+                  "instance": true,
+                  "job": true
+                },
+                "indexByName": {
+                  "artifact_id": 0,
+                  "version_label": 1,
+                  "promoted": 2,
+                  "Value": 3
+                },
+                "renameByName": {
+                  "Value": "Active agents",
+                  "artifact_id": "Artifact",
+                  "promoted": "Promoted",
+                  "version_label": "Version"
+                }
+              }
+            }
+          ],
+          "type": "table"
         }
       ],
-      "title": "LAT Activation And Unit Lifecycle",
-      "type": "logs"
+      "title": "Version inventories \u00b7 running components & runtime artifacts",
+      "type": "row"
     },
     {
-      "datasource": {
-        "type": "loki",
-        "uid": "finite-loki"
-      },
+      "collapsed": true,
       "gridPos": {
-        "h": 8,
+        "h": 1,
         "w": 24,
         "x": 0,
-        "y": 143
+        "y": 63
       },
-      "id": 23,
-      "options": {
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "prettifyLogMessage": false,
-        "showCommonLabels": false,
-        "showLabels": true,
-        "showTime": true,
-        "sortOrder": "Descending",
-        "wrapLogMessage": false
-      },
-      "targets": [
+      "id": 35,
+      "panels": [
         {
-          "editorMode": "code",
-          "expr": "{host=~\"finite-lat-[1-5]\", source=\"auth\", priority=~\"warning|error|crit|alert|emerg\"}",
-          "queryType": "range",
-          "refId": "A"
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "short"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 64
+          },
+          "id": 10,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "node_load1{instance=~\"finite-lat-[1-5]\"}",
+              "instant": false,
+              "legendFormat": "{{instance}} load1",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "node_load5{instance=~\"finite-lat-[1-5]\"}",
+              "instant": false,
+              "legendFormat": "{{instance}} load5",
+              "range": true,
+              "refId": "B"
+            },
+            {
+              "editorMode": "code",
+              "expr": "node_load15{instance=~\"finite-lat-[1-5]\"}",
+              "instant": false,
+              "legendFormat": "{{instance}} load15",
+              "range": true,
+              "refId": "C"
+            }
+          ],
+          "title": "LAT Load Average",
+          "type": "timeseries",
+          "description": "Runnable or uninterruptible tasks averaged over 1, 5, and 15 minutes. These counts are not normalized by CPU count."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "percent",
+              "min": 0,
+              "max": 100
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 64
+          },
+          "id": 12,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "(100 * (1 - (node_memory_SwapFree_bytes{instance=~\"finite-lat-[1-5]\"} / node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"}))) and on(instance) node_memory_SwapTotal_bytes{instance=~\"finite-lat-[1-5]\"} > 0",
+              "instant": false,
+              "legendFormat": "{{instance}}",
+              "range": true,
+              "refId": "A"
+            }
+          ],
+          "title": "LAT Swap Used",
+          "type": "timeseries",
+          "description": "Percentage of configured swap in use. Hosts without swap are intentionally omitted."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "Bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 72
+          },
+          "id": 14,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "rate(node_disk_read_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
+              "instant": false,
+              "legendFormat": "{{instance}} {{device}} read",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "rate(node_disk_written_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"nvme.*|md.*|sd.*|vd.*|xvd.*\"}[5m])",
+              "instant": false,
+              "legendFormat": "{{instance}} {{device}} write",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "LAT Disk Throughput",
+          "type": "timeseries",
+          "description": "Block-device read/write bytes per second, using a 5-minute rate window."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  },
+                  {
+                    "color": "red",
+                    "value": 80
+                  }
+                ]
+              },
+              "unit": "bps"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 72
+          },
+          "id": 16,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "8 * rate(node_network_receive_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+              "instant": false,
+              "legendFormat": "{{instance}} {{device}} rx",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "8 * rate(node_network_transmit_bytes_total{instance=~\"finite-lat-[1-5]\",device=~\"en.*|eth.*|wg-finite\"}[5m])",
+              "instant": false,
+              "legendFormat": "{{instance}} {{device}} tx",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "LAT Network Throughput",
+          "type": "timeseries",
+          "description": "Interface receive/transmit bits per second, using a 5-minute rate window."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "finite-prometheus"
+          },
+          "description": "Average current CPU frequency compared with the average scaling maximum exported by each host.",
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 12,
+                "gradientMode": "none",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "linear",
+                "lineWidth": 1,
+                "pointSize": 3,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "never",
+                "showValues": false,
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": 0
+                  }
+                ]
+              },
+              "unit": "hertz"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 80
+          },
+          "id": 25,
+          "options": {
+            "legend": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "displayMode": "table",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "pluginVersion": "13.0.2",
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "avg by (instance) (node_cpu_scaling_frequency_hertz{instance=~\"finite-lat-[1-5]\"})",
+              "instant": false,
+              "legendFormat": "{{instance}} current",
+              "range": true,
+              "refId": "A"
+            },
+            {
+              "editorMode": "code",
+              "expr": "avg by (instance) (node_cpu_scaling_frequency_max_hertz{instance=~\"finite-lat-[1-5]\"})",
+              "instant": false,
+              "legendFormat": "{{instance}} maximum",
+              "range": true,
+              "refId": "B"
+            }
+          ],
+          "title": "LAT CPU Clock",
+          "type": "timeseries"
         }
       ],
-      "title": "LAT SSH And Sudo Logs",
-      "type": "logs"
+      "title": "Host diagnostics \u00b7 load, swap, throughput & clocks",
+      "type": "row"
+    },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 64
+      },
+      "id": 36,
+      "panels": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "finite-loki"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 65
+          },
+          "id": 20,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "{host=~\"finite-lat-[1-5]\", source=~\"kernel|systemd|nixos-activation|auth\", priority=~\"warning|error|crit|alert|emerg\"}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "LAT Host Incident Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "finite-loki"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 73
+          },
+          "id": 21,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "{host=~\"finite-lat-[1-5]\", source=\"kernel\", priority=~\"warning|error|crit|alert|emerg\"}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "LAT Kernel Warning Logs",
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "finite-loki"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 81
+          },
+          "id": 22,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "{host=~\"finite-lat-[1-5]\", source=~\"systemd|nixos-activation\", priority=~\"warning|error|crit|alert|emerg\"}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "LAT Activation And Unit Lifecycle",
+          "type": "logs"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "finite-loki"
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 24,
+            "x": 0,
+            "y": 89
+          },
+          "id": 23,
+          "options": {
+            "dedupStrategy": "none",
+            "enableLogDetails": true,
+            "prettifyLogMessage": false,
+            "showCommonLabels": false,
+            "showLabels": true,
+            "showTime": true,
+            "sortOrder": "Descending",
+            "wrapLogMessage": false
+          },
+          "targets": [
+            {
+              "editorMode": "code",
+              "expr": "{host=~\"finite-lat-[1-5]\", source=\"auth\", priority=~\"warning|error|crit|alert|emerg\"}",
+              "queryType": "range",
+              "refId": "A"
+            }
+          ],
+          "title": "LAT SSH And Sudo Logs",
+          "type": "logs"
+        }
+      ],
+      "title": "Focused warning logs \u00b7 host, kernel, lifecycle & access",
+      "type": "row"
     }
   ],
   "refresh": "30s",

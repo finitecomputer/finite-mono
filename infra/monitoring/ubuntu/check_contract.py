@@ -205,7 +205,14 @@ def check_prometheus() -> None:
     dashboard = json.loads(
         read(ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.json")
     )
-    for panel in dashboard["panels"]:
+    def all_panels(panels):
+        for panel in panels:
+            yield panel
+            yield from all_panels(panel.get("panels", []))
+
+    panels = {panel["id"]: panel for panel in all_panels(dashboard["panels"])}
+    require({1, 2, 3, 4} <= panels.keys(), "missing public probe dashboard panel")
+    for panel in panels.values():
         if panel["id"] not in (1, 2, 3, 4):
             continue
         selector = re.search(r'job=~"([^"]+)"', panel["targets"][0]["expr"])
