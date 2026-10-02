@@ -99,6 +99,60 @@ make collection unavailable without affecting the public uptime probes.
 
 ## Credentials and deployment
 
+### Billing account dashboard (awaiting initial provisioning)
+
+`grafana/dashboards/finite-billing-accounts.json` reports one account per Core
+`customer_orgs` row, including missing `customer_billing_accounts` rows. It does
+not count users, infer human engagement, verify receipts, or measure revenue.
+An active subscription is **not confirmed cash payment**; discounts and delayed
+webhooks can affect its meaning. The dashboard explains the exact precedence of
+its nine exclusive categories: subscribed, trial, sponsored, grandfathered,
+expired/past-due, incomplete, no subscription, missing billing account, unknown.
+Trial deadlines use the stored period end, falling back to redeemed-at plus
+campaign days only for redeemed trials. Reservations alone do not prove access.
+
+The lat2 `finite-billing-metrics` timer runs every five minutes, reusing the
+existing Core connection loader and credentials locally. Its single read-only
+SQL aggregate scans organizations and joins billing/trial rows by indexed keys;
+only category counts and a snapshot timestamp leave Postgres. There are nine
+fixed status series, a collection-success gauge, and a snapshot-time gauge.
+No schema, Core request path, Stripe call, credential, or public endpoint is
+added. Query/lock/connect/process deadlines are 5/1/5/15 seconds. The hardened
+oneshot has a 20-second limit and atomically caches mode-0640 text in
+`/run/finite-monitoring/finite-billing.prom`; existing loopback node-exporter
+and Alloy transport it. Scrapes do not query Core. A collection failure replaces
+counts with failure status; timestamp and scrape gates hide missing, future or
+at-least-ten-minute-old data. A healthy empty database exports explicit zeroes.
+The timestamp measures collection freshness, not Stripe reconciliation freshness.
+
+Deployment is separate from dashboard layout updates and runtime/trial rollouts:
+
+1. In a separately authorized rollout, deploy the reviewed lat2 NixOS closure
+   containing the collector and Alloy allowlist. Verify the timer, eleven
+   `finite_billing_*` samples, and unchanged Core/Chat health with `finite-status`.
+   No Core image, migrations, Stripe credentials, or new database role is needed.
+2. Before initial provisioning, record whether the file and UID already exist,
+   their prior content, and the candidate file hash in an operator receipt.
+   Provision the new JSON file through the existing Grafana file provider on the
+   monitoring receiver; verify its UID `finite-billing-accounts`, category sum,
+   freshness, and failure behavior. Do not edit Grafana's database directly.
+3. Only after initial provisioning, add its filename/UID to `grafana/production.json`
+   for routine dashboard CI updates. The current deployment helper requires an
+   existing file and UID; adding it early blocks the entire dashboard bundle.
+   An overview navigation link can be added with the separate layout change.
+
+Rollback the collector via the prior lat2 closure and remove only its cached
+textfile if left behind; collection gates also expire it after ten minutes.
+Restore a backed-up dashboard file, or remove a newly created file only if its
+bytes still match the receipt. The provider has `disableDeletion: true`, so
+removing the file **does not remove its Grafana UID**. This is an incomplete
+Grafana rollback: preserve the receipt and have an operator reconcile that
+exact UID before retrying, following [dashboard rollback](dashboards.md).
+No billing or user data is written, so there is no data migration to reverse.
+Local/CI proof is part of `just monitoring-nixos-contract`: disposable Postgres
+with the actual owning migrations, exporter failure/label tests, evaluated Nix
+service/transport checks, and Promtool fixtures for every panel query.
+
 The monitoring host stores operational credentials only as operator-provisioned
 host files:
 

@@ -55,6 +55,11 @@ GLOBAL_SUFFIXES = (
 )
 
 MONITORING_PREFIX = "infra/monitoring/"
+BILLING_METRICS_PATHS = {
+    "infra/nixos/scripts/finite_billing_metrics.py",
+    "infra/nixos/scripts/finite_billing_metrics.sql",
+    "infra/nixos/tests/test_finite_billing_metrics.py",
+}
 WORKFLOW_PREFIX = ".github/workflows/"
 # CI diffs use --no-renames, so this keeps this family move focused while the
 # deleted old paths are still visible in the PR.
@@ -72,6 +77,7 @@ RUNTIME_METRICS_SOURCE_PATHS = {
     "scripts/finite_runtime_metrics.py",
 }
 MONITORING_NIXOS_PATHS = {
+    "infra/nixos/modules/billing-metrics.nix",
     "infra/nixos/hosts/finite-monitoring/default.nix",
     "infra/nixos/modules/monitoring-vps.nix",
 }
@@ -303,6 +309,12 @@ def apply_harness_dependencies(selection: HarnessSelection) -> None:
 
 def apply_path(selection: HarnessSelection, path: str) -> None:
     if not path:
+        return
+
+    # This SQL is a read-only reporting query, not a schema/protocol migration.
+    # Keep collector-only edits on the real-Postgres and dashboard contract gate.
+    if path in BILLING_METRICS_PATHS:
+        apply_monitoring_path(selection, path)
         return
 
     if is_global_path(path):
