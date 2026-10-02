@@ -180,11 +180,17 @@ test("sidebar direct drag, saved topic order, failures, keyboard movement, and t
     await touchDesign.locator(".finite-chat__thread-open").tap();
     await touch.getByRole("button", { name: "Open chats", exact: true }).tap();
     const cdp = await touchContext.newCDPSession(touch);
-    const source = await touchDesign.locator(".finite-chat__thread-open").boundingBox();
-    const target = await touch.locator('[data-topic-id="topic_design"] .finite-chat__folder-header').boundingBox();
-    assert(source && target);
-    const point = { x: source.x + source.width / 2, y: source.y + source.height / 2 };
-    const destination = { x: target.x + target.width / 2, y: target.y + target.height / 2 };
+    const touchPoint = async (locator: Locator) => {
+      // Raw CDP touches bypass Playwright's actionability checks. Wait for the
+      // sidebar's slide-in animation to settle before sampling coordinates.
+      await locator.tap({ trial: true });
+      const box = await locator.boundingBox();
+      assert(box);
+      const point = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+      assert(await locator.evaluate((element, point) => element.contains(document.elementFromPoint(point.x, point.y)), point), "touch coordinates must hit the intended element");
+      return point;
+    };
+    let point = await touchPoint(touchDesign.locator(".finite-chat__thread-open"));
     let touchMoves = 0;
     touch.on("request", (request) => { if (request.postData()?.includes('"MoveChat"')) touchMoves++; });
     // Moving before the hold behaves as a swipe, never a move.
@@ -194,12 +200,15 @@ test("sidebar direct drag, saved topic order, failures, keyboard movement, and t
     await touch.waitForTimeout(400);
     assert.equal(touchMoves, 0);
     // A cancelled long-press drag is also a no-op.
+    point = await touchPoint(touchDesign.locator(".finite-chat__thread-open"));
+    const destination = await touchPoint(touch.locator('[data-topic-id="topic_design"] .finite-chat__folder-header'));
     await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
     await touchDesign.and(touch.locator('[data-dragging="true"]')).waitFor();
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [destination] });
     await cdp.send("Input.dispatchTouchEvent", { type: "touchCancel", touchPoints: [] });
     assert.equal(touchMoves, 0);
     // Long-press and drag the original row directly to General.
+    point = await touchPoint(touchDesign.locator(".finite-chat__thread-open"));
     await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
     await touchDesign.and(touch.locator('[data-dragging="true"]')).waitFor();
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [destination] });
@@ -215,13 +224,12 @@ test("sidebar direct drag, saved topic order, failures, keyboard movement, and t
     await touch.locator('[data-topic-id="topic_design"] [data-chat-id="chat_design"]').waitFor();
 
     // Failed touch saves preserve the same row and transcript after reload.
-    const touchSource = await touchDesign.locator(".finite-chat__thread-open").boundingBox();
-    const touchHome = await touch.locator('[data-topic-id="home"] .finite-chat__folder-header').boundingBox();
-    assert(touchSource && touchHome);
+    const touchSource = await touchPoint(touchDesign.locator(".finite-chat__thread-open"));
+    const touchHome = await touchPoint(touch.locator('[data-topic-id="home"] .finite-chat__folder-header'));
     await touch.route("**/hosted-device/actions", (route) => route.fulfill({ status: 503, json: { error: "Synthetic touch failure" } }), { times: 1 });
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: touchSource.x + 40, y: touchSource.y + 17 }] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [touchSource] });
     await touchDesign.and(touch.locator('[data-dragging="true"]')).waitFor();
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: touchHome.x + 40, y: touchHome.y + 17 }] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [touchHome] });
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
     await touch.getByRole("alert").getByText("Synthetic touch failure", { exact: true }).waitFor();
     await touch.reload();
@@ -237,10 +245,10 @@ test("sidebar direct drag, saved topic order, failures, keyboard movement, and t
     await farFolder.waitFor();
     const farId = await farFolder.getAttribute("data-topic-id");
     const nav = touch.locator(".finite-chat__sidebar-nav");
+    const scrollSource = await touchPoint(touchDesign.locator(".finite-chat__thread-open"));
     const navBounds = await nav.boundingBox();
-    const scrollSource = await touchDesign.locator(".finite-chat__thread-open").boundingBox();
-    assert(navBounds && scrollSource);
-    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: scrollSource.x + 40, y: scrollSource.y + 17 }] });
+    assert(navBounds);
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [scrollSource] });
     await touchDesign.and(touch.locator('[data-dragging="true"]')).waitFor();
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: navBounds.x + 80, y: navBounds.y + navBounds.height - 8 }] });
     await touch.waitForFunction((topicId) => {
