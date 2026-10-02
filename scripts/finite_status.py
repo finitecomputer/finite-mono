@@ -736,9 +736,44 @@ def collect_runtime_assignment(project: str) -> dict[str, Any]:
     if result.returncode:
         raise CollectionError("Core Runtime assignment query failed")
     try:
-        return build_runtime_assignment(project, json.loads(result.stdout))
+        report = build_runtime_assignment(project, json.loads(result.stdout))
+        section = report["sections"]["runtime_assignment"]
+        if section["status"] == "green":
+            section["live_contact"] = collect_assignment_contact(section["assignments"][0])
+        return report
     except json.JSONDecodeError as error:
         raise CollectionError("Core Runtime assignment query returned invalid JSON") from error
+
+
+def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
+    """Observe the Core-bound published Principal even when shim State is unavailable."""
+    result = {"status": "unknown", "repair_authority": False,
+              "agent_principal_sha256": None, "matches_core_principal": False}
+    addresses = {"finite-lat-3": "10.254.3.2", "finite-lat-4": "10.254.3.3",
+                 "finite-lat-5": "10.254.3.5"}
+    endpoint = assignment.get("contact_endpoint")
+    if not isinstance(endpoint, str):
+        return result
+    parsed = urlparse(endpoint)
+    try:
+        if (parsed.scheme != "http" or parsed.hostname != addresses.get(assignment.get("source_host_id"))
+                or not parsed.port or not 49152 <= parsed.port <= 65535 or parsed.path != "/contact"
+                or parsed.username or parsed.password or parsed.query or parsed.fragment):
+            return result
+    except ValueError:
+        return result
+    observed = run_read_only(["curl", "--noproxy", "*", "--max-time", "5", "--max-filesize", "65536",
+                              "--fail", "--silent", endpoint], timeout=8)
+    try:
+        value = json.loads(observed.stdout) if observed.returncode == 0 and len(observed.stdout) <= 65536 else {}
+        principal = value.get("agent_npub", "")
+        if not isinstance(principal, str) or not re.fullmatch(r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}", principal):
+            return result
+        result.update(status="observed", agent_principal_sha256=hashlib.sha256(principal.encode()).hexdigest(),
+                      matches_core_principal=principal == assignment.get("expected_agent_npub"))
+    except (ValueError, AttributeError):
+        pass
+    return result
 
 
 def collect_kata_recovery_host() -> dict[str, Any]:

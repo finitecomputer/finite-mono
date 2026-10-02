@@ -900,6 +900,30 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                                                        guest_agent_probe=True)
         run.assert_not_called()
 
+    def test_assignment_contact_requires_host_bound_endpoint_before_network(self) -> None:
+        with mock.patch.object(finite_status, "run_read_only") as run:
+            for url in ["http://127.0.0.1:49155/contact", "http://10.254.3.5:49155/contact",
+                        "http://user@10.254.3.2:49155/contact", "http://10.254.3.2:4200/contact",
+                        "http://10.254.3.2:49155/contact?token=private"]:
+                result = finite_status.collect_assignment_contact({"source_host_id": "finite-lat-3", "contact_endpoint": url})
+                self.assertEqual(result["status"], "unknown")
+            run.assert_not_called()
+
+    def test_assignment_contact_reports_principal_mismatch_without_echoing_document(self) -> None:
+        principal = "npub1" + "q" * 58
+        assignment = {"source_host_id": "finite-lat-3", "contact_endpoint": "http://10.254.3.2:49155/contact",
+                      "expected_agent_npub": principal}
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps({"agent_npub": principal, "unrelated": "private"}), "")):
+            result = finite_status.collect_assignment_contact(assignment)
+            self.assertTrue(result["matches_core_principal"])
+            assignment["expected_agent_npub"] = "another-principal"
+            result = finite_status.collect_assignment_contact(assignment)
+            self.assertFalse(result["matches_core_principal"])
+        self.assertFalse(result["repair_authority"])
+        self.assertNotIn("private", json.dumps(result))
+        self.assertNotIn(principal, json.dumps(result))
+
     def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
         row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
                "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-3",
