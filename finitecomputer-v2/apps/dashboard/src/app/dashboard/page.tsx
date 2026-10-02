@@ -2,6 +2,7 @@ import { PaymentRecoveryNotice } from "@/components/payment-recovery-notice";
 import { paymentRecoveryPresentation } from "@/lib/payment-recovery";
 import { ManageBillingForm } from "@/components/manage-billing-form";
 import { TrialStatusPanel } from "@/components/trial-status-panel";
+import { TrialAccessMonitor } from "@/components/trial-access-monitor";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
@@ -397,6 +398,7 @@ export default async function DashboardPage({
             : "ocean-page-stack"
         }
       >
+        {billing.billing?.trial_access ? <TrialAccessMonitor blocked={billing.billing.trial_access.blocked} /> : null}
         <PendingRefresh enabled={hasPendingAgentCreation} />
         {isNewAgentFlow &&
         homeView.kind !== "agent-ready" &&

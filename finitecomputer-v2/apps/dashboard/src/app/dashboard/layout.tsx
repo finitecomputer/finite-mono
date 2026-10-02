@@ -47,7 +47,7 @@ export default async function DashboardLayout({
       saasMode={core.configured}
       viewerEmail={viewer.email}
     >
-      {billing.billing?.trial_access ? <TrialAccessMonitor /> : null}
+      {billing.billing?.trial_access ? <TrialAccessMonitor blocked={billing.billing.trial_access.blocked} excludeHome /> : null}
       {children}
     </DashboardShell>
   );
