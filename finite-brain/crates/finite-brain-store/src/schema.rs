@@ -109,6 +109,39 @@ impl BrainStore {
             )?;
         }
         tx.commit()?;
+
+        // V30 drops the three never-lived tables in its own guarded step
+        // (the V23 pattern). The audit table goes first because it carries
+        // the foreign key to brain_email_access_delegations; child-first
+        // drops need no pragma dance, so foreign_keys stays ON and the
+        // whole step stays inside one transaction. The post-commit
+        // pragma_foreign_key_check post-condition guards the step just as
+        // it guards V23.
+        let v30_applied = {
+            let tx = self.conn.transaction()?;
+            let applied = migration_applied(&tx, 30)?;
+            tx.commit()?;
+            applied
+        };
+        if !v30_applied {
+            let tx = self.conn.transaction()?;
+            tx.execute_batch(SCHEMA_V30)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![30, MIGRATION_TIMESTAMP],
+            )?;
+            tx.commit()?;
+            let violations: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pragma_foreign_key_check",
+                [],
+                |row| row.get(0),
+            )?;
+            if violations > 0 {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "schema V29 table drops left foreign key violations".to_owned(),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -318,6 +351,18 @@ impl BrainStore {
         Ok(())
     }
 }
+
+const SCHEMA_V30: &str = r#"
+-- V29 retires the three never-lived tables. The ladder below created
+-- them, but no statement in any crate ever read or wrote them, so every
+-- fresh database minted three corpses. Drop order matters: the audit
+-- table carries the foreign key to brain_email_access_delegations, so
+-- it goes first. Old migrations stay byte-stable; this drop is the only
+-- schema change.
+DROP TABLE IF EXISTS brain_email_access_delegation_audit;
+DROP TABLE IF EXISTS brain_email_access_delegations;
+DROP TABLE IF EXISTS personal_vault_bootstrap_authorizations;
+"#;
 
 const SCHEMA_V25: &str = r#"
 -- Pending Grant Wraps: the JOIN side of the departure pending-rotation
@@ -2674,6 +2719,113 @@ mod tests {
     }
 
     #[test]
+    fn migration_v30_drops_the_never_lived_tables_on_fresh_replay() {
+        let store = BrainStore::open_in_memory().unwrap();
+
+        for table in [
+            "brain_email_access_delegation_audit",
+            "brain_email_access_delegations",
+            "personal_vault_bootstrap_authorizations",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "fresh replay must not leave {table} behind");
+        }
+
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 30",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 1);
+
+        let foreign_key_failures: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_failures, 0);
+    }
+
+    #[test]
+    fn migration_v30_drops_populated_corpse_tables_on_upgrade() {
+        // A pre-V29 database still carries the three corpses, and they may
+        // even hold rows an operator inserted by hand. Recreate them with
+        // the audit child pointing at its delegation parent, rewind the V29
+        // marker, and re-run the ladder: the drops must clear them
+        // child-first with foreign_keys=ON and leave no violations.
+        let mut store = BrainStore::open_in_memory().unwrap();
+        store
+            .conn
+            .execute_batch(
+                r#"
+                DELETE FROM schema_migrations WHERE version = 30;
+                CREATE TABLE brain_email_access_delegations (
+                    id TEXT PRIMARY KEY NOT NULL
+                );
+                CREATE TABLE brain_email_access_delegation_audit (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    delegation_id TEXT NOT NULL,
+                    FOREIGN KEY (delegation_id) REFERENCES brain_email_access_delegations(id)
+                );
+                CREATE TABLE personal_vault_bootstrap_authorizations (
+                    authorization_id TEXT PRIMARY KEY NOT NULL
+                );
+                INSERT INTO brain_email_access_delegations VALUES ('delegation-1');
+                INSERT INTO brain_email_access_delegation_audit VALUES ('audit-1', 'delegation-1');
+                INSERT INTO personal_vault_bootstrap_authorizations VALUES ('authorization-1');
+                "#,
+            )
+            .unwrap();
+
+        store.apply_migrations().unwrap();
+
+        for table in [
+            "brain_email_access_delegation_audit",
+            "brain_email_access_delegations",
+            "personal_vault_bootstrap_authorizations",
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = ?1",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "V29 upgrade must drop {table}");
+        }
+
+        let version: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 30",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 1);
+
+        let foreign_key_failures: i64 = store
+            .conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(foreign_key_failures, 0);
+    }
+
+    #[test]
     fn migrates_deployed_v9_schema_and_preserves_brain_data() {
         let conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "foreign_keys", "ON").unwrap();
@@ -2787,7 +2939,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 29);
+        assert_eq!(latest_version, 30);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(
@@ -2817,6 +2969,21 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_table_count, 0);
+
+        // The V7/V8/V9 corpses existed in the deployed V9 database; the
+        // upgrade to head must drop them (V29), not carry them forward.
+        let corpse_table_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name IN (\
+                 'brain_email_access_delegation_audit', \
+                 'brain_email_access_delegations', \
+                 'personal_vault_bootstrap_authorizations')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(corpse_table_count, 0);
 
         store
             .conn
