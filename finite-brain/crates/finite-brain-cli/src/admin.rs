@@ -493,6 +493,8 @@ pub(crate) fn admin_access_change_event_with_note(
         &now,
     ];
     if let Some(note) = note {
+        // Keep name-carrying commands distinct so restoring an earlier name
+        // within the same clock second is not mistaken for an accepted replay.
         change_fields.push(note);
         change_fields.push(&nonce);
     }

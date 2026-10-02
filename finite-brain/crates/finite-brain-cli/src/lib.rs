@@ -12026,7 +12026,8 @@ mod tests {
                 } else if request_line.contains("/metadata") {
                     (
                         "200 OK",
-                        serde_json::json!({ "mountedFolders": [] }).to_string(),
+                        serde_json::json!({ "name": "Renamed Brain", "mountedFolders": [] })
+                            .to_string(),
                     )
                 } else {
                     (
@@ -12080,6 +12081,16 @@ mod tests {
         );
         let tree_state = read_working_tree_state(&tree).unwrap();
         assert_eq!(tree_state.sync.latest_sequence, 8);
+
+        // Members do not receive administrative history: refreshed metadata
+        // must update the cached label without an export or bootstrap request.
+        let export: Value =
+            read_json_file(&tree.join(".finitebrain/encrypted-sync/export.json")).unwrap();
+        assert_eq!(export["brain"]["name"], "Renamed Brain");
+        let directory: Value =
+            read_json_file(&tree.join(".finitebrain/brain-directory.json")).unwrap();
+        assert_eq!(directory["brain"]["name"], "Renamed Brain");
+        assert_eq!(directory["brain"]["id"], "brain");
 
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 2);
