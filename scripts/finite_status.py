@@ -1602,6 +1602,7 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     guest_agent = None
     restart_fence = None
     cleanup_layout = None
+    network_probe = None
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
         writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
@@ -1610,9 +1611,12 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     if guest_agent_probe:
         if __package__:
             from .kata_guest_probe import collect_guest_agent_probe
+            from .kata_network_probe import collect_kata_network_probe
         else:
             from kata_guest_probe import collect_guest_agent_probe
+            from kata_network_probe import collect_kata_network_probe
         guest_agent = collect_guest_agent_probe(agent.get("report", {}))
+        network_probe = collect_kata_network_probe(agent.get("report", {}))
     return {
         "schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
         "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
@@ -1625,6 +1629,7 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
             "guest_agent": guest_agent,
             "restart_fence": restart_fence,
             "cleanup_layout": cleanup_layout,
+            "network_probe": network_probe,
         }},
     }
 
@@ -1694,6 +1699,12 @@ def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
                       oci_config_sha256=config_sha, network_id=string(network["NetworkID"]),
                       network_created=network["NetworkCreated"], endpoints=selected,
                       oci_network_namespace_paths=network_paths, oci_hook_paths=hook_paths)
+        cgroups = {"sandbox": persist.get("SandboxCgroupPath"),
+                   "overhead": persist.get("OverheadCgroupPath"),
+                   "oci": config.get("linux", {}).get("cgroupsPath")}
+        result["cgroup_paths"] = {key: value if isinstance(value, str) and
+            re.fullmatch(r"[A-Za-z0-9_./:-]{0,4096}", value) else None
+            for key, value in cgroups.items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, StopIteration, CollectionError):
         result["reason"] = "exact retained cleanup layout unavailable"
     return result
