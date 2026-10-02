@@ -402,6 +402,18 @@ runs normally once the probe is green. If prepare-time or execute-time
 provider facts drifted instead, re-`--prepare` and approve the new hash;
 never edit retained evidence.
 
+To investigate one skipped assignment on its Runner host, use
+`scripts/finite-status --runtime-lifecycle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_ID`.
+Establish all three identifiers from Core and the retained plan first. This
+read-only mode reports the full lifecycle probe, including failed checks,
+without requiring a local Core database credential or stopping the guest. It
+reports unknown if the probe is unavailable, malformed, or names a different
+assignment. A serving `/contact` endpoint does not override a failed control
+channel check. For an orphaned task, it also reads bounded retained sandbox
+and `/proc` metadata to observe the VMM's executable, sandbox match and process
+start time. These observations never confer authority to signal a PID. The
+command diagnoses provider state; it does not authorize repair or replacement.
+
 For an exactly-one-agent emergency where the probe verdict is understood and
 the upgrade must proceed anyway, add `--probe-override` to the execute
 command. It requires exactly one `--roll-project-id`, hard-refuses

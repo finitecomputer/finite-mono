@@ -1252,7 +1252,7 @@ def probe_agent_entry(
 
 
 def collect_lifecycle_probe(
-    runtimes: list[dict[str, Any]], hostname: str
+    runtimes: list[dict[str, Any]], hostname: str, *, retain_report: bool = False
 ) -> dict[str, Any]:
     """Probe lifecycle-control health for this host's active Agents.
 
@@ -1312,7 +1312,10 @@ def collect_lifecycle_probe(
             row.get("source_machine_id") or "",
         ]
         try:
-            result = run_read_only(command, environment=environment)
+            # The installed probe has a 60s overall budget plus a bounded final
+            # provider read. Target diagnosis must wait for its findings.
+            result = run_read_only(command, environment=environment,
+                                   timeout=90 if retain_report else 30)
         except CollectionError as error:
             raw["agents"][runtime_id] = probe_agent_entry(
                 "unknown", "probe_unavailable", str(error)
@@ -1332,17 +1335,110 @@ def collect_lifecycle_probe(
             )
             continue
         if (
-            report.get("schema") != LIFECYCLE_PROBE_SCHEMA
+            not isinstance(report, dict)
+            or report.get("schema") != LIFECYCLE_PROBE_SCHEMA
             or report.get("verdict") not in LIFECYCLE_VERDICTS
         ):
             raw["agents"][runtime_id] = probe_agent_entry(
                 "unknown", "probe_invalid", "unrecognized probe report shape"
             )
             continue
+        if retain_report and (
+            not isinstance(report.get("runtime"), dict)
+            or any(report["runtime"].get(key) != row.get(key)
+                   for key in ("project_id", "agent_runtime_id", "source_machine_id"))
+            or not isinstance(report.get("checks"), list)
+        ):
+            raw["agents"][runtime_id] = probe_agent_entry(
+                "unknown", "probe_invalid", "probe target does not match requested Runtime"
+            )
+            continue
         raw["agents"][runtime_id] = probe_agent_entry(
             report["verdict"], report.get("reason")
         )
+        if retain_report:
+            raw["agents"][runtime_id]["report"] = report
     return raw
+
+
+def collect_runtime_lifecycle(project: str, runtime: str, machine: str) -> dict[str, Any]:
+    """Inspect one exact provider assignment without requiring Core credentials."""
+    hostname = socket.gethostname().split(".", 1)[0]
+    raw = collect_lifecycle_probe([{
+        "project_id": project, "agent_runtime_id": runtime,
+        "source_machine_id": machine, "source_host_id": hostname,
+        "link_state": "active",
+    }], hostname, retain_report=True)
+    agent = raw["agents"].get(runtime, probe_agent_entry(
+        "unknown", "probe_unavailable", "; ".join(raw["errors"])
+    ))
+    verdict = agent["verdict"]
+    status = "green" if verdict == "operable" else "unknown" if verdict == "unknown" else "red"
+    orphan_vmm = None
+    if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
+        orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
+    return {
+        "schema_version": "finite.status.v1", "generated_at": isoformat(utc_now()),
+        "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
+        "sections": {"runtime_lifecycle": {
+            "status": status, "project_id": project, "agent_runtime_id": runtime,
+            "source_machine_id": machine, "source_host_id": hostname,
+            "probe": agent, "collection_errors": raw["errors"],
+            "orphan_vmm": orphan_vmm,
+        }},
+    }
+
+
+def collect_orphan_vmm(report: dict[str, Any]) -> dict[str, Any]:
+    """Observe a retained sandbox's VMM without treating a PID as repair authority."""
+    unknown: dict[str, Any] = {"status": "unknown", "repair_authority": False}
+    try:
+        canonical = next(check for check in report["checks"]
+                         if check["name"] == "canonical_handle" and check["status"] == "pass")
+        container = canonical["evidence"]["container_id"]
+        if not isinstance(container, str) or not re.fullmatch(r"[a-f0-9]{64}", container):
+            raise ValueError("canonical container identifier is invalid")
+        roots = {"FC_RUNNER_KATA_SANDBOX_ROOT": "/run/vc/sbs", "FC_RUNNER_KATA_PROC_ROOT": "/proc"}
+        for key in ("shared_environment_file", "environment_file"):
+            roots.update(read_environment_values(Path(CONTRACT["runner"][key]), set(roots)))
+
+        def bounded(path: Path, limit: int) -> bytes:
+            with path.open("rb") as source:
+                value = source.read(limit + 1)
+            if len(value) > limit:
+                raise ValueError("bounded forensic read exceeded its limit")
+            return value
+
+        persist = json.loads(bounded(Path(roots["FC_RUNNER_KATA_SANDBOX_ROOT"]) / container / "persist.json", 1024 * 1024))
+        if persist.get("SandboxContainer") != container:
+            raise ValueError("retained sandbox does not match the canonical container")
+        pid = persist.get("HypervisorState", {}).get("Pid")
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("retained sandbox has no valid VMM PID")
+        process = Path(roots["FC_RUNNER_KATA_PROC_ROOT"]) / str(pid)
+        try:
+            before = bounded(process / "stat", 4096)
+            comm = bounded(process / "comm", 4096).decode().strip()
+            command = bounded(process / "cmdline", 65536)
+            executable = os.readlink(process / "exe")
+            after = bounded(process / "stat", 4096)
+        except FileNotFoundError:
+            return {**unknown, "status": "unavailable", "pid": pid,
+                    "reason": "process absent or disappeared during observation"}
+        # Field 22 is starttime; split after the last ')' because comm may contain spaces.
+        start_before = before.rsplit(b")", 1)[1].split()[19]
+        start_after = after.rsplit(b")", 1)[1].split()[19]
+        if int(start_before) < 0 or int(start_after) < 0:
+            raise ValueError("invalid VMM process start time")
+        if start_before != start_after:
+            raise ValueError("VMM PID changed identity during observation")
+        identified = bool(re.fullmatch(r"\.?qemu-system-[A-Za-z0-9_-]+", Path(executable).name)
+                          and container.encode() in command)
+        return {**unknown, "status": "observed", "container_id": container,
+                "pid": pid, "comm": comm, "executable": executable,
+                "starttime_ticks": start_before.decode(), "matches_sandbox": identified}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, IndexError, StopIteration, CollectionError) as error:
+        return {**unknown, "reason": f"orphan VMM observation unavailable: {type(error).__name__}"}
 
 
 # Scratch-copy ceiling for the SQLite probes: a status command must stay
@@ -3303,6 +3399,9 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
                       help="compare one owned Kata Runtime's direct and published identity routes")
+    mode.add_argument("--runtime-lifecycle", nargs=3,
+                      metavar=("PROJECT_ID", "AGENT_RUNTIME_ID", "SOURCE_MACHINE_ID"),
+                      help="inspect one exact Kata assignment's lifecycle control without stopping it; emits JSON")
     parser.add_argument("--expected-agent-principal-sha256",
                         help="compare both routes against an independently established Principal hash")
     mode.add_argument(
@@ -3332,6 +3431,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.runtime_lifecycle and any(
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value)
+        for value in options.runtime_lifecycle
+    ):
+        parser.error("--runtime-lifecycle requires three simple identifiers")
     if options.runtime_route and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_route):
         parser.error("--runtime-route requires a simple source machine identifier")
     if options.expected_agent_principal_sha256 and (
@@ -3352,6 +3456,8 @@ def main(arguments: list[str] | None = None) -> None:
     try:
         if options.runtime_route:
             report = collect_runtime_route(options.runtime_route, options.expected_agent_principal_sha256)
+        elif options.runtime_lifecycle:
+            report = collect_runtime_lifecycle(*options.runtime_lifecycle)
         elif options.tinfoil:
             from finite_tinfoil_status import collect
 
@@ -3390,6 +3496,7 @@ def main(arguments: list[str] | None = None) -> None:
         or options.tinfoil
         or options.finite_private_usage
         or options.runtime_route
+        or options.runtime_lifecycle
     ):
         print(json.dumps(report, indent=2, sort_keys=True))
     else:

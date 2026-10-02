@@ -799,6 +799,87 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertEqual(command[:2], ["/bin/sh", "lifecycle-probe"])
         self.assertIn("machine-a", command)
 
+    def test_target_lifecycle_preserves_findings_and_exit_severity(self) -> None:
+        for verdict, status, code in [("operable", "green", 0), ("inoperable", "red", 1), ("unknown", "unknown", 2)]:
+            probe = json.loads(self.probe_report(verdict, "control_channel_unavailable"))
+            probe["checks"] = [{"name": "shim_control", "status": "fail", "detail": "bounded timeout"}]
+            with (
+                mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
+                mock.patch.object(finite_status.socket, "gethostname", return_value="finite-lat-1"),
+                mock.patch.object(finite_status, "read_environment_values", return_value={}),
+                mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, json.dumps(probe), "")) as run,
+            ):
+                report = finite_status.collect_runtime_lifecycle("project-a", "runtime-a", "machine-a")
+            self.assertEqual(report["overall_status"], status)
+            self.assertEqual(report["exit_code"], code)
+            self.assertEqual(report["sections"]["runtime_lifecycle"]["probe"]["report"], probe)
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.args[0][1], "lifecycle-probe")
+
+    def test_target_lifecycle_rejects_malformed_or_wrong_target_green_reports(self) -> None:
+        wrong = json.loads(self.probe_report("operable"))
+        wrong["runtime"]["source_machine_id"] = "other-machine"
+        for probe in [[], wrong, {"schema": finite_status.LIFECYCLE_PROBE_SCHEMA, "verdict": "operable"}]:
+            with (
+                mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
+                mock.patch.object(finite_status, "read_environment_values", return_value={}),
+                mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess([], 0, json.dumps(probe), "")),
+            ):
+                raw = finite_status.collect_lifecycle_probe([self.runtime_row("runtime-a")], "finite-lat-1", retain_report=True)
+            self.assertEqual(raw["agents"]["runtime-a"]["verdict"], "unknown")
+            self.assertEqual(raw["agents"]["runtime-a"]["reason"], "probe_invalid")
+
+    def test_target_lifecycle_cli_rejects_unsafe_identifiers_and_conflicting_modes(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            for arguments in [["--runtime-lifecycle", "project", "runtime", "../machine"],
+                              ["--runtime-lifecycle", "project", "runtime", "machine", "--runtime-route", "machine"]]:
+                with self.assertRaises(SystemExit) as failure:
+                    finite_status.parse_args(arguments)
+                self.assertEqual(failure.exception.code, 2)
+
+    def test_orphan_vmm_observation_is_bounded_and_does_not_authorize_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            container = "a" * 64
+            sandbox = root / "sandbox" / container
+            process = root / "proc" / "123"
+            sandbox.mkdir(parents=True)
+            process.mkdir(parents=True)
+            persist = {"SandboxContainer": container, "HypervisorState": {"Pid": 123}}
+            (sandbox / "persist.json").write_text(json.dumps(persist))
+            (process / "stat").write_text("123 (qemu) S " + "0 " * 18 + "333\n")
+            (process / "comm").write_text(".qemu-system-x8\n")
+            (process / "cmdline").write_bytes(b"qemu\0-name\0sandbox-" + container.encode())
+            (process / "exe").symlink_to("/nix/store/example/bin/.qemu-system-x86_64")
+            report = {"checks": [{"name": "canonical_handle", "status": "pass", "evidence": {"container_id": container}}]}
+            roots = {"FC_RUNNER_KATA_SANDBOX_ROOT": str(root / "sandbox"), "FC_RUNNER_KATA_PROC_ROOT": str(root / "proc")}
+            with mock.patch.object(finite_status, "read_environment_values", return_value=roots):
+                result = finite_status.collect_orphan_vmm(report)
+                self.assertEqual(result["status"], "observed")
+                self.assertTrue(result["matches_sandbox"])
+                self.assertEqual(result["starttime_ticks"], "333")
+                self.assertFalse(result["repair_authority"])
+                real_open = Path.open
+                stat_reads = 0
+
+                def reused_pid(path, *args, **kwargs):
+                    nonlocal stat_reads
+                    if path == process / "stat":
+                        stat_reads += 1
+                        return io.BytesIO(("123 (qemu) S " + "0 " * 18 + str(333 + stat_reads) + "\n").encode())
+                    return real_open(path, *args, **kwargs)
+
+                with mock.patch.object(Path, "open", reused_pid):
+                    self.assertEqual(finite_status.collect_orphan_vmm(report)["status"], "unknown")
+                # A reused PID or unrelated process is never identified as this sandbox.
+                (process / "cmdline").write_bytes(b"qemu\0other-sandbox")
+                self.assertFalse(finite_status.collect_orphan_vmm(report)["matches_sandbox"])
+                persist["SandboxContainer"] = "b" * 64
+                (sandbox / "persist.json").write_text(json.dumps(persist))
+                self.assertEqual(finite_status.collect_orphan_vmm(report)["status"], "unknown")
+                (sandbox / "persist.json").write_bytes(b" " * (1024 * 1024 + 1))
+                self.assertEqual(finite_status.collect_orphan_vmm(report)["status"], "unknown")
+
     def test_lifecycle_probe_reads_shared_defaults_then_operator_overrides(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             shared = Path(directory) / "shared.env"
