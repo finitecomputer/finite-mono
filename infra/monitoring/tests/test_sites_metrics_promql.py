@@ -10,10 +10,16 @@ DASHBOARD = ROOT / "infra/monitoring/grafana/dashboards/finite-production-mvp.js
 SOURCE = 'job="finite-sites-metrics",instance="finite.site"'
 
 
+def all_panels(panels):
+    for panel in panels:
+        yield panel
+        yield from all_panels(panel.get("panels", []))
+
+
 def main():
     panels = {
         p["id"]: p
-        for p in json.loads(DASHBOARD.read_text())["panels"]
+        for p in all_panels(json.loads(DASHBOARD.read_text())["panels"])
         if p["id"] in (27, 28, 29, 30)
     }
     assert set(panels) == {27, 28, 29, 30}

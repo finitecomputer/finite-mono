@@ -323,6 +323,12 @@ def panel_targets(panel: dict[str, Any]) -> list[dict[str, Any]]:
     return panel.get("targets", [])
 
 
+def all_panels(panels: list[dict[str, Any]]):
+    for panel in panels:
+        yield panel
+        yield from all_panels(panel.get("panels", []))
+
+
 def panel_rect(panel: dict[str, Any]) -> tuple[int, int, int, int]:
     grid = panel["gridPos"]
     return (grid["x"], grid["y"], grid["x"] + grid["w"], grid["y"] + grid["h"])
@@ -340,7 +346,7 @@ def overlaps(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 
 def check_dashboard_layout(dashboard: dict[str, Any], subject: str) -> None:
-    panels = dashboard["panels"]
+    panels = list(all_panels(dashboard["panels"]))
     panel_ids = [panel["id"] for panel in panels]
     require(
         len(panel_ids) == len(set(panel_ids)), f"{subject} panel IDs must be unique"
@@ -361,12 +367,18 @@ def check_dashboard_layout(dashboard: dict[str, Any], subject: str) -> None:
             f"{subject} panel {panel['title']!r} has an empty grid area",
         )
 
-    for index, left in enumerate(panels):
-        for right in panels[index + 1 :]:
-            require(
-                not overlaps(left, right),
-                f"{subject} panels overlap: {left['title']!r} and {right['title']!r}",
-            )
+    # Collapsed rows store children at their expanded positions. Those may
+    # overlap later top-level rows, but siblings must never overlap.
+    def check_siblings(siblings):
+        for index, left in enumerate(siblings):
+            for right in siblings[index + 1 :]:
+                require(
+                    not overlaps(left, right),
+                    f"{subject} panels overlap: {left['title']!r} and {right['title']!r}",
+                )
+            check_siblings(left.get("panels", []))
+
+    check_siblings(dashboard["panels"])
 
 
 def check_mvp_dashboard_contract() -> None:
@@ -375,8 +387,24 @@ def check_mvp_dashboard_contract() -> None:
         dashboard["refresh"] == "30s", "MVP Grafana dashboard must refresh every 30s"
     )
     check_dashboard_layout(dashboard, "MVP Grafana dashboard")
-    panels = dashboard["panels"]
+    visible_ids = {panel["id"] for panel in dashboard["panels"]}
+    require(
+        {1, 2, 4, 7, 8, 9, 11, 13, 15, 17, 18, 19, 24, 26, 29} <= visible_ids,
+        "overview health, capacity, errors and telemetry availability must stay visible",
+    )
+    panels = list(all_panels(dashboard["panels"]))
     panels_by_title = {panel["title"]: panel for panel in panels}
+    panels_by_id = {panel["id"]: panel for panel in panels}
+    for panel_id, window in ((2, "24h"), (3, "7d")):
+        panel = panels_by_id[panel_id]
+        require(
+            panel["type"] == "state-timeline" and panel["timeFrom"] == window,
+            "public availability must retain separate service lanes and time windows",
+        )
+        require(
+            panel["fieldConfig"]["defaults"]["custom"]["spanNulls"] is False,
+            "public availability must not bridge missing data",
+        )
     for title in HOST_PANEL_TITLES:
         require(title in panels_by_title, f"missing Grafana host panel {title!r}")
     for title in LOG_PANEL_TITLES:

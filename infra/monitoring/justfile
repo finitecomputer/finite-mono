@@ -10,6 +10,7 @@ monitoring-nixos-contract:
     cd ../.. && bash -n infra/monitoring/tinfoil/bootstrap-collector
     cd ../.. && python3 infra/monitoring/deploy_dashboards.py validate
     cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_deploy_dashboards.py'
+    cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_dashboard_layout.py'
     cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_install_ci_access.py'
     cd ../.. && python3 -m unittest discover -s infra/monitoring/tests -p 'test_provision_tinfoil.py'
     cd ../.. && python3 scripts/check_monitoring_nixos_contract.py
