@@ -144,7 +144,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
+        "w": 10,
         "x": 0,
         "y": 5
       },
@@ -167,7 +167,7 @@
         "wideLayout": true,
         "text": {
           "titleSize": 11,
-          "valueSize": 22
+          "valueSize": 18
         }
       },
       "pluginVersion": "13.0.2",
@@ -231,8 +231,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 8,
+        "w": 10,
+        "x": 10,
         "y": 5
       },
       "id": 26,
@@ -254,7 +254,7 @@
         "wideLayout": true,
         "text": {
           "titleSize": 11,
-          "valueSize": 22
+          "valueSize": 18
         }
       },
       "pluginVersion": "13.0.2",
@@ -316,8 +316,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 16,
+        "w": 4,
+        "x": 20,
         "y": 5
       },
       "id": 29,
@@ -446,7 +446,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "mode": "palette-classic"
           },
           "custom": {
             "lineWidth": 0,
@@ -1389,7 +1389,7 @@
           "fieldConfig": {
             "defaults": {
               "color": {
-                "mode": "thresholds"
+                "mode": "palette-classic"
               },
               "custom": {
                 "lineWidth": 0,
