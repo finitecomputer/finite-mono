@@ -22,6 +22,15 @@ production state.
 | Finite Private (Tinfoil) | [`tinfoil/model-inventory.md`](tinfoil/model-inventory.md) plus checked-in candidate configs under `infra/tinfoil/` | `just finite-private-deepseek-contract` |
 | Phala canary Runtime | `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/phala-runner.env` | the worker credential environment supplies the pin; [`runbooks/phala-confidential-runner.md`](runbooks/phala-confidential-runner.md) |
 
+## 2026-10-02 — Brain 0.6.0 release
+
+Shipped [fbrain 0.6.0](https://github.com/finitecomputer/finite-releases/releases/tag/fbrain/v0.6.0)
+for administrator Brain renaming, invited-Folder sync recovery and one-hour
+invitation transit tolerance ([source PR #1037](https://github.com/finitecomputer/finite-mono/pull/1037)).
+The approved existing-Agent rollout completed at 2026-10-02T10:59:44Z, preserving four
+explicitly excluded Runtimes. Core's per-Runtime records remain the image
+authority; the retained compatibility boundaries below apply to this release.
+
 ## Compatibility boundaries
 
 Hosted Agents pin their Runtime image at launch and do not auto-update. Guarded
