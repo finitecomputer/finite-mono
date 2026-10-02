@@ -14,6 +14,15 @@
 let
   originCert = "/etc/finite-saas/certs/finite-chat-origin.pem";
   originKey = "/etc/finite-saas/certs/finite-chat-origin.key";
+  # Hold requests while an upstream restarts during a deploy instead of
+  # returning 502 at once (FIN-156). Caddy retries a failed connection for
+  # every method; a request that reached the upstream is retried only if it is
+  # a GET. A dead upstream still returns 502 once the window ends, so keep
+  # windows short and use longer ones only for slow-restarting services.
+  holdDuringRestart = window: ''
+    lb_try_duration ${window}
+    lb_try_interval 250ms
+  '';
   sitesRedirects = ''
     # Required private exact-host map; missing/unreadable mappings fail validation.
     import /etc/finite/sites-redirects.caddy
@@ -33,14 +42,20 @@ in
     # Replaces the fragile hardcoded-ClusterIP Caddyfile on old lat1.
     virtualHosts."finite.computer".extraConfig = ''
       handle /internal/finite-private/* {
-        reverse_proxy 127.0.0.1:4200
+        reverse_proxy 127.0.0.1:4200 {
+          ${holdDuringRestart "30s"}
+        }
       }
       @finitePrivateUserApi path /api/core/v1/finite-private/usage /api/core/v1/finite-private/usage/reset
       handle @finitePrivateUserApi {
-        reverse_proxy 127.0.0.1:4200
+        reverse_proxy 127.0.0.1:4200 {
+          ${holdDuringRestart "30s"}
+        }
       }
       handle {
-        reverse_proxy 127.0.0.1:3000
+        reverse_proxy 127.0.0.1:3000 {
+          ${holdDuringRestart "15s"}
+        }
       }
     '';
 
@@ -48,7 +63,9 @@ in
     # embedded through finite.computer/client so the WorkOS session cookie is
     # never broadened to sibling subdomains.
     virtualHosts."brain.finite.computer".extraConfig = ''
-      reverse_proxy 127.0.0.1:3015
+      reverse_proxy 127.0.0.1:3015 {
+        ${holdDuringRestart "15s"}
+      }
     '';
 
     # Canonical Finite Identity signing/API origin. The edge is dumb on
@@ -59,7 +76,9 @@ in
     # exist only on the loopback full router (127.0.0.1:8790). The NIP-05
     # CORS header is set by the service, not here.
     virtualHosts."identity.finite.vip".extraConfig = ''
-      reverse_proxy 127.0.0.1:8791
+      reverse_proxy 127.0.0.1:8791 {
+        ${holdDuringRestart "15s"}
+      }
     '';
 
     # Public Chat listener. See modules/finitechat-server.nix.
@@ -78,6 +97,7 @@ in
         transport http {
           keepalive 10s
         }
+        ${holdDuringRestart "30s"}
       }
     '';
 

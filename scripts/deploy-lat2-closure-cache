@@ -239,6 +239,12 @@ if [[ -n "$unexpected_units" ]]; then
   exit 75
 fi
 
+# Both modes pull before any switch, so activation never downloads the image
+# while the old dashboard container is already stopped.
+echo "==> pre-pulling the candidate dashboard image on finite-lat-2"
+ssh -o BatchMode=yes "$LAT2" bash -s -- "$SYSTEM" \
+  < infra/nixos/scripts/prepull-lat2-dashboard-image
+
 if [[ "$mode" == "prepare" ]]; then
   echo "==> PREPARED rev=$REV (no activation performed)"
   exit 0

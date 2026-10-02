@@ -554,6 +554,8 @@ jobs:
         run: nix develop --command just sites-backup-contract
       - name: Sites content redirect contract
         run: nix shell --inputs-from . nixpkgs#caddy --command python3 scripts/tests/test_sites_redirects.py
+      - name: Edge restart hold contract
+        run: nix shell --inputs-from . nixpkgs#caddy --command python3 scripts/tests/test_caddy_restart_hold.py
       - name: Litestream recovery contract
         run: nix develop --command just litestream-recovery-contract
       - name: lat1 secret bootstrap contract

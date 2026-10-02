@@ -135,8 +135,9 @@ Fleet scope requires both `--roll-all` and an explicit
 
 2. Prepare only that artifact. The deploy script validates the manifest, proves
    `REV` is on `origin/main`, realizes the exact `SYSTEM` path on lat2 from the
-   artifact cache with local builds disabled, runs dry activation, and refuses
-   unexpected app-plane unit changes:
+   artifact cache with local builds disabled, runs dry activation, refuses
+   unexpected app-plane unit changes, and pulls the candidate's pinned
+   dashboard image so activation never downloads it mid-restart:
 
    ```sh
    just deploy-lat2-closure "$ARTIFACT_DIR" --prepare

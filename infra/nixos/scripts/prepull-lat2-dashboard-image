@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Pull the candidate closure's pinned dashboard image before the switch.
+# The dashboard unit runs `podman run --pull missing`, so a new digest is
+# otherwise downloaded after the old container stops, inside the outage
+# (FIN-156). Runs on finite-lat-2; reads the image from the candidate unit so
+# it pulls exactly the bytes activation will start.
+set -euo pipefail
+
+if [[ $# -ne 1 ]]; then
+  echo "usage: $0 <candidate-system-path>" >&2
+  exit 64
+fi
+system="$1"
+
+unit="$system/etc/systemd/system/podman-finite-saas-dashboard.service"
+start_script="$(sed -n 's/^ExecStart=\([^ ]*\).*/\1/p' "$unit")"
+if [[ -z "$start_script" || ! -f "$start_script" ]]; then
+  echo "candidate dashboard unit has no readable ExecStart: $unit" >&2
+  exit 1
+fi
+
+images="$(
+  grep -oE 'ghcr\.io/finitecomputer/finite-saas-dashboard@sha256:[0-9a-f]{64}' "$start_script" \
+    | sort -u || true
+)"
+if [[ -z "$images" || "$images" == *$'\n'* ]]; then
+  echo "candidate dashboard unit must name exactly one pinned dashboard image; found:" >&2
+  printf '%s\n' "${images:-<none>}" >&2
+  exit 1
+fi
+
+if podman image exists "$images"; then
+  echo "dashboard image already present: $images"
+else
+  podman pull "$images"
+fi
