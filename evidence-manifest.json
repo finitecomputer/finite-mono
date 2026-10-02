@@ -1,0 +1,138 @@
+{
+  "synthetic": true,
+  "production_access_used": false,
+  "baseline_commit": "ec5668b4",
+  "dashboard_uid": "finite-production-mvp",
+  "datasource_uids": [
+    "finite-prometheus",
+    "finite-loki"
+  ],
+  "render_engine": "Real Grafana 13.0.2 in Docker; headless Chromium via preinstalled Python Playwright",
+  "versions": {
+    "grafana": "13.0.2",
+    "prometheus": "3.13.2",
+    "loki": "3.5.8"
+  },
+  "viewport": {
+    "width": 1600,
+    "height": 1100,
+    "device_scale_factor": 1
+  },
+  "comparison_time": {
+    "from": 1790893380000,
+    "to": 1790979780000,
+    "timezone": "UTC",
+    "synthetic": true
+  },
+  "seed": {
+    "synthetic": true,
+    "series": 193,
+    "samples_per_series": 4609,
+    "from": 1790374980,
+    "to": 1790979780,
+    "conditions": [
+      "finite.site has no probe_success samples between 16:23 and 17:23 UTC (synthetic missing-data gap)",
+      "brain public endpoint down in last hour",
+      "chat latency elevated in last two hours",
+      "finite-lat-5 scrape down in last 90 minutes",
+      "finite-lat-3 high CPU and thermal pressure",
+      "finite-lat-2 high memory use",
+      "finite-lat-4 /data 96% used and read only; network errors",
+      "sites counts and 30 daily cohorts",
+      "one old runtime artifact and component version drift"
+    ]
+  },
+  "checks": {
+    "prometheus_query_targets": 32,
+    "all_prometheus_targets_nonempty_at_frozen_end": true,
+    "collapsed_rows_expanded": 5,
+    "nested_original_panels_rendered": 15,
+    "deep_links_verified": [
+      30,
+      21
+    ],
+    "browser_page_errors": 0,
+    "grafana_datasource_query_errors": 0,
+    "missing_data_gap_returned_no_series": true,
+    "state_timeline_five_services_and_unbridged_gap_visually_inspected": true,
+    "state_timeline_UP_DOWN_values_visually_inspected_in_full_panel": true,
+    "relative_seven_day_request_ms": [
+      604800000
+    ]
+  },
+  "limitations": [
+    "Data is synthetic local fixture data; screenshots are genuine Grafana renders, not production observations.",
+    "The matching comparison uses a fixed absolute 24-hour range, which Grafana applies in preference to per-panel relative time overrides. A separate relative-time screenshot/request check verifies the 7-day panel override.",
+    "Sites history seeds 30 daily date cohorts rather than 90; the original 90-day query contract is preserved.",
+    "State timeline may clip an inline label in a short outage segment at overview width; the full panel render shows DOWN in full.",
+    "No agent-browser executable was available; the existing Playwright/Chromium runtime was used without installing host packages."
+  ],
+  "source_sha256": {
+    "baseline.json": "abaa69c65d0a5f2fe0615a74adca4197f414cc028694fe9a1963659c30b624bc",
+    "candidate.json": "2d5537d506f9bcdebc30c2ed3a47cc5e2c434ed41bce43f04eaea7779c648cf3"
+  },
+  "screenshots": [
+    {
+      "file": "after-synthetic-collapsed-rows.png",
+      "sha256": "01602ddf086281ed31ebcbf896e0b2ff182d0d39801b6fbde114de60f94f9b50",
+      "bytes": 196181
+    },
+    {
+      "file": "after-synthetic-deeplink-21.png",
+      "sha256": "246661f09d8b2099265f08dea5d0c69da8bd9e9d5747922013983d8f25c0f989",
+      "bytes": 81469
+    },
+    {
+      "file": "after-synthetic-deeplink-30.png",
+      "sha256": "a37a23155568599de854ef6bd77fa74f72835ea1e69585107a36c1423d8fb706",
+      "bytes": 64497
+    },
+    {
+      "file": "after-synthetic-expanded-row-32.png",
+      "sha256": "8869ad878328596eb719927dc35ee945830df074e98e257b13d437a059defa97",
+      "bytes": 176582
+    },
+    {
+      "file": "after-synthetic-expanded-row-33.png",
+      "sha256": "27256b6de4fa5b23d2e669f26c9a4f4f6d9e6fe6841c952602c7b395e2a357e6",
+      "bytes": 100181
+    },
+    {
+      "file": "after-synthetic-expanded-row-34.png",
+      "sha256": "0a3cd70bbdd61fa8da02748031186aa68e9ce37ec967350260442e3304cc4a24",
+      "bytes": 118540
+    },
+    {
+      "file": "after-synthetic-expanded-row-35.png",
+      "sha256": "f30a60f1655ac034401b0d846cfd4632b997b7832b5f5cb3fa8421bb856fdcf7",
+      "bytes": 144191
+    },
+    {
+      "file": "after-synthetic-expanded-row-36.png",
+      "sha256": "6b5c5644208502ba4350e7ef415d74bc37527bed704164a4d34647b0bd1f7757",
+      "bytes": 213090
+    },
+    {
+      "file": "after-synthetic-overview.png",
+      "sha256": "f0c27630e4ede813d1c9203c5d07d50629c4a6168bd4942fb0d4443a650e5457",
+      "bytes": 319449
+    },
+    {
+      "file": "after-synthetic-relative-7-days.png",
+      "sha256": "54af439e9bf50b242d3e8c68ca389f87b6f1da1f1fedaf813e6277bc65739935",
+      "bytes": 52110
+    },
+    {
+      "file": "after-synthetic-uptime-detail.png",
+      "sha256": "a6f84bc4c1bb32fdbcfd92cdd93d25f6ba2dbffa9aae50da0db6214159a8567b",
+      "bytes": 52600
+    },
+    {
+      "file": "before-synthetic-overview.png",
+      "sha256": "5dca0eae0d0a67ee39b0353d50344c954602c73251421fbbafd1b84aa38cfcb9",
+      "bytes": 218000
+    }
+  ],
+  "candidate_commit": "9c0277ad",
+  "fixture_services_stopped": true
+}
