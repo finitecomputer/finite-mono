@@ -27,6 +27,9 @@ env:
   NIX_CONFIG: |
     access-tokens = github.com=${{ github.token }}
 
+# Cache downloads on these runners have failed with HTTP/2 framing errors and
+# HTTP 416 on resumed transfers. Configure every Nix client and daemon through
+# the installer; retain HTTPS, cache signatures, and all existing checks.
 jobs:
   source-structure:
     name: Source structure
@@ -34,6 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -87,6 +93,9 @@ jobs:
         with:
           fetch-depth: 0
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -188,6 +197,9 @@ jobs:
         run: pnpm test
 
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
         if: needs.changes.outputs.run_dashboard_browser == 'true'
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.outputs.run_dashboard_browser == 'true'
@@ -258,6 +270,9 @@ jobs:
           python-version: "3.13"
 
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
 
       - name: Select Cachix push mode
         id: cachix
@@ -464,6 +479,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -480,6 +498,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -496,6 +517,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -515,6 +539,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -587,6 +614,9 @@ jobs:
           # path keeps their artifacts from poisoning this package checkout.
           path: nix-packages-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Select Cachix push mode
         id: cachix
         env:
@@ -801,6 +831,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
@@ -841,6 +874,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
       - name: Configure Cachix read-only cache
         uses: cachix/cachix-action@v17
         with:
