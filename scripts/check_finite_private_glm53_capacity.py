@@ -161,6 +161,7 @@ def request_once(
     first_output_at: float | None = None
     completion_tokens = 0
     saw_done = False
+    saw_expected_model = False
     request = urllib.request.Request(
         f"{args.url.rstrip('/')}/v1/chat/completions",
         data=json.dumps(make_payload(args, index, run_tag)).encode(),
@@ -184,6 +185,11 @@ def request_once(
                     saw_done = True
                     continue
                 event = json.loads(data)
+                expected_model = getattr(args, "expected_model", None)
+                if expected_model and event.get("model") not in (None, expected_model):
+                    return RequestResult(error="stream returned unexpected model")
+                if expected_model and event.get("model") == expected_model:
+                    saw_expected_model = True
                 if first_output_at is None and event_has_output(event):
                     first_output_at = time.perf_counter()
                 usage = event.get("usage")
@@ -197,6 +203,8 @@ def request_once(
     except Exception as error:  # The report must retain every transport failure.
         return RequestResult(error=repr(error))
     ended = time.perf_counter()
+    if getattr(args, "expected_model", None) and not saw_expected_model:
+        return RequestResult(error="stream lacked expected model identity")
     if first_output_at is None:
         return RequestResult(error="stream contained no output delta")
     if not saw_done:
@@ -343,6 +351,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", required=True, help="OpenAI-compatible /v1 base URL")
     parser.add_argument("--model", default=MODEL)
+    parser.add_argument("--expected-model", help="Reject streams identifying another model")
     parser.add_argument("--api-key-env", default="FINITE_PRIVATE_CANARY_API_KEY")
     parser.add_argument(
         "--concurrency", type=parse_concurrency, default=(1, 32, 64, 120)

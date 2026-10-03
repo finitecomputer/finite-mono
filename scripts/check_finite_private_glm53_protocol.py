@@ -533,7 +533,9 @@ def run_gate(
 
 
 def main() -> int:
+    global MODEL
     parser = argparse.ArgumentParser()
+    parser.add_argument("--model", default=MODEL, help="Expected served model identity")
     parser.add_argument(
         "--endpoint", required=True, help="OpenAI-compatible /v1 base URL"
     )
@@ -551,6 +553,7 @@ def main() -> int:
         ),
     )
     arguments = parser.parse_args()
+    MODEL = arguments.model
     api_key = os.environ.get(arguments.api_key_env, "")
     if not api_key:
         parser.error(f"{arguments.api_key_env} is required")
