@@ -35,3 +35,47 @@ test("the global New chat target comes only from canonical topics", () => {
   );
   assert.equal(canonicalNewChatTopic([]), null);
 });
+
+test("sidebar placement keeps canonical identity and handles Home, empty, unavailable, and legacy destinations", async () => {
+  const { sidebarTopics, sidebarChatKey } = await import("@/lib/hosted-web-chat-topics");
+  const chat = (id: string, destination?: string, position = "AV") => ({
+    chat_id: id, title: id, archived: false, active: false, unread_count: 2,
+    message_count: 3, started_seq: 1, updated_seq: 4, last_message_preview: "history",
+    ...(destination ? { placement: { topic_id: destination, position } } : {}),
+  });
+  const home = { ...topic("room", "home"), chats: [chat("same-id", "home", "BV")] };
+  const source = { ...topic("room", "source"), chats: [chat("same-id", "home"), chat("fallback", "deleted", "CV")] };
+  const empty = topic("room", "empty");
+  const original = structuredClone([home, source, empty]);
+  const result = sidebarTopics([home, source, empty]);
+  assert.deepEqual([home, source, empty], original, "derived sidebar must not rewrite canonical data");
+  assert.deepEqual(result[0].chats.map((item) => item.source_topic_id), ["source", "home"]);
+  assert.equal(new Set(result[0].chats.map(sidebarChatKey)).size, 2);
+  assert.equal(result[0].unread_count, 4);
+  assert.equal(result[1].chats[0].chat_id, "fallback");
+  assert.deepEqual(result[2].chats, []);
+  source.chats[0].updated_seq = 999;
+  assert.deepEqual(sidebarTopics([home, source, empty])[0].chats.map(sidebarChatKey), result[0].chats.map(sidebarChatKey));
+  const legacy = { ...topic("room", "legacy"), chats: [chat("z"), chat("a")] };
+  assert.deepEqual(sidebarTopics([legacy])[0].chats.map((item) => item.chat_id), ["z", "a"]);
+});
+
+test("keyboard movement handles adjacent positions and topics without changing chat identity", async () => {
+  const { sidebarTopics, sidebarKeyboardMove } = await import("@/lib/hosted-web-chat-topics");
+  const chats = ["a", "b", "c"].map((chat_id) => ({
+    chat_id, title: chat_id, archived: false, active: false, unread_count: 0,
+    message_count: 0, started_seq: 1, updated_seq: 1, last_message_preview: "",
+    placement: { topic_id: "home", position: chat_id },
+  }));
+  const topics = sidebarTopics([{ ...topic("room", "home"), chats }, topic("room", "empty")]);
+  const [a, b, c] = topics[0].chats;
+  assert.equal(sidebarKeyboardMove(topics, a, "ArrowUp"), null);
+  assert.equal(sidebarKeyboardMove(topics, c, "ArrowDown"), null);
+  assert.deepEqual(sidebarKeyboardMove(topics, a, "ArrowDown"), { topicId: "home", before: c });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowDown"), { topicId: "home", before: null });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowUp"), { topicId: "home", before: a });
+  assert.deepEqual(sidebarKeyboardMove(topics, b, "ArrowRight"), { topicId: "empty", before: null });
+  assert.equal(sidebarKeyboardMove(topics, b, "ArrowLeft"), null);
+  assert.equal(sidebarKeyboardMove(topics, { ...b, archived: true }, "ArrowUp"), null);
+  assert.equal(sidebarKeyboardMove(topics, { ...b, placement: null }, "ArrowUp"), null);
+});

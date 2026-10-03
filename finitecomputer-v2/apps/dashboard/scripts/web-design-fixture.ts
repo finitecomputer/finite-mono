@@ -16,6 +16,7 @@ const VALID_SCENARIOS = new Set(["healthy", "unavailable", "recovering"]);
 type Scenario = "healthy" | "unavailable" | "recovering";
 
 type FixtureState = {
+  placements?: Record<string, { topic_id: string; position: string }>;
   rev: number;
   chatArchived: boolean;
   chatTitle: string;
@@ -361,7 +362,8 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
   }
   if (request.method === "POST" && requestPath === "/v1/app/actions") {
     const action = await readJson(request);
-    applyAction(action as Record<string, unknown>);
+    try { applyAction(action as Record<string, unknown>); }
+    catch { writeJson(response, 400, { error: "The chats changed. Refresh and try moving the chat again." }); return; }
     writeJson(response, 200, appState());
     emitState();
     return;
@@ -430,6 +432,21 @@ async function handleHostedRequest(request: IncomingMessage, response: ServerRes
 }
 
 function applyAction(action: Record<string, unknown>) {
+  const move = action.MoveChat as { room_id: string; topic_id: string; chat_id: string; destination_topic_id: string; before: { topic_id: string; chat_id: string } | null } | undefined;
+  if (move) {
+    const topics = appState().topics;
+    const chats = topics.flatMap((topic) => topic.chats.map((chat) => ({ ...chat, source: topic.topic_id })));
+    const source = chats.find((chat) => chat.source === move.topic_id && chat.chat_id === move.chat_id);
+    if (move.room_id !== "room_design" || !source || source.archived || !topics.some((topic) => topic.topic_id === move.destination_topic_id)) throw new Error("invalid move");
+    const destination = chats.filter((chat) => !chat.archived && chat !== source && chat.placement.topic_id === move.destination_topic_id)
+      .sort((a, b) => a.placement.position < b.placement.position ? -1 : 1);
+    const index = move.before ? destination.findIndex((chat) => chat.source === move.before!.topic_id && chat.chat_id === move.before!.chat_id) : destination.length;
+    if (index < 0) throw new Error("invalid anchor");
+    destination.splice(index, 0, source);
+    state.placements ??= {};
+    // Fixture storage models the resulting order; Rust tests exercise the real rank/event implementation.
+    destination.forEach((chat, index) => { state.placements![JSON.stringify([chat.source, chat.chat_id])] = { topic_id: move.destination_topic_id, position: `${String(index).padStart(6, "0")}V` }; });
+  }
   const start = action.StartTopicChatIntent as { room_id?: string; topic_id?: string; intent_key?: string } | undefined;
   if (start?.room_id === "room_design" && start.topic_id === "home" && start.intent_key) {
     state.newChatIntents ??= {};
@@ -485,7 +502,7 @@ function appState(view = new URLSearchParams()) {
         created_seq: 0, updated_seq: state.rev, archived: false,
         active_chat_id: state.selectedNewChatId ?? null,
         chats: Object.values(state.newChatIntents ?? {}).map((chatId) => ({
-          chat_id: chatId, title: "New chat", active: chatId === state.selectedNewChatId, archived: false,
+          chat_id: chatId, placement: fixturePlacement("home", chatId), title: "New chat", active: chatId === state.selectedNewChatId, archived: false,
         })),
       },
       {
@@ -501,6 +518,7 @@ function appState(view = new URLSearchParams()) {
         active_chat_id: "chat_design",
         chats: [{
           chat_id: "chat_design",
+          placement: fixturePlacement("topic_design", "chat_design"),
           title: state.chatTitle,
           active: true,
           archived: state.chatArchived,
@@ -542,6 +560,10 @@ function appState(view = new URLSearchParams()) {
   };
 }
 
+function fixturePlacement(topicId: string, chatId: string) {
+  return state.placements?.[JSON.stringify([topicId, chatId])] ?? { topic_id: topicId, position: `V${chatId}` };
+}
+
 function coreMe() {
   return {
     email: FIXTURE_EMAIL,
@@ -564,6 +586,7 @@ function loadState(): FixtureState {
     if (Number.isInteger(parsed.rev) && Array.isArray(parsed.messages)) {
       return {
         rev: parsed.rev,
+        placements: parsed.placements ?? {},
         chatArchived: parsed.chatArchived === true,
         newChatIntents: parsed.newChatIntents ?? {},
         selectedNewChatId: parsed.selectedNewChatId ?? null,

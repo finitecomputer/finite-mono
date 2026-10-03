@@ -131,6 +131,18 @@ and new messages do not implicitly restore the chat. Clients retain the
 encrypted current-value projection alongside the append-only encrypted event
 journal; neither local projection is a server-side source of truth.
 
+`finitechat.chat.placement.v1` records sidebar placement using the same
+non-notifying encrypted event path. Its source `topic_id` and `chat_id` must
+match the envelope; `destination_topic_id` and a bounded lexicographic
+`position` affect presentation only. The original conversation/segment route,
+transcript and agent session never move. The latest accepted room sequence for
+each source chat wins; moves of different chats do not replace one another.
+Older readers ignore this namespaced event and keep canonical grouping. New
+readers fall back to the original topic if the destination is unavailable.
+The dashboard uses stable creation order until a chat is explicitly positioned,
+so incoming messages do not undo its arrangement. The hosted service must
+support placement metadata before the dashboard exposes movement controls.
+
 Push policy is part of the server-visible envelope, not the encrypted semantic
 kind. V1 defaults are:
 

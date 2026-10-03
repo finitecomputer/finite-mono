@@ -936,7 +936,7 @@ export function HostedWebChat({
             >
               <PanelLeftIcon className="size-4" />
             </button>
-            <span>{selectedTopic?.title ?? "Home"}</span>
+            <span>{roomTopics.find((topic) => topic.topic_id === selectedChat?.placement?.topic_id)?.title ?? selectedTopic?.title ?? "Home"}</span>
             <ChevronRightIcon className="size-4" />
             <strong>{selectedChat?.title ?? machineLabel}</strong>
             {selectedChat ? (

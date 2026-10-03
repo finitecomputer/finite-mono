@@ -1,3 +1,5 @@
+mod chat_organization;
+pub use chat_organization::{AppChatPlacement, ChatAddress};
 mod view;
 pub use view::AppView;
 
@@ -42,17 +44,18 @@ use finitechat_http::{
 use finitechat_mls::{NOSTR_SECRET_KEY_BYTES, NostrSecretKey};
 use finitechat_proto::{
     AppendEphemeralActivityRequest, AppendEventRequest, ApplicationDeliveryPolicy,
-    AttachmentBlobMetadataV1, AttachmentBlobReferenceV1, ChatArchiveV1, ChatReactionV1,
-    ChatReceiptStateV1, ChatReceiptV1, ChatRenameV1, ClaimKeyPackageResult, ConversationMetadataV1,
-    ConversationProjection, ConversationProjectionEntry, ConversationProjectionEventContext,
-    ConversationSegmentStartV1, CreateRoomRequest, DEVICE_LINK_BOOTSTRAP_VERSION_V2,
-    DecryptedApplicationEventV1, DecryptedEphemeralActivityV1, DeviceLinkBootstrapEventV2,
-    DeviceLinkBootstrapProfileV2, DeviceLinkBootstrapRoomV2, DeviceLinkBootstrapSelectionV2,
-    DeviceLinkBootstrapV2, DeviceRef, DurableAppEventKind, EphemeralActivityAccepted,
-    EphemeralActivityActionV1, EphemeralActivityIngressContext, EphemeralActivityProjection,
-    EphemeralActivityProjectionEntry, EventAccepted, FINITECHAT_ACTIVITY_KIND_THINKING,
-    FINITECHAT_ACTIVITY_KIND_TYPING, FINITECHAT_ACTIVITY_KIND_WORKING,
-    FINITECHAT_CHAT_ARCHIVE_EVENT_V1, FINITECHAT_CHAT_RENAME_EVENT_V1,
+    AttachmentBlobMetadataV1, AttachmentBlobReferenceV1, ChatArchiveV1, ChatPlacementV1,
+    ChatReactionV1, ChatReceiptStateV1, ChatReceiptV1, ChatRenameV1, ClaimKeyPackageResult,
+    ConversationMetadataV1, ConversationProjection, ConversationProjectionEntry,
+    ConversationProjectionEventContext, ConversationSegmentStartV1, CreateRoomRequest,
+    DEVICE_LINK_BOOTSTRAP_VERSION_V2, DecryptedApplicationEventV1, DecryptedEphemeralActivityV1,
+    DeviceLinkBootstrapEventV2, DeviceLinkBootstrapProfileV2, DeviceLinkBootstrapRoomV2,
+    DeviceLinkBootstrapSelectionV2, DeviceLinkBootstrapV2, DeviceRef, DurableAppEventKind,
+    EphemeralActivityAccepted, EphemeralActivityActionV1, EphemeralActivityIngressContext,
+    EphemeralActivityProjection, EphemeralActivityProjectionEntry, EventAccepted,
+    FINITECHAT_ACTIVITY_KIND_THINKING, FINITECHAT_ACTIVITY_KIND_TYPING,
+    FINITECHAT_ACTIVITY_KIND_WORKING, FINITECHAT_CHAT_ARCHIVE_EVENT_V1,
+    FINITECHAT_CHAT_PLACEMENT_EVENT_V1, FINITECHAT_CHAT_RENAME_EVENT_V1,
     FINITECHAT_DEVICE_LINK_BOOTSTRAP_EVENT_V2, GenericActivityKindV1, ListAccountRoomsRequest,
     LogEntryKind, MAX_CHAT_TITLE_BYTES, MAX_DEVICE_LINK_BOOTSTRAP_CHUNKS,
     MAX_DEVICE_LINK_BOOTSTRAP_EVENTS, MAX_DEVICE_LINK_BOOTSTRAP_PAYLOAD_BYTES,
@@ -758,6 +761,8 @@ pub struct AppRoomSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppChatSummary {
+    #[serde(default)]
+    pub placement: Option<AppChatPlacement>,
     pub chat_id: String,
     pub title: String,
     pub last_message_preview: String,
@@ -1036,6 +1041,13 @@ pub enum AppAction {
         text: Option<String>,
         intent_key: String,
     },
+    MoveChat {
+        room_id: String,
+        topic_id: String,
+        chat_id: String,
+        destination_topic_id: String,
+        before: Option<ChatAddress>,
+    },
     RenameChat {
         room_id: String,
         topic_id: String,
@@ -1249,6 +1261,7 @@ impl AppAction {
             AppAction::OpenChat { .. } => CommandClass::Writer,
             AppAction::PairAgent { .. } => CommandClass::Writer,
             AppAction::StartHomeChat { .. } => CommandClass::Writer,
+            AppAction::MoveChat { .. } => CommandClass::Writer,
             AppAction::RenameChat { .. } => CommandClass::Writer,
             AppAction::SetChatArchived { .. } => CommandClass::Writer,
             AppAction::CreateRoom { .. } => CommandClass::Writer,
@@ -1658,6 +1671,7 @@ struct ChatProjectionState {
     conversations: ConversationProjection,
     chat_archives: BTreeMap<(String, String, String), ChatArchiveProjectionEntry>,
     chat_titles: BTreeMap<(String, String, String), ChatTitleProjectionEntry>,
+    chat_placements: BTreeMap<(String, String, String), (u64, AppChatPlacement)>,
     reaction_senders: BTreeSet<(String, String, String, String)>,
     poll_votes: BTreeMap<(String, String, String), String>,
     delivered_through: BTreeMap<(String, String), u64>,
@@ -3140,6 +3154,13 @@ impl AppRuntimeState {
             AppAction::StartHomeChat { text, intent_key } => {
                 self.start_home_chat(text, intent_key)?
             }
+            AppAction::MoveChat {
+                room_id,
+                topic_id,
+                chat_id,
+                destination_topic_id,
+                before,
+            } => self.move_chat(room_id, topic_id, chat_id, destination_topic_id, before)?,
             AppAction::RenameChat {
                 room_id,
                 topic_id,
@@ -10006,6 +10027,7 @@ enum DecodedAppEvent {
     PollVote(ChatPollVoteV1),
     ChatArchive(ChatArchiveV1),
     ChatRename(ChatRenameV1),
+    ChatPlacement(ChatPlacementV1),
     Ignored,
 }
 
@@ -10263,6 +10285,7 @@ fn chat_projection_payload_from_application_plaintext(
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
         | DecodedAppEvent::ChatArchive(_)
+        | DecodedAppEvent::ChatPlacement(_)
         | DecodedAppEvent::ChatRename(_)
         | DecodedAppEvent::Ignored => None,
     }
@@ -10520,6 +10543,21 @@ fn decoded_typed_application_event(event: &DecryptedApplicationEventV1) -> Decod
                 .unwrap_or(DecodedAppEvent::Ignored)
         }
         DurableAppEventKind::Namespaced { name, policy }
+            if name == FINITECHAT_CHAT_PLACEMENT_EVENT_V1
+                && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
+        {
+            serde_json::from_slice::<ChatPlacementV1>(&event.payload)
+                .ok()
+                .filter(|placement| placement.validate_limits().is_ok())
+                .filter(|placement| chat_organization::valid_position(&placement.position))
+                .filter(|placement| {
+                    event.conversation_id.as_deref() == Some(placement.topic_id.as_str())
+                })
+                .filter(|placement| event.segment_id.as_deref() == Some(placement.chat_id.as_str()))
+                .map(DecodedAppEvent::ChatPlacement)
+                .unwrap_or(DecodedAppEvent::Ignored)
+        }
+        DurableAppEventKind::Namespaced { name, policy }
             if name == FINITECHAT_CHAT_RENAME_EVENT_V1
                 && *policy == ApplicationDeliveryPolicy::NON_NOTIFYING =>
         {
@@ -10738,6 +10776,7 @@ fn conversation_id_from_decoded_event(event: &DecodedAppEvent) -> Option<String>
         | DecodedAppEvent::ChatReceipt(_)
         | DecodedAppEvent::PollVote(_)
         | DecodedAppEvent::ChatArchive(_)
+        | DecodedAppEvent::ChatPlacement(_)
         | DecodedAppEvent::ChatRename(_)
         | DecodedAppEvent::Ignored => None,
     }
@@ -11308,6 +11347,10 @@ impl ChatProjectionState {
                 archive,
                 ChatArchiveProjectionSource::CanonicalEvent,
             ),
+            DecodedAppEvent::ChatPlacement(placement) => {
+                self.apply_chat_placement(&event.room_id, event.seq, placement);
+                false
+            }
             DecodedAppEvent::ChatRename(rename) => {
                 self.apply_chat_rename(&event.room_id, event.seq, rename);
                 false
@@ -11350,6 +11393,7 @@ impl ChatProjectionState {
             | DecodedAppEvent::ChatReceipt(_)
             | DecodedAppEvent::PollVote(_)
             | DecodedAppEvent::ChatArchive(_)
+            | DecodedAppEvent::ChatPlacement(_)
             | DecodedAppEvent::ChatRename(_) => return,
             DecodedAppEvent::Ignored => {
                 let Some(app_event) = envelope else {
@@ -11442,6 +11486,7 @@ impl ChatProjectionState {
             ));
         }
 
+        self.attach_chat_placements(&mut topics);
         topics.sort_by(topic_sort);
         topics
     }
@@ -12610,6 +12655,7 @@ fn chat_summary_from_parts(
         .max()
         .unwrap_or(started_seq);
     AppChatSummary {
+        placement: None,
         chat_id: chat_id.to_owned(),
         title: chat_title(
             context.room_id,
@@ -13202,6 +13248,7 @@ fn profile_error(error: impl std::fmt::Display) -> FiniteChatCoreError {
 
 #[cfg(test)]
 mod tests {
+    mod chat_organization_tests;
     use super::*;
     use finitechat_http::{
         ApplicationEffectRequest, GetNostrProfilesRequest, HttpApplicationDeliveryEffect,
@@ -22762,6 +22809,13 @@ mod tests {
                 text: Some(text()),
                 intent_key: id(),
             },
+            AppAction::MoveChat {
+                room_id: id(),
+                topic_id: id(),
+                chat_id: id(),
+                destination_topic_id: id(),
+                before: None,
+            },
             AppAction::RenameChat {
                 room_id: id(),
                 topic_id: id(),
@@ -22940,6 +22994,7 @@ mod tests {
                 AppAction::OpenChat { .. } => CommandClass::Writer,
                 AppAction::PairAgent { .. } => CommandClass::Writer,
                 AppAction::StartHomeChat { .. } => CommandClass::Writer,
+                AppAction::MoveChat { .. } => CommandClass::Writer,
                 AppAction::RenameChat { .. } => CommandClass::Writer,
                 AppAction::SetChatArchived { .. } => CommandClass::Writer,
                 AppAction::CreateRoom { .. } => CommandClass::Writer,
