@@ -63,6 +63,8 @@ let
     "finite-hosted-web-chat-offsite-health.timer"
     "finite-runtime-metrics.service"
     "finite-runtime-metrics.timer"
+    "finite-billing-metrics.service"
+    "finite-billing-metrics.timer"
   ];
 in
 {
@@ -72,6 +74,7 @@ in
     ./storage-health.nix
     ../../modules/import-mode.nix
     ../../modules/finite-saas-core.nix
+    ../../modules/billing-metrics.nix
     ../../modules/finite-private-request-diagnostics.nix
     ../../modules/finite-identity.nix
     ../../modules/finitechat-server.nix

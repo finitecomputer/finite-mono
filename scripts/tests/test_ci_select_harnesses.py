@@ -299,6 +299,19 @@ class CiHarnessSelectionTests(unittest.TestCase):
             },
         )
 
+    def test_billing_collector_edits_always_run_monitoring_contract(self) -> None:
+        for path in (
+            "infra/nixos/scripts/finite_billing_metrics.py",
+            "infra/nixos/scripts/finite_billing_metrics.sql",
+            "infra/nixos/tests/test_finite_billing_metrics.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_monitoring_nixos_contract"})
+        self.assertEqual(
+            selected("infra/nixos/modules/billing-metrics.nix"),
+            {"run_monitoring_nixos_contract", "run_nix_checks", "run_nix_service_packages"},
+        )
+
     def test_runtime_image_contract_paths_run_nix_checks(self) -> None:
         self.assertEqual(
             selected(

@@ -1,0 +1,723 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Aggregate Core billing account status. Active subscriptions are not confirmed cash payments. No user-level data.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "type": "link",
+      "title": "Production overview",
+      "url": "/d/finite-production-mvp",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "text",
+      "title": "Billing state \u2022 customer organizations",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 4
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "One customer organization = one billing account, including missing billing rows. **These are not users or engaged humans. Active subscription \u2260 confirmed cash payment.** Core-recorded state can lag Stripe webhooks. Refreshed every 5 minutes; failed, missing, future-dated or \u226510-minute-old snapshots are unavailable. Counts are not filled with zero during outages."
+      }
+    },
+    {
+      "id": 2,
+      "title": "All billing accounts",
+      "type": "stat",
+      "description": "All customer organizations, including missing billing records. Sum of the nine exclusive categories.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum (finite_billing_accounts{instance=\"finite-lat-2\",job=\"finite-internal-health\"} and on (job, instance) ((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Active subscriptions",
+      "type": "stat",
+      "description": "Core records active with a nonempty subscription ID. This is not evidence of cash paid; includes discounts and cancel-at-period-end subscriptions until status changes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum (finite_billing_accounts{instance=\"finite-lat-2\",job=\"finite-internal-health\",status=\"subscribed\"} and on (job, instance) ((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Unknown or missing state",
+      "type": "stat",
+      "description": "Review source state before interpreting these accounts. Missing state is never classified as nonpaying.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum (finite_billing_accounts{instance=\"finite-lat-2\",job=\"finite-internal-health\",status=~\"unknown|missing_billing_account\"} and on (job, instance) ((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Collection",
+      "type": "stat",
+      "description": "UNAVAILABLE means failure, missing scrape/export, a future timestamp, or age \u226510 minutes. Current is collection freshness, not Stripe synchronization freshness.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 4,
+        "w": 6,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "UNAVAILABLE",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "CURRENT",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "(max(((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600))) or vector(0))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "__auto"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "Accounts by billing state",
+      "description": "Mutually exclusive categories. Zero is a successful snapshot with no accounts in that category.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 15
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "subscribed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trial"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sponsored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "grandfathered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "cyan"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expired_past_due"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incomplete"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no_subscription"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "missing_billing_account"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "basic",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "last"
+          ],
+          "fields": ""
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (status) (finite_billing_accounts{instance=\"finite-lat-2\",job=\"finite-internal-health\"} and on (job, instance) ((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600)))",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{status}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "text",
+      "title": "Category definitions and precedence",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 15
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "Every organization appears once. Evaluation order:\n\n1. **missing_billing_account** \u2014 no billing row.\n2. **unknown** \u2014 unknown billing class/status, blank subscription ID, or only one of subscription ID/status present.\n3. **subscribed** \u2014 stored status `active`, even if cancellation is scheduled. No receipt or invoice verification.\n4. **sponsored / grandfathered** \u2014 matching billing class, after the checks above; exemptions take precedence over trial/inactive status.\n5. **trial** \u2014 standard, `trialing`, deadline in the future. Deadline is period end, falling back to redeemed-at + campaign days for a redeemed trial. Unknown if neither exists.\n6. **expired_past_due** \u2014 standard with elapsed trial (deadline inclusive), `past_due`, `unpaid`, `canceled`, `paused`, or `incomplete_expired`.\n7. **incomplete** \u2014 standard, checkout subscription is `incomplete`.\n8. **no_subscription** \u2014 standard, billing row exists with both subscription ID and status absent. A customer ID alone does not imply a subscription.\n\nTrial reservations alone do not prove a trial. Historical snapshots reflect recorded billing state, not revenue or human engagement."
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Billing account state over time",
+      "description": "Point-in-time gauges of Core state; gaps are unavailable collection. No historical counts are backfilled.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "finite-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "noValue": "Unavailable",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "fillOpacity": 0,
+            "spanNulls": false,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "subscribed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "green"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "trial"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "blue"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sponsored"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "purple"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "grandfathered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "cyan"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "expired_past_due"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "orange"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "incomplete"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "yellow"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "no_subscription"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "gray"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "missing_billing_account"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "red"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorMode": "code",
+          "expr": "sum by (status) (finite_billing_accounts{instance=\"finite-lat-2\",job=\"finite-internal-health\"} and on (job, instance) ((finite_billing_collection_success{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (up{instance=\"finite-lat-2\",job=\"finite-internal-health\"} == 1) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} >= 0) and on (job, instance) (time() - finite_billing_collected_at_seconds{instance=\"finite-lat-2\",job=\"finite-internal-health\"} < 600)))",
+          "instant": false,
+          "range": true,
+          "legendFormat": "{{status}}"
+        }
+      ]
+    }
+  ],
+  "refresh": "1m",
+  "schemaVersion": 39,
+  "tags": [
+    "finite",
+    "billing"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "utc",
+  "title": "Finite Billing Accounts",
+  "uid": "finite-billing-accounts",
+  "version": 1
+}
