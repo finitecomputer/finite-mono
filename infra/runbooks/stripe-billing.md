@@ -29,11 +29,22 @@ file:
 STRIPE_READINESS_SECRET_KEY='<temporary-rk_live>' \
 STRIPE_EXPECTED_ACCOUNT_ID='<approved-acct-id>' \
 STRIPE_EXPECTED_PRICE_ID='price_1TsqWWA50jhCdjMEhQLEBpvR' \
+STRIPE_EXPECTED_EVENT_DESTINATION_ID='<verified-event-destination-id>' \
   npm --prefix finitecomputer-v2/apps/dashboard run stripe:readiness
 ```
 
 The report contains no secret or customer values. Expire the audit key after
 the run whether it passes or fails. A failure keeps Checkout dark.
+
+The destination ID is non-secret and must identify the destination whose
+signing secret the running dashboard accepts. Establish that binding through
+the existing authorized operator process; this read-only audit does not prove
+it or retrieve signing secrets. An explicit ID never falls back to another
+destination. Without an ID, the audit accepts only a unique matching URL across
+all pages and fails closed on duplicates. It evaluates the selected destination's
+event set alone: neither timestamps nor the union of several destinations'
+events establish readiness. The report identifies the selected destination;
+provider error details are withheld to avoid exposing credentials.
 
 ## Paid but not synchronized
 
