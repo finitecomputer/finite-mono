@@ -46,3 +46,19 @@ fresh read-only evidence establish observed state.
   private scratch copy. No secret values or customer content in git or logs.
 - A Runtime lifecycle probe gates upgrade eligibility separately from app
   health. Never clear its failure by blindly deleting compute or MLS state.
+- Rust service packages use the root generated `Cargo.nix` through
+  `infra/nixos/packages.nix`. Regenerate after manifest/lock changes with
+  `nix develop .#crate2nix -c crate2nix generate`; CI rejects stale definitions.
+  The generator carries a small patch for upstream crate2nix issue #258:
+  `dep:name` must not activate an explicitly declared same-named feature.
+  `checks.x86_64-linux.crate2nix-features` covers this distinction.
+  Cargo.toml and Cargo.lock remain authoritative. Each crate is cached
+  separately; a dependency edit rebuilds its reverse dependency closure.
+  The CLI overrides explicitly include embedded files outside their crate
+  directories. Preserve those relative paths when changing embedded assets.
+  `.#rust-build-cache` retains the compiled libraries and build scripts that
+  are absent from runtime closures. Trusted CI publishes that closure as well
+  as package outputs to Cachix; omitting it loses reuse on fresh runners.
+  Chat retains its scoped build fingerprint, including resolved dependencies.
+  Ordinary unrelated source edits must preserve its output. The `Nix service
+  packages` and devfinity smoke lanes must pass before rollout.
