@@ -14,13 +14,16 @@ import json
 import math
 import os
 import re
+import select
 import shlex
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -1907,7 +1910,70 @@ def observe_nerdctl_exec(process: Path, command: bytes, container: str) -> dict[
         "observation_grants_cancel_authority": False}
 
 
+SHIM_EXIT_LOG_TIMEOUT = 10
+
+
 def collect_runtime_shim_exit_log(report: dict[str, Any]) -> dict[str, Any]:
+    """Isolate filesystem calls so a stuck mount cannot hold up finite-status."""
+    unknown = {"status": "unknown", "repair_authority": False,
+        "historical_logger_identity_established": False, "exited_children": [],
+        "reason": "exact shim exit or default log metadata unavailable",
+        "observation_phase": "observation_worker"}
+    def failure(error: Exception) -> dict[str, Any]:
+        result = {**unknown, "error_kind": type(error).__name__}
+        if isinstance(error, OSError) and isinstance(error.errno, int):
+            result["error_errno"] = error.errno
+        return result
+
+    deadline = time.monotonic() + SHIM_EXIT_LOG_TIMEOUT
+    try:
+        reader, writer = os.pipe()
+    except OSError as error:
+        return failure(error)
+    try:
+        pid = os.fork()
+    except OSError as error:
+        os.close(reader)
+        os.close(writer)
+        return failure(error)
+    if pid == 0:
+        os.close(reader)
+        try:
+            payload = json.dumps(_collect_runtime_shim_exit_log(report, deadline)).encode()
+            while payload:
+                payload = payload[os.write(writer, payload):]
+        finally:
+            os.close(writer)
+            os._exit(0)
+    os.close(writer)
+    try:
+        payload = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([reader], [], [], remaining)[0]:
+                return {**unknown, "error_kind": "TimeoutError"}
+            chunk = os.read(reader, 4096)
+            if time.monotonic() >= deadline:
+                return {**unknown, "error_kind": "TimeoutError"}
+            if not chunk:
+                return json.loads(payload)
+            payload.extend(chunk)
+            if len(payload) > 65536:
+                raise ValueError("observation output bound")
+    except (OSError, ValueError) as error:
+        return failure(error)
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(reader)
+        with contextlib.suppress(OSError, RuntimeError):
+            if os.waitpid(pid, os.WNOHANG)[0] == 0:
+                os.kill(pid, signal.SIGKILL)
+                # A filesystem task may remain in uninterruptible kernel sleep.
+                # Reap it when it exits without delaying this one-shot diagnostic.
+                threading.Thread(target=os.waitpid, args=(pid, 0), daemon=True).start()
+
+
+def _collect_runtime_shim_exit_log(report: dict[str, Any], deadline: float) -> dict[str, Any]:
     """Observe exact shim zombie children and default log metadata; no authority.
 
     Child wait status belongs to the leader, not necessarily the whole thread
@@ -1928,8 +1994,6 @@ def collect_runtime_shim_exit_log(report: dict[str, Any]) -> dict[str, Any]:
         root = checks[0]["evidence"]["state_root"]
         if not isinstance(cid, str) or not re.fullmatch(r"[a-f0-9]{64}", cid) or not isinstance(root, str) or not re.fullmatch(r"/data/finite-saas-runner/kata/[A-Za-z0-9_.-]+", root):
             raise ValueError("canonical target invalid")
-        deadline = time.monotonic() + 10
-
         def read(path: Path, limit: int) -> bytes:
             if time.monotonic() > deadline:
                 raise ValueError("observation deadline")
@@ -2055,12 +2119,6 @@ def collect_runtime_shim_exit_log(report: dict[str, Any]) -> dict[str, Any]:
         info = log.lstat()
         if log.resolve() != log or not stat.S_ISREG(info.st_mode) or info.st_uid != 0 or info.st_nlink != 1 or info.st_mode & 0o022:
             raise ValueError("unsafe default log file")
-        phase = "final_lifetime"
-        final = process_fields(shim)
-        if final[0] in ("Z", "X") or final[19] != original[19] or os.readlink(shim / "exe") != executable or read(shim / "cmdline", 65536) != command:
-            raise ValueError("shim identity drift")
-        if time.monotonic() > deadline:
-            raise ValueError("observation deadline")
         phase = "filesystem"
         filesystem_matches = []
         for line in read(Path("/proc/self/mountinfo"), 4 * 1024 * 1024).decode("utf-8").splitlines():
@@ -2078,6 +2136,12 @@ def collect_runtime_shim_exit_log(report: dict[str, Any]) -> dict[str, Any]:
         if len(filesystem_types) != 1:
             raise ValueError("log filesystem type ambiguous")
         space = os.statvfs(log.parent)
+        phase = "final_lifetime"
+        final = process_fields(shim)
+        if final[0] in ("Z", "X") or final[19] != original[19] or os.readlink(shim / "exe") != executable or read(shim / "cmdline", 65536) != command:
+            raise ValueError("shim identity drift")
+        if time.monotonic() >= deadline:
+            raise ValueError("observation deadline")
         result.update(status="observed", container_id=cid, host_context=host_context,
             log_filesystem_type=next(iter(filesystem_types)),
             log_filesystem_available_bytes=space.f_bavail * space.f_frsize,

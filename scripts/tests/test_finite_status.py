@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -21,7 +22,7 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
-    def _shim_exit_fixture(self, *, duplicate=False, drift=False, unsafe_log=False, missing_handle=False, fail_read=None, publisher=None, publisher_drift=False, extra_options=()):
+    def _shim_exit_fixture(self, *, duplicate=False, drift=False, unsafe_log=False, missing_handle=False, fail_read=None, publisher=None, publisher_drift=False, extra_options=(), filesystem_hook=None, isolated=False):
         container = "a" * 64
         executable = "/nix/store/" + "b" * 32 + "-kata/bin/containerd-shim-kata-v2"
         report = {"checks": [] if missing_handle else [{"name": "canonical_handle", "status": "pass",
@@ -61,7 +62,7 @@ class FiniteStatusTests(unittest.TestCase):
             log = path("/var/lib/nerdctl/01234567/containers/finite/" + container + "/" + container + "-json.log")
             log.parent.mkdir(parents=True);log.write_text("PRIVATE_LOG_CONTENT")
             if unsafe_log:log.chmod(0o666)
-            real_stat, real_lstat, real_open = Path.stat, Path.lstat, Path.open
+            real_stat, real_lstat, real_open, real_statvfs = Path.stat, Path.lstat, Path.open, os.statvfs
             reads = []
             command_reads = 0
             def root_info(method, value, *args, **kwargs):
@@ -73,6 +74,8 @@ class FiniteStatusTests(unittest.TestCase):
             def guarded_open(value, *args, **kwargs):
                 nonlocal command_reads
                 reads.append(str(value))
+                if filesystem_hook and value == path("/proc/self/mountinfo"):
+                    filesystem_hook("mountinfo", path)
                 if fail_read and value == path(fail_read):
                     raise PermissionError(13, "PRIVATE_EXCEPTION_PAYLOAD")
                 if "PRIVATE_PUBLISHER" in str(value):
@@ -85,13 +88,97 @@ class FiniteStatusTests(unittest.TestCase):
                     if publisher_drift and command_reads > 1:
                         return io.BytesIO(command.replace(publisher.encode(), b"DIFFERENT_OPAQUE_PUBLISHER"))
                 return real_open(value, *args, **kwargs)
+            def guarded_statvfs(value):
+                if filesystem_hook:
+                    filesystem_hook("statvfs", path)
+                return real_statvfs(value)
             with mock.patch.object(finite_status, "Path", side_effect=path), \
                  mock.patch.object(Path, "stat", lambda value, *a, **kw: root_info(real_stat, value, *a, **kw)), \
                  mock.patch.object(Path, "lstat", lambda value, *a, **kw: root_info(real_lstat, value, *a, **kw)), \
                  mock.patch.object(Path, "open", guarded_open), \
+                 mock.patch.object(finite_status.os, "statvfs", guarded_statvfs), \
                  mock.patch.object(finite_status, "run_read_only", side_effect=AssertionError("no runtime commands required")):
-                result = finite_status.collect_runtime_shim_exit_log(report)
+                result = (finite_status.collect_runtime_shim_exit_log(report) if isolated else
+                    finite_status._collect_runtime_shim_exit_log(report, time.monotonic() + 10))
             return result, reads
+
+    def test_shim_exit_log_isolated_worker_preserves_observation(self) -> None:
+        result, _ = self._shim_exit_fixture(isolated=True)
+        self.assertEqual(result["status"], "observed")
+        self.assertEqual(result["shim"]["starttime_ticks"], "100")
+        self.assertEqual(result["log_filesystem_type"], "ext4")
+
+    def test_shim_exit_log_worker_setup_failure_is_sanitized(self) -> None:
+        for operation in ("pipe", "fork"):
+            with self.subTest(operation=operation):
+                with mock.patch.object(finite_status.os, operation, side_effect=OSError(24, "PRIVATE_FAILURE")):
+                    result = finite_status.collect_runtime_shim_exit_log({})
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["error_kind"], "OSError")
+                self.assertEqual(result["error_errno"], 24)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_shim_exit_log_rejects_worker_result_after_deadline(self) -> None:
+        read = os.read
+        def delayed_read(*args):
+            data = read(*args)
+            time.sleep(0.3)
+            return data
+        with mock.patch.object(finite_status.os, "read", side_effect=delayed_read), \
+             mock.patch.object(finite_status, "SHIM_EXIT_LOG_TIMEOUT", 0.2):
+            result, _ = self._shim_exit_fixture(isolated=True)
+        self.assertEqual(result["status"], "unknown")
+        self.assertEqual(result["error_kind"], "TimeoutError")
+        self.assertNotIn("default_json_log", result)
+
+    def test_shim_exit_log_checks_deadline_after_filesystem_collection(self) -> None:
+        for phase in ("mountinfo", "statvfs"):
+            with self.subTest(phase=phase):
+                clock = [0.0]
+                def expire(current, _):
+                    if current == phase:
+                        clock[0] = 11.0
+                with mock.patch.object(finite_status.time, "monotonic", side_effect=lambda: clock[0]):
+                    result, _ = self._shim_exit_fixture(filesystem_hook=expire)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["exited_children"], [])
+                self.assertNotIn("default_json_log", result)
+
+    def test_shim_exit_log_rechecks_lifetime_after_filesystem_collection(self) -> None:
+        for phase in ("mountinfo", "statvfs"):
+            for identity in ("stat", "exe", "cmdline"):
+                with self.subTest(phase=phase, identity=identity):
+                    def change(current, path):
+                        if current != phase:
+                            return
+                        target = path("/proc/100/" + identity)
+                        if identity == "stat":
+                            target.write_bytes(target.read_bytes().replace(b" 100 ", b" 999 "))
+                        elif identity == "exe":
+                            target.unlink()
+                            target.symlink_to("/PRIVATE_REPLACEMENT")
+                        else:
+                            target.write_bytes(b"PRIVATE_REPLACEMENT\0")
+                    result, _ = self._shim_exit_fixture(filesystem_hook=change)
+                    self.assertEqual(result["status"], "unknown")
+                    self.assertEqual(result["observation_phase"], "final_lifetime")
+                    self.assertEqual(result["exited_children"], [])
+                    self.assertNotIn("PRIVATE", json.dumps(result))
+
+    def test_shim_exit_log_stalled_filesystem_cannot_hold_caller(self) -> None:
+        for phase in ("mountinfo", "statvfs"):
+            with self.subTest(phase=phase):
+                def stall(current, _):
+                    if current == phase:
+                        time.sleep(30)
+                started = time.monotonic()
+                with mock.patch.object(finite_status, "SHIM_EXIT_LOG_TIMEOUT", 0.2):
+                    result, _ = self._shim_exit_fixture(filesystem_hook=stall, isolated=True)
+                self.assertLess(time.monotonic() - started, 2)
+                self.assertEqual(result["status"], "unknown")
+                self.assertEqual(result["error_kind"], "TimeoutError")
+                self.assertEqual(result["exited_children"], [])
+                self.assertNotIn("default_json_log", result)
 
     def test_shim_exit_log_metadata_is_exact_read_only_and_redacted(self) -> None:
         result, reads = self._shim_exit_fixture()
