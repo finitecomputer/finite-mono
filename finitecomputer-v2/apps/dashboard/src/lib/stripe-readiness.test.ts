@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { evaluateStripeReadiness, type StripeReadinessSnapshot } from "./stripe-readiness";
+import { selectStripeReadinessWebhook, type StripeReadinessEventDestination } from "./stripe-readiness-webhook";
 
 const expected = {
   accountId: "acct_finite",
@@ -52,6 +53,31 @@ test("production readiness fails closed on account, Price, Portal, webhook, and 
   );
 });
 
+test("complementary incomplete destinations never combine into a ready webhook", async () => {
+  const ready = readySnapshot().webhook!;
+  const destinations: StripeReadinessEventDestination[] = [
+    "checkout.session.completed", "checkout.session.expired",
+  ].map((missingEvent, index) => ({
+    id: `ed_live_incomplete_${index}`,
+    livemode: ready.livemode,
+    status: ready.status,
+    type: ready.type,
+    event_payload: ready.eventPayload,
+    events_from: ready.eventsFrom,
+    enabled_events: ready.enabledEvents.filter((event) => event !== missingEvent),
+    snapshot_api_version: ready.snapshotApiVersion,
+    webhook_endpoint: { url: ready.url },
+  }));
+
+  for (const destination of destinations) {
+    const snapshot = readySnapshot();
+    snapshot.webhook = await selectStripeReadinessWebhook(destinations, destination.id);
+    const result = evaluateStripeReadiness(snapshot, expected);
+    assert.equal(result.ready, false);
+    assert.deepEqual(result.checks.filter((check) => !check.passed).map((check) => check.name), ["webhook.events"]);
+  }
+});
+
 function readySnapshot(): StripeReadinessSnapshot {
   return {
     account: {
@@ -96,6 +122,7 @@ function readySnapshot(): StripeReadinessSnapshot {
       loginPageEnabled: false,
     },
     webhook: {
+      id: "ed_live_finite",
       livemode: true,
       status: "enabled",
       type: "webhook_endpoint",

@@ -51,6 +51,7 @@ export type StripeReadinessSnapshot = {
     loginPageEnabled: boolean;
   } | null;
   webhook: {
+    id: string;
     livemode: boolean;
     status: string;
     type: string;
@@ -149,6 +150,7 @@ export function evaluateStripeReadiness(
   check("portal.shareable_login_off", portal?.loginPageEnabled === false, String(portal?.loginPageEnabled ?? "missing"));
 
   check("webhook.present", Boolean(webhook), String(Boolean(webhook)));
+  check("webhook.id", Boolean(webhook?.id), webhook?.id ?? "missing");
   check("webhook.live", Boolean(webhook?.livemode), String(webhook?.livemode ?? false));
   check("webhook.enabled", webhook?.status === "enabled", webhook?.status ?? "missing");
   check("webhook.type", webhook?.type === "webhook_endpoint", webhook?.type ?? "missing");
