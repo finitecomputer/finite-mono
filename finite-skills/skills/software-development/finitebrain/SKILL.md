@@ -416,6 +416,27 @@ Unsupported, so never offer them:
 - Guest email bootstrap. The Folder claim flow and invite secrets are retired;
   Folder Invitations target one key.
 
+To answer "who has access?", run `fbrain access list --brain <brain-id> --json`
+for one exact Brain ID. The acting key must itself be that Brain's admin,
+owner, or Personal Agent; there is no account fallback. Report `coverage` and
+`currentAccessComplete` first and never call the list complete while a scope
+is `unverified` (for example while Folders are mounted in from another Brain;
+that Brain's admins report other routes to its Folders). Keys with no
+recorded participation of their own always show an unknown name, even if a
+name is stored elsewhere. Each row is one exact key; distinct keys never
+merge, even with the same name. Names are labels, not authority: `verified`
+means an active Identity Directory binding for this exact key. Say "Domain
+claim" for `domainClaimed`; the key holder has not confirmed that label.
+Say "Stored name, not rechecked" for
+`storedNotRechecked`; say the name is unknown for `unknown`. Say "Managed
+Agent" only when `identityType.value` is `managedAgent`, otherwise "Type not
+confirmed", and never claim who owns or operates a key. `revocationIncomplete`
+Folders still hold a current grant without entitlement; a present grant does
+not prove decryption. Never remove, restore, re-grant, or act on another Brain
+because of an unknown or unverified name; confirm the exact npub with the user
+first. If the server answers `unsupported`, report it; do not substitute
+`fbrain access summary`.
+
 To answer "have I been invited to anything?", run `fbrain invite brain list`
 with no `--brain` from outside any Brain Working Tree, with the intended server
 selected. Inside a Working Tree, the command infers its Brain and lists issued

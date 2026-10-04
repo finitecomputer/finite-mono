@@ -30,9 +30,14 @@ async fn run(args: Vec<String>) -> Result<(), String> {
         flag_value(&args, "--finite-vip-domain").unwrap_or_else(|| "finite.vip".to_owned());
     let operator_token =
         configured_operator_token(&args, std::env::var("FINITE_IDENTITY_OPERATOR_TOKEN").ok());
+    let name_lookup_token = configured_name_lookup_token(
+        std::env::var("FINITE_IDENTITY_NAME_LOOKUP_TOKEN").ok(),
+        operator_token.as_deref(),
+    )?;
     let address: SocketAddr = listen
         .parse()
         .map_err(|error| format!("invalid --listen address: {error}"))?;
+    require_loopback_for_name_lookup(address, name_lookup_token.is_some())?;
     let public_address: SocketAddr = public_listen
         .parse()
         .map_err(|error| format!("invalid --public-listen address: {error}"))?;
@@ -49,7 +54,8 @@ async fn run(args: Vec<String>) -> Result<(), String> {
             email_challenge_ttl_seconds: 15 * 60,
             operator_token,
         },
-    );
+    )
+    .with_name_lookup_token(name_lookup_token);
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| format!("cannot bind {address}: {error}"))?;
@@ -76,6 +82,39 @@ fn configured_operator_token(args: &[String], environment: Option<String>) -> Op
         .or(environment)
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
+}
+
+/// The read-only name-lookup credential comes only from the service
+/// environment and must differ from the operator credential, so a product
+/// holding it can never reach operator endpoints.
+fn configured_name_lookup_token(
+    environment: Option<String>,
+    operator_token: Option<&str>,
+) -> Result<Option<String>, String> {
+    let token = environment
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    if token.is_some() && token.as_deref() == operator_token {
+        return Err(
+            "FINITE_IDENTITY_NAME_LOOKUP_TOKEN must differ from the operator token".to_owned(),
+        );
+    }
+    Ok(token)
+}
+
+/// Exact-key name lookup is served only on the private `--listen` router.
+/// With the capability enabled that listener must be a loopback address, so
+/// the credential-gated route is never reachable off-host by misconfiguration.
+fn require_loopback_for_name_lookup(
+    address: SocketAddr,
+    name_lookup_enabled: bool,
+) -> Result<(), String> {
+    if name_lookup_enabled && !address.ip().is_loopback() {
+        return Err(format!(
+            "FINITE_IDENTITY_NAME_LOOKUP_TOKEN requires a loopback --listen address; got {address}"
+        ));
+    }
+    Ok(())
 }
 
 fn configure_mailer(
@@ -182,5 +221,40 @@ mod tests {
             Some("environment-token")
         );
         assert_eq!(configured_operator_token(&args(&["serve"]), None), None);
+    }
+
+    #[test]
+    fn name_lookup_token_is_optional_and_never_the_operator_token() {
+        assert_eq!(configured_name_lookup_token(None, Some("op")), Ok(None));
+        assert_eq!(
+            configured_name_lookup_token(Some("  ".to_owned()), Some("op")),
+            Ok(None)
+        );
+        assert_eq!(
+            configured_name_lookup_token(Some(" lookup ".to_owned()), Some("op")),
+            Ok(Some("lookup".to_owned()))
+        );
+        assert!(configured_name_lookup_token(Some("op".to_owned()), Some("op")).is_err());
+    }
+
+    #[test]
+    fn name_lookup_requires_a_loopback_private_listener() {
+        for loopback in ["127.0.0.1:8790", "127.0.0.2:8790", "[::1]:8790"] {
+            assert!(require_loopback_for_name_lookup(loopback.parse().unwrap(), true).is_ok());
+        }
+        for external in [
+            "0.0.0.0:8790",
+            "10.0.0.5:8790",
+            "[::]:8790",
+            "[2001:db8::1]:8790",
+        ] {
+            let address = external.parse().unwrap();
+            assert!(
+                require_loopback_for_name_lookup(address, true).is_err(),
+                "{external}"
+            );
+            // Without the capability the existing listener contract is unchanged.
+            assert!(require_loopback_for_name_lookup(address, false).is_ok());
+        }
     }
 }

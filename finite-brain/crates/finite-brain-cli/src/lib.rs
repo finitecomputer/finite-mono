@@ -1,5 +1,6 @@
 //! Agent-native FiniteBrain CLI surface.
 
+mod access_report;
 mod admin;
 mod args;
 mod clock;
@@ -156,7 +157,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2425,6 +2426,13 @@ fn access<W: Write>(
             }
         }
         Some("list") | Some("ls") => {
+            let brain_id = command_brain_id(args, env)?;
+            let report = access_report::fetch_access_report(env, args, &brain_id)?;
+            access_report::write_access_report(output, json, &report)
+        }
+        // The older metadata-derived view: Folder recipients and readiness
+        // counts without named evidence or coverage.
+        Some("summary") => {
             let brain_id = command_brain_id(args, env)?;
             let route = format!("/v1/brains/{brain_id}/access");
             let metadata =
@@ -4741,6 +4749,8 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    mod access_report_tests;
 
     #[test]
     fn invite_accept_input_parses_url_fragment_and_bare_token() {
@@ -8713,7 +8723,7 @@ mod tests {
         run_with_env(
             [
                 "access",
-                "list",
+                "summary",
                 "--brain",
                 "acme",
                 "--server",
@@ -8762,11 +8772,18 @@ mod tests {
                 "readyCount": 0,
                 "totalCount": 2
             }]),
-            "access list must surface per-principal folder-key readiness"
+            "access summary must surface per-principal folder-key readiness"
         );
         let mut output = Vec::new();
         run_with_env(
-            ["access", "list", "--brain", "acme", "--server", &server_url],
+            [
+                "access",
+                "summary",
+                "--brain",
+                "acme",
+                "--server",
+                &server_url,
+            ],
             env_for(&tmp),
             &mut output,
         )
@@ -8809,7 +8826,7 @@ mod tests {
     }
 
     #[test]
-    fn access_list_reports_personal_owner_and_personal_agent_as_effective() {
+    fn access_summary_reports_personal_owner_and_personal_agent_as_effective() {
         let tmp = TempDir::new().unwrap();
         import_identity_secret(
             &tmp,
@@ -8821,7 +8838,7 @@ mod tests {
         run_with_env(
             [
                 "access",
-                "list",
+                "summary",
                 "--brain",
                 "personal-alice",
                 "--server",
@@ -13528,6 +13545,10 @@ mod tests {
             "admin ensure-access",
             "llms.txt",
             "Provenance",
+            "fbrain access list --brain <brain-id> --json",
+            "Stored name, not rechecked",
+            "Type not confirmed",
+            "act on another Brain because of an unknown",
             "Error glossary",
         ] {
             assert!(guide.contains(expected), "guide is missing: {expected}");

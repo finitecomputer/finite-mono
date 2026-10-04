@@ -99,7 +99,7 @@ fbrain search "credential rotation" --json
 fbrain status --json
 fbrain activity
 fbrain folder list --brain <brain-id>
-fbrain access list --brain <brain-id>
+fbrain access list --brain <brain-id>   # named access report; admin standing
 ```
 
 Use global `--config-dir <path>` when an agent needs a dedicated signer/config
@@ -137,6 +137,17 @@ loopback addresses, or the exact development host explicitly named by
   defaults to the public Directory `https://identity.finite.vip`; this
   variable is an override. The Brain server itself no longer takes any
   `FINITE_IDENTITY_*` or `FC_CORE_*` wiring (auth-kernel cut).
+- `FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_URL` and
+  `FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_CREDENTIAL`: optional pair (set both or
+  neither) letting the access report ask the Directory's loopback listener for
+  active names bound to exact report keys. The URL must be a literal loopback
+  IP (`http://127.0.0.1:<port>` or `http://[::1]:<port>`) with no host name,
+  user info, path, query, or fragment; anything else fails startup. The
+  credential is the Directory's read-only `FINITE_IDENTITY_NAME_LOOKUP_TOKEN`,
+  never its operator token. It supplies name evidence only, and only for keys
+  with recorded participation of their own; authorization stays in Brain
+  tables. Unset, the report states names as domain claims, stored claims, or
+  unknown. A NIP-05 forward match is not a label confirmed by the key holder.
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend`.

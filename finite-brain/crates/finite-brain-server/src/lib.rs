@@ -47,7 +47,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod access_report;
 mod contracts;
+mod directory_names;
 mod object_records;
 mod protected_routes;
 mod responses;
@@ -71,6 +73,7 @@ const FINITEBRAIN_NOSTR_HEADER: &str = "x-finitebrain-nostr";
 const APP_SPECIFIC_KIND: u16 = 30_078;
 const NIP05_CONNECT_TIMEOUT_SECONDS: u64 = 3;
 const NIP05_READ_TIMEOUT_SECONDS: u64 = 5;
+const NIP05_TOTAL_TIMEOUT_SECONDS: u64 = 4;
 
 type Nip05Fetcher =
     Arc<dyn Fn(&Nip05WellKnownRequest) -> Result<Vec<u8>, String> + Send + Sync + 'static>;
@@ -115,6 +118,7 @@ pub struct ServerState {
     nip05_fetcher: Nip05Fetcher,
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
+    directory_names: Option<directory_names::DirectoryNameLookup>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -157,7 +161,42 @@ impl ServerState {
             nip05_fetcher: default_nip05_fetcher(),
             invite_mailer: None,
             brain_updates,
+            directory_names: None,
         }
+    }
+
+    /// Let the access report ask the Identity Directory's trusted loopback
+    /// listener which active names are bound to exact report keys. The
+    /// credential is the Directory's read-only name-lookup credential, never
+    /// its operator token. `base_url` must be a literal loopback IP URL with
+    /// no user info, path, query, or fragment; anything else is refused.
+    /// Without this the report states names explicitly as stored or unknown.
+    pub fn with_directory_name_lookup(
+        mut self,
+        base_url: &str,
+        credential: impl Into<String>,
+    ) -> Result<Self, String> {
+        self.directory_names = Some(directory_names::http_directory_name_lookup(
+            base_url,
+            credential.into(),
+        )?);
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    fn with_directory_name_fixture(
+        mut self,
+        lookup: impl Fn(
+            &[String],
+        ) -> Result<
+            directory_names::DirectoryLookupResponse,
+            directory_names::DirectoryLookupFailure,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.directory_names = Some(Arc::new(lookup));
+        self
     }
 
     fn publish_brain_update(
@@ -412,6 +451,13 @@ pub fn server_state_with_sqlite_path(
     Ok(ServerState::new(BrainStore::open(path)?, public_base_url))
 }
 
+/// Validate an Identity Directory name-lookup base URL: a literal loopback
+/// IP (`127.0.0.0/8` or `[::1]`) with no user info, path, query, or fragment.
+/// Returns the normalized base URL.
+pub fn validate_directory_name_lookup_url(url: &str) -> Result<String, String> {
+    directory_names::validate_loopback_base_url(url)
+}
+
 /// Build a router with explicit state.
 pub fn router_with_state(state: ServerState) -> Router {
     let cors_state = state.clone();
@@ -450,6 +496,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/rename", post(rename_brain_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
+        .route(
+            "/brains/{brain_id}/access-report",
+            get(access_report::access_report_handler),
+        )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access",
             get(folder_access_handler),
@@ -621,6 +671,7 @@ fn fetch_nip05_document(request: &Nip05WellKnownRequest, url: &str) -> Result<Ve
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(NIP05_CONNECT_TIMEOUT_SECONDS))
         .timeout_read(Duration::from_secs(NIP05_READ_TIMEOUT_SECONDS))
+        .timeout(Duration::from_secs(NIP05_TOTAL_TIMEOUT_SECONDS))
         .redirects(0)
         .build();
     let response = agent
@@ -1397,25 +1448,31 @@ fn expected_created_at(event: &Event) -> Result<String, ApiError> {
 }
 
 fn ensure_brain_admin(stored: &StoredBrain, actor_npub: &str) -> Result<(), ApiError> {
-    if stored.brain.kind == BrainKind::Personal
-        && stored
-            .brain
+    ensure_brain_admin_key(&stored.brain, stored.personal_agent.as_ref(), actor_npub)
+}
+
+/// Canonical key-based Brain admin policy: the calling key itself must be the
+/// Personal Brain owner, the Personal Brain's delegated Personal Agent, or an
+/// Organization/Brain admin. Nothing falls back to an account.
+fn ensure_brain_admin_key(
+    brain: &finite_brain_core::Brain,
+    personal_agent: Option<&finite_brain_store::PersonalAgent>,
+    actor_npub: &str,
+) -> Result<(), ApiError> {
+    if brain.kind == BrainKind::Personal
+        && brain
             .owner_user_id
             .as_ref()
             .is_some_and(|owner| owner.as_str() == actor_npub)
     {
         return Ok(());
     }
-    if stored.brain.kind == BrainKind::Personal
-        && stored
-            .personal_agent
-            .as_ref()
-            .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub)
+    if brain.kind == BrainKind::Personal
+        && personal_agent.is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub)
     {
         return Ok(());
     }
-    let is_admin = stored
-        .brain
+    let is_admin = brain
         .admins
         .iter()
         .any(|admin| admin.as_str() == actor_npub);
@@ -9801,4 +9858,6 @@ mod tests {
         assert_eq!(replay.outcome, "noPendingWraps");
         assert_eq!(replay.completed_count, 0);
     }
+
+    mod access_report_tests;
 }

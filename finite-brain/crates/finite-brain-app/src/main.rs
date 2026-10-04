@@ -28,6 +28,34 @@ fn protected_rate_limit_override(value: Option<String>) -> Result<Option<(u32, u
     Ok(Some((max_requests, window_seconds)))
 }
 
+/// Pair `FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_URL` with
+/// `FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_CREDENTIAL`. Both unset keeps the
+/// lookup off (older deployments); one without the other fails closed. The
+/// URL must name the Directory's loopback listener by literal loopback IP;
+/// the server refuses any other host when the lookup is installed.
+fn directory_name_lookup(
+    url: Option<String>,
+    credential: Option<String>,
+) -> Result<Option<(String, String)>, String> {
+    let url = url
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let credential = credential
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    match (url, credential) {
+        (None, None) => Ok(None),
+        (Some(url), Some(credential)) => {
+            let url = finite_brain_server::validate_directory_name_lookup_url(&url)?;
+            Ok(Some((url, credential)))
+        }
+        _ => Err(
+            "set both FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_URL and FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_CREDENTIAL, or neither"
+                .to_owned(),
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args()
@@ -81,6 +109,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    if let Some((url, credential)) = directory_name_lookup(
+        std::env::var("FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_URL").ok(),
+        std::env::var("FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_CREDENTIAL").ok(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+    {
+        state = state
+            .with_directory_name_lookup(&url, credential)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    }
     let router = finite_brain_server::router_with_state(state);
     axum::serve(listener, router).await?;
 
@@ -89,7 +127,45 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::protected_rate_limit_override;
+    use super::{directory_name_lookup, protected_rate_limit_override};
+
+    #[test]
+    fn directory_name_lookup_is_optional_paired_and_loopback_only() {
+        for external in [
+            "http://localhost:8790",
+            "https://identity.finite.example",
+            "http://10.0.0.5:8790",
+            "http://user@127.0.0.1:8790",
+            "http://127.0.0.1:8790/path?query",
+        ] {
+            assert!(
+                directory_name_lookup(Some(external.to_owned()), Some("synthetic".to_owned()))
+                    .is_err(),
+                "{external}"
+            );
+        }
+        assert_eq!(directory_name_lookup(None, None), Ok(None));
+        assert_eq!(
+            directory_name_lookup(Some(" ".to_owned()), Some(String::new())),
+            Ok(None)
+        );
+        assert_eq!(
+            directory_name_lookup(
+                Some("http://127.0.0.1:8790".to_owned()),
+                Some("synthetic".to_owned())
+            ),
+            Ok(Some((
+                "http://127.0.0.1:8790".to_owned(),
+                "synthetic".to_owned()
+            )))
+        );
+        assert!(directory_name_lookup(Some("http://127.0.0.1:8790".to_owned()), None).is_err());
+        assert!(directory_name_lookup(None, Some("synthetic".to_owned())).is_err());
+        assert!(
+            directory_name_lookup(Some("file:///tmp".to_owned()), Some("synthetic".to_owned()))
+                .is_err()
+        );
+    }
 
     #[test]
     fn protected_rate_limit_unset_or_empty_keeps_defaults() {

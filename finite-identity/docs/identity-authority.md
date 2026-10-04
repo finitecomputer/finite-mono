@@ -66,6 +66,7 @@ Runtime flags:
 | `--listen HOST:PORT` | Local bind address. Defaults to `127.0.0.1:8790`. |
 | `FINITE_IDENTITY_OPERATOR_TOKEN` | Enables v1 operator endpoints without exposing the credential in process arguments. If omitted, operator endpoints reject every request. |
 | `--operator-token TOKEN` | Backward-compatible local/debug override. Production services should use `FINITE_IDENTITY_OPERATOR_TOKEN`. |
+| `FINITE_IDENTITY_NAME_LOOKUP_TOKEN` | Enables the loopback exact-key name lookup with a read-only credential distinct from the operator token. If omitted, the lookup rejects every request. Environment only. |
 | `--mailer dev` | Development mailer. Requires `--dev-print-email-tokens yes` so token printing is explicit. |
 | `--mailer resend` | Production mailer using the Resend JSON API via the shared `finite-mail` transport. Requires `--mail-from ADDR` and `RESEND_API_KEY`. |
 | `--mail-from ADDR` | Sender shown on production Email Challenge messages. Never put provider API keys in argv. |
@@ -208,6 +209,55 @@ Content-Type: application/json
 Disabling preserves audit history but suppresses NIP-05 serving and name
 resolution. Operators cannot reassign a name, rotate a key, recover an
 account, or migrate product data in v1.
+
+### Exact-Key Name Lookup (loopback, read-only)
+
+The Brain access report asks which active names are bound to keys it has
+already authorized for a report:
+
+```http
+POST /api/v1/name-lookup/by-key
+X-Finite-Name-Lookup-Token: <configured-name-lookup-credential>
+Content-Type: application/json
+
+{ "pubkeys": ["<hex or npub>", "..."] }
+```
+
+At most 64 keys per request. Each result carries the exact `pubkey`, `status`
+(`found` or `not_found`), up to eight active Finite VIP names with `kind`
+(`mailbox` or `managed_agent`), `source`, and `bound_at`, and `more_names`.
+Disabled bindings, other keys, and challenge audit are never returned. It is
+evidence metadata, not an authorization answer.
+
+Scope: only active bindings on the configured Finite VIP domain
+(`--finite-vip-domain`, `finite.vip` in production). It does not discover
+private owners, accounts, mailboxes outside that domain, or names a bot never
+published here, so `not_found` means "no published name", not "unowned".
+
+Boundary: the retired Principal Resolution, mailbox, and grant-authorization
+APIs must not be rebuilt. This route stays inside the Directory's existing
+name-binding job: it answers "which published names bind this exact key"
+for keys a product has already authorized, and never answers who may access
+anything. The Brain sends only keys whose own participation it recorded
+(redeemed an Invite Token, accepted an npub invitation, or made an
+authenticated Brain request), after its own exact-key admin policy admitted
+the caller; adding an arbitrary key to a Brain never makes it eligible.
+
+The route exists only on the loopback router, never on `public_router`. It
+requires `FINITE_IDENTITY_NAME_LOOKUP_TOKEN` from the service environment; when
+unset the route rejects every request, and when set `--listen` must be a
+loopback address or the service refuses to start. The credential is checked
+before the request body is parsed, and bodies are bounded. The value must
+differ from the operator credential, the operator credential is never accepted
+here, and the name-lookup credential never reaches operator endpoints. The
+Brain server reads the same value as
+`FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_CREDENTIAL` with the base URL in
+`FINITE_BRAIN_DIRECTORY_NAME_LOOKUP_URL`, which must be a literal loopback IP
+(`http://127.0.0.1:<port>` or `http://[::1]:<port>`, no host name, user info,
+path, query, or fragment); set both or neither. The Brain disables redirects,
+bounds each request's total time and body size, and treats any answer that
+does not cover exactly the requested keys as unavailable. Never place either
+value in argv or an Agent Runtime.
 
 ## Storage Ownership
 

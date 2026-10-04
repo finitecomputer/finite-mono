@@ -53,6 +53,7 @@ PUBLIC_GET_ROUTES = [
 PRIVATE_PATTERNS = [
     re.compile(r"^/internal/"),
     re.compile(r"^/api/v1/operator/"),
+    re.compile(r"^/api/v1/name-lookup/"),
 ]
 
 # Direct Identity Directory calls in the CLI look like

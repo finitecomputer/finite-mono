@@ -17,6 +17,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod access_report;
 mod approvals;
 mod brains;
 mod folder_access;
@@ -28,6 +29,13 @@ mod pending_wraps;
 mod schema;
 mod shared_folders;
 mod sync_records;
+
+pub use access_report::{
+    AccessReportAuthority, AccessReportGrant, AccessReportSnapshot, FolderAccessSource,
+    IncomingMount, IncomingMountParticipant, MAX_ACCESS_REPORT_EVIDENCE_KEYS,
+    MAX_ACCESS_REPORT_IDENTITIES, MAX_ACCESS_REPORT_OUTGOING_MOUNTS, ParticipationEvidence,
+    ParticipationKind,
+};
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
 const MAX_PULL_LIMIT: u64 = 1_000;

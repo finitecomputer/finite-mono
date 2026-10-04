@@ -188,12 +188,41 @@ tree; Folders you cannot read appear locked or not at all. Access changes
 are signed admin events, and Folder Keys rotate on revocation; the CLI
 prepares rotation material automatically; never hand-build rotation bodies.
 
+## Who has access?
+
+Answer "who has access?" with one fresh server report for one exact Brain ID:
+
+```sh
+fbrain access list --brain <brain-id> --json
+```
+
+The acting key must itself be an admin, owner, or Personal Agent of that
+Brain; there is no account fallback. Report `coverage` and
+`currentAccessComplete` first: never call the list complete while a scope is
+`unverified`. Each row is one exact key; distinct keys never merge, even with
+the same name. Names are labels with evidence, not authority:
+
+- `verified`: an active Identity Directory binding matched this exact key.
+- `domainClaimed`: say "Domain claim"; a public name-to-key claim does not
+  establish a label confirmed by the key holder.
+- `storedNotRechecked`: say "Stored name, not rechecked" with its stored time.
+- `unknown`: say the name is unknown; never guess one.
+- "Managed Agent" only when `identityType.value` is `managedAgent`; otherwise
+  say "Type not confirmed". Never claim who owns or operates a key.
+
+`revocationIncomplete` lists Folders where a current grant remains without
+entitlement; `missingCurrentGrants` lists entitled Folders without one. A
+present grant does not prove the key decrypted anything. Never remove,
+restore, re-grant, or act on another Brain because of an unknown or
+unverified name; confirm the exact npub with the user first. An older server
+fails with `unsupported`; report that rather than substituting
+`fbrain access summary`, which names no identities and proves no coverage.
+
 ## Provenance
 
 Memberships and grants record where they came from: an invitation, a signed
 approval artifact, or a direct admin action. When reporting who has access,
-read `fbrain brain metadata --json` and `fbrain access list` rather than
-inferring from local files.
+use `fbrain access list` rather than inferring from local files.
 
 ## Error glossary
 

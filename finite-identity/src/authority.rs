@@ -24,6 +24,12 @@ use sha2::{Digest, Sha256};
 use crate::{hex, nip98, npub};
 use finite_mail::MailTransport as _;
 
+mod name_lookup;
+
+pub use name_lookup::{
+    MAX_NAME_LOOKUP_KEYS, MAX_NAMES_PER_KEY, NAME_LOOKUP_PATH, NAME_LOOKUP_TOKEN_HEADER,
+};
+
 #[derive(Debug, Clone)]
 pub struct AuthorityConfig {
     pub external_base_url: String,
@@ -136,6 +142,7 @@ pub struct AuthorityState {
     mailer: Arc<dyn Mailer>,
     clock: Arc<dyn Clock>,
     config: AuthorityConfig,
+    name_lookup_token: Option<String>,
 }
 
 impl AuthorityState {
@@ -150,7 +157,18 @@ impl AuthorityState {
             mailer,
             clock: Arc::new(clock),
             config,
+            name_lookup_token: None,
         }
+    }
+
+    /// Enable the loopback exact-key name lookup with its own read-only
+    /// credential. Without one the route rejects every request. The operator
+    /// token is never accepted in its place.
+    pub fn with_name_lookup_token(mut self, token: Option<String>) -> Self {
+        self.name_lookup_token = token
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        self
     }
 }
 
@@ -275,6 +293,8 @@ impl IdentityStore {
             );
             CREATE UNIQUE INDEX IF NOT EXISTS vip_email_bindings_name
               ON vip_email_bindings(localpart, domain);
+            CREATE INDEX IF NOT EXISTS vip_email_bindings_pubkey
+              ON vip_email_bindings(pubkey);
             CREATE TABLE IF NOT EXISTS email_challenges (
               token_hash TEXT PRIMARY KEY,
               email TEXT NOT NULL,
@@ -534,9 +554,11 @@ pub fn public_router(state: AuthorityState) -> Router {
 }
 
 /// The full loopback router: the public surface plus the operator routes
-/// trusted services reach by network position.
+/// trusted services reach by network position, and the read-only exact-key
+/// name lookup behind its own credential.
 pub fn router(state: AuthorityState) -> Router {
     public_routes()
+        .route(NAME_LOOKUP_PATH, post(name_lookup::lookup_names_by_key))
         .route("/api/v1/operator/inspect", post(operator_inspect))
         .route(
             "/api/v1/operator/agent-email-bindings",

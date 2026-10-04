@@ -250,8 +250,27 @@ separate background worker; provider work never runs inside the sync path.
 
 ```sh
 fbrain access explain <folder-id>
-fbrain access list
+fbrain access list --brain <brain-id> [--json]
+fbrain access summary --brain <brain-id> [--json]
 ```
+
+`access list` is the named access report: one server snapshot with coverage
+per scope, exact keys, name evidence, Folder entitlements and their recorded
+sources, current-grant readiness with signed-audit state, and Folders mounted
+in from other Brains. Every page must carry the same `authorityFingerprint`;
+if Brain access changes mid-read the CLI restarts the report, and it refuses
+partial, foreign, or inconsistent pages. It requires the acting key's own
+admin standing and fails with `unsupported` on an older server. `access
+summary` is the older metadata view of Folder recipients; it names no
+identities and proves no coverage.
+
+Name evidence is separate from permission. `verified` means an active Directory
+binding for the exact key. `domainClaimed` means a domain publishes a NIP-05
+name-to-key claim; the key holder has not confirmed that label. Stored names
+that could not be rechecked remain labelled as such. Mailbox names do not prove
+a human owner. Incoming Mount source access can remain unverified even when
+native Folder and current-grant checks are complete. Content edits do not
+invalidate an access-report cursor.
 
 `access` is read-only. Mutations live under the explicit `admin`, `invite`,
 `collaborator`, and `mount` workflows. The CLI prepares Folder Key rotation

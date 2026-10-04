@@ -108,6 +108,17 @@ impl BrainStore {
                 params![29, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V30 is additive only (indexes for the access report's per-key
+        // participation reads). A V29 binary reopening a V30 database never
+        // looks for version 30 and SQLite maintains the indexes on its writes.
+        if !migration_applied(&tx, 30)? {
+            tx.execute_batch(SCHEMA_V30)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![30, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -380,6 +391,20 @@ CREATE TABLE brain_invite_tokens (
 
 CREATE INDEX brain_invite_tokens_by_brain
     ON brain_invite_tokens(brain_id, created_at);
+"#;
+
+const SCHEMA_V30: &str = r#"
+-- Access report participation evidence: one indexed point read per report
+-- key ("did this exact key act on this Brain itself?") instead of grouping a
+-- Brain's whole history.
+CREATE INDEX brain_record_index_by_actor
+    ON brain_record_index(brain_id, actor_npub, accepted_at);
+
+CREATE INDEX brain_invitations_accepted_by_user
+    ON brain_invitations(brain_id, user_id, status, target_kind);
+
+CREATE INDEX brain_invite_tokens_by_redeemer
+    ON brain_invite_tokens(brain_id, redeemed_by_npub, redeemed_at);
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2787,7 +2812,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 29);
+        assert_eq!(latest_version, 30);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(
