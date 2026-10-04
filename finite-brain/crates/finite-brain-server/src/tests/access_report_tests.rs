@@ -285,8 +285,11 @@ fn record_alias(state: &ServerState, keys: &Keys, nip05: &str) {
 /// by two runtimes, a participating key known only by a stored name, replaced
 /// keys, admin-added keys (one with a preexisting stored alias), a direct
 /// Guest, a demoted admin, a removed member, and a Mount participant.
-async fn synthetic_brain(cast: &Cast) -> (ServerState, Router) {
-    let state = test_state();
+async fn synthetic_brain(cast: &Cast) -> (ServerState, Router, tempfile::TempDir) {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let database = scratch.path().join("legacy-report-fixture.sqlite3");
+    let store = BrainStore::open(&database).unwrap();
+    let state = ServerState::new(store, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60);
     let router = router_with_state(state.clone());
     assert_eq!(
         post_brain(
@@ -357,10 +360,32 @@ async fn synthetic_brain(cast: &Cast) -> (ServerState, Router) {
     )
     .await;
     {
-        let mut store = state.store.lock().unwrap();
-        // Removed and demoted without rotation: their current grants remain.
-        store.remove_member(&brain, &user(&cast.replaced)).unwrap();
-        store.remove_admin(&brain, &user(&cast.demoted)).unwrap();
+        // Reproduce a historical database left by the pre-safe-removal writer.
+        // Current removal APIs intentionally reject this retained-grant drift;
+        // only this synthetic fixture uses raw role deletes. Foreign keys and
+        // capacity-counter triggers remain enabled, and grants are untouched.
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+                    rusqlite::params![brain.as_str(), user(&cast.replaced).as_str()],
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                    rusqlite::params![brain.as_str(), user(&cast.demoted).as_str()],
+                )
+                .unwrap(),
+            1
+        );
     }
 
     // A destination Organization Brain mounts the restricted Folder.
@@ -418,7 +443,7 @@ async fn synthetic_brain(cast: &Cast) -> (ServerState, Router) {
     record_alias(&state, &cast.replaced, "replaced-name@example.test");
     record_alias(&state, &cast.replacement, "replacement-name@example.test");
     record_alias(&state, &cast.outsider, "outsider-name@example.test");
-    (state, router)
+    (state, router, scratch)
 }
 
 fn row<'a>(report: &'a serde_json::Value, keys: &Keys) -> &'a serde_json::Value {
@@ -457,7 +482,7 @@ fn durable_state(state: &ServerState, cast: &Cast) -> impl PartialEq + std::fmt:
 #[tokio::test]
 async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
     let cast = Cast::new();
-    let (mut state, _) = synthetic_brain(&cast).await;
+    let (mut state, _, _scratch) = synthetic_brain(&cast).await;
     let (lookup, directory_calls) = directory_fixture(&cast);
     let nip05_urls = nip05_fixture(
         &mut state,
@@ -699,7 +724,7 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
 #[tokio::test]
 async fn access_report_denies_non_admins_before_any_lookup() {
     let cast = Cast::new();
-    let (mut state, _) = synthetic_brain(&cast).await;
+    let (mut state, _, _scratch) = synthetic_brain(&cast).await;
     let (lookup, directory_calls) = directory_fixture(&cast);
     let nip05_urls = nip05_fixture(&mut state, Vec::new());
     let state = state.with_directory_name_fixture(lookup);
@@ -769,7 +794,7 @@ async fn personal_brain_report_admits_owner_and_its_delegated_personal_agent_onl
 #[tokio::test]
 async fn access_report_degrades_names_honestly_when_the_directory_cannot_answer() {
     let cast = Cast::new();
-    let (base, _) = synthetic_brain(&cast).await;
+    let (base, _, _scratch) = synthetic_brain(&cast).await;
     let wrong_key = hex_of(&Keys::generate());
     let cases = vec![
         ("notConfigured", None),
@@ -862,7 +887,7 @@ async fn access_report_degrades_names_honestly_when_the_directory_cannot_answer(
 #[tokio::test]
 async fn access_report_rebuilds_when_a_token_redemption_lands_during_name_lookup() {
     let cast = Cast::new();
-    let (base, _) = synthetic_brain(&cast).await;
+    let (base, _, _scratch) = synthetic_brain(&cast).await;
     let acme = BrainId::new("acme").unwrap();
     let sequence_before = base.store.lock().unwrap().latest_sequence(&acme).unwrap();
     let late_admin = Keys::generate();
@@ -932,7 +957,7 @@ async fn access_report_rebuilds_when_a_token_redemption_lands_during_name_lookup
 #[tokio::test]
 async fn access_report_pages_are_stable_bounded_and_bound_to_one_authority() {
     let cast = Cast::new();
-    let (base, _) = synthetic_brain(&cast).await;
+    let (base, _, _scratch) = synthetic_brain(&cast).await;
     // Seventy more participating members force two Directory batches.
     let extra = (0..70).map(|_| Keys::generate()).collect::<Vec<_>>();
     for (index, keys) in extra.iter().enumerate() {
@@ -1067,7 +1092,7 @@ async fn access_report_pages_are_stable_bounded_and_bound_to_one_authority() {
 #[tokio::test]
 async fn incoming_mounts_are_reported_and_never_claimed_complete() {
     let cast = Cast::new();
-    let (mut state, _) = synthetic_brain(&cast).await;
+    let (mut state, _, _scratch) = synthetic_brain(&cast).await;
     nip05_fixture(&mut state, Vec::new());
     let router = router_with_state(state);
 
@@ -1202,7 +1227,7 @@ fn signed_grant_audit_verifies_only_an_exactly_matching_grant_change() {
 #[tokio::test]
 async fn existing_access_metadata_route_keeps_its_shape() {
     let cast = Cast::new();
-    let (_, router) = synthetic_brain(&cast).await;
+    let (_, router, _scratch) = synthetic_brain(&cast).await;
     let response = authed_request(
         router,
         &cast.admin,
@@ -1220,7 +1245,7 @@ async fn existing_access_metadata_route_keeps_its_shape() {
 #[tokio::test]
 async fn failed_non_admin_lookup_cannot_turn_domain_claim_into_verified_identity() {
     let cast = Cast::new();
-    let (mut state, _) = synthetic_brain(&cast).await;
+    let (mut state, _, _scratch) = synthetic_brain(&cast).await;
     nip05_fixture(&mut state, vec![("attacker-label", hex_of(&cast.mailbox))]);
     let router = router_with_state(state.clone());
     // Existing identity resolution records a global alias before the route
@@ -1271,7 +1296,7 @@ async fn failed_non_admin_lookup_cannot_turn_domain_claim_into_verified_identity
 async fn access_report_does_not_retry_or_expire_cursor_for_ordinary_content_writes() {
     use finite_brain_store::{FolderObjectRevisionSyncRecord, SyncRecordInput};
     let cast = Cast::new();
-    let (base, _) = synthetic_brain(&cast).await;
+    let (base, _, _scratch) = synthetic_brain(&cast).await;
     let store = base.store.clone();
     let actor = user(&cast.admin);
     let calls = Arc::new(AtomicUsize::new(0));
@@ -1323,17 +1348,40 @@ async fn access_report_does_not_retry_or_expire_cursor_for_ordinary_content_writ
 #[tokio::test]
 async fn caller_losing_admin_during_lookup_receives_no_report() {
     let cast = Cast::new();
-    let (base, _) = synthetic_brain(&cast).await;
+    let (base, _, _scratch) = synthetic_brain(&cast).await;
     let brain = BrainId::new("acme").unwrap();
     base.store
         .lock()
         .unwrap()
         .add_admin(&brain, &user(&cast.mailbox))
         .unwrap();
-    let store = base.store.clone();
+    let database = _scratch.path().join("legacy-report-fixture.sqlite3");
     let caller = user(&cast.admin);
     let mut state = base.with_directory_name_fixture(move |keys: &[String]| {
-        store.lock().unwrap().remove_admin(&brain, &caller).unwrap();
+        // Model a concurrent historical writer losing the caller's role while
+        // name lookup is in flight. This tests the report's fresh auth check,
+        // without asking safe current mutation APIs to create unsafe drift.
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        assert_eq!(
+            connection
+                .execute(
+                    "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                    rusqlite::params![brain.as_str(), caller.as_str()],
+                )
+                .unwrap(),
+            1
+        );
+        let remaining: u64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                rusqlite::params![brain.as_str(), caller.as_str()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
         Ok(directory_answer(keys, &BTreeMap::new()))
     });
     nip05_fixture(&mut state, Vec::new());
