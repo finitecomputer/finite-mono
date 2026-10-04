@@ -1610,7 +1610,7 @@ fn built_fbrain_invite_brain_create_accepts_one_hour_from_a_lagging_client() {
 }
 
 #[test]
-fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key() {
+fn built_fbrain_process_regrants_demoted_admin_only_the_new_folder_key() {
     let scratch = TempDir::new().unwrap();
     let owner_home = scratch.path().join("owner");
     let member_home = scratch.path().join("member");
@@ -1713,6 +1713,8 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
         &owner_tree,
         &["admin", "role", "revoke", "admin", "--target", member],
     );
+    // Demotion committed fresh revisions; the writer must catch up before editing.
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
     run_json(&member_home, &member_tree, &["sync", "now"]);
     // The client preserves old downloaded bytes after access loss. Check the
     // server's authority, then require a new revision to prove restored reads.
@@ -1753,7 +1755,28 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     let retry = run_json(&owner_home, &owner_tree, &repair);
     assert_eq!(retry["outcome"], "alreadyHasAccess");
     let after = run_json(&owner_home, &owner_tree, &["brain", "export"]);
-    assert_eq!(after["keyGrants"], before["keyGrants"]);
+    assert_eq!(
+        after["keyGrants"].as_array().unwrap().len(),
+        before["keyGrants"].as_array().unwrap().len() + 1
+    );
+    assert!(
+        after["keyGrants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|grant| grant["folderId"] == "shared"
+                && grant["keyVersion"] == 2
+                && grant["recipientNpub"] == *member)
+    );
+    assert!(
+        !after["keyGrants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|grant| grant["folderId"] == "unrelated"
+                && grant["keyVersion"] == 2
+                && grant["recipientNpub"] == *member)
+    );
     run_json(&member_home, &member_tree, &["sync", "now"]);
     assert_eq!(
         fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
@@ -1764,7 +1787,7 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
         "# Unrelated\n"
     );
 
-    // A fresh local tree must also bootstrap and decrypt the retained grant.
+    // A fresh local tree must also bootstrap and decrypt the explicitly regranted current key.
     let fresh_tree = member_home.join("fresh-tree");
     run_json(
         &member_home,

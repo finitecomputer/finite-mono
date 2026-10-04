@@ -550,7 +550,7 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Remove a Member and every readable Folder relationship in one transaction.
+    /// Remove Membership, admin role and every withdrawn current-key scope atomically.
     pub fn remove_member_with_rotations(
         &mut self,
         brain_id: &BrainId,
@@ -571,7 +571,7 @@ impl BrainStore {
         )
     }
 
-    /// Remove a Member and append every affected Brain's signed control records atomically.
+    /// Remove an identity (including a former Member with retained grants) and append signed records atomically.
     #[allow(clippy::too_many_arguments)]
     pub fn remove_member_with_rotations_and_control_records(
         &mut self,
@@ -582,6 +582,53 @@ impl BrainStore {
         mount_rotations: &[MemberMountRotation],
         updated_at: &str,
         control_records_by_brain: &BTreeMap<BrainId, Vec<SyncRecordInput>>,
+    ) -> Result<(), StoreError> {
+        self.remove_identity_with_rotations(
+            brain_id,
+            actor_user_id,
+            removed_user_id,
+            rotations,
+            mount_rotations,
+            updated_at,
+            control_records_by_brain,
+            false,
+        )
+    }
+
+    /// Guarded admin demotion preserves independent Membership and direct access.
+    #[allow(clippy::too_many_arguments)]
+    pub fn remove_admin_with_rotations_and_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        actor_user_id: &UserId,
+        removed_user_id: &UserId,
+        rotations: &[MemberFolderRotation],
+        updated_at: &str,
+        control_records_by_brain: &BTreeMap<BrainId, Vec<SyncRecordInput>>,
+    ) -> Result<(), StoreError> {
+        self.remove_identity_with_rotations(
+            brain_id,
+            actor_user_id,
+            removed_user_id,
+            rotations,
+            &[],
+            updated_at,
+            control_records_by_brain,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn remove_identity_with_rotations(
+        &mut self,
+        brain_id: &BrainId,
+        actor_user_id: &UserId,
+        removed_user_id: &UserId,
+        rotations: &[MemberFolderRotation],
+        mount_rotations: &[MemberMountRotation],
+        updated_at: &str,
+        control_records_by_brain: &BTreeMap<BrainId, Vec<SyncRecordInput>>,
+        demotion: bool,
     ) -> Result<(), StoreError> {
         validate_folder_rotation_fanout(
             FolderRotationOperation::MemberRemoval,
@@ -597,25 +644,64 @@ impl BrainStore {
                 })),
         )?;
         let stored = self.load_brain(brain_id)?;
-        if stored.brain.admins.contains(removed_user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "remove admin role before removing member".to_owned(),
-            });
-        }
-        if !stored
-            .brain
-            .members
-            .iter()
-            .any(|member| member.user_id == *removed_user_id)
+        if stored.brain.kind != BrainKind::Organization
+            || !stored.brain.admins.contains(actor_user_id)
         {
             return Err(StoreError::BrokenInvariant {
-                reason: "brain member does not exist".to_owned(),
+                reason: "identity removal requires a current Organization Brain admin".to_owned(),
             });
+        }
+        if stored.brain.admins.contains(removed_user_id) && stored.brain.admins.len() == 1 {
+            return Err(StoreError::BrokenInvariant {
+                reason: "organization brain must keep at least one admin".to_owned(),
+            });
+        }
+        if actor_user_id == removed_user_id {
+            return Err(StoreError::BrokenInvariant {
+                reason: "another current admin must perform and verify identity removal".to_owned(),
+            });
+        }
+        // A Mount's source authority cannot be inferred from a smaller destination roster.
+        let stranded_mount_grant: Option<String> = self.conn.query_row(
+            "SELECT connections.id FROM shared_folder_connections connections
+             JOIN folders ON folders.brain_id = connections.source_brain_id AND folders.id = connections.source_folder_id
+             JOIN folder_key_grants grants ON grants.brain_id = folders.brain_id AND grants.folder_id = folders.id AND grants.key_version = folders.current_key_version
+             WHERE connections.destination_brain_id = ?1 AND connections.status = 'active' AND grants.recipient_npub = ?2
+             AND NOT EXISTS (SELECT 1 FROM shared_folder_connection_members members WHERE members.connection_id = connections.id AND members.member_npub = ?2)
+             AND NOT EXISTS (SELECT 1 FROM brain_admins admins WHERE admins.brain_id = folders.brain_id AND admins.user_id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM brains WHERE brains.id = folders.brain_id AND brains.owner_user_id = ?2)
+             AND NOT EXISTS (SELECT 1 FROM personal_agents agents WHERE agents.brain_id = folders.brain_id AND agents.agent_npub = ?2 AND agents.status = 'active')
+             AND NOT EXISTS (SELECT 1 FROM brain_members members WHERE members.brain_id = folders.brain_id AND members.user_id = ?2 AND folders.access = 'all_members')
+             AND NOT EXISTS (SELECT 1 FROM folder_access_sources sources WHERE sources.brain_id = folders.brain_id AND sources.folder_id = folders.id AND sources.user_id = ?2 AND sources.source_kind != 'mount')
+             LIMIT 1", params![brain_id.as_str(), removed_user_id.as_str()], |row| row.get(0)).optional()?;
+        if let Some(mount) = stranded_mount_grant {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "Mount {mount} has a retained source grant outside its participant roster; source-authority repair is required before removal"
+                ),
+            });
+        }
+        if demotion {
+            let controller: Option<String> = self.conn.query_row(
+                "SELECT id FROM shared_folder_connections WHERE destination_brain_id = ?1 AND destination_admin_npub = ?2 AND status = 'active' LIMIT 1",
+                params![brain_id.as_str(), removed_user_id.as_str()], |row| row.get(0)).optional()?;
+            if let Some(mount) = controller {
+                return Err(StoreError::BrokenInvariant {
+                    reason: format!(
+                        "Mount {mount} uses this admin as destination controller; revoke the Mount before demotion"
+                    ),
+                });
+            }
         }
         let mut post_removal_brain = stored.brain.clone();
         post_removal_brain
-            .members
-            .retain(|member| member.user_id != *removed_user_id);
+            .admins
+            .retain(|admin| admin != removed_user_id);
+        if !demotion {
+            post_removal_brain
+                .members
+                .retain(|member| member.user_id != *removed_user_id);
+        }
         let personal_agent = stored
             .personal_agent
             .as_ref()
@@ -627,9 +713,29 @@ impl BrainStore {
                 .get(&folder.id)
                 .cloned()
                 .unwrap_or_default();
-            if required_recipients(&stored.brain, folder, &access, personal_agent)?
-                .contains(removed_user_id)
-            {
+            let held_current_key = stored.grants.iter().any(|grant| {
+                grant.folder_id == folder.id
+                    && grant.key_version == folder.current_key_version
+                    && grant.recipient_npub == *removed_user_id
+            });
+            let was_entitled = required_recipients(&stored.brain, folder, &access, personal_agent)?
+                .contains(removed_user_id);
+            let remains_entitled = demotion
+                && required_recipients(&post_removal_brain, folder, &access, personal_agent)?
+                    .contains(removed_user_id);
+            if (was_entitled || held_current_key) && !remains_entitled {
+                // Source-owned Mount access cannot be silently converted into direct revocation.
+                let mount_owned: bool = self.conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM folder_access_sources WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3 AND source_kind = 'mount')",
+                    params![brain_id.as_str(), folder.id.as_str(), removed_user_id.as_str()], |row| row.get(0))?;
+                if mount_owned {
+                    return Err(StoreError::BrokenInvariant {
+                        reason: format!(
+                            "Folder {} has source-owned Mount access; revoke that connection before identity removal",
+                            folder.id
+                        ),
+                    });
+                }
                 expected_folders.insert(folder.id.clone());
             }
         }
@@ -639,15 +745,26 @@ impl BrainStore {
             .collect::<BTreeSet<_>>();
         if expected_folders != supplied_folders || supplied_folders.len() != rotations.len() {
             return Err(StoreError::BrokenInvariant {
-                reason: "member removal requires exactly one rotation for every readable Folder"
-                    .to_owned(),
+                reason: format!(
+                    "member removal requires exactly one rotation for every readable Folder or retained current grant; missing {:?}, unexpected {:?}, duplicate rotations {}",
+                    expected_folders
+                        .difference(&supplied_folders)
+                        .collect::<Vec<_>>(),
+                    supplied_folders
+                        .difference(&expected_folders)
+                        .collect::<Vec<_>>(),
+                    supplied_folders.len() != rotations.len()
+                ),
             });
         }
-        let expected_mounts = self
-            .list_active_destination_mounts_for_participant(brain_id, removed_user_id)?
-            .into_iter()
-            .map(|connection| connection.id)
-            .collect::<BTreeSet<_>>();
+        let expected_mounts = if demotion {
+            Vec::new()
+        } else {
+            self.list_active_destination_mounts_for_participant(brain_id, removed_user_id)?
+        }
+        .into_iter()
+        .map(|connection| connection.id)
+        .collect::<BTreeSet<_>>();
         let supplied_mounts = mount_rotations
             .iter()
             .map(|rotation| rotation.connection_id.clone())
@@ -659,6 +776,22 @@ impl BrainStore {
                         .to_owned(),
             });
         }
+        if rotations.is_empty()
+            && mount_rotations.is_empty()
+            && !stored.brain.admins.contains(removed_user_id)
+            && (demotion
+                || (!stored
+                    .brain
+                    .members
+                    .iter()
+                    .any(|member| member.user_id == *removed_user_id)
+                    && !stored
+                        .folder_access
+                        .values()
+                        .any(|access| access.contains(removed_user_id))))
+        {
+            return Ok(());
+        }
         let current_objects = self.load_current_objects(brain_id)?;
         for rotation in rotations {
             let folder = stored
@@ -669,7 +802,7 @@ impl BrainStore {
                 .ok_or_else(|| StoreError::MissingFolder {
                     folder_id: rotation.folder_id.to_string(),
                 })?;
-            if rotation.new_key_version != folder.current_key_version + 1 {
+            if Some(rotation.new_key_version) != folder.current_key_version.checked_add(1) {
                 return Err(StoreError::BrokenInvariant {
                     reason: "member removal must rotate to each Folder's next key version"
                         .to_owned(),
@@ -765,7 +898,7 @@ impl BrainStore {
                 .ok_or_else(|| StoreError::MissingFolder {
                     folder_id: connection.source_folder_id.to_string(),
                 })?;
-            if rotation.new_key_version != folder.current_key_version + 1 {
+            if Some(rotation.new_key_version) != folder.current_key_version.checked_add(1) {
                 return Err(StoreError::BrokenInvariant {
                     reason: "member removal Mount rotation must use the next key version"
                         .to_owned(),
@@ -812,6 +945,12 @@ impl BrainStore {
 
         let tx = self.conn.transaction()?;
         for rotation in rotations {
+            pending_wraps::clear_pending_grant_wraps_for_folder_recipient(
+                &tx,
+                brain_id,
+                &rotation.folder_id,
+                removed_user_id,
+            )?;
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
                 params![
@@ -848,6 +987,9 @@ impl BrainStore {
         }
         for (rotation, (connection, removed)) in mount_rotations.iter().zip(mounted_removals.iter())
         {
+            // Preserve independent source access while retiring this connection's provenance.
+            tx.execute("DELETE FROM folder_access_sources WHERE source_kind = 'mount' AND source_id = ?1 AND (?2 OR user_id = ?3)",
+                params![rotation.connection_id, rotation.revoke_mount, removed_user_id.as_str()])?;
             if removed.is_empty() {
                 if rotation.revoke_mount {
                     tx.execute(
@@ -921,14 +1063,20 @@ impl BrainStore {
             }
         }
         tx.execute(
-            "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
+            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), removed_user_id.as_str()],
         )?;
-        tx.execute(
-            "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), removed_user_id.as_str()],
-        )?;
-        pending_wraps::clear_pending_grant_wraps_for_recipient(&tx, brain_id, removed_user_id)?;
+        if !demotion {
+            tx.execute(
+                "DELETE FROM folder_access WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed_user_id.as_str()],
+            )?;
+            tx.execute(
+                "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), removed_user_id.as_str()],
+            )?;
+            pending_wraps::clear_pending_grant_wraps_for_recipient(&tx, brain_id, removed_user_id)?;
+        }
         for (record_brain_id, control_records) in control_records_by_brain {
             sync_records::append_sync_records(&tx, record_brain_id, control_records)?;
         }

@@ -496,6 +496,15 @@ pub(crate) fn admin_access_change_event_with_note(
         // Keep name-carrying commands distinct so restoring an earlier name
         // within the same clock second is not mistaken for an accepted replay.
         change_fields.push(note);
+    }
+    if note.is_some()
+        || matches!(
+            action,
+            AdminAccessAction::RemoveMember | AdminAccessAction::RemoveAdmin
+        )
+    {
+        // A repaired removal can follow the legacy removal in the same second.
+        // Give the new exact plan its own signed record, even for the same target.
         change_fields.push(&nonce);
     }
     let change_id = deterministic_id("access-change", &change_fields);

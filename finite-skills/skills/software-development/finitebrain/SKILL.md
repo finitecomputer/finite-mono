@@ -467,6 +467,18 @@ grants one specific Folder version. Separately or together they do not prove
 complete Organization Brain Collaboration; do not compose them for a normal
 "share this Org Brain with Agent B" request.
 
+For an authorized removal, use `admin member remove --target <exact identity>
+--json`; it removes the Admin role, Membership and direct Folder Access in one
+operation and rotates affected current Folder Keys. Use `admin role revoke
+admin` only when the user wants to remove the Admin role and retain other
+entitlements. Both commands prepare rotation themselves. Report completion
+only when the receipt has `state: complete`; `outcome: alreadyComplete` is a
+checked retry that made no further changes. If the result is unknown, refresh
+and retry the same command. If the server or a Mount blocks the operation,
+explain that blocker; never demote first, invent a rotation body, or re-invite
+the target to work around it. Earlier keys and downloaded copies cannot be
+recalled.
+
 ## Security Rules
 
 - Never print or expose private Nostr secrets, Folder Keys, grant plaintext,

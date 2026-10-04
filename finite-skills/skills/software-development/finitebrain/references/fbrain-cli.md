@@ -333,6 +333,35 @@ change Brain-wide relationships, while `folder-access` targets one Folder;
 they do not prove complete Organization Brain Collaboration and are not the
 normal sharing workflow.
 
+`admin member remove` removes the exact target's Admin role, Membership and
+direct Folder Access together. It also rotates affected current Folder Keys,
+including retained grants for a target whose Membership was already removed.
+`admin role revoke admin` removes only the Admin role: Membership and explicit
+Folder Access remain, and only Folders that lose entitlement are rotated.
+Another current admin must perform these operations; the last admin is
+protected. A source-owned Mount that cannot be updated safely stops the
+operation and names the blocker before access changes.
+The acting identity must also be able to verify every active incoming Mount's
+source. Current metadata cannot distinguish restricted direct source access
+from access left by a Mount; that overlap blocks removal unless independent
+source entitlement can be proved from owner, admin or all-member standing.
+
+The client prepares grants and re-encrypts live content, then checks fresh
+authority, current grants and exact content revisions. Inspect the receipt:
+`state: complete` proves the operation; `outcome: changed` means access changed,
+and `outcome: alreadyComplete` means a checked retry made no further changes.
+`folders` records each affected Brain, Folder and old/new key version.
+`preservedSourceAccess` names any independently authorized source Folder
+access that remains after removing participation in a destination Mount.
+Removal from one Brain does not revoke independent access in another Brain.
+An older server that cannot perform the guarded operation rejects it. Upgrade
+the server before retrying; never demote first to bypass that rejection.
+
+`Result unknown` means the client could not prove completion. Refresh and
+retry the same operation; do not report success, restore access, or rotate
+again manually. Earlier keys and downloaded copies cannot be recalled, even
+after a complete removal.
+
 ## Invitations And Sharing
 
 The finitebrain skill's Brain Invitations section is the contract for choosing

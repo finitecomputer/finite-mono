@@ -11,6 +11,7 @@ mod identity_authority;
 mod models;
 mod output;
 mod requester_context;
+mod revocation;
 mod search;
 mod semantic_index;
 mod signer;
@@ -36,6 +37,7 @@ pub(crate) use identity_authority::*;
 pub(crate) use models::*;
 pub(crate) use output::*;
 pub(crate) use requester_context::*;
+pub(crate) use revocation::*;
 pub(crate) use search::*;
 pub(crate) use signer::*;
 pub(crate) use skill::*;
@@ -3357,158 +3359,8 @@ fn admin_operation<W: Write>(
             let response = signed_json_request(env, args, "PUT", &route, Some(body))?;
             write_command_response(output, json, &response)
         }
-        ("member", "remove") => {
-            let brain_id = command_brain_id(args, env)?;
-            let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
-            let target = resolve_identity_npub(env, args, &raw_target)?;
-            let event = admin_access_change_event(
-                env,
-                &brain_id,
-                AdminAccessAction::RemoveMember,
-                None,
-                Some(&target),
-                None,
-            )?;
-            let metadata = fetch_brain_metadata(env, args, &brain_id)?;
-            let post_removal_metadata = metadata_after_member_removal(&metadata, &target);
-            let mut rotations = Vec::new();
-            for folder in &metadata.folders {
-                let recipients =
-                    folder_required_recipients(&metadata, &folder.access, &folder.access_user_ids)?;
-                if !recipients.iter().any(|recipient| recipient == &target) {
-                    continue;
-                }
-                let prepared = prepare_folder_access_removal(
-                    env,
-                    args,
-                    &post_removal_metadata,
-                    &brain_id,
-                    &folder.id,
-                    &target,
-                )?;
-                rotations.push(serde_json::json!({
-                    "folderId": folder.id,
-                    "newKeyVersion": prepared["newKeyVersion"],
-                    "grants": prepared["grants"],
-                    "reencryptedRecords": prepared["reencryptedRecords"],
-                }));
-            }
-            let mounts_route = format!("/v1/brains/{brain_id}/mounts");
-            let mounts = signed_json_request(env, args, "GET", &mounts_route, None)?;
-            let incoming_mounts = mounts["incoming"].as_array().ok_or_else(|| {
-                CliError::InvalidInput(
-                    "Mount list omitted incoming destination relationships".to_owned(),
-                )
-            })?;
-            let mut mount_rotations = Vec::new();
-            for mount in incoming_mounts {
-                let participants = mount["participantNpubs"].as_array().ok_or_else(|| {
-                    CliError::InvalidInput("Mount response omitted participant roster".to_owned())
-                })?;
-                if !participants
-                    .iter()
-                    .any(|participant| participant.as_str() == Some(&target))
-                {
-                    continue;
-                }
-                let mount_id = required_json_string(mount, "id")?;
-                let source_brain_id = required_json_string(mount, "sourceBrainId")?;
-                let source_folder_id = required_json_string(mount, "sourceFolderId")?;
-                let controller = required_json_string(mount, "destinationControllerNpub")?;
-                let revoke_mount = controller == target;
-                let managed_participants = mount["managedAccessParticipantNpubs"]
-                    .as_array()
-                    .ok_or_else(|| {
-                        CliError::InvalidInput(
-                            "Mount response omitted managed access roster".to_owned(),
-                        )
-                    })?;
-                let removed = if revoke_mount {
-                    managed_participants
-                        .iter()
-                        .map(|participant| {
-                            participant.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                                CliError::InvalidInput(
-                                    "Mount participant was not a string".to_owned(),
-                                )
-                            })
-                        })
-                        .collect::<Result<BTreeSet<_>, _>>()?
-                } else if managed_participants
-                    .iter()
-                    .any(|participant| participant.as_str() == Some(&target))
-                {
-                    BTreeSet::from([target.clone()])
-                } else {
-                    BTreeSet::new()
-                };
-                let prepared = if removed.is_empty() {
-                    serde_json::json!({
-                        "newKeyVersion": 0,
-                        "grants": [],
-                        "reencryptedRecords": []
-                    })
-                } else {
-                    let source_metadata = fetch_brain_metadata(env, args, &source_brain_id)?;
-                    prepare_folder_access_removals(
-                        env,
-                        args,
-                        &source_metadata,
-                        &source_brain_id,
-                        &source_folder_id,
-                        &removed,
-                    )?
-                };
-                mount_rotations.push(serde_json::json!({
-                    "mountId": mount_id,
-                    "revokeMount": revoke_mount,
-                    "newKeyVersion": prepared["newKeyVersion"],
-                    "grants": prepared["grants"],
-                    "reencryptedRecords": prepared["reencryptedRecords"],
-                }));
-            }
-            let route = format!("/v1/admin/brains/{brain_id}/members/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({
-                    "accessChangeEvent": event,
-                    "rotations": rotations,
-                    "mountRotations": mount_rotations
-                })),
-            )?;
-            let authoritative: BrainMetadataView = serde_json::from_value(response)?;
-            if authoritative.members.iter().any(|member| member == &target)
-                || authoritative
-                    .folders
-                    .iter()
-                    .any(|folder| folder.access_user_ids.iter().any(|user| user == &target))
-            {
-                return Err(CliError::InvalidInput(
-                    "Member removal postcondition was not authoritative".to_owned(),
-                ));
-            }
-            let mounts = signed_json_request(env, args, "GET", &mounts_route, None)?;
-            let target_still_participates = mounts["incoming"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|mount| {
-                    mount["status"] == "active"
-                        && mount["participantNpubs"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|participant| participant.as_str() == Some(&target))
-                });
-            if target_still_participates {
-                return Err(CliError::InvalidInput(
-                    "Member removal left an active Mount participation".to_owned(),
-                ));
-            }
-            write_command_response(output, json, &serde_json::to_value(authoritative)?)
+        ("member", "remove") | ("role", "revoke") => {
+            remove_identity(args, env, json, output, namespace == "role")
         }
         ("role", "grant") => {
             let brain_id = command_brain_id(args, env)?;
@@ -3525,28 +3377,6 @@ fn admin_operation<W: Write>(
             let body = serde_json::json!({ "accessChangeEvent": event });
             let route = format!("/v1/admin/brains/{brain_id}/roles/admin/{target}");
             let response = signed_json_request(env, args, "PUT", &route, Some(body))?;
-            write_command_response(output, json, &response)
-        }
-        ("role", "revoke") => {
-            let brain_id = command_brain_id(args, env)?;
-            let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
-            let target = resolve_identity_npub(env, args, &raw_target)?;
-            let event = admin_access_change_event(
-                env,
-                &brain_id,
-                AdminAccessAction::RemoveAdmin,
-                None,
-                Some(&target),
-                None,
-            )?;
-            let route = format!("/v1/admin/brains/{brain_id}/roles/admin/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({ "accessChangeEvent": event })),
-            )?;
             write_command_response(output, json, &response)
         }
         ("folder-access", "grant") => {
@@ -3599,12 +3429,6 @@ fn admin_operation<W: Write>(
             "admin {namespace} {action}"
         ))),
     }
-}
-
-fn metadata_after_member_removal(metadata: &BrainMetadataView, target: &str) -> BrainMetadataView {
-    let mut updated = metadata.clone();
-    updated.members.retain(|member| member != target);
-    updated
 }
 
 fn admin<W: Write>(
@@ -13819,6 +13643,28 @@ mod tests {
         let args = vec!["add-member".to_owned(), "npub-target".to_owned()];
 
         assert_eq!(command_brain_id(&args, &env).unwrap(), "agent-brain");
+    }
+
+    #[test]
+    fn fin159_same_timestamp_removal_plans_have_distinct_signed_record_ids() {
+        let scratch = TempDir::new().unwrap();
+        let env = env_for(&scratch);
+        let target = load_signer(&env).unwrap().npub;
+        for action in [
+            AdminAccessAction::RemoveMember,
+            AdminAccessAction::RemoveAdmin,
+        ] {
+            let first =
+                admin_access_change_event(&env, "acme", action, None, Some(&target), None).unwrap();
+            let second =
+                admin_access_change_event(&env, "acme", action, None, Some(&target), None).unwrap();
+            let first_payload: serde_json::Value =
+                serde_json::from_str(first["content"].as_str().unwrap()).unwrap();
+            let second_payload: serde_json::Value =
+                serde_json::from_str(second["content"].as_str().unwrap()).unwrap();
+            assert_ne!(first_payload["changeId"], second_payload["changeId"]);
+            assert_ne!(first["id"], second["id"]);
+        }
     }
 
     #[test]

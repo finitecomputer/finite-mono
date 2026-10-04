@@ -26,6 +26,18 @@ and after every rollout. App-plane deployment, Runtime artifact promotion and
 existing-Agent rollout are separate operations. A source merge authorizes none
 of them by itself.
 
+On the Brain host, `scripts/finite-status --brain-access <exact-brain-id>`
+reports native Folder entitlement, missing current grants and current grants
+left for unentitled keys. It queries only a read-only scratch copy of the
+local authority database; `--brain-database <path>` selects another local
+database. Active Mounts or retained Mount provenance produce unverified
+coverage rather than a clean result. Use the signed admin access report to
+inspect source scope. Neither report proves decryption or recalls older copies.
+Output includes Folder paths and public keys for operator use. Exit codes are
+0 for complete native grant coverage, 1 for confirmed missing or unentitled
+grants, and 2 for unreadable state or unverified scope; confirmed counts remain
+visible when Mount coverage is unverified.
+
 Use the exact reviewed revision, immutable artifact and named target. Preserve
 accepted writes across binary rollback; restore requires an isolated empty
 target and the complete Recovery Set. A persistent volume, successful upload
