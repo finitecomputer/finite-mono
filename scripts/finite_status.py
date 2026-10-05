@@ -2629,6 +2629,62 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     return raw
 
 
+def collect_brain_roster(brain_id: str) -> dict[str, Any]:
+    """Opt-in operator roster: exact Brain keys with platform identity evidence.
+
+    Brain facts come from a private scratch copy of the Brain store; Core
+    facts from one read-only REPEATABLE READ transaction. See
+    finite_status_brain_roster for what is and is never read.
+    """
+    if __package__:  # imported as scripts.finite_status (tests)
+        from . import finite_status_brain_roster as roster
+    else:
+        import finite_status_brain_roster as roster
+
+    try:
+        brain = roster.collect_brain(
+            roster.BRAIN_DATABASE,
+            brain_id,
+            scratch_copy_sqlite,
+            lambda database, sql: sqlite_json_query(database, sql, timeout=60),
+        )
+        inputs = roster.core_inputs(brain)
+    except roster.RosterError as error:
+        raise CollectionError(str(error)) from error
+    command = [
+        "psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+        "--set", "ON_ERROR_STOP=1", "--dbname", CONTRACT["database"]["name"],
+    ]
+    for name, value in inputs.items():
+        command.extend(["--set", f"{name}={value}"])
+    # The script goes in a private file read with --file: piping this
+    # \gset/\if script through stdin stalled psql after its first query.
+    with tempfile.TemporaryDirectory(prefix="finite-status-roster.") as scratch:
+        script = Path(scratch) / "roster.sql"
+        script.write_text(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '30s';\n"
+            f"{roster.CORE_QUERY}ROLLBACK;\n"
+        )
+        script.chmod(0o600)
+        result = run_read_only(
+            [*command, "--file", str(script)],
+            environment=postgres_environment(),
+            input_text="",
+        )
+    if result.returncode != 0:
+        message = result.stderr.strip().splitlines()
+        detail = message[-1] if message else f"exit {result.returncode}"
+        raise CollectionError(f"read-only Core roster query failed: {detail}")
+    try:
+        core = roster.parse_core_output(result.stdout)
+        report = roster.build_report(brain, core, brain_id)
+    except roster.RosterError as error:
+        raise CollectionError(str(error)) from error
+    report["generated_at"] = isoformat(utc_now())
+    return report
+
+
 def parse_caddy_access_entry(line: str) -> dict[str, Any] | None:
     """Extract (ts, remote_ip, method, path) from one Caddy JSON log line."""
     try:
@@ -4446,6 +4502,12 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
+        "--brain-roster",
+        metavar="BRAIN_ID",
+        help="operator-only: exact keys of one Brain with platform identity evidence and"
+             " account emails; read-only; emits JSON",
+    )
+    mode.add_argument(
         "--brain-identity",
         action="store_true",
         help="read only aggregate, contact-free Brain identity description state; emits JSON",
@@ -4464,6 +4526,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     options = parser.parse_args(arguments)
     if options.guest_agent_probe and not options.runtime_lifecycle:
         parser.error("--guest-agent-probe requires --runtime-lifecycle")
+    if options.brain_roster is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", options.brain_roster):
+        parser.error("--brain-roster requires an exact Brain id")
     if options.runtime_assignment and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_assignment):
         parser.error("--runtime-assignment requires a simple Project identifier")
     if options.runtime_lifecycle and any(
@@ -4509,6 +4573,8 @@ def main(arguments: list[str] | None = None) -> None:
             report = collect_finite_private_usage()
         elif options.brain_identity:
             report = collect_brain_identity()
+        elif options.brain_roster:
+            report = collect_brain_roster(options.brain_roster)
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -4541,6 +4607,7 @@ def main(arguments: list[str] | None = None) -> None:
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity
+        or options.brain_roster
         or options.runtime_route
         or options.runtime_lifecycle
         or options.runtime_assignment
