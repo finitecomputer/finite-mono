@@ -8,6 +8,11 @@ import {
   type BrainApproveChoice,
   type BrainApproveEnvelope,
 } from "@/lib/brain-approval-metadata";
+import {
+  type BrainInvitationCardData,
+  invitationCardsFromResponse,
+  joinRequestBody,
+} from "@/lib/brain-invitations";
 import { cn } from "@/lib/utils";
 
 /// Chat-surface Brain cards, anchored to the messages that carry them.
@@ -267,14 +272,6 @@ function BrainApprovalCard({
   );
 }
 
-type InvitationCard = {
-  id: string;
-  brainId?: string;
-  inviteCode?: string;
-  status?: string;
-  ref?: string;
-};
-
 /// Pending Brain invitations for this account. Unlike approval questions,
 /// invitations arrive out of band (someone invited you), so there is no chat
 /// message to anchor to; the section refreshes on conversation updates.
@@ -287,7 +284,7 @@ export function BrainInvitationCards({
   revision?: number;
   onSendMessage?: (text: string) => Promise<void>;
 }) {
-  const [invitations, setInvitations] = useState<InvitationCard[]>([]);
+  const [invitations, setInvitations] = useState<BrainInvitationCardData[]>([]);
   const [cardState, setCardState] = useState<Record<string, CardState>>({});
   const [cardError, setCardError] = useState<Record<string, string>>({});
 
@@ -295,13 +292,8 @@ export function BrainInvitationCards({
     try {
       const response = await fetch("/api/brain/invitations", { cache: "no-store" });
       if (response.ok) {
-        const body = await response.json();
-        const pending = Array.isArray(body.invitations)
-          ? body.invitations.filter(
-              (invitation: InvitationCard) => invitation.status === "pending"
-            )
-          : [];
-        setInvitations(pending.filter((invitation: InvitationCard) => Boolean(invitation.inviteCode)));
+        // The server lists only pending invitations (no status field).
+        setInvitations(invitationCardsFromResponse(await response.json()));
       }
     } catch {
       // Unavailable invitations are not an error surface; joining retries.
@@ -352,48 +344,78 @@ export function BrainInvitationCards({
     <section className={cn("finite-brain-cards", className)} aria-label="Brain invitations">
       {invitations.map((card) => {
         const key = `invitation:${card.id}`;
-        const state = cardState[key] ?? "idle";
+        const name = card.brainDisplayName ?? card.brainId;
         return (
-          <article key={key} className="finite-brain-card" data-kind="invitation">
-            <header className="finite-brain-card__head">
-              <BrainIcon aria-hidden className="size-4" />
-              <strong>Brain invitation</strong>
-              <span className="finite-brain-card__brain">{card.ref ?? card.brainId ?? ""}</span>
-            </header>
-            <p className="finite-brain-card__body">
-              You were invited to a Brain. Joining adds your account as a member and lets this
-              Brain&apos;s admins see your account email and that you are responsible for your
-              agents there.
-            </p>
-            {state === "error" ? (
-              <p className="finite-brain-card__error" role="alert">
-                {cardError[key] || "Joining failed."}
-              </p>
-            ) : null}
-            <footer className="finite-brain-card__actions">
-              <button
-                type="button"
-                disabled={state === "working" || state === "done"}
-                onClick={() =>
-                  act(
-                    key,
-                    "/api/brain/invitations/accept",
-                    { inviteCode: card.inviteCode, shareAccountContact: true },
-                    `Joined ${card.ref ?? card.brainId ?? "a Brain"}`
-                  )
-                }
-              >
-                {state === "working" ? (
-                  <Loader2Icon aria-hidden className="size-4 animate-spin" />
-                ) : state === "done" ? (
-                  <CheckIcon aria-hidden className="size-4" />
-                ) : null}
-                Join Brain
-              </button>
-            </footer>
-          </article>
+          <BrainInvitationCard
+            key={key}
+            card={card}
+            state={cardState[key] ?? "idle"}
+            error={cardError[key] ?? ""}
+            onJoin={(body) =>
+              act(key, "/api/brain/invitations/accept", body, `Joined ${name}`)
+            }
+          />
         );
       })}
     </section>
+  );
+}
+
+/// One invitation. Expired invitations show why and offer no Join action.
+export function BrainInvitationCard({
+  card,
+  state,
+  error,
+  onJoin,
+}: {
+  card: BrainInvitationCardData;
+  state: CardState;
+  error: string;
+  onJoin: (body: ReturnType<typeof joinRequestBody>) => void;
+}) {
+  return (
+    <article
+      className="finite-brain-card"
+      data-kind="invitation"
+      data-expired={card.expired ? "true" : undefined}
+    >
+      <header className="finite-brain-card__head">
+        <BrainIcon aria-hidden className="size-4" />
+        <strong>Brain invitation</strong>
+        <span className="finite-brain-card__brain">{card.brainDisplayName ?? card.brainId}</span>
+      </header>
+      {card.expired ? (
+        <p className="finite-brain-card__body">
+          This invitation expired. Ask an admin of this Brain for a new one.
+        </p>
+      ) : (
+        <p className="finite-brain-card__body">
+          You were invited to a Brain. Joining adds your account as a member and lets this
+          Brain&apos;s admins see your account email and that you are responsible for your
+          agents there.
+        </p>
+      )}
+      {state === "error" ? (
+        <p className="finite-brain-card__error" role="alert">
+          {error || "Joining failed."}
+        </p>
+      ) : null}
+      {card.expired ? null : (
+        <footer className="finite-brain-card__actions">
+          <button
+            type="button"
+            disabled={state === "working" || state === "done"}
+            onClick={() => onJoin(joinRequestBody(card))}
+          >
+            {state === "working" ? (
+              <Loader2Icon aria-hidden className="size-4 animate-spin" />
+            ) : state === "done" ? (
+              <CheckIcon aria-hidden className="size-4" />
+            ) : null}
+            Join Brain
+          </button>
+        </footer>
+      )}
+    </article>
   );
 }
