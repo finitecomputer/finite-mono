@@ -143,6 +143,8 @@ pub struct CompleteRuntimeControlRequest {
     pub published_app_urls: Option<Vec<String>>,
     #[serde(default)]
     pub retirement_snapshot: Option<crate::RuntimeRetirementSnapshotReceipt>,
+    #[serde(default)]
+    pub trial_archive: Option<crate::TrialArchiveSnapshot>,
     pub now: Option<String>,
 }
 
@@ -348,4 +350,13 @@ pub struct SettleFinitePrivateReservationRequest {
     pub upstream_status: Option<i32>,
     pub upstream_error_class: Option<String>,
     pub now: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RenewTrialRestoreRequest {
+    #[serde(flatten)]
+    pub lease: RenewRuntimeControlRequest,
+    #[serde(default)]
+    pub pause_only: bool,
 }

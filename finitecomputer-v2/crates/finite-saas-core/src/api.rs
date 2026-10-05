@@ -431,6 +431,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(retry_runtime_control_request),
         )
         .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/trial-restore-renew",
+            post(renew_trial_restore),
+        )
+        .route(
             "/api/core/v1/agent-creation-requests/{request_id}/complete",
             post(complete_agent_creation_request),
         )

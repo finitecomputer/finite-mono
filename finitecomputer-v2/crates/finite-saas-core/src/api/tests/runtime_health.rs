@@ -95,6 +95,7 @@ async fn core_api_runtime_health_reports_are_runner_authed_and_host_scoped() {
                         runtime_upgrade: true,
                         stop: true,
                         runtime_retirement: false,
+                        trial_archive: false,
                     },
                 )),
                 display_name: Some("Health Api Agent".to_string()),

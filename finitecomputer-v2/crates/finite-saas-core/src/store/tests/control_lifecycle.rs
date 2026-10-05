@@ -300,6 +300,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
             );
             store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
                     request_id: restart.id.clone(),
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-{run}"),
@@ -644,6 +645,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
             .unwrap();
             upgrade_store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
                     request_id: upgrade.id.clone(),
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("ctl-upgrade-{run}"),
@@ -653,6 +655,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
                         RuntimeCapabilitiesV1 {
                             recover_known_good_chat: true,
                             runtime_retirement: true,
+                            trial_archive: false,
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
@@ -812,6 +815,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
                         runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                             RuntimeCapabilitiesV1 {
                                 runtime_retirement: true,
+                                trial_archive: false,
                                 ..*kata_runtime_capabilities().v1()
                             },
                         )),
@@ -842,6 +846,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
                 retention_policy: crate::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
             };
             let completion = CompleteRuntimeControlRequestInput {
+        trial_archive: None,
                 request_id: destroy.id.clone(),
                 runner_id: format!("runner-{run}"),
                 lease_token: format!("ctl-destroy-{run}"),

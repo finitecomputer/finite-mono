@@ -162,6 +162,7 @@ async fn postgres_admin_ops_runtime_overview_and_finite_private_lifecycle() {
         assert_eq!(control_lease.request.id, restart.id);
         store
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id.clone(),
                 runner_id: format!("runner-admin-ops-{run}"),
                 lease_token: format!("control-lease-{run}"),

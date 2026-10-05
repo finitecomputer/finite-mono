@@ -96,6 +96,7 @@ pub(crate) fn state_preserving_runtime_capabilities(
         runtime_upgrade,
         stop: true,
         runtime_retirement: false,
+        trial_archive: false,
     })
 }
 
@@ -113,6 +114,7 @@ pub(crate) fn kata_runtime_capabilities_with_retirement(
         runtime_upgrade: true,
         stop: true,
         runtime_retirement,
+        trial_archive: false,
     })
 }
 
@@ -609,7 +611,9 @@ where
         )? {
             return self.run_runtime_control(lease, lease_token);
         }
-        if let Some(reason) = runner_capacity.agent_creation_rejection_reason() {
+        if let Some(reason) = runner_capacity.agent_creation_rejection_reason()
+            && !runtime_capabilities.v1().trial_archive
+        {
             return Ok(RunOnceOutcome::CapacityUnavailable {
                 reason: reason.to_string(),
                 runner_capacity,
@@ -626,6 +630,38 @@ where
         };
 
         let request_id = lease.request.id.clone();
+        if lease.trial_restore_allowed == Some(false) {
+            let queue = &mut self.queue;
+            let mut renew = || {
+                queue.renew_trial_restore(
+                    &request_id,
+                    RenewRuntimeControlRequestInput {
+                        request_id: request_id.clone(),
+                        runner_id: self.runner_id.clone(),
+                        lease_token: lease_token.clone(),
+                        lease_seconds: Some(RUNTIME_RETIREMENT_LEASE_SECONDS),
+                        now: None,
+                    },
+                    true,
+                )
+            };
+            self.launcher.pause_trial_restore(&lease, &mut renew)?;
+            self.queue.fail_agent_creation(
+                &request_id,
+                FailAgentCreationRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: self.runner_id.clone(),
+                    lease_token,
+                    failure_message: "Trial restore paused pending billing authorization".into(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                },
+            )?;
+            return Ok(RunOnceOutcome::LaunchFailed {
+                request_id,
+                failure_message: "Trial restore paused pending billing authorization".into(),
+            });
+        }
         let launch_options = match self.runtime_launch_options(&lease, &lease_token) {
             Ok(options) => options,
             Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
@@ -648,7 +684,33 @@ where
                 });
             }
         };
-        let launch = {
+        let restore = if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_some_and(|r| r.v1().trial_archive.is_some())
+        {
+            let queue = &mut self.queue;
+            let mut renew = || {
+                queue.renew_trial_restore(
+                    &request_id,
+                    RenewRuntimeControlRequestInput {
+                        request_id: request_id.clone(),
+                        runner_id: self.runner_id.clone(),
+                        lease_token: lease_token.clone(),
+                        lease_seconds: Some(RUNTIME_RETIREMENT_LEASE_SECONDS),
+                        now: None,
+                    },
+                    false,
+                )
+            };
+            renew()
+                .and_then(|()| self.launcher.prepare_trial_restore(&lease, &mut renew))
+                .and_then(|()| renew())
+        } else {
+            Ok(())
+        };
+        let launch = restore.and_then(|()| {
             let mut provider_operation_journal = QueueProviderOperationJournal {
                 queue: &mut self.queue,
                 request_id: &request_id,
@@ -660,7 +722,7 @@ where
                 &launch_options,
                 &mut provider_operation_journal,
             )
-        };
+        });
         match launch {
             Ok(facts) => {
                 let launch_result = self.queue.register_agent_creation_runtime(
@@ -734,7 +796,18 @@ where
                     }),
                     Err(error) => {
                         let failure_message = error.to_string();
-                        let cleanup_error = self.launcher.cleanup_failed_launch(&facts).err();
+                        let cleanup_error = if lease
+                            .request
+                            .relocation
+                            .as_ref()
+                            .is_some_and(|r| r.v1().trial_archive.is_some())
+                        {
+                            // A delayed 4xx may belong to a stale lease after a
+                            // successor completed. Only a new cleanup lease may stop.
+                            None
+                        } else {
+                            self.launcher.cleanup_failed_launch(&facts).err()
+                        };
                         self.queue.fail_agent_creation(
                             &request_id,
                             FailAgentCreationRequestInput {
@@ -878,6 +951,16 @@ where
             RuntimeControlKind::Stop => {
                 self.run_runtime_control_operation(lease, lease_token, RuntimeControlKind::Stop)
             }
+            RuntimeControlKind::ArchiveTrial => self.run_runtime_control_operation(
+                lease,
+                lease_token,
+                RuntimeControlKind::ArchiveTrial,
+            ),
+            RuntimeControlKind::ReclaimTrial => self.run_runtime_control_operation(
+                lease,
+                lease_token,
+                RuntimeControlKind::ReclaimTrial,
+            ),
             RuntimeControlKind::Destroy => {
                 self.run_runtime_control_operation(lease, lease_token, RuntimeControlKind::Destroy)
             }
@@ -967,7 +1050,9 @@ where
                 .launcher
                 .stop_runtime(&lease)
                 .map(|()| RuntimeControlCompletionFacts::None),
-            RuntimeControlKind::Destroy => {
+            RuntimeControlKind::Destroy
+            | RuntimeControlKind::ArchiveTrial
+            | RuntimeControlKind::ReclaimTrial => {
                 let runner_id = self.runner_id.clone();
                 let lease_token_for_renewal = lease_token.clone();
                 // Establish Core's maximum bounded lease before synchronous
@@ -989,9 +1074,20 @@ where
                         )
                         .map(|_| ())
                 };
-                self.launcher
-                    .retire_runtime(&lease, &mut renew_lease)
-                    .map(|receipt| RuntimeControlCompletionFacts::Retirement(Box::new(receipt)))
+                match kind {
+                    RuntimeControlKind::ArchiveTrial => self
+                        .launcher
+                        .archive_trial(&lease, &mut renew_lease)
+                        .map(|s| RuntimeControlCompletionFacts::TrialArchive(Box::new(s))),
+                    RuntimeControlKind::ReclaimTrial => self
+                        .launcher
+                        .reclaim_trial(&lease, &mut renew_lease)
+                        .map(|()| RuntimeControlCompletionFacts::None),
+                    _ => self
+                        .launcher
+                        .retire_runtime(&lease, &mut renew_lease)
+                        .map(|s| RuntimeControlCompletionFacts::Retirement(Box::new(s))),
+                }
             }
         };
 
@@ -1000,12 +1096,14 @@ where
                 let upgrade_facts = match &completion_facts {
                     RuntimeControlCompletionFacts::Upgrade(facts) => Some(facts),
                     RuntimeControlCompletionFacts::None
-                    | RuntimeControlCompletionFacts::Retirement(_) => None,
+                    | RuntimeControlCompletionFacts::Retirement(_)
+                    | RuntimeControlCompletionFacts::TrialArchive(_) => None,
                 };
                 let retirement_snapshot = match &completion_facts {
                     RuntimeControlCompletionFacts::Retirement(receipt) => Some((**receipt).clone()),
                     RuntimeControlCompletionFacts::None
-                    | RuntimeControlCompletionFacts::Upgrade(_) => None,
+                    | RuntimeControlCompletionFacts::Upgrade(_)
+                    | RuntimeControlCompletionFacts::TrialArchive(_) => None,
                 };
                 let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
                     artifact_bounded_upgrade_runtime_capabilities(
@@ -1016,6 +1114,10 @@ where
                 let completed = self.queue.complete_runtime_control(
                     &request_id,
                     CompleteRuntimeControlRequestInput {
+                        trial_archive: match &completion_facts {
+                            RuntimeControlCompletionFacts::TrialArchive(s) => Some((**s).clone()),
+                            _ => None,
+                        },
                         request_id: request_id.clone(),
                         runner_id: self.runner_id.clone(),
                         lease_token,
@@ -1068,7 +1170,12 @@ where
         failure_message: &str,
         failure_stage: RuntimeLifecycleStage,
     ) -> Result<(), RunnerError> {
-        if kind == RuntimeControlKind::Destroy {
+        if matches!(
+            kind,
+            RuntimeControlKind::Destroy
+                | RuntimeControlKind::ArchiveTrial
+                | RuntimeControlKind::ReclaimTrial
+        ) {
             self.queue.retry_runtime_control(
                 request_id,
                 RetryRuntimeControlRequestInput {
@@ -1202,6 +1309,17 @@ where
 }
 
 pub trait AgentCreationQueue {
+    fn renew_trial_restore(
+        &mut self,
+        _request_id: &str,
+        _input: RenewRuntimeControlRequestInput,
+        _pause_only: bool,
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "trial restore renewal unsupported".into(),
+        ))
+    }
+
     fn lease_runtime_control(
         &mut self,
         runner_id: &str,
@@ -1369,6 +1487,52 @@ where
 }
 
 pub trait RuntimeLauncher {
+    fn archive_trial(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<finite_saas_core::TrialArchiveSnapshot, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "trial archive unsupported".into(),
+        ))
+    }
+    fn reclaim_trial(
+        &mut self,
+        _lease: &RuntimeControlLease,
+        _renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "trial reclaim unsupported".into(),
+        ))
+    }
+    fn pause_trial_restore(
+        &mut self,
+        _lease: &AgentCreationLease,
+        _renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "Trial restore pause unsupported".into(),
+        ))
+    }
+
+    fn prepare_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        _renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_some_and(|r| r.v1().trial_archive.is_some())
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "trial restore unsupported".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError>;
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope;
     fn runner_class(&self) -> RunnerClass {
@@ -1451,6 +1615,35 @@ impl<L> RuntimeLauncher for Box<L>
 where
     L: RuntimeLauncher + ?Sized,
 {
+    fn archive_trial(
+        &mut self,
+        l: &RuntimeControlLease,
+        r: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<finite_saas_core::TrialArchiveSnapshot, RunnerError> {
+        (**self).archive_trial(l, r)
+    }
+    fn reclaim_trial(
+        &mut self,
+        l: &RuntimeControlLease,
+        r: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        (**self).reclaim_trial(l, r)
+    }
+    fn pause_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        (**self).pause_trial_restore(lease, renew)
+    }
+    fn prepare_trial_restore(
+        &mut self,
+        l: &AgentCreationLease,
+        r: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        (**self).prepare_trial_restore(l, r)
+    }
+
     fn validate_ready(&self) -> Result<(), RunnerError> {
         (**self).validate_ready()
     }
@@ -1572,7 +1765,9 @@ fn runtime_control_success_outcome(
             request_id,
             runtime_id,
         },
-        RuntimeControlKind::Stop => RunOnceOutcome::RuntimeStopped {
+        RuntimeControlKind::Stop
+        | RuntimeControlKind::ArchiveTrial
+        | RuntimeControlKind::ReclaimTrial => RunOnceOutcome::RuntimeStopped {
             request_id,
             runtime_id,
         },
@@ -1601,7 +1796,9 @@ fn runtime_control_failed_outcome(
             request_id,
             failure_message,
         },
-        RuntimeControlKind::Stop => RunOnceOutcome::RuntimeStopFailed {
+        RuntimeControlKind::Stop
+        | RuntimeControlKind::ArchiveTrial
+        | RuntimeControlKind::ReclaimTrial => RunOnceOutcome::RuntimeStopFailed {
             request_id,
             failure_message,
         },
@@ -1656,6 +1853,7 @@ enum RuntimeControlCompletionFacts {
     None,
     Upgrade(RuntimeUpgradeFacts),
     Retirement(Box<RuntimeRetirementSnapshotReceipt>),
+    TrialArchive(Box<finite_saas_core::TrialArchiveSnapshot>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1784,7 +1982,9 @@ fn control_runtime_spec(
         RuntimeControlKind::Restart
         | RuntimeControlKind::Upgrade
         | RuntimeControlKind::Stop
-        | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
+        | RuntimeControlKind::Destroy
+        | RuntimeControlKind::ArchiveTrial
+        | RuntimeControlKind::ReclaimTrial => RuntimeBootIntent::Normal,
     };
     if spec.operation_id != lease.request.id
         || spec.project_id != lease.runtime.project_id
@@ -2413,6 +2613,21 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         )
     }
 
+    fn renew_trial_restore(
+        &mut self,
+        request_id: &str,
+        input: RenewRuntimeControlRequestInput,
+        pause_only: bool,
+    ) -> Result<(), RunnerError> {
+        let mut body = serde_json::to_value(input)
+            .map_err(|error| RunnerError::CoreJson(error.to_string()))?;
+        body["pauseOnly"] = serde_json::Value::Bool(pause_only);
+        let _: bool = self.post_json(
+            &format!("/api/core/v1/agent-creation-requests/{request_id}/trial-restore-renew"),
+            &body,
+        )?;
+        Ok(())
+    }
     fn renew_runtime_control(
         &mut self,
         request_id: &str,
@@ -7173,6 +7388,7 @@ mod tests {
         let mut lease = sample_lease(request_id);
         lease.request.relocation = Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
             finite_saas_core::RuntimeRelocationV1 {
+                trial_archive: None,
                 source_host_id: "old-host".into(),
                 source_machine_id: "old-machine".into(),
                 target_source_host_id: "new-host".into(),
@@ -7186,6 +7402,7 @@ mod tests {
 
     fn sample_lease(request_id: &str) -> AgentCreationLease {
         AgentCreationLease {
+            trial_restore_allowed: None,
             project: Project {
                 id: "project_123".to_string(),
                 customer_org_id: "org_123".to_string(),
@@ -7326,6 +7543,8 @@ mod tests {
         kind: RuntimeControlKind,
     ) -> RuntimeControlLease {
         RuntimeControlLease {
+            archive_principal: None,
+            trial_archive: None,
             request: RuntimeControlRequest {
                 id: request_id.to_string(),
                 project_id: "project_123".to_string(),

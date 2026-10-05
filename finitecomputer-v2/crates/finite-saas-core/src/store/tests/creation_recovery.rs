@@ -168,6 +168,7 @@ async fn postgres_persisted_machine_named_durable_state_id_is_repaired_on_read()
         );
         store
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id.clone(),
                 runner_id: format!("runner-{host}"),
                 lease_token: "restart-lease".to_string(),

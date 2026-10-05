@@ -44,6 +44,14 @@ where
     } else {
         verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
     }
+    if request
+        .relocation
+        .as_ref()
+        .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
+        client.execute("UPDATE agent_creation_requests SET status='requested', lease_token=NULL, lease_expires_at=NULL, failure_message=$2, updated_at=$3::text::timestamptz WHERE id=$1", &[&request.id,&failure_message,&now]).await.map_err(store_error)?;
+        return locked_agent_creation_request(client, &request.id).await;
+    }
     let is_relocation = request.relocation.is_some();
     if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
         let key_id = trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;

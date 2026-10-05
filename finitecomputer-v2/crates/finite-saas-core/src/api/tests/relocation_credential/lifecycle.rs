@@ -66,6 +66,7 @@ async fn run_relocation_credential_handoff(same_host: bool) {
             .unwrap();
         assert_eq!(stop_lease.request.id, stop.id);
         db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
             request_id: stop.id,
             runner_id: runner.clone(),
             lease_token: format!("{suffix}-stop-lease"),
@@ -216,6 +217,7 @@ async fn run_relocation_credential_handoff(same_host: bool) {
             .secret;
         assert!(upgrade_secret == replacement_secret);
         db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
             request_id: upgrade.id,
             runner_id: runner,
             lease_token: upgrade_lease_token,

@@ -232,6 +232,7 @@ fn kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope {
         runtime_upgrade: true,
         stop: true,
         runtime_retirement: false,
+        trial_archive: false,
     })
 }
 
@@ -267,6 +268,7 @@ async fn stage_retired_offboard_anomaly(
     let retirement_capable =
         serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
             runtime_retirement: true,
+            trial_archive: false,
             ..*kata_runtime_capabilities().v1()
         }))
         .unwrap();
@@ -295,6 +297,7 @@ async fn stage_retired_offboard_anomaly(
                 runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                     RuntimeCapabilitiesV1 {
                         runtime_retirement: true,
+                        trial_archive: false,
                         ..*kata_runtime_capabilities().v1()
                     },
                 )),

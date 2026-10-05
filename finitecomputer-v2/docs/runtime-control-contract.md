@@ -176,6 +176,57 @@ minutes) rather than on every sweep;
 unavailable Runners or unsupported capabilities remain visible errors, not
 permission to purge data or create a replacement agent.
 
+### Trial archive, local reclamation and restore
+
+This Kata-only residency flow is disabled unless Core has
+`FC_CORE_TRIAL_ARCHIVES_ENABLED=true`, the Runner has
+`FC_RUNNER_TRIAL_ARCHIVES_ENABLED=true`, and the Runtime and worker advertise
+`trial_archive`. It reuses the configured Recovery Authority and encrypted SSH
+Borg repository. It creates no repository, credentials, campaign or billing charge.
+
+After a trial-owned Stop settles, `archive_trial` uploads the stopped durable
+state and verifies exact remote readback. Core commits the immutable receipt,
+original tree digest and pinned Agent Principal before issuing the separate
+`reclaim_trial` lease. Reclaim reads and verifies that same remote object again,
+checks source quiescence/content and removes compute plus the local durable tree.
+A durable host reservation withholds capacity through incomplete disk cleanup.
+Missing keys, space, principal, archive or verification fail closed with local
+state retained. Recovery archives have no new TTL and are never pruned here.
+
+Billing-authorized return after reclamation creates a restore operation for the
+same Runtime, Project, Principal and durable-state ID. No-capacity operations wait
+unbound; the first eligible worker pins the target, and subsequent retries never
+retarget on lease expiry. Restoration verifies the ZIP and tree digest on an
+empty staging directory, atomically promotes it, and records a durable operation
+journal before boot. That journal preserves later guest writes across interrupted
+launch/completion retries. Principal verification and existing relocation
+credential handoff guard final registration; the predecessor credential is
+revoked only in the successful completion transaction.
+
+Payment before reclaim is queued keeps local state and follows ordinary Restart.
+Payment during a live reclaim waits for it to settle, then restores. Billing is
+rechecked at restore claim, renewal, registration and completion. A denied pinned
+operation can be claimed only to stop its target, with fresh cleanup-lease
+validation after acquiring the host operation lock; it cannot receive new bootstrap
+credentials or complete. A crashed worker's target stop remains asynchronous,
+bounded by lease expiry and the next reachable worker cycle. Ambiguous completion
+responses preserve compute until an authoritative retry resolves the operation.
+
+Archive/reclaim retries retain their original request IDs. Restore failures retain
+the same target and request, with a 30-second retry delay. Public controls conflict
+while restoration owns the lifecycle. Failed or missing-host operations remain
+queued with failure evidence; operators must not retarget an uncertain writer.
+
+Rollout requires a real empty-target restore qualification with the existing
+Recovery Authority, keys, pinned image and sufficient staging space (archive
+creation needs both local ZIP and readback copies). Deploy compatible Core and
+Runners before enabling either flag. Older persisted Runtime capability records
+require an explicitly approved compatible upgrade before they become eligible;
+Runner deployment alone does not rewrite those records. Turning the Core flag off prevents new
+archives but permits already committed residency operations to finish. After any
+new operation is persisted, rolling back to a binary that cannot parse these
+kinds/fields is unsafe; retain the compatible binary and disable new archival.
+
 ### Operator-only Cold Relocation
 
 Cold relocation moves one exact, stopped Kata Runtime between Finite-owned
@@ -221,8 +272,9 @@ An archive receipt alone does not prove a complete empty-target restore; the
 Recovery Authority must independently possess the required keys and artifacts.
 
 Purge User Data is not an ordinary Runtime operation. Subscription cancellation,
-non-payment, stop and retirement do not authorize deleting durable state or
-retained Recovery Sets. TODO: [recovery qualification](https://linear.app/finitecomputer/issue/FIN-62).
+non-payment, stop and retirement do not themselves authorize data purge. The
+explicit trial residency policy above may evict a verified local copy while
+retaining its Recovery Set; it never authorizes deleting that Recovery Set. TODO: [recovery qualification](https://linear.app/finitecomputer/issue/FIN-62).
 
 ## Managed Skills
 

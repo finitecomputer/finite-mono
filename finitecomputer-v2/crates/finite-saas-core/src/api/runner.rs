@@ -178,6 +178,7 @@ pub(super) async fn complete_runtime_control_request(
         state
             .store
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: input.trial_archive,
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,
@@ -360,4 +361,28 @@ pub(super) async fn fail_agent_creation_request(
             })
             .await?,
     ))
+}
+
+pub(super) async fn renew_trial_restore(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+    Json(body): Json<RenewTrialRestoreRequest>,
+) -> Result<Json<bool>, ApiError> {
+    let input = body.lease;
+    let credential = require_runner_auth(&state, &headers)?;
+    authorize_runner_id(&credential, &input.runner_id)?;
+    let renewal = crate::RenewRuntimeControlRequestInput {
+        request_id,
+        runner_id: input.runner_id,
+        lease_token: input.lease_token,
+        lease_seconds: input.lease_seconds,
+        now: None,
+    };
+    if body.pause_only {
+        state.store.renew_trial_restore_pause(renewal).await?;
+    } else {
+        state.store.renew_trial_restore(renewal).await?;
+    }
+    Ok(Json(true))
 }

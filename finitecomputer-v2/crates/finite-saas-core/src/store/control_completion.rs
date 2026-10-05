@@ -150,6 +150,25 @@ where
     // idempotent Destroy replay: the same receipt re-presented against the
     // stopped request returns the stored row unchanged.
     if locked.status.is_terminal() {
+        if matches!(
+            locked.kind,
+            RuntimeControlKind::ArchiveTrial | RuntimeControlKind::ReclaimTrial
+        ) && locked.status == RuntimeControlRequestStatus::Stopped
+            && locked.runner_id.as_deref() == Some(input.runner_id.as_str())
+        {
+            let completion = RuntimeControlCompletion::parse(locked.kind, &input)?;
+            let replay = match completion {
+                RuntimeControlCompletion::ArchiveTrial(snapshot) => {
+                    let stored = client.query_opt("SELECT snapshot FROM trial_runtime_archives WHERE archive_request_id=$1 AND archive_lease_sha256=$2", &[&locked.id,&runtime_credentials::digest(&input.lease_token)]).await.map_err(store_error)?;
+                    stored.is_some_and(|row| row.get::<_,Value>(0) == serde_json::to_value(&snapshot).unwrap_or(Value::Null))
+                }
+                _ if locked.kind == RuntimeControlKind::ReclaimTrial => client.query_opt("SELECT archive_request_id FROM trial_runtime_archives WHERE reclaim_request_id=$1 AND reclaimed_at IS NOT NULL AND reclaim_lease_sha256=$2", &[&locked.id,&runtime_credentials::digest(&input.lease_token)]).await.map_err(store_error)?.is_some(),
+                _ => false,
+            };
+            if replay {
+                return Ok(locked);
+            }
+        }
         let stored = postgres_runtime_retirement_snapshot(client, &input.request_id).await?;
         let idempotent_destroy_replay = locked.status == RuntimeControlRequestStatus::Stopped
             && locked.kind == RuntimeControlKind::Destroy
@@ -175,6 +194,15 @@ where
     // the upgrade-with-facts / destroy / plain shapes cannot be confused
     // anywhere below this line.
     let completion = RuntimeControlCompletion::parse(locked.kind, &input)?;
+    if let RuntimeControlCompletion::ArchiveTrial(snapshot) = &completion {
+        trial_archives::store_snapshot(client, &locked, snapshot, &now).await?;
+    }
+    if locked.kind == RuntimeControlKind::ReclaimTrial {
+        let changed=client.execute("UPDATE trial_runtime_archives SET reclaimed_at=COALESCE(reclaimed_at,$2::text::timestamptz),reclaim_lease_sha256=$3 WHERE reclaim_request_id=$1 AND restored_at IS NULL", &[&locked.id,&now,&runtime_credentials::digest(&input.lease_token)]).await.map_err(store_error)?;
+        if changed != 1 {
+            return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+        }
+    }
     let retirement_snapshot = match &completion {
         RuntimeControlCompletion::Destroy(receipt) => {
             let runtime = select_agent_runtime(client, &locked.agent_runtime_id)
@@ -357,9 +385,10 @@ where
         | RuntimeControlKind::Upgrade => {
             launching.compute_up(&completion).ready().succeed().status()
         }
-        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => {
-            launching.confirm_stopped(&completion).status()
-        }
+        RuntimeControlKind::Stop
+        | RuntimeControlKind::Destroy
+        | RuntimeControlKind::ArchiveTrial
+        | RuntimeControlKind::ReclaimTrial => launching.confirm_stopped(&completion).status(),
     };
     let row = client
         .query_one(
@@ -385,7 +414,10 @@ where
         RuntimeControlKind::Restart
         | RuntimeControlKind::RecoverKnownGoodChatRuntime
         | RuntimeControlKind::Upgrade => RuntimeSummaryStatus::Online,
-        RuntimeControlKind::Stop | RuntimeControlKind::Destroy => RuntimeSummaryStatus::Offline,
+        RuntimeControlKind::Stop
+        | RuntimeControlKind::Destroy
+        | RuntimeControlKind::ArchiveTrial
+        | RuntimeControlKind::ReclaimTrial => RuntimeSummaryStatus::Offline,
     };
     let destroy = request.kind == RuntimeControlKind::Destroy;
     apply_runtime_control_completion(

@@ -1,3 +1,4 @@
+mod archives;
 use super::*;
 use crate::test_support::{TestDb, with_isolated_postgres};
 use crate::{BillingSubscriptionStatus, RuntimeArtifactKind, RuntimeCapabilitiesV1};
@@ -9,6 +10,7 @@ fn capabilities() -> RuntimeCapabilitiesEnvelope {
         runtime_upgrade: true,
         stop: true,
         runtime_retirement: false,
+        trial_archive: false,
     })
 }
 
@@ -196,6 +198,7 @@ async fn complete_next(store: &TestDb, kind: RuntimeControlKind) -> RuntimeContr
     assert_eq!(lease.request.kind, kind);
     store
         .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+            trial_archive: None,
             request_id: lease.request.id.clone(),
             runner_id: "trial-runner".into(),
             lease_token: "trial-control".into(),
@@ -460,6 +463,7 @@ async fn trial_expiry_waits_for_live_control_but_fences_an_expired_lease() {
         assert!(
             store
                 .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                    trial_archive: None,
                     request_id: lease.request.id,
                     runner_id: "slow-runner".into(),
                     lease_token: "slow-token".into(),

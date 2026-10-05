@@ -58,6 +58,7 @@ async fn postgres_destroy_completion_records_forward_only_offboarding_phases() {
             retention_policy: crate::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
         };
         let completion = CompleteRuntimeControlRequestInput {
+            trial_archive: None,
             request_id: destroy.id.clone(),
             runner_id: format!("runner-{run}"),
             lease_token: format!("ctl-destroy-{run}"),

@@ -104,6 +104,7 @@ async fn postgres_admin_offboard_retired_runtime_completes_verified_retirement()
         let retirement_capable =
             serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
                 runtime_retirement: true,
+                trial_archive: false,
                 ..*kata_runtime_capabilities().v1()
             }))
             .unwrap();
@@ -136,6 +137,7 @@ async fn postgres_admin_offboard_retired_runtime_completes_verified_retirement()
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             runtime_retirement: true,
+                            trial_archive: false,
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
@@ -480,6 +482,7 @@ async fn postgres_verified_retirement_receipt_blocks_link_reactivation() {
         let retirement_capable =
             serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
                 runtime_retirement: true,
+                trial_archive: false,
                 ..*kata_runtime_capabilities().v1()
             }))
             .unwrap();
@@ -512,6 +515,7 @@ async fn postgres_verified_retirement_receipt_blocks_link_reactivation() {
                     runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                         RuntimeCapabilitiesV1 {
                             runtime_retirement: true,
+                            trial_archive: false,
                             ..*kata_runtime_capabilities().v1()
                         },
                     )),
@@ -594,6 +598,7 @@ async fn postgres_verified_retirement_receipt_blocks_link_reactivation() {
         let mut retry = register_input(format!("lease-reactivate-{run}"), "2026-07-21T12:09:00Z");
         retry.runtime_capabilities = Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
             runtime_retirement: true,
+            trial_archive: false,
             ..*kata_runtime_capabilities().v1()
         }));
         let error = store

@@ -1,4 +1,6 @@
 use super::*;
+mod trial_archive;
+
 use crate::retirement::{
     RecoveryArtifactContext, VerifiedRecoveryZip, create_recovery_zip, source_manifest,
     verify_recovery_zip,
@@ -2033,8 +2035,54 @@ impl KataLauncher {
 }
 
 impl RuntimeLauncher for KataLauncher {
+    fn archive_trial(
+        &mut self,
+        lease: &RuntimeControlLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<finite_saas_core::TrialArchiveSnapshot, RunnerError> {
+        self.archive_trial_state(lease, renew)
+    }
+    fn reclaim_trial(
+        &mut self,
+        lease: &RuntimeControlLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        self.reclaim_trial_state(lease, renew)
+    }
+    fn pause_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        let plan = self.plan_launch(lease)?;
+        let _lock = self.acquire_runtime_operation_lock(&plan)?;
+        self.pause_trial_restore_state(lease, &plan, renew)
+    }
+    fn prepare_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<(), RunnerError> {
+        if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_none_or(|r| r.v1().trial_archive.is_none())
+        {
+            return Ok(());
+        }
+        let plan = self.plan_launch(lease)?;
+        let _lock = self.acquire_runtime_operation_lock(&plan)?;
+        self.restore_trial_state(lease, &plan, renew)
+    }
+
     fn runtime_capabilities(&self) -> RuntimeCapabilitiesEnvelope {
-        kata_runtime_capabilities_with_retirement(self.config.retirement.is_some())
+        let mut capabilities =
+            kata_runtime_capabilities_with_retirement(self.config.retirement.is_some());
+        let RuntimeCapabilitiesEnvelope::V1(value) = &mut capabilities;
+        value.trial_archive = self.config.retirement.is_some()
+            && std::env::var("FC_RUNNER_TRIAL_ARCHIVES_ENABLED").as_deref() == Ok("true");
+        capabilities
     }
 
     fn runner_class(&self) -> RunnerClass {
@@ -2863,7 +2911,9 @@ impl RuntimeLauncher for KataLauncher {
                         "could not establish the pre-retirement active-sandbox count".to_string(),
                     )
                 })?;
-            let agent_principal = if inspected.state.status == "running" {
+            let agent_principal = if lease.request.kind == RuntimeControlKind::ArchiveTrial {
+                lease.archive_principal.clone()
+            } else if inspected.state.status == "running" {
                 renew_lease()?;
                 let host_port = self.host_port(&validated_plan)?;
                 Some(self.wait_for_agent_npub(&validated_plan, host_port)?)
@@ -2904,6 +2954,11 @@ impl RuntimeLauncher for KataLauncher {
                 .saturating_add(64 * 1024 * 1024);
             let available_space = fs4::available_space(&staging_root)
                 .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let required_space = if lease.request.kind == RuntimeControlKind::ArchiveTrial {
+                required_space.saturating_mul(2)
+            } else {
+                required_space
+            };
             if available_space < required_space {
                 return Err(RunnerError::RuntimeLaunch(format!(
                     "retirement staging requires {required_space} bytes but only {available_space} are available"
@@ -3000,6 +3055,9 @@ impl RuntimeLauncher for KataLauncher {
             self.write_retirement_progress(&plan, &progress)?;
         }
 
+        if lease.request.kind == RuntimeControlKind::ArchiveTrial {
+            return Ok(receipt);
+        }
         if progress.phase < KataRetirementPhase::ComputeRemoved {
             if let Some(inspected) = self.inspect(&progress.container_name)? {
                 self.validate_owned(&plan, &lease.runtime.project_id, &inspected)?;
@@ -3149,6 +3207,9 @@ impl KataLauncher {
             return Err(RunnerError::RuntimeLaunch(
                 "cold relocation binding did not match the target Runner plan".to_string(),
             ));
+        }
+        if relocation.trial_archive.is_some() && self.trial_restore_journal_matches(lease, plan)? {
+            return self.validate_trial_restore_target(lease, plan);
         }
         if self.inspect(&plan.container_name)?.is_some() {
             return Err(RunnerError::RuntimeLaunch(
@@ -4470,7 +4531,8 @@ fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter(|line| !line.trim().is_empty())
-            .count() as u32,
+            .count() as u32
+            + trial_archive::reclaim_reservation_count(config)?,
     )
 }
 
@@ -4562,6 +4624,7 @@ struct KataRecoveryHelper {
 
 #[cfg(test)]
 mod tests {
+    mod trial_archives;
     use super::*;
     use finite_saas_core::{
         AgentRuntime, HostOwnedRuntimeFacts, RuntimeControlRequest, RuntimeControlRequestStatus,
@@ -4938,6 +5001,10 @@ mkdir -p "$remote"
 cmd="$1"; shift
 case "$cmd" in
   info)
+    if [ "${1:-}" = "--json" ]; then
+      printf '%s\n' '{"encryption":{"mode":"repokey"}}'
+      exit 0
+    fi
     test -f "$remote/archive.zip"
     ;;
   create)
@@ -5023,6 +5090,8 @@ esac
 
     fn upgrade_lease(request_id: &str) -> RuntimeControlLease {
         let mut lease = RuntimeControlLease {
+            archive_principal: None,
+            trial_archive: None,
             request: RuntimeControlRequest {
                 id: request_id.to_string(),
                 project_id: "project-1".to_string(),
@@ -8137,6 +8206,7 @@ esac
         let window = Duration::from_millis(20);
         let relocation =
             |manifest: String, source_compute_absent: bool| finite_saas_core::RuntimeRelocationV1 {
+                trial_archive: None,
                 source_host_id: "finite-lat-1".to_string(),
                 source_machine_id: TEST_CONTAINER_NAME.to_string(),
                 target_source_host_id: "finite-lat-3".to_string(),
@@ -8206,6 +8276,7 @@ esac
     ) -> AgentCreationLease {
         let placement = kata_placement();
         AgentCreationLease {
+            trial_restore_allowed: None,
             project: finite_saas_core::Project {
                 id: "project-1".to_string(),
                 customer_org_id: "org-1".to_string(),
@@ -8255,6 +8326,7 @@ esac
                 target_source_host_id: Some(target_source_host_id.to_string()),
                 relocation: Some(finite_saas_core::RuntimeRelocationEnvelope::V1(
                     finite_saas_core::RuntimeRelocationV1 {
+                        trial_archive: None,
                         source_host_id: source_host_id.to_string(),
                         source_machine_id: TEST_CONTAINER_NAME.to_string(),
                         target_source_host_id: target_source_host_id.to_string(),

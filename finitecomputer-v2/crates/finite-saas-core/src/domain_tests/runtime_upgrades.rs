@@ -293,6 +293,7 @@ async fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_fact
 
         let mismatch = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
                 request_id: upgrade.id.clone(),
                 runner_id: "kata-runner".to_string(),
                 lease_token: "upgrade-lease".to_string(),
@@ -323,6 +324,7 @@ async fn explicit_kata_upgrade_binds_compatible_artifact_and_commits_actual_fact
         db.exec("UPDATE runtime_artifacts SET retired_at = '2026-05-25T13:06:30Z' WHERE id = 'artifact-v2'")
             .await;
         with_runtime_config(&db, &BTreeMap::new(), &refreshed_secret_references).complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
                     request_id: upgrade.id.clone(),
                     runner_id: "kata-runner".to_string(),
                     lease_token: "upgrade-lease".to_string(),
