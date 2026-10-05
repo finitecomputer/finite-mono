@@ -234,7 +234,11 @@ Core (`finite-saas-core`):
 
 Dashboard: `src/lib/brain-identity-observation.ts`, called through `after()`
 from `POST /api/brain/invitations/accept` once the Brain server returns an
-acceptance by the exact hosted key. It loads the key with Hosted Device
+acceptance by the exact hosted key, and from `POST /api/brain/approvals/approve`
+once the Brain server applies a delegation-grant approval signed for that
+exact Brain (how existing admins qualify). Both cards tell the user that the
+action lets the Brain's admins see their account email and that they are
+responsible for their agents there. It loads the key with Hosted Device
 `identifyMember` (no mint), retries a lost response once with the same
 operation id, and never changes the join result. Configuration:
 `FC_CORE_BRAIN_IDENTITY_URL` and `FC_CORE_BRAIN_OBSERVATION_TOKEN`; the Brain

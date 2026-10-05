@@ -70,11 +70,40 @@ export function acceptedBrainInvitation(
   return accepter ? { brainId } : null;
 }
 
-export async function observeHostedBrainInvitationAcceptance(
+/// A delegation-grant approval the Brain server applied. The Brain checked
+/// the hosted signer's standing in the exact Brain named by the signed
+/// request path, so that path's Brain id is the confirmed scope.
+export function appliedBrainApproval(result: unknown, signedBrainId: string): { brainId: string } | null {
+  if (!result || typeof result !== "object") return null;
+  const record = result as Record<string, unknown>;
+  if (record.status !== "applied" || record.action !== "delegation-grant") return null;
+  if (!/^[A-Za-z0-9_-]{1,128}$/u.test(signedBrainId)) return null;
+  return { brainId: signedBrainId };
+}
+
+export function observeHostedBrainInvitationAcceptance(
   config: BrainObservationConfig | null,
   account: AccountAuthContext,
   brainServer: string,
   acceptance: unknown,
+  dependencies: Dependencies
+): Promise<ObservationResult> {
+  return observeHostedHumanBrainAction(
+    config,
+    account,
+    brainServer,
+    (npub) => acceptedBrainInvitation(acceptance, npub),
+    dependencies
+  );
+}
+
+/// Shared path for qualifying hosted human actions. `qualify` receives the
+/// hosted key's npub and returns the Brain the action proved, or null.
+export async function observeHostedHumanBrainAction(
+  config: BrainObservationConfig | null,
+  account: AccountAuthContext,
+  brainServer: string,
+  qualify: (hostedNpub: string) => { brainId: string } | null,
   dependencies: Dependencies
 ): Promise<ObservationResult> {
   if (!config) return { skipped: "not configured" };
@@ -95,8 +124,8 @@ export async function observeHostedBrainInvitationAcceptance(
   ) {
     return { skipped: "no hosted identity" };
   }
-  const accepted = acceptedBrainInvitation(acceptance, npub);
-  if (!accepted) return { skipped: "acceptance not proven" };
+  const accepted = qualify(npub);
+  if (!accepted) return { skipped: "action not proven" };
 
   const body = JSON.stringify({
     version: OBSERVATION_VERSION,

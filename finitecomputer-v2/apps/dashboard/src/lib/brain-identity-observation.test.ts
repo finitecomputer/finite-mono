@@ -6,6 +6,7 @@ import {
   OBSERVATION_CREDENTIAL_HEADER,
   OBSERVATION_PATH,
   acceptedBrainInvitation,
+  appliedBrainApproval,
   brainObservationConfig,
   observeHostedBrainInvitationAcceptance,
 } from "./brain-identity-observation";
@@ -166,7 +167,7 @@ test("missing Device identity, unproven acceptance or no config send nothing", a
       { ...ACCEPTED, userId: "npub1other" },
       deps(fetcher),
     ],
-    "acceptance not proven",
+    "action not proven",
   ]);
   cases.push([[null, ACCOUNT, "https://brain.finite.computer", ACCEPTED, deps(fetcher)], "not configured"]);
   cases.push([
@@ -177,4 +178,13 @@ test("missing Device identity, unproven acceptance or no config send nothing", a
     assert.deepEqual(await observeHostedBrainInvitationAcceptance(...args), { skipped: reason });
   }
   assert.equal(calls.length, 0);
+});
+
+test("an applied delegation-grant approval proves its signed Brain", async () => {
+  const applied = { status: "applied", action: "delegation-grant", approvalEventId: "e", result: {} };
+  assert.deepEqual(appliedBrainApproval(applied, "brain_alpha"), { brainId: "brain_alpha" });
+  assert.equal(appliedBrainApproval({ ...applied, status: "pending" }, "brain_alpha"), null);
+  assert.equal(appliedBrainApproval({ ...applied, action: "other" }, "brain_alpha"), null);
+  assert.equal(appliedBrainApproval(applied, "../brain"), null);
+  assert.equal(appliedBrainApproval(null, "brain_alpha"), null);
 });
