@@ -22,11 +22,21 @@ pub struct IncreaseTrialCapacity {
     pub expected_seat_limit: i32,
 }
 
+/// Compare-and-set prevents one operator from overwriting another's code edit.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTrialCode {
+    pub code: String,
+    pub expected_code_revision: i32,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrialCampaign {
     pub id: String,
     pub name: String,
+    pub code: Option<String>,
+    pub code_revision: i32,
     pub seat_limit: i32,
     pub trial_days: i32,
     pub active: bool,
@@ -41,12 +51,14 @@ pub struct TrialCampaign {
 pub struct TrialRedemption {
     pub customer_org_id: String,
     pub owner_workos_user_id: Option<String>,
+    pub owner_email: String,
+    pub agent_names: Vec<String>,
     pub state: String,
     pub redeemed_at: Option<String>,
     pub trial_access: Option<TrialAccess>,
 }
 
-// No Debug: the code is returned only at issuance.
+// No Debug: campaign codes must not enter diagnostic logs.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IssuedTrialCampaign {
@@ -104,7 +116,7 @@ pub struct TrialAccess {
 }
 
 // 16 independent base32 symbols preserve the previous code's 80 random bits.
-// O/I/0/1 are absent; groups can be read aloud. Plaintext is returned only once.
+// O/I/0/1 are absent; groups can be read aloud.
 const TRIAL_CODE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 
 pub(crate) fn generate_trial_code() -> crate::CoreResult<String> {
@@ -120,20 +132,35 @@ pub(crate) fn generate_trial_code() -> crate::CoreResult<String> {
 }
 
 pub(crate) fn hash_trial_code(value: &str) -> crate::CoreResult<String> {
+    match normalize_trial_code(value) {
+        Ok(code) => crate::launch_codes::hash_launch_code(&code),
+        // Existing trial_<hex> codes retain their exact, case-sensitive hashes.
+        Err(_) => crate::launch_codes::hash_launch_code(value),
+    }
+}
+
+pub(crate) fn normalize_trial_code(value: &str) -> crate::CoreResult<String> {
     let compact: String = value
         .chars()
         .filter(|c| *c != '-' && !c.is_ascii_whitespace())
         .map(|c| c.to_ascii_uppercase())
         .collect();
+    if value.len() > 128
+        || !(8..=64).contains(&compact.len())
+        || !compact.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(crate::CoreError::TrialUnavailable(
+            "Use 8–64 letters or numbers, with optional spaces or hyphens.",
+        ));
+    }
     if compact.len() == 16
         && compact
             .bytes()
             .all(|byte| TRIAL_CODE_ALPHABET.contains(&byte))
     {
-        crate::launch_codes::hash_launch_code(&group_trial_code(&compact))
+        Ok(group_trial_code(&compact))
     } else {
-        // Existing trial_<hex> codes retain their exact, case-sensitive hashes.
-        crate::launch_codes::hash_launch_code(value)
+        Ok(compact)
     }
 }
 

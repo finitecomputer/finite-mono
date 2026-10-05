@@ -483,11 +483,11 @@ async fn trial_workshop_codes_are_readable_normalized_and_legacy_compatible() {
         assert_eq!(reused.stripe_session_id, "cs_readable");
         let stored = db.row("trial_campaigns", &issued.id).await.unwrap();
         assert_eq!(stored["code_hash"], hash_trial_code(&issued.code).unwrap());
-        assert!(!stored.to_string().contains(&issued.code));
-        assert!(!serde_json::to_string(&db.list_trial_campaigns().await.unwrap()).unwrap().contains(&issued.code));
+        assert_eq!(stored["code"], issued.code);
+        assert_eq!(db.list_trial_campaigns().await.unwrap()[0].code.as_deref(), Some(issued.code.as_str()));
         let legacy = "trial_0123456789abcdef0123";
         let legacy_hash = hash_launch_code(legacy).unwrap();
-        db.query_json("UPDATE trial_campaigns SET code_hash=$2 WHERE id=$1 RETURNING to_jsonb(trial_campaigns.*)", &[&issued.id, &legacy_hash]).await;
+        db.query_json("UPDATE trial_campaigns SET code_hash=$2,code=NULL WHERE id=$1 RETURNING to_jsonb(trial_campaigns.*)", &[&issued.id, &legacy_hash]).await;
         assert_eq!(db.trial_offer(legacy).await.unwrap().campaign_id, issued.id);
         assert!(db.trial_offer(&legacy.to_ascii_uppercase()).await.is_err());
         assert_eq!(hash_trial_code(legacy).unwrap(), legacy_hash);

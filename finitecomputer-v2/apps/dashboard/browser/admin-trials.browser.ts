@@ -12,7 +12,7 @@ const operatorOrg = "workos_org_trial_fixture";
 const token = `fixture.${Buffer.from(JSON.stringify({ org_id: operatorOrg })).toString("base64url")}.signature`;
 
 // Synthetic fixtures only. No Stripe client, credentials, or production endpoints.
-test("trial admin dashboard creates campaigns, increases total capacity, and reports unknowns", { timeout: 180_000 }, async (t) => {
+test("trial admin dashboard persists and edits codes, shows account identities, and guards writes", { timeout: 180_000 }, async (t) => {
   const state = { campaigns: fixtures(), posts: [] as Array<{ path: string; body: Record<string, unknown> }>, fail: false, reject: false };
   const core = http.createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
@@ -25,6 +25,14 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
       if (request.method === "GET") return reply(state.campaigns);
       let raw = ""; for await (const chunk of request) raw += chunk;
       const body = JSON.parse(raw); state.posts.push({ path, body });
+      if (path.endsWith("/code")) {
+        const campaign = state.campaigns.find(c => path.includes(c.id))!;
+        if (campaign.codeRevision !== body.expectedCodeRevision) return reply({ error: "The code changed. Refresh before editing it." }, 409);
+        const code = String(body.code).replace(/[- ]/g, "").toUpperCase();
+        if (state.campaigns.some(c => c.id !== campaign.id && c.code === code)) return reply({ error: "Another campaign already uses this code." }, 409);
+        campaign.code = code; campaign.codeRevision = Number(body.expectedCodeRevision) + 1;
+        response.statusCode = 204; return response.end();
+      }
       if (path.endsWith("/capacity")) {
         const campaign = state.campaigns.find(c => path.includes(c.id))!;
         if (campaign.seatLimit !== body.expectedSeatLimit) return reply({ error: "The signup limit changed. Refresh before increasing it." }, 409);
@@ -32,7 +40,7 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
         campaign.seatLimit = Number(body.seatLimit);
         response.statusCode = 204; return response.end();
       }
-      state.campaigns.unshift({ id: "campaign_created", ...body, active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
+      state.campaigns.unshift({ id: "campaign_created", ...body, code: "TEST-2345-6789-ABCD", codeRevision: 0, active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
       return reply({ id: "campaign_created", code: "TEST-2345-6789-ABCD" });
     }
     if (path === "/api/core/v1/me") return reply({ email: "admin@example.test", workos_user_id: "user_admin", projects: [], claimable_candidates: [], agent_creation_requests: [] });
@@ -100,7 +108,7 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
   await page.getByLabel("Campaign name", { exact: true }).fill("Extra workshop");
   await page.getByLabel("Total signup limit", { exact: true }).fill("15");
   await page.getByRole("button", { name: "Create campaign and code" }).click();
-  await page.getByText("TEST-2345-6789-ABCD", { exact: true }).waitFor();
+  await page.getByRole("article", { name: "Extra workshop" }).getByText("TEST-2345-6789-ABCD", { exact: true }).waitFor();
   await page.getByText("Extra workshop · 15 total seats · 7-day trial", { exact: true }).waitFor();
   await page.getByRole("article", { name: "Extra workshop" }).waitFor();
   assert.deepEqual(state.posts[1].body, { name: "Extra workshop", seatLimit: 15, trialDays: 7 });
@@ -114,7 +122,7 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
   assert.equal(state.posts.length, 2);
   state.reject = false;
   await open();
-  assert.equal(await page.getByText("TEST-2345-6789-ABCD", { exact: true }).count(), 0, "one-time code must not reappear after navigation");
+  assert.equal(await page.getByText("TEST-2345-6789-ABCD", { exact: true }).count(), 1, "saved code must remain visible after navigation");
   // A stale total cannot overwrite another operator's increase.
   await workshop.getByText("Increase signup limit", { exact: true }).click();
   state.campaigns.find(c => c.id === "campaign_workshop")!.seatLimit = 20;
@@ -124,6 +132,49 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
   await workshop.getByRole("alert").filter({ hasText: "signup limit changed" }).waitFor();
   await page.getByRole("button", { name: "Refresh counts" }).click();
   await workshop.getByText("6 / 20", { exact: true }).waitFor();
+  const created = page.getByRole("article", { name: "Extra workshop" });
+  await created.getByText("Edit code", { exact: true }).click();
+  await created.getByLabel("Trial code", { exact: true }).fill("workshop-2026");
+  await created.getByRole("button", { name: "Save code", exact: true }).click();
+  await created.getByText("WORKSHOP2026", { exact: true }).waitFor();
+  await open();
+  await created.getByText("WORKSHOP2026", { exact: true }).waitFor();
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await created.getByRole("button", { name: "Copy code", exact: true }).click();
+  assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "WORKSHOP2026");
+  // A second operator changes the code after this page loaded.
+  await created.getByText("Edit code", { exact: true }).click();
+  state.campaigns.find(c => c.id === "campaign_created")!.codeRevision = 2;
+  state.campaigns.find(c => c.id === "campaign_created")!.code = "OTHER2026";
+  await created.getByLabel("Trial code", { exact: true }).fill("STALE2026");
+  await created.getByRole("button", { name: "Save code", exact: true }).click();
+  await created.getByRole("alert").filter({ hasText: "The code changed" }).waitFor();
+  await page.getByRole("button", { name: "Refresh counts" }).click();
+  await created.getByText("OTHER2026", { exact: true }).waitFor();
+  assert.equal(await created.getByLabel("Trial code", { exact: true }).inputValue(), "OTHER2026");
+  await workshop.getByText("This code is unavailable for display.", { exact: false }).waitFor();
+  const attribution = JSON.stringify(state.campaigns.find(c => c.id === "campaign_workshop")!.redemptions);
+  await workshop.getByText("Set replacement code", { exact: true }).click();
+  await workshop.getByLabel("Trial code", { exact: true }).fill("OTHER2026");
+  await workshop.getByRole("button", { name: "Save code", exact: true }).click();
+  await workshop.getByRole("alert").filter({ hasText: "Another campaign already uses this code" }).waitFor();
+  await workshop.getByLabel("Trial code", { exact: true }).fill("AUTUMN2026");
+  await workshop.getByRole("button", { name: "Save code", exact: true }).click();
+  await workshop.getByText("AUTUMN2026", { exact: true }).waitFor();
+  assert.equal(JSON.stringify(state.campaigns.find(c => c.id === "campaign_workshop")!.redemptions), attribution);
+  await open();
+  await workshop.getByText("Account attribution and trial states (7)").click();
+  await workshop.getByText("trial@example.test", { exact: true }).waitFor();
+  await workshop.getByText("Research bot, Support bot", { exact: true }).waitFor();
+  await workshop.getByText("org_trial", { exact: true }).waitFor();
+  await workshop.getByText("No agents yet", { exact: true }).first().waitFor();
+  await workshop.getByText("Agent names unavailable", { exact: true }).first().waitFor();
+  await workshop.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${screenshots}/editable-codes-desktop.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+  await workshop.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${screenshots}/editable-codes-mobile.png` });
   state.campaigns = [];
   await open(); await page.getByText("No free trial campaigns yet.").waitFor();
   state.fail = true;
@@ -145,14 +196,14 @@ test("trial admin dashboard creates campaigns, increases total capacity, and rep
 
 function fixtures(): TrialCampaign[] {
   const seat = (id: string, state: string, status: string | null = null, blocked = false) => ({
-    customerOrgId: `org_${id}`, ownerWorkosUserId: `user_${id}`, state,
+    customerOrgId: `org_${id}`, ownerWorkosUserId: `user_${id}`, ownerEmail: `${id}@example.test`, agentNames: id === "trial" ? ["Research bot", "Support bot"] : id === "unpaid" ? undefined : [], state,
     redeemedAt: state === "redeemed" ? "2026-10-01T12:00:00Z" : null,
     trialAccess: state === "redeemed" ? { eventName: "October workshop", blocked, subscriptionStatus: status, periodEnd: status === "active" ? "2026-11-01T12:00:00Z" : "2026-10-08T12:00:00Z" } : null,
   });
   return [
-    { id: "campaign_workshop", name: "October workshop", seatLimit: 10, trialDays: 7, active: true, reservedSeats: 2, redeemedSeats: 4, seatsRemaining: 4, redemptions: [seat("trial", "redeemed", "trialing"), seat("paid", "redeemed", "active"), seat("ended", "redeemed", "trialing", true), seat("unpaid", "redeemed", "past_due", true), seat("checkout", "reserved"), seat("retry", "reserved"), seat("retry", "expired")] },
-    { id: "campaign_full", name: "Design partners", seatLimit: 3, trialDays: 14, active: true, reservedSeats: 3, redeemedSeats: 0, seatsRemaining: 0, redemptions: [seat("d1", "reserved"), seat("d2", "reserved"), seat("d3", "reserved")] },
-    { id: "campaign_inactive", name: "Previous event", seatLimit: 5, trialDays: 7, active: false, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: 5, redemptions: [] },
+    { id: "campaign_workshop", code: null, codeRevision: 0, name: "October workshop", seatLimit: 10, trialDays: 7, active: true, reservedSeats: 2, redeemedSeats: 4, seatsRemaining: 4, redemptions: [seat("trial", "redeemed", "trialing"), seat("paid", "redeemed", "active"), seat("ended", "redeemed", "trialing", true), seat("unpaid", "redeemed", "past_due", true), seat("checkout", "reserved"), seat("retry", "reserved"), seat("retry", "expired")] },
+    { id: "campaign_full", code: "PARTNERS2026", codeRevision: 0, name: "Design partners", seatLimit: 3, trialDays: 14, active: true, reservedSeats: 3, redeemedSeats: 0, seatsRemaining: 0, redemptions: [seat("d1", "reserved"), seat("d2", "reserved"), seat("d3", "reserved")] },
+    { id: "campaign_inactive", code: "PREVIOUS2026", codeRevision: 0, name: "Previous event", seatLimit: 5, trialDays: 7, active: false, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: 5, redemptions: [] },
   ];
 }
 
