@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest import mock
 
@@ -428,6 +429,48 @@ class DirectoryTests(unittest.TestCase):
         self.assertNotIn("QQQQ", str(raised.exception))
         self.assertIsNone(raised.exception.__context__)
         self.assertIsNone(raised.exception.__cause__)
+
+    def test_unexpected_transport_and_error_body_failures_are_redacted(self):
+        import http.client
+
+        def assert_redacted(raised):
+            self.assertNotIn(TOKEN, str(raised.exception))
+            self.assertNotIn(TOKEN, repr(raised.exception))
+            self.assertIsNone(raised.exception.__context__)
+            self.assertIsNone(raised.exception.__cause__)
+
+        class Opener:
+            def __init__(self, failure):
+                self.failure = failure
+
+            def open(self, request, timeout):
+                raise self.failure
+
+        class BadBody(urllib.error.HTTPError):
+            def __init__(self, fail_on):
+                super().__init__("http://127.0.0.1:9", 404, "x", {}, None)
+                self.fail_on = fail_on
+
+            def read(self, *args):
+                if self.fail_on == "read":
+                    raise http.client.IncompleteRead(TOKEN.encode())
+                return b"{}"
+
+            def close(self):
+                if self.fail_on == "close":
+                    raise RuntimeError(f"close failed {TOKEN}")
+
+        for failure, expected in ((http.client.HTTPException(f"bad status {TOKEN}"), "HTTPException"),
+                                  (http.client.RemoteDisconnected(TOKEN), "RemoteDisconnected"),
+                                  (RuntimeError(f"unexpected {TOKEN}"), "RuntimeError"),
+                                  (BadBody("read"), "IncompleteRead"),
+                                  (BadBody("close"), "RuntimeError")):
+            with mock.patch.object(roster.urllib.request, "build_opener", return_value=Opener(failure)):
+                post = roster.http_directory_post(TOKEN)
+                with self.assertRaises(roster.DirectoryUnavailable) as raised:
+                    post(b"{}")
+            assert_redacted(raised)
+            self.assertEqual(str(raised.exception), expected)
 
     def test_collection_is_exact_key_and_budgeted(self):
         requests = []

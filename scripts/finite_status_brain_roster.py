@@ -82,25 +82,31 @@ def http_directory_post(token: str) -> Callable[[bytes], tuple[int, bytes]]:
     no redirects; the token travels only in its header."""
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
 
-    def post(body: bytes) -> tuple[int, bytes]:
-        failure = None
+    def exchange(body: bytes) -> tuple[int, bytes]:
+        request = urllib.request.Request(
+            DIRECTORY_INSPECT_URL, data=body, method="POST",
+            headers={"content-type": "application/json", "x-finite-operator-token": token},
+        )
         try:
-            request = urllib.request.Request(
-                DIRECTORY_INSPECT_URL, data=body, method="POST",
-                headers={"content-type": "application/json", "x-finite-operator-token": token},
-            )
             with opener.open(request, timeout=DIRECTORY_REQUEST_TIMEOUT_SECONDS) as response:
                 return response.status, response.read(MAX_DIRECTORY_RESPONSE_BYTES + 1)
         except urllib.error.HTTPError as error:
+            # Reading or closing the error body can fail too; that failure
+            # propagates to post(), which redacts it.
             try:
                 return error.code, error.read(MAX_DIRECTORY_RESPONSE_BYTES + 1)
             finally:
                 error.close()
-        except (urllib.error.URLError, OSError, TimeoutError, ValueError, UnicodeError) as error:
-            # Class name only: some transport errors echo header values.
+
+    def post(body: bytes) -> tuple[int, bytes]:
+        failure = None
+        try:
+            return exchange(body)
+        except Exception as error:  # noqa: BLE001 - redact every transport failure
+            # Class name only: transport errors can echo header values.
             failure = type(error).__name__
-        # Raised outside the handler so the original exception (which may
-        # hold the header value) is not kept as context.
+        # Raised outside the handler so no original exception (which may
+        # hold the header value) is kept as context.
         raise DirectoryUnavailable(failure)
 
     return post
