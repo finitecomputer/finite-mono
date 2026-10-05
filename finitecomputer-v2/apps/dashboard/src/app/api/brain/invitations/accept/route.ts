@@ -11,6 +11,7 @@ import {
   brainObservationConfig,
   hostedObservationDependencies,
   observeHostedBrainInvitationAcceptance,
+  requestsContactSharing,
 } from "@/lib/brain-identity-observation";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
 import { requestOriginMatchesHost } from "@/lib/http-headers";
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     return Response.json({ error: "Join request is too large." }, { status: 413, headers: NO_STORE });
   }
-  let body: { inviteCode?: string };
+  let body: { inviteCode?: string; shareAccountContact?: unknown };
   try {
     body = JSON.parse(text);
   } catch {
@@ -58,7 +59,7 @@ export async function POST(request: Request) {
     // After the response: record which existing hosted key joined and that
     // this account shares its contact with the Brain's admins. Failures are
     // logged without contact details and never change the join result.
-    const observation = brainObservationConfig();
+    const observation = requestsContactSharing(body) ? brainObservationConfig() : null;
     if (observation) {
       const brainServer = brainPublicOrigin() ?? brainOrigin;
       after(async () => {

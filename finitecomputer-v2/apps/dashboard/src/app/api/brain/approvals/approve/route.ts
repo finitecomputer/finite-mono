@@ -13,6 +13,7 @@ import {
   brainObservationConfig,
   hostedObservationDependencies,
   observeHostedHumanBrainAction,
+  requestsContactSharing,
 } from "@/lib/brain-identity-observation";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
 import { requestOriginMatchesHost } from "@/lib/http-headers";
@@ -39,7 +40,12 @@ export async function POST(request: Request) {
   if (new TextEncoder().encode(text).byteLength > MAX_BODY_BYTES) {
     return Response.json({ error: "Approval request is too large." }, { status: 413, headers: NO_STORE });
   }
-  let body: { brainId?: string; requestId?: string; payload?: Record<string, unknown> };
+  let body: {
+    brainId?: string;
+    requestId?: string;
+    payload?: Record<string, unknown>;
+    shareAccountContact?: unknown;
+  };
   try {
     body = JSON.parse(text);
   } catch {
@@ -78,7 +84,7 @@ export async function POST(request: Request) {
     );
     // After the response: an applied approval proves this hosted key acted
     // in this exact Brain. Never changes the approval result.
-    const observation = brainObservationConfig();
+    const observation = requestsContactSharing(body) ? brainObservationConfig() : null;
     if (observation) {
       const brainServer = brainPublicOrigin() ?? brainOrigin;
       after(async () => {

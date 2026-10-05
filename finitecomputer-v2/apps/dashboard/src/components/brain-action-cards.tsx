@@ -228,6 +228,7 @@ function BrainApprovalCard({
                   brainId: reference.brainId,
                   requestId: reference.requestId,
                   payload: detail?.payload ?? null,
+                  shareAccountContact: true,
                 },
                 "approved",
                 `Approved: ${label.toLowerCase()} for ${brainName}`
@@ -377,7 +378,7 @@ export function BrainInvitationCards({
                   act(
                     key,
                     "/api/brain/invitations/accept",
-                    { inviteCode: card.inviteCode },
+                    { inviteCode: card.inviteCode, shareAccountContact: true },
                     `Joined ${card.ref ?? card.brainId ?? "a Brain"}`
                   )
                 }

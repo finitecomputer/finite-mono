@@ -42,6 +42,18 @@ export function brainObservationConfig(
   }
 }
 
+/// The current Join and Approve buttons send `shareAccountContact: true`
+/// beside their disclosure text. A request without it (for example from a
+/// tab loaded before that text existed) still performs the action but never
+/// records sharing. This is intent only; it carries no identity.
+export function requestsContactSharing(body: unknown): boolean {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    (body as Record<string, unknown>).shareAccountContact === true
+  );
+}
+
 export type ObservationResult =
   | { outcome: "recorded" | "unchanged" }
   | { skipped: string };

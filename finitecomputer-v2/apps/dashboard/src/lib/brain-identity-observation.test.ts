@@ -10,6 +10,7 @@ import {
   appliedBrainApproval,
   brainObservationConfig,
   observeHostedBrainInvitationAcceptance,
+  requestsContactSharing,
 } from "./brain-identity-observation";
 
 const HEX = "ab".repeat(32);
@@ -197,4 +198,15 @@ test("an applied delegation-grant approval proves its signed Brain", async () =>
   assert.equal(appliedBrainApproval({ ...applied, action: "other" }, "brain_alpha"), null);
   assert.equal(appliedBrainApproval(applied, "../brain"), null);
   assert.equal(appliedBrainApproval(null, "brain_alpha"), null);
+});
+
+test("only an explicit boolean shareAccountContact requests sharing", () => {
+  assert.equal(requestsContactSharing({ inviteCode: "abc", shareAccountContact: true }), true);
+  // Bodies from tabs loaded before the disclosure text existed.
+  assert.equal(requestsContactSharing({ inviteCode: "abc" }), false);
+  assert.equal(requestsContactSharing({ brainId: "b", requestId: "r", payload: {} }), false);
+  for (const value of ["true", 1, "yes", null, false, {}]) {
+    assert.equal(requestsContactSharing({ shareAccountContact: value }), false, String(value));
+  }
+  assert.equal(requestsContactSharing(null), false);
 });
