@@ -769,7 +769,12 @@ def collect_hosted(
     if overflow:
         return {"state": "unavailable", "accounts": [],
                 "reason": f"more than {MAX_HOSTED_CANDIDATES} candidate accounts"}
-    if not root.is_dir():
+    try:
+        present = root.is_dir()
+    except OSError as error:  # e.g. a 0700 /var/lib/private when not run as root
+        return {"state": "unavailable", "accounts": [],
+                "reason": f"Hosted data root not readable: {type(error).__name__}"}
+    if not present:
         return {"state": "unavailable", "accounts": [],
                 "reason": "Hosted data root is not present on this host"}
     # charged counts the pre-copy stat size of every copy attempted,

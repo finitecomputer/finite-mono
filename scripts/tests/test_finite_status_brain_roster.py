@@ -596,13 +596,17 @@ class DirectoryTests(unittest.TestCase):
         bad_file.write_text(f"FINITE_IDENTITY_OPERATOR_TOKEN='{bad_token}'\n")
         for token_path, expected in ((token_file, "checked"), (Path(scratch.name) / "absent", "notConfigured"),
                                      (bad_file, "unavailable")):
+            # A scratch Hosted root keeps this test off the host's real
+            # /var/lib/private (mode 0700 on Linux CI runners).
             with mock.patch.object(roster, "BRAIN_DATABASE", database), \
+                    mock.patch.object(roster, "HOSTED_DATA_ROOT", Path(scratch.name) / "hosted"), \
                     mock.patch.object(roster, "DIRECTORY_TOKEN_FILE", token_path), \
                     mock.patch.object(roster, "http_directory_post", side_effect=unreachable), \
                     mock.patch.object(finite_status, "postgres_environment", return_value={}), \
                     mock.patch.object(finite_status, "run_read_only", side_effect=run):
                 report = finite_status.collect_brain_roster("content-brain")
             self.assertEqual(report["evidence"]["identityDirectory"]["state"], expected)
+            self.assertEqual(report["evidence"]["hostedChatStores"]["state"], "unavailable")
             self.assertNotIn(TOKEN, json.dumps(report))
             self.assertNotIn("token-fragment-ZZZZ", json.dumps(report))
 
@@ -854,6 +858,16 @@ class HostedChatStoreTests(unittest.TestCase):
         text = json.dumps(report)
         for hidden in (storage("wos_old"), storage("wos_jules"), "wos_", CIPHERTEXT_MARKER.decode()):
             self.assertNotIn(hidden, text)
+
+    def test_unreadable_hosted_root_is_unavailable_and_redacted(self):
+        marker = "/var/lib/private/HOSTED-PATH-MARKER"
+        denied = PermissionError(13, "Permission denied", marker)
+        with mock.patch.object(Path, "is_dir", side_effect=denied):
+            hosted = self.collect([{"account": "account-old", "storage": storage("wos_old")}])
+        self.assertEqual(hosted, {"state": "unavailable", "accounts": [],
+                                  "reason": "Hosted data root not readable: PermissionError"})
+        self.assertNotIn("MARKER", json.dumps(hosted))
+        self.assertEqual(self.sql, [], "no store was copied or queried")
 
     def test_candidates_come_from_launch_rows_for_unknown_keys_and_roster_accounts(self):
         core = core_fixture()
