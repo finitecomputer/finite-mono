@@ -15,9 +15,15 @@ Keys that only admitted a member or issued a grant are looked up as
 reference keys. That never makes them roster members and never makes them
 the owner or controller of the keys they admitted.
 
+Keys Core cannot name get two more sources, both operator evidence only:
+the caller-provided owner_chat_account_id on agent creation requests (same
+Core transaction), and the account_id/device_id columns of candidate
+accounts' Hosted Chat stores (private scratch copies). Neither changes the
+Core classification, proves control, or records consent.
+
 Never read: wrapped Folder Key Grants, access-change events, encrypted
-content, identity or key files, sealed Hosted Device bindings, the Identity
-Directory database, retired authority tables.
+content or device-state ciphertext, identity or key files, sealed Hosted
+Device bindings, the Identity Directory database, retired authority tables.
 """
 
 from __future__ import annotations
@@ -55,6 +61,16 @@ NPUB_LENGTH = 63
 class RosterError(Exception):
     """Evidence could not be collected; the probe fails closed."""
 
+
+# Hosted Chat client stores: <root>/users/<sha256(WorkOS user id)>/chat/client.sqlite3
+# (finitechat-hosted-device user_root/chat_data_dir; DynamicUser state dir).
+HOSTED_DATA_ROOT = Path("/var/lib/private/finitechat-hosted-device")
+HOSTED_DEVICE_ID = "hosted-web"
+MAX_HOSTED_CANDIDATES = 64
+MAX_HOSTED_STORE_BYTES = 1 << 30
+MAX_HOSTED_TOTAL_BYTES = 8 << 30
+HOSTED_BUDGET_SECONDS = 300
+STORAGE_ID = re.compile(r"^[0-9a-f]{64}$")
 
 # Identity Directory operator inspect: loopback full router, exact key only.
 DIRECTORY_INSPECT_URL = "http://127.0.0.1:8790/api/v1/operator/inspect"
@@ -379,6 +395,7 @@ SELECT json_build_object(
     FROM users u WHERE u.id IN (SELECT DISTINCT owner_user_id FROM agent_rows)), '[]'::json)
 ) AS core;
 \\if :finite_has_brain_identity
+\\set association_filter 'AND NOT EXISTS (SELECT 1 FROM account_brain_principals a WHERE a.public_key_hex = p.hex)'
 WITH hexes AS (SELECT value AS hex FROM jsonb_array_elements_text(:'hexes'::jsonb)),
 brains AS (SELECT value AS brain_id FROM jsonb_array_elements_text(:'brain_ids'::jsonb)),
 keys AS (SELECT value AS npub FROM jsonb_array_elements_text(:'npubs'::jsonb)),
@@ -412,9 +429,51 @@ SELECT json_build_object(
       'account', s.user_id,
       'brain_server', CASE WHEN octet_length(s.brain_server) <= :name_limit THEN s.brain_server END,
       'brain_id', s.brain_id, 'established_at', core_rfc3339(s.established_at),
-      'revoked_at', core_rfc3339(s.revoked_at))) FROM scope_rows s), '[]'::json)
+      'revoked_at', core_rfc3339(s.revoked_at))) FROM scope_rows s), '[]'::json),
+  'hosted_candidates', COALESCE((SELECT json_agg(json_build_object(
+      'account', c.id, 'storage', c.storage, 'link_status', c.link_status)) FROM (
+      SELECT u.id, u.link_status, encode(sha256(convert_to(u.workos_user_id, 'UTF8')), 'hex') AS storage
+      FROM users u WHERE u.id IN (SELECT user_id FROM human_rows) AND u.workos_user_id IS NOT NULL
+      ORDER BY u.id LIMIT :candidate_limit) c), '[]'::json)
 ) AS identity;
+\\else
+\\set association_filter ''
 \\endif
+WITH pairs AS (SELECT value->>'npub' AS npub, value->>'hex' AS hex
+               FROM jsonb_array_elements(:'key_pairs'::jsonb)),
+remaining AS (
+  -- Keys Core cannot name today: no runtime pin and no account association.
+  SELECT p.hex FROM pairs p
+  WHERE NOT EXISTS (SELECT 1 FROM agent_runtimes r WHERE r.health_reporting_npub = p.npub)
+  :association_filter
+),
+requests AS (
+  SELECT r.id, r.owner_chat_account_id AS hex, r.owner_user_id, r.project_id, r.agent_runtime_id,
+    r.status, core_rfc3339(r.created_at) AS created_at, core_rfc3339(r.updated_at) AS updated_at
+  FROM agent_creation_requests r JOIN remaining k ON k.hex = r.owner_chat_account_id
+  ORDER BY r.id LIMIT :row_limit
+), candidates AS (
+  SELECT owner_user_id AS user_id FROM requests
+  UNION
+  SELECT p.owner_user_id FROM agent_runtimes r JOIN pairs k ON k.npub = r.health_reporting_npub
+  JOIN projects p ON p.id = r.project_id
+)
+SELECT json_build_object(
+  'launch_chat_keys', COALESCE((SELECT json_agg(json_build_object(
+      'hex', q.hex, 'request', q.id, 'account', q.owner_user_id, 'project', q.project_id,
+      'runtime', q.agent_runtime_id, 'status', q.status, 'created_at', q.created_at,
+      'updated_at', q.updated_at)) FROM requests q), '[]'::json),
+  'accounts', COALESCE((SELECT json_agg(json_build_object(
+      'account', u.id,
+      'email', CASE WHEN octet_length(u.normalized_email) <= :email_limit THEN u.normalized_email END,
+      'link_status', u.link_status))
+    FROM users u WHERE u.id IN (SELECT DISTINCT owner_user_id FROM requests)), '[]'::json),
+  'hosted_candidates', COALESCE((SELECT json_agg(json_build_object(
+      'account', c.id, 'storage', c.storage, 'link_status', c.link_status)) FROM (
+      SELECT u.id, u.link_status, encode(sha256(convert_to(u.workos_user_id, 'UTF8')), 'hex') AS storage
+      FROM users u WHERE u.id IN (SELECT user_id FROM candidates) AND u.workos_user_id IS NOT NULL
+      ORDER BY u.id LIMIT :candidate_limit) c), '[]'::json)
+) AS launch;
 """
 
 
@@ -634,6 +693,97 @@ def sharing_scopes(identity: dict[str, Any], brain_id: str, scopes: list[dict[st
             if scope.get("account") in implicated and scope.get("brain_id") == brain_id]
 
 
+def unknown_hexes(brain: dict[str, Any], core: dict[str, Any]) -> list[str]:
+    """Canonical keys for which Core holds no pin and no association."""
+    accounts = {row["account"]: row for row in core.get("accounts", [])}
+    tables = brain["tables"]
+    roster = roster_keys(tables)
+    references = reference_keys(tables, roster)
+    npubs = {npub for _, npub in roster} | {npub for _, npub in references}
+    return sorted(npub_to_hex(npub) for npub in npubs if npub_to_hex(npub)
+                  and core_identity(npub, core, accounts)["state"] == "noCoreRecord")
+
+
+def hosted_candidates(core: dict[str, Any], unknown: list[str]) -> list[dict[str, Any]]:
+    """Accounts whose Hosted store may hold an unknown key: historical launch
+    submitters for those keys, plus accounts Core links to roster keys now."""
+    wanted = {row["account"] for row in core.get("launch_chat_keys", []) if row.get("hex") in unknown}
+    wanted |= {row.get("account") for row in core.get("agents", []) if row.get("account")}
+    wanted |= {row.get("account") for row in core.get("humans", []) if row.get("account")}
+    return [row for row in core.get("hosted_candidates", []) if row.get("account") in wanted]
+
+
+def hosted_store_query(hexes: list[str]) -> str:
+    """Only plaintext key columns of the device-state table; never ciphertext."""
+    if any(not re.fullmatch(r"[0-9a-f]{64}", hex_key) for hex_key in hexes):
+        raise RosterError("Hosted store lookup accepts only canonical hex keys")
+    listed = ", ".join(f"'{hex_key}'" for hex_key in hexes) or "NULL"
+    return (f"SELECT account_id, device_id FROM client_device_states WHERE device_id ="
+            f" '{HOSTED_DEVICE_ID}' AND account_id IN ({listed}) ORDER BY account_id"
+            f" LIMIT {MAX_KEYS + 1};")
+
+
+def collect_hosted(
+    candidates: list[dict[str, Any]],
+    unknown: list[str],
+    scratch_copy: Callable[[Path], Any],
+    query: Callable[[Path, str], list[dict[str, Any]]],
+    root: Path | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    overflow: bool = False,
+) -> dict[str, Any]:
+    """Look for unknown keys in candidate accounts' Hosted Chat stores.
+
+    The store path follows the Hosted Device (users/<sha256 of the WorkOS
+    user id>/chat/client.sqlite3); Core computes that digest so no WorkOS id
+    reaches this process. Each store is read through one private scratch copy,
+    selecting only the plaintext account_id and device_id key columns."""
+    root = HOSTED_DATA_ROOT if root is None else root
+    if not unknown:
+        return {"state": "notNeeded", "accounts": []}
+    if overflow:
+        return {"state": "unavailable", "accounts": [],
+                "reason": f"more than {MAX_HOSTED_CANDIDATES} candidate accounts"}
+    if not root.is_dir():
+        return {"state": "unavailable", "accounts": [],
+                "reason": "Hosted data root is not present on this host"}
+    started, copied_bytes, accounts = clock(), 0, []
+    sql = hosted_store_query(unknown)
+    for candidate in sorted(candidates, key=lambda row: str(row.get("account"))):
+        entry: dict[str, Any] = {"account": candidate.get("account")}
+        accounts.append(entry)
+        storage = str(candidate.get("storage"))
+        if not STORAGE_ID.fullmatch(storage):
+            entry.update(state="unavailable", reason="malformed storage id")
+            continue
+        store = root / "users" / storage / "chat" / "client.sqlite3"
+        try:
+            if not store.exists():
+                entry.update(state="missingStore")
+                continue
+            size = sum(Path(f"{store}{suffix}").stat().st_size for suffix in ("", "-wal", "-shm")
+                       if Path(f"{store}{suffix}").exists())
+        except OSError as error:
+            entry.update(state="unavailable", reason=type(error).__name__)
+            continue
+        if clock() - started > HOSTED_BUDGET_SECONDS:
+            entry.update(state="unavailable", reason="Hosted time budget exhausted")
+        elif size > MAX_HOSTED_STORE_BYTES or copied_bytes + size > MAX_HOSTED_TOTAL_BYTES:
+            entry.update(state="unavailable", reason="Hosted store over byte budget")
+        else:
+            copied_bytes += size
+            try:
+                with scratch_copy(store) as scratch:
+                    rows = _bounded("hosted store", query(scratch, sql), MAX_KEYS)
+            except Exception as error:  # noqa: BLE001 - one store failing is per-source evidence
+                entry.update(state="unavailable", reason=type(error).__name__)
+                continue
+            entry.update(state="checked", matches=sorted(
+                {row.get("account_id") for row in rows
+                 if row.get("device_id") == HOSTED_DEVICE_ID and row.get("account_id") in unknown}))
+    return {"state": "checked", "checked_at": _now(), "accounts": accounts}
+
+
 def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> dict[str, Any]:
     tables = brain["tables"]
     roster = roster_keys(tables)
@@ -652,6 +802,39 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
 
     directory = brain.get("directory")
     directory_results = (directory or {}).get("results", {})
+    hosted = core.get("hosted")
+    all_accounts = {row["account"]: row for row in core.get("accounts", [])}
+
+    def account_view(ref: Any) -> dict[str, Any]:
+        found = all_accounts.get(ref)
+        return dict(found) if found else {"account": ref, "email": None, "link_status": None}
+
+    def unresolved_evidence(npub: str, identity: dict[str, Any]) -> dict[str, Any]:
+        """Extra operator evidence only for keys Core cannot name today."""
+        if identity["state"] != "noCoreRecord":
+            return {}
+        hex_key = npub_to_hex(npub)
+        launches = [{
+            "requestId": row.get("request"), "status": row.get("status"),
+            "createdAt": row.get("created_at"), "updatedAt": row.get("updated_at"),
+            "projectId": row.get("project"), "agentRuntimeId": row.get("runtime"),
+            "historicalOwnerAccount": account_view(row.get("account")),
+        } for row in core.get("launch_chat_keys", []) if row.get("hex") == hex_key]
+        stores = [] if hosted is None else [{
+            "account": account_view(entry["account"]), "deviceId": HOSTED_DEVICE_ID,
+        } for entry in hosted.get("accounts", []) if hex_key in entry.get("matches", [])]
+        return {
+            "submittedLaunchChatKey": {
+                "note": "caller-provided owner_chat_account_id at agent creation; not ownership proof",
+                "requests": launches,
+            },
+            "hostedChatStores": {
+                "note": "key found as a hosted-web device in this account's Hosted Chat store; "
+                        "operator evidence, not a signature, control proof or consent",
+                "state": "notChecked" if hosted is None else hosted.get("state"),
+                "matches": stores,
+            },
+        }
 
     def directory_view(npub: str) -> dict[str, Any]:
         if directory is None:
@@ -679,6 +862,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "coreIdentity": identity,
             "identityDirectory": directory_view(npub),
             "sharingScopes": sharing_scopes(identity, brain_key, scopes),
+            **unresolved_evidence(npub, identity),
         })
     for (brain_key, npub), labels in sorted(references.items()):
         identity = core_identity(npub, core, accounts)
@@ -690,6 +874,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "storedNip05": stored_alias(npub),
             "coreIdentity": identity,
             "identityDirectory": directory_view(npub),
+            **unresolved_evidence(npub, identity),
         })
     brains = []
     for record in tables["brains"]:
@@ -722,6 +907,12 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "coreCheckedAt": core.get("checked_at"),
             "coreBrainIdentitySchema": core.get("brain_identity_schema"),
             "identityDirectory": report_directory,
+            "hostedChatStores": {"state": "notChecked"} if hosted is None else {
+                "state": hosted.get("state"),
+                "checkedAt": hosted.get("checked_at"),
+                "accounts": [{"account": entry.get("account"), "state": entry.get("state"),
+                              "reason": entry.get("reason")} for entry in hosted.get("accounts", [])],
+            },
         },
         "coverage": {
             "included": [
@@ -737,7 +928,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
                 "use `fbrain access list --brain <id>` for authoritative access",
                 "participants known only through a Mount and holding no stored role or grant here",
                 "Core's disclosure policy; no decision about what admins may see is made",
-                "Hosted Device bindings and older key versions",
+                "sealed Hosted Device bindings, identity files, ciphertext and older key versions",
             ],
         },
         "limitations": [
@@ -760,6 +951,10 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "disabled ones. A name is not account ownership, contact or consent.",
             "aliasNameEvidence rows are Brain's stored alias cache, read from the same scratch "
             "copy; the Directory is read at a different time and is the binding authority.",
+            "For noCoreRecord keys only: submittedLaunchChatKey is the caller-provided launch-time "
+            "owner_chat_account_id (historical, not ownership proof), and hostedChatStores says "
+            "a candidate account's Hosted Chat store holds that key as its hosted-web device "
+            "(scratch copy, key columns only). Neither changes coreIdentity or implies consent.",
         ],
         "brains": brains,
         "aliasNameEvidence": alias_name_evidence(directory_results, tables.get("name_aliases", [])),
@@ -810,6 +1005,8 @@ def core_inputs(brain: dict[str, Any]) -> dict[str, str]:
     tables = brain["tables"]
     valid = selected_npubs(tables)
     return {
+        "key_pairs": json.dumps([{"npub": npub, "hex": npub_to_hex(npub)} for npub in valid]),
+        "candidate_limit": str(MAX_HOSTED_CANDIDATES + 1),
         "npubs": json.dumps(valid),
         "hexes": json.dumps(sorted({npub_to_hex(npub) for npub in valid})),
         "brain_ids": json.dumps(sorted({row["id"] for row in tables["brains"]})),
@@ -823,7 +1020,8 @@ def parse_core_output(stdout: str) -> dict[str, Any]:
     """Merge the one or two JSON rows the Core transaction prints."""
     if len(stdout.encode()) > MAX_REPORT_BYTES:
         raise RosterError("Core roster output exceeded its byte bound")
-    merged: dict[str, Any] = {"humans": [], "scopes": [], "accounts": []}
+    merged: dict[str, Any] = {"humans": [], "scopes": [], "accounts": [],
+                              "launch_chat_keys": [], "hosted_candidates": []}
     rows = [line for line in stdout.splitlines() if line.strip()]
     if not rows:
         raise RosterError("Core roster query returned nothing")
@@ -834,13 +1032,22 @@ def parse_core_output(stdout: str) -> dict[str, Any]:
             raise RosterError("Core roster query returned invalid JSON") from error
         if not isinstance(part, dict):
             raise RosterError("Core roster query returned an unexpected shape")
-        for name in ("agents", "humans", "scopes"):
+        for name in ("agents", "humans", "scopes", "launch_chat_keys"):
             if name in part:
                 merged[name] = _bounded(f"core {name}", part[name] or [])
         merged["accounts"].extend(_bounded("core accounts", part.get("accounts") or []))
+        listed = _bounded("core hosted candidates", part.get("hosted_candidates") or [],
+                          MAX_HOSTED_CANDIDATES + 1)
+        merged["hosted_overflow"] = merged.get("hosted_overflow", False) or (
+            len(listed) > MAX_HOSTED_CANDIDATES)
+        merged["hosted_candidates"].extend(listed)
         for name in ("checked_at", "brain_identity_schema"):
             if name in part:
                 merged[name] = part[name]
     if "agents" not in merged:
         raise RosterError("Core roster query did not return agent evidence")
+    candidates = {row.get("account"): row for row in merged["hosted_candidates"]}
+    merged["hosted_overflow"] = merged.get("hosted_overflow", False) or (
+        len(candidates) > MAX_HOSTED_CANDIDATES)
+    merged["hosted_candidates"] = list(candidates.values())
     return merged

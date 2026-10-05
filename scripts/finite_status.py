@@ -2696,6 +2696,14 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
         raise CollectionError(f"read-only Core roster query failed: {detail}")
     try:
         core = roster.parse_core_output(result.stdout)
+        unknown = roster.unknown_hexes(brain, core)
+        core["hosted"] = roster.collect_hosted(
+            roster.hosted_candidates(core, unknown),
+            unknown,
+            scratch_copy_sqlite,
+            lambda database, sql: sqlite_json_query(database, sql, timeout=60),
+            overflow=core["hosted_overflow"],
+        )
         report = roster.build_report(brain, core, brain_id)
     except roster.RosterError as error:
         raise CollectionError(str(error)) from error

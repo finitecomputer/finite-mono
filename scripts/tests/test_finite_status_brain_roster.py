@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import http.server
 import io
 import threading
@@ -313,9 +314,12 @@ class ClassificationTests(unittest.TestCase):
 class QueryContractTests(unittest.TestCase):
     def test_queries_are_select_only_and_never_read_payload_columns(self):
         texts = list(roster.brain_queries("content-brain").values()) + [
-            roster.alias_query([VECTOR_NPUB]), roster.CORE_QUERY]
+            roster.alias_query([VECTOR_NPUB]), roster.CORE_QUERY,
+            roster.hosted_store_query([VECTOR_HEX])]
         with self.assertRaises(roster.RosterError):
             roster.alias_query(["npub1'); DROP TABLE x; --"])
+        with self.assertRaises(roster.RosterError):
+            roster.hosted_store_query(["00'); DROP TABLE x; --"])
         for text in texts:
             upper = text.upper()
             for token in ("INSERT ", "UPDATE ", "DELETE ", "ALTER ", "DROP ", "CREATE ", "ATTACH "):
@@ -323,6 +327,12 @@ class QueryContractTests(unittest.TestCase):
             for column in ("wrapped_event_json", "access_change_event_json", "ciphertext",
                            "secret", "payload_json"):
                 self.assertNotIn(column, text)
+        hosted = roster.hosted_store_query([VECTOR_HEX])
+        self.assertNotIn("nonce", hosted)
+        # The WorkOS id is only hashed into the Hosted namespace or null-tested.
+        self.assertEqual(roster.CORE_QUERY.count("workos_user_id"),
+                         roster.CORE_QUERY.count("sha256(convert_to(u.workos_user_id, 'UTF8'))")
+                         + roster.CORE_QUERY.count("u.workos_user_id IS NOT NULL"))
 
     def test_parse_core_output_requires_agent_evidence_and_bounds(self):
         with self.assertRaises(roster.RosterError):
@@ -596,67 +606,275 @@ class DirectoryTests(unittest.TestCase):
             self.assertNotIn("token-fragment-ZZZZ", json.dumps(report))
 
 
-@unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
-class CorePostgresTests(unittest.TestCase):
-    def test_core_query_matches_exact_pins_and_hides_ids(self):
-        member_hex = roster.npub_to_hex(KEYS["member"])
-        fixture = f"""
-BEGIN;
-CREATE FUNCTION core_rfc3339(ts timestamptz) RETURNS text LANGUAGE sql IMMUTABLE
-  AS $$ SELECT to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') $$;
-CREATE TEMP TABLE users(id text, normalized_email text, link_status text);
-CREATE TEMP TABLE projects(id text, owner_user_id text, display_name text, agent_email text);
-CREATE TEMP TABLE agent_runtimes(id text, project_id text, health_reporting_npub text,
-  offboarding_phase text, health_reported_at timestamptz);
-CREATE TEMP TABLE project_runtime_links(project_id text, agent_runtime_id text, active boolean);
+def run_core_query(test: unittest.TestCase, fixture: str, inputs: dict[str, str]) -> dict:
+    command = ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+               "--set", "ON_ERROR_STOP=1", "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]]
+    for name, value in inputs.items():
+        command.extend(["--set", f"{name}={value}"])
+    # Same invocation shape as the probe: a script file, stdin closed,
+    # bounded by subprocess and server-side timeouts.
+    scratch = tempfile.TemporaryDirectory()
+    test.addCleanup(scratch.cleanup)
+    script = Path(scratch.name) / "core.sql"
+    script.write_text(fixture + roster.CORE_QUERY + "ROLLBACK;\n")
+    environment = dict(os.environ, PGOPTIONS="-c idle_in_transaction_session_timeout=20000"
+                                             " -c statement_timeout=20000")
+    result = subprocess.run([*command, "--file", str(script)], stdin=subprocess.DEVNULL,
+                            text=True, capture_output=True, timeout=60, env=environment)
+    test.assertEqual(result.returncode, 0, result.stderr[-2000:])
+    test.assertNotIn("wos_", result.stdout, "WorkOS ids never leave Core")
+    return roster.parse_core_output(result.stdout)
+
+
+def core_fixture_sql(with_brain_identity: bool) -> str:
+    member_hex = roster.npub_to_hex(KEYS["member"])
+    agent_hex = roster.npub_to_hex(KEYS["agent"])
+    guest_hex = roster.npub_to_hex(KEYS["guest"])
+    identity = f"""
 CREATE TEMP TABLE account_brain_principals(user_id text, public_key_hex text, status text,
   first_observed_at timestamptz, last_observed_at timestamptz);
 CREATE TEMP TABLE account_brain_sharing_scopes(user_id text, brain_server text, brain_id text,
   established_at timestamptz, revoked_at timestamptz);
-INSERT INTO users VALUES ('user_jules','jules@acme.example','linked'),('user_ray','ray@other.example','linked');
+INSERT INTO account_brain_principals VALUES ('user_ray','{member_hex}','active',now(),now());
+INSERT INTO account_brain_sharing_scopes VALUES ('user_ray','https://brain.finite.computer',
+  'content-brain',now(),NULL),('user_ray','https://brain.finite.computer','elsewhere',now(),NULL);
+""" if with_brain_identity else ""
+    return f"""
+BEGIN;
+CREATE FUNCTION core_rfc3339(ts timestamptz) RETURNS text LANGUAGE sql IMMUTABLE
+  AS $$ SELECT to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') $$;
+CREATE TEMP TABLE users(id text, normalized_email text, link_status text, workos_user_id text);
+CREATE TEMP TABLE projects(id text, owner_user_id text, display_name text, agent_email text);
+CREATE TEMP TABLE agent_runtimes(id text, project_id text, health_reporting_npub text,
+  offboarding_phase text, health_reported_at timestamptz);
+CREATE TEMP TABLE project_runtime_links(project_id text, agent_runtime_id text, active boolean);
+CREATE TEMP TABLE agent_creation_requests(id text, customer_org_id text, owner_user_id text,
+  project_id text, status text, agent_runtime_id text, created_at timestamptz,
+  updated_at timestamptz, owner_chat_account_id text);
+INSERT INTO users VALUES ('user_jules','jules@acme.example','linked','wos_jules'),
+  ('user_ray','ray@other.example','linked','wos_ray'),
+  ('user_old','old@third.example','linked','wos_old'),
+  ('user_nolink','nolink@third.example','pending',NULL);
 INSERT INTO projects VALUES ('project_1','user_jules','Jules Agent','{"a" * 300}@finite.vip');
 INSERT INTO agent_runtimes VALUES ('runtime_1','project_1','{KEYS["agent"]}',NULL,now()),
   ('runtime_x','project_1','npub1unrelated',NULL,now());
 INSERT INTO project_runtime_links VALUES ('project_1','runtime_1',true);
-INSERT INTO account_brain_principals VALUES ('user_ray','{member_hex}','active',now(),now());
-INSERT INTO account_brain_sharing_scopes VALUES ('user_ray','https://brain.finite.computer',
-  'content-brain',now(),NULL),('user_ray','https://brain.finite.computer','elsewhere',now(),NULL);
-"""
-        command = ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
-                   "--set", "ON_ERROR_STOP=1", "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]]
-        for name, value in {
-            "npubs": json.dumps([KEYS["agent"], KEYS["member"]]),
-            "hexes": json.dumps([member_hex]),
-            "brain_ids": json.dumps(["content-brain"]),
-            "row_limit": "50001",
-            "name_limit": "256",
-            "email_limit": "254",
-        }.items():
-            command.extend(["--set", f"{name}={value}"])
-        # Same invocation shape as the probe: a script file, stdin closed,
-        # bounded by subprocess and server-side timeouts.
-        scratch = tempfile.TemporaryDirectory()
-        self.addCleanup(scratch.cleanup)
-        script = Path(scratch.name) / "core.sql"
-        script.write_text(fixture + roster.CORE_QUERY + "ROLLBACK;\n")
-        environment = dict(os.environ, PGOPTIONS="-c idle_in_transaction_session_timeout=20000"
-                                                 " -c statement_timeout=20000")
-        result = subprocess.run([*command, "--file", str(script)], stdin=subprocess.DEVNULL,
-                                text=True, capture_output=True, timeout=60, env=environment)
-        self.assertEqual(result.returncode, 0, result.stderr[-2000:])
-        core = roster.parse_core_output(result.stdout)
+INSERT INTO agent_creation_requests VALUES
+  ('request_guest','org_1','user_old','project_9','ready','runtime_9',now(),now(),'{guest_hex}'),
+  ('request_guest_2','org_1','user_nolink','project_8','failed',NULL,now(),now(),'{guest_hex}'),
+  ('request_agent','org_1','user_old','project_7','ready','runtime_7',now(),now(),'{agent_hex}'),
+  ('request_member','org_1','user_old','project_6','ready','runtime_6',now(),now(),'{member_hex}'),
+  ('request_other','org_1','user_old','project_5','ready','runtime_5',now(),now(),'{"ab" * 32}');
+{identity}"""
+
+
+def core_query_inputs(**overrides: str) -> dict[str, str]:
+    keys = [KEYS["agent"], KEYS["member"], KEYS["guest"]]
+    inputs = {
+        "key_pairs": json.dumps([{"npub": key, "hex": roster.npub_to_hex(key)} for key in keys]),
+        "candidate_limit": str(roster.MAX_HOSTED_CANDIDATES + 1),
+        "npubs": json.dumps(keys),
+        "hexes": json.dumps([roster.npub_to_hex(key) for key in keys]),
+        "brain_ids": json.dumps(["content-brain"]),
+        "row_limit": "50001",
+        "name_limit": "256",
+        "email_limit": "254",
+    }
+    inputs.update(overrides)
+    return inputs
+
+
+@unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "needs a disposable Core Postgres")
+class CorePostgresTests(unittest.TestCase):
+    def test_core_query_matches_exact_pins_and_hides_ids(self):
+        core = run_core_query(self, core_fixture_sql(True), core_query_inputs())
         self.assertEqual([agent["npub"] for agent in core["agents"]], [KEYS["agent"]])
         self.assertEqual(core["agents"][0]["display_name"], "Jules Agent")
         self.assertIsNone(core["agents"][0]["agent_email"], "oversized text is withheld in SQL")
         self.assertEqual(len(core["humans"]), 1)
         self.assertEqual([scope["brain_id"] for scope in core["scopes"]], ["content-brain"])
         emails = {account["email"] for account in core["accounts"]}
-        self.assertEqual(emails, {"jules@acme.example", "ray@other.example"})
+        self.assertEqual(emails, {"jules@acme.example", "ray@other.example", "old@third.example",
+                                  "nolink@third.example"})
         # Real Core ids are operator metadata; unrelated rows never appear.
         self.assertEqual(core["agents"][0]["project"], "project_1")
         self.assertEqual(core["agents"][0]["runtime"], "runtime_1")
         self.assertEqual(core["agents"][0]["account"], "user_jules")
         self.assertNotIn("runtime_x", json.dumps(core))
+
+    def test_launch_requests_match_only_keys_core_cannot_name(self):
+        guest_hex = roster.npub_to_hex(KEYS["guest"])
+        core = run_core_query(self, core_fixture_sql(True), core_query_inputs())
+        # Pinned (agent) and associated (member) keys are excluded in SQL.
+        self.assertEqual(sorted((row["request"], row["hex"], row["account"], row["status"],
+                                 row["project"], row["runtime"])
+                                for row in core["launch_chat_keys"]),
+                         [("request_guest", guest_hex, "user_old", "ready", "project_9", "runtime_9"),
+                          ("request_guest_2", guest_hex, "user_nolink", "failed", "project_8", None)])
+        self.assertTrue(all(row["created_at"] and row["updated_at"] for row in core["launch_chat_keys"]))
+        # Candidates: launch submitters, the pin owner and the associated
+        # account; unlinked accounts have no Hosted namespace.
+        candidates = {row["account"]: row["storage"] for row in core["hosted_candidates"]}
+        self.assertEqual(candidates, {
+            name: hashlib.sha256(f"wos_{name.removeprefix('user_')}".encode()).hexdigest()
+            for name in ("user_old", "user_jules", "user_ray")})
+        self.assertFalse(core["hosted_overflow"])
+        self.assertNotIn("request_other", json.dumps(core))
+
+    def test_launch_lookup_runs_without_the_brain_identity_schema(self):
+        core = run_core_query(self, core_fixture_sql(False), core_query_inputs())
+        self.assertFalse(core["brain_identity_schema"])
+        self.assertEqual(sorted(row["request"] for row in core["launch_chat_keys"]),
+                         ["request_guest", "request_guest_2", "request_member"])
+
+    def test_candidate_overflow_is_reported_not_truncated(self):
+        core = run_core_query(self, core_fixture_sql(True), core_query_inputs(candidate_limit="2"))
+        with mock.patch.object(roster, "MAX_HOSTED_CANDIDATES", 1):
+            reparsed = roster.parse_core_output(json.dumps({"agents": [], "hosted_candidates":
+                                                            core["hosted_candidates"][:2]}))
+        self.assertTrue(reparsed["hosted_overflow"])
+
+
+CIPHERTEXT_MARKER = b"HOSTED-CIPHERTEXT-MUST-NOT-BE-READ"
+
+
+def build_chat_store(path: Path, rows: list[tuple[str, str]]) -> None:
+    """Shaped like finitechat-client's client_device_states plus content."""
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(path)
+    connection.executescript("""
+        CREATE TABLE client_device_states(account_id TEXT NOT NULL, device_id TEXT NOT NULL,
+          nonce BLOB NOT NULL, ciphertext BLOB NOT NULL, PRIMARY KEY(account_id, device_id));
+        CREATE TABLE app_messages(body BLOB);
+    """)
+    connection.executemany("INSERT INTO client_device_states VALUES (?, ?, ?, ?)",
+                           [(account, device, b"nonce", CIPHERTEXT_MARKER) for account, device in rows])
+    connection.execute("INSERT INTO app_messages VALUES (?)", (CIPHERTEXT_MARKER,))
+    connection.commit()
+    connection.close()
+
+
+def storage(workos_id: str) -> str:
+    return hashlib.sha256(workos_id.encode()).hexdigest()
+
+
+class HostedChatStoreTests(unittest.TestCase):
+    def setUp(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        (self.root / "users").mkdir()
+        self.added = roster.npub_to_hex(KEYS["added"])
+        self.wrapper = roster.npub_to_hex(KEYS["wrapper"])
+        self.store = self.root / "users" / storage("wos_old") / "chat" / "client.sqlite3"
+        build_chat_store(self.store, [(self.added, "hosted-web"), (self.wrapper, "phone"),
+                                      ("cd" * 32, "hosted-web")])
+        self.sql: list[str] = []
+
+    def query(self, database: Path, sql: str) -> list[dict]:
+        self.assertNotEqual(database, self.store, "only the scratch copy is queried")
+        self.sql.append(sql)
+        return finite_status.sqlite_json_query(database, sql)
+
+    def collect(self, candidates, unknown=None, **options) -> dict:
+        unknown = sorted([self.added, self.wrapper]) if unknown is None else unknown
+        return roster.collect_hosted(candidates, unknown, finite_status.scratch_copy_sqlite,
+                                     self.query, root=self.root, **options)
+
+    def test_known_account_match_selects_key_columns_only(self):
+        before = self.store.read_bytes()
+        hosted = self.collect([
+            {"account": "account-old", "storage": storage("wos_old")},
+            {"account": "account-1", "storage": storage("wos_jules")},
+            {"account": "account-bad", "storage": "../../etc"},
+        ])
+        states = {row["account"]: row for row in hosted["accounts"]}
+        self.assertEqual(states["account-old"]["state"], "checked")
+        # The phone device holding wrapper's key is not the hosted-web device.
+        self.assertEqual(states["account-old"]["matches"], [self.added])
+        self.assertEqual(states["account-1"]["state"], "missingStore")
+        self.assertEqual(states["account-bad"], {"account": "account-bad", "state": "unavailable",
+                                                 "reason": "malformed storage id"})
+        self.assertEqual(len(self.sql), 1)
+        self.assertTrue(self.sql[0].startswith("SELECT account_id, device_id FROM client_device_states"))
+        self.assertNotIn("ciphertext", self.sql[0])
+        self.assertNotIn("nonce", self.sql[0])
+        self.assertNotIn(CIPHERTEXT_MARKER.decode(), json.dumps(hosted))
+        self.assertEqual(self.store.read_bytes(), before)
+
+        # The report adds launch and Hosted evidence to noCoreRecord keys only.
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        database = Path(scratch.name) / "brain.sqlite3"
+        build_brain_store(database)
+        brain = roster.collect_brain(database, "content-brain", finite_status.scratch_copy_sqlite, query)
+        core = core_fixture()
+        core["accounts"].append({"account": "account-old", "email": "old@third.example",
+                                 "link_status": "linked"})
+        core["launch_chat_keys"] = [{"hex": self.added, "request": "request-9", "account": "account-old",
+                                     "project": "project-9", "runtime": None, "status": "failed",
+                                     "created_at": "2026-09-01T00:00:00Z",
+                                     "updated_at": "2026-09-01T00:05:00Z"}]
+        core["hosted"] = hosted
+        self.assertEqual(roster.unknown_hexes(brain, core), sorted(
+            roster.npub_to_hex(KEYS[name]) for name in ("admin", "added", "target", "guest", "wrapper")))
+        report = roster.build_report(brain, core, "content-brain")
+        rows = {row["npub"]: row for row in report["brains"][0]["roster"]}
+        added = rows[KEYS["added"]]
+        self.assertEqual(added["coreIdentity"]["state"], "noCoreRecord")
+        launch = added["submittedLaunchChatKey"]
+        self.assertIn("not ownership proof", launch["note"])
+        self.assertEqual(launch["requests"][0]["requestId"], "request-9")
+        self.assertEqual(launch["requests"][0]["historicalOwnerAccount"]["email"], "old@third.example")
+        self.assertEqual([match["account"]["email"] for match in added["hostedChatStores"]["matches"]],
+                         ["old@third.example"])
+        self.assertIn("not a signature", added["hostedChatStores"]["note"])
+        for pinned in (KEYS["agent"], KEYS["member"]):
+            self.assertNotIn("submittedLaunchChatKey", rows[pinned])
+            self.assertNotIn("hostedChatStores", rows[pinned])
+        reference = report["brains"][0]["referenceKeys"][0]
+        self.assertEqual(reference["hostedChatStores"]["matches"], [], "phone device is not evidence")
+        evidence = report["evidence"]["hostedChatStores"]
+        self.assertEqual(evidence["state"], "checked")
+        self.assertEqual({row["account"]: row["state"] for row in evidence["accounts"]},
+                         {"account-old": "checked", "account-1": "missingStore",
+                          "account-bad": "unavailable"})
+        text = json.dumps(report)
+        for hidden in (storage("wos_old"), storage("wos_jules"), "wos_", CIPHERTEXT_MARKER.decode()):
+            self.assertNotIn(hidden, text)
+
+    def test_candidates_come_from_launch_rows_for_unknown_keys_and_roster_accounts(self):
+        core = core_fixture()
+        core["launch_chat_keys"] = [
+            {"hex": self.added, "account": "account-old"},
+            {"hex": "ef" * 32, "account": "account-elsewhere"}]
+        core["hosted_candidates"] = [{"account": name, "storage": storage(name)} for name in
+                                     ("account-1", "account-2", "account-old", "account-elsewhere",
+                                      "account-unrelated")]
+        self.assertEqual(sorted(row["account"] for row in roster.hosted_candidates(core, [self.added])),
+                         ["account-1", "account-2", "account-old"])
+
+    def test_bounds_and_missing_sources_are_explicit_per_source(self):
+        candidate = [{"account": "account-old", "storage": storage("wos_old")}]
+        self.assertEqual(self.collect(candidate, unknown=[])["state"], "notNeeded")
+        overflow = self.collect(candidate, overflow=True)
+        self.assertEqual(overflow["state"], "unavailable")
+        missing_root = roster.collect_hosted(candidate, [self.added], finite_status.scratch_copy_sqlite,
+                                             self.query, root=self.root / "absent")
+        self.assertEqual(missing_root["state"], "unavailable")
+        with mock.patch.object(roster, "MAX_HOSTED_STORE_BYTES", 10):
+            self.assertEqual(self.collect(candidate)["accounts"][0]["reason"],
+                             "Hosted store over byte budget")
+        ticks = iter([0, roster.HOSTED_BUDGET_SECONDS + 1])
+        self.assertEqual(self.collect(candidate, clock=lambda: next(ticks))["accounts"][0]["reason"],
+                         "Hosted time budget exhausted")
+        torn = self.root / "users" / storage("wos_torn") / "chat" / "client.sqlite3"
+        torn.parent.mkdir(parents=True)
+        torn.write_bytes(b"not sqlite")
+        failed = self.collect([{"account": "account-torn", "storage": storage("wos_torn")}])
+        self.assertEqual(failed["accounts"][0], {"account": "account-torn", "state": "unavailable",
+                                                 "reason": "CollectionError"})
+        self.assertEqual(len(self.sql), 1, "only the torn store reached a query")
 
 
 if __name__ == "__main__":
