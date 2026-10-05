@@ -127,9 +127,10 @@ export async function observeHostedHumanBrainAction(
   const accepted = qualify(npub);
   if (!accepted) return { skipped: "action not proven" };
 
+  const operationId = `obs_${randomBytes(16).toString("hex")}`;
   const body = JSON.stringify({
     version: OBSERVATION_VERSION,
-    operationId: `obs_${randomBytes(16).toString("hex")}`,
+    operationId,
     brainServer,
     brainId: accepted.brainId,
     observedAt: dependencies.now().toISOString(),
@@ -159,8 +160,16 @@ export async function observeHostedHumanBrainAction(
     if (response.status >= 500) continue;
     if (!response.ok) return { skipped: `core refused (${response.status})` };
     try {
-      const parsed = (await response.json()) as { outcome?: unknown };
-      if (parsed.outcome === "recorded" || parsed.outcome === "unchanged") {
+      const parsed = (await response.json()) as {
+        version?: unknown;
+        operationId?: unknown;
+        outcome?: unknown;
+      };
+      if (
+        parsed.version === OBSERVATION_VERSION &&
+        parsed.operationId === operationId &&
+        (parsed.outcome === "recorded" || parsed.outcome === "unchanged")
+      ) {
         return { outcome: parsed.outcome };
       }
     } catch {

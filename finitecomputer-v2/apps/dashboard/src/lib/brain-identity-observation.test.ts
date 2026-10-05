@@ -5,6 +5,7 @@ import { type AccountAuthContext } from "./dashboard-auth";
 import {
   OBSERVATION_CREDENTIAL_HEADER,
   OBSERVATION_PATH,
+  OBSERVATION_VERSION,
   acceptedBrainInvitation,
   appliedBrainApproval,
   brainObservationConfig,
@@ -24,16 +25,24 @@ const ACCOUNT: AccountAuthContext = {
 const ACCEPTED = { brainId: "brain_alpha", status: "accepted", userId: NPUB };
 
 type Call = { url: string; init: RequestInit };
+/// A reply built from the request, so a stub can echo the operation id.
+type Reply = Response | Error | ((request: { operationId: string }) => Response);
 
-function recorder(responses: Array<Response | Error>) {
+function recorder(responses: Reply[]) {
   const calls: Call[] = [];
   const fetcher = (async (url: string, init: RequestInit) => {
     calls.push({ url, init });
     const next = responses.shift();
     if (!next || next instanceof Error) throw next ?? new Error("no response");
+    if (typeof next === "function") return next(JSON.parse(String(init.body)));
     return next;
   }) as unknown as typeof fetch;
   return { calls, fetcher };
+}
+
+function echo(outcome: string, overrides: Record<string, unknown> = {}): Reply {
+  return ({ operationId }) =>
+    Response.json({ version: OBSERVATION_VERSION, operationId, outcome, ...overrides });
 }
 
 function deps(fetcher: typeof fetch, identify: () => Promise<unknown> = async () => ({
@@ -76,9 +85,7 @@ test("acceptance must name this exact hosted key and an accepted status", () => 
 });
 
 test("a proven acceptance posts one observation with both credentials", async () => {
-  const { calls, fetcher } = recorder([
-    Response.json({ version: "v", operationId: "x", outcome: "recorded" }),
-  ]);
+  const { calls, fetcher } = recorder([echo("recorded")]);
   const result = await observeHostedBrainInvitationAcceptance(
     CONFIG,
     ACCOUNT,
@@ -106,7 +113,7 @@ test("a proven acceptance posts one observation with both credentials", async ()
 test("a lost response is retried once with the same operation id", async () => {
   const { calls, fetcher } = recorder([
     new Error("socket hang up"),
-    Response.json({ outcome: "recorded" }),
+    echo("recorded"),
   ]);
   const result = await observeHostedBrainInvitationAcceptance(
     CONFIG,
@@ -127,6 +134,9 @@ test("Core outages, refusals and old Core never throw", async () => {
     [new Response("", { status: 404 })],
     [new Response("", { status: 409 })],
     [new Response("not json", { status: 200 })],
+    [echo("recorded", { version: "finite-core-brain-account-observation-v0" })],
+    [echo("recorded", { operationId: "obs_someone_else" })],
+    [echo("created")],
   ]) {
     const { fetcher } = recorder([...responses]);
     const result = await observeHostedBrainInvitationAcceptance(
