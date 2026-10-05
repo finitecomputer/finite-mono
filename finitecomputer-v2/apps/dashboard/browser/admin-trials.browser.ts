@@ -13,7 +13,7 @@ const token = `fixture.${Buffer.from(JSON.stringify({ org_id: operatorOrg })).to
 
 // Synthetic fixtures only. No Stripe client, credentials, or production endpoints.
 test("trial admin dashboard persists and edits codes, shows account identities, and guards writes", { timeout: 180_000 }, async (t) => {
-  const state = { campaigns: fixtures(), posts: [] as Array<{ path: string; body: Record<string, unknown> }>, fail: false, reject: false, legacy: false };
+  const state = { campaigns: fixtures(), posts: [] as Array<{ path: string; body: Record<string, unknown> }>, fail: false, reject: false, legacy: false, createdCount: 0 };
   const core = http.createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     const reply = (data: unknown, status = 200) => { response.statusCode = status; response.end(JSON.stringify(data)); };
@@ -44,8 +44,9 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
         response.statusCode = 204; return response.end();
       }
       const code = state.legacy ? "QRST-2345-6789-ABCD" : "TEST-2345-6789-ABCD";
-      state.campaigns.unshift({ id: "campaign_created", ...body, ...(state.legacy ? {} : { code, codeRevision: 0 }), active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
-      return reply({ id: "campaign_created", code });
+      const id = state.createdCount++ === 0 ? "campaign_created" : `campaign_created_${state.createdCount}`;
+      state.campaigns.unshift({ id, ...body, ...(state.legacy ? {} : { code, codeRevision: 0 }), active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
+      return reply({ id, code });
     }
     if (path === "/api/core/v1/me") return reply({ email: "admin@example.test", workos_user_id: "user_admin", projects: [], claimable_candidates: [], agent_creation_requests: [] });
     if (path === "/api/core/v1/me/billing") return reply({ customer_org: null, billing_account: null, agent_creation_entitlement: null, can_create_agent: false, requires_billing: false });
@@ -119,15 +120,45 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
   assert.deepEqual(state.posts[1].body, { name: "Extra workshop", seatLimit: 15, trialDays: 7 });
   await page.getByText("Create new free trial campaign", { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${screenshots}/created.png` });
+  // Once persisted, a receipt must never revive its original code after an
+  // edit followed by Core rollback to a GET response without code fields.
+  const receiptCampaign = page.getByRole("article", { name: "Extra workshop" });
+  await receiptCampaign.getByText("Edit code", { exact: true }).click();
+  await receiptCampaign.getByLabel("Trial code", { exact: true }).fill("REPLACED2026");
+  await receiptCampaign.getByRole("button", { name: "Save code", exact: true }).click();
+  await receiptCampaign.getByText("REPLACED2026", { exact: true }).waitFor();
+  state.legacy = true;
+  await page.getByRole("button", { name: "Refresh counts" }).click();
+  await receiptCampaign.getByText("This code is unavailable for display.", { exact: false }).waitFor();
+  const issuance = page.getByRole("form", { name: "Create trial campaign" });
+  for (const viewport of [{ width: 1440, height: 1400 }, { width: 390, height: 844 }]) {
+    await page.setViewportSize(viewport);
+    assert.equal(await issuance.locator("code").count(), 0, "rollback must not revive the replaced issuance code");
+    await issuance.getByText("Its current code is unavailable", { exact: false }).waitFor();
+    await issuance.getByRole("status").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${screenshots}/retired-issuance-${viewport.width}.png` });
+  }
+  assert.equal(state.campaigns.find(c => c.id === "campaign_created")!.code, "REPLACED2026");
+  // Retirement belongs to one issuance, not to the whole form. Creating a new
+  // campaign while still on old Core must show its fresh receipt on this page.
+  await issuance.getByLabel("Campaign name", { exact: true }).fill("Rollback-era workshop");
+  await issuance.getByRole("button", { name: "Create campaign and code" }).click();
+  await issuance.getByText("QRST-2345-6789-ABCD", { exact: true }).waitFor();
+  await issuance.getByText("Copy and save this code now.", { exact: false }).waitFor();
+  assert.equal(state.campaigns[0].id, "campaign_created_2");
+  state.legacy = false;
+  await page.setViewportSize({ width: 1440, height: 1400 });
+  await page.getByRole("button", { name: "Refresh counts" }).click();
+  await receiptCampaign.getByText("REPLACED2026", { exact: true }).waitFor();
   // Revoked Core authorization blocks a forged/stale admin form too.
   state.reject = true;
   await page.getByLabel("Campaign name", { exact: true }).fill("Must not create");
   await page.getByRole("button", { name: "Create campaign and code" }).click();
   await page.getByRole("alert").filter({ hasText: "Operator access revoked" }).waitFor();
-  assert.equal(state.posts.length, 2);
+  assert.equal(state.posts.length, 4);
   state.reject = false;
   await open();
-  assert.equal(await page.getByText("TEST-2345-6789-ABCD", { exact: true }).count(), 1, "saved code must remain visible after navigation");
+  assert.equal(await page.getByText("REPLACED2026", { exact: true }).count(), 1, "saved replacement must remain visible after navigation");
   // A stale total cannot overwrite another operator's increase.
   await workshop.getByText("Increase signup limit", { exact: true }).click();
   state.campaigns.find(c => c.id === "campaign_workshop")!.seatLimit = 20;
@@ -149,7 +180,7 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
   assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "WORKSHOP2026");
   // A second operator changes the code after this page loaded.
   await created.getByText("Edit code", { exact: true }).click();
-  state.campaigns.find(c => c.id === "campaign_created")!.codeRevision = 2;
+  state.campaigns.find(c => c.id === "campaign_created")!.codeRevision = 3;
   state.campaigns.find(c => c.id === "campaign_created")!.code = "OTHER2026";
   await created.getByLabel("Trial code", { exact: true }).fill("STALE2026");
   await created.getByRole("button", { name: "Save code", exact: true }).click();
@@ -202,6 +233,17 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
     await form.getByRole("status").scrollIntoViewIfNeeded();
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
     await page.screenshot({ path: `${screenshots}/legacy-issuance-${viewport.width}.png` });
+    // A fresh legacy receipt stays until this particular issuance is actually
+    // acknowledged, then remains retired if display support disappears again.
+    state.legacy = false;
+    Object.assign(state.campaigns[0], { code: "CONFIRMED2026", codeRevision: 1 });
+    await page.getByRole("button", { name: "Refresh counts" }).click();
+    await legacy.getByText("CONFIRMED2026", { exact: true }).waitFor();
+    assert.equal(await form.locator("code").count(), 0);
+    state.legacy = true;
+    await page.getByRole("button", { name: "Refresh counts" }).click();
+    await legacy.getByText("This code is unavailable for display.", { exact: false }).waitFor();
+    assert.equal(await form.locator("code").count(), 0, "an acknowledged legacy receipt must stay retired too");
     await open();
     assert.equal(await page.getByText("QRST-2345-6789-ABCD", { exact: true }).count(), 0, "the receipt is honestly one-time on old Core");
   }
