@@ -1,0 +1,28 @@
+{
+  "version": "finite-core-brain-identity-descriptions-v1",
+  "brainId": "brain_synthetic_fixture",
+  "checkedAt": "2026-10-04T00:00:00Z",
+  "results": [
+    {
+      "publicKeyHex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Ada",
+      "lifecycle": "active",
+      "responsibleAccount": {
+        "email": "sam@example.org",
+        "source": "coreAccountContact",
+        "observedAt": "2026-10-03T00:00:00Z"
+      },
+      "source": {
+        "kind": "finiteRuntimeRecord",
+        "observedAt": "2026-10-03T00:00:00Z",
+        "revision": "synthetic-runtime-record-1"
+      }
+    },
+    {
+      "publicKeyHex": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "state": "notShared"
+    }
+  ]
+}

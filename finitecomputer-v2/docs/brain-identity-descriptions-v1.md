@@ -126,8 +126,11 @@ credential names and locations only. Redact contact details from routine logs.
 Query all exact runtime-pin matches. Require active project/runtime links to
 agree with `runtime.project_id`. Deduplicate runtime incarnations only under an
 explicit lifecycle rule. Different projects or accounts sharing a key are
-ambiguous even if names match. Stopped/offline runtimes retain key evidence;
-null pins, retired links and unresolved relocations do not become current owners.
+ambiguous even if names match. Stopped/offline runtimes retain key evidence.
+An unambiguous retired agent remains described as `retired`, using its recorded
+project/responsible-account facts with their source time; it is not represented
+as an active runtime. Null pins, inconsistent links and unresolved relocation
+records do not justify guessing. Include lifecycle state in resolved agent rows.
 
 Join current account contact and project owner in one bounded source snapshot.
 Return source observation time/revision separately from Brain's access snapshot.
