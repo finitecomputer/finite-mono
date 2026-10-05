@@ -21,9 +21,15 @@ Core transaction), and the account_id/device_id columns of candidate
 accounts' Hosted Chat stores (private scratch copies). Neither changes the
 Core classification, proves control, or records consent.
 
-Never read: wrapped Folder Key Grants, access-change events, encrypted
-content or device-state ciphertext, identity or key files, sealed Hosted
-Device bindings, the Identity Directory database, retired authority tables.
+Never selected or decrypted: wrapped Folder Key Grants, access-change
+events, encrypted content or device-state nonce/ciphertext. Never read at
+all: identity or key files, sealed Hosted Device bindings, the Identity
+Directory database, retired authority tables.
+
+Every SQLite source, the Brain store and each Hosted Chat store, is copied
+whole (database, WAL and SHM, so including encrypted columns and content)
+into a private scratch directory that is deleted after its query. Only the
+columns named in the queries are selected from that copy.
 """
 
 from __future__ import annotations
@@ -746,7 +752,12 @@ def collect_hosted(
     The store path follows the Hosted Device (users/<sha256 of the WorkOS
     user id>/chat/client.sqlite3); Core computes that digest so no WorkOS id
     reaches this process. Each store is read through one private scratch copy,
-    selecting only the plaintext account_id and device_id key columns."""
+    selecting only the plaintext account_id and device_id key columns.
+
+    The time, size and free-disk checks are observations taken before each
+    copy starts. They decide whether to start it; they are not a hard
+    deadline or byte cap on a copy in progress, so a store that grows or a
+    slow copy can run past them."""
     root = HOSTED_DATA_ROOT if root is None else root
     if free_bytes is None:
         # scratch_copy_sqlite copies into the default temporary directory.
@@ -942,13 +953,18 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
                 "Core runtime pins, account key associations and raw sharing-scope rows",
                 "Identity Directory finite.vip bindings for each exact key (operator inspect)",
                 "stored Brain alias rows for those exact names, on any key",
+                "for noCoreRecord keys: historical launch requests whose submitted "
+                "owner_chat_account_id equals the exact key",
+                "for noCoreRecord keys: hosted-web account_id/device_id rows in candidate "
+                "accounts' Hosted Chat stores (key metadata only)",
             ],
             "notIncluded": [
                 "Folder entitlement, readability, and retained-but-unentitled grant detection; "
                 "use `fbrain access list --brain <id>` for authoritative access",
                 "participants known only through a Mount and holding no stored role or grant here",
                 "Core's disclosure policy; no decision about what admins may see is made",
-                "sealed Hosted Device bindings, identity files, ciphertext and older key versions",
+                "sealed Hosted Device bindings, identity files, older key versions, and any "
+                "selected or decrypted ciphertext",
             ],
         },
         "limitations": [
@@ -975,6 +991,18 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "owner_chat_account_id (historical, not ownership proof), and hostedChatStores says "
             "a candidate account's Hosted Chat store holds that key as its hosted-web device "
             "(scratch copy, key columns only). Neither changes coreIdentity or implies consent.",
+            "historicalOwnerAccount is the account that submitted the request; its email is that "
+            "account's current email, not the email at submission time.",
+            "Hosted stores are found only through each candidate's current WorkOS link "
+            "(linked accounts only). missingStore or no match does not mean the key was never "
+            "hosted: the account may have relinked, been unlinked, or never been a candidate.",
+            "Launch requests and Hosted matches can point at different accounts for one key. "
+            "All matches are listed; the probe does not resolve conflicting hints.",
+            "Each Hosted Chat store is copied whole (database, WAL and SHM, including encrypted "
+            "columns) into a private scratch directory, queried for key columns only, then "
+            "deleted.",
+            "Hosted time, size and scratch-disk budgets are checked before each copy starts, "
+            "not enforced during it; a store that grows or copies slowly can exceed them.",
         ],
         "brains": brains,
         "aliasNameEvidence": alias_name_evidence(directory_results, tables.get("name_aliases", [])),
