@@ -10,10 +10,13 @@ in
   systemd.services.finite-brain-app = {
     description = "FiniteBrain Rust application server";
     wants = [ "network-online.target" ];
-    # Brain no longer calls the Identity Directory or SaaS Core at request
-    # time (auth-kernel cut): invitations are capability tokens and finite.vip
-    # NIP-05 resolves through public internet fetch. No service requires are
-    # left; boot ordering follows network-online only.
+    # Brain authorization never calls the Identity Directory or SaaS Core
+    # (auth-kernel cut): invitations are capability tokens and finite.vip
+    # NIP-05 resolves through public internet fetch. The only Core call is the
+    # optional, read-only identity description lookup for the admin access
+    # report (FIN-122, brain-identity.env below); access never depends on it
+    # and an outage only marks descriptions unavailable. No service requires
+    # are left; boot ordering follows network-online only.
     after = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
 
@@ -41,6 +44,11 @@ in
         # the server no longer reads FINITE_IDENTITY_OPERATOR_TOKEN or
         # FC_CORE_API_TOKEN.
         mailEnvironmentFile
+        # Optional Core identity descriptions for the access report
+        # (FIN-122): FINITE_BRAIN_CORE_IDENTITY_URL and
+        # FINITE_BRAIN_CORE_DESCRIPTION_TOKEN. Root-owned 0600; absent means
+        # off. Remove the file and restart to turn descriptions off.
+        "-/etc/finite/brain-identity.env"
       ];
       DynamicUser = true;
       # SQLite restored from smoke at cutover; real path under DynamicUser:

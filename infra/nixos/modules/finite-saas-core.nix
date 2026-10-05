@@ -102,6 +102,11 @@ in
       #   WORKOS_API_KEY                 Read-only user lookup after JWT validation
       #   WORKOS_CLIENT_ID               Expected AuthKit client_id/JWKS selector
       #   FC_WORKOS_OPERATOR_ORG_ID      Exact org_id required by admin routes
+      #   Optional Brain identity listener (FIN-122), all four or none:
+      #   FC_CORE_BRAIN_IDENTITY_BIND          127.0.0.1:4202
+      #   FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER  https://brain.finite.computer
+      #   FC_CORE_BRAIN_OBSERVATION_TOKEN      shared only with the dashboard
+      #   FC_CORE_BRAIN_DESCRIPTION_TOKEN      shared only with Brain
       EnvironmentFile = "/etc/finite/core.env";
       Restart = "on-failure";
       RestartSec = 2;

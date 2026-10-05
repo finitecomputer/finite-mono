@@ -81,3 +81,20 @@ Runtime supplies the new CLI and invitation guidance; existing managed skills
 update with `finite skills sync`, and Working Tree guidance refreshes on a
 successful open/sync. These changes do not provision Personal Brains or repair
 Chat's Organization Brain requester lease.
+
+### fbrain 0.7.0 and Brain identity descriptions
+
+Deploy the lat2 closure (Core, Brain and the dashboard image together) before
+publishing the CLI. Core Migration 0038 and Brain SCHEMA_V30 are additive; the
+previous Core and Brain binaries reopen both. The new
+`GET /v1/brains/{id}/access-report` route is admin-only and read-only. The new
+CLI's `fbrain access list` renders it and reports an upgrade error against an
+older server; `fbrain access summary` keeps the previous metadata view, which
+`access list` used to print. Fielded 0.6.0 clients keep working against the
+new server.
+
+Identity descriptions are off until optional settings are added, per
+[the runbook](runbooks/brain-identity-descriptions.md). Rolling back removes
+the report route and descriptions; stored associations and scopes stay in
+Core and are ignored by the older binary. Hosted Agents keep their pinned
+Runtime; this release needs no Runtime upgrade.

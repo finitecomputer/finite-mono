@@ -254,7 +254,12 @@ fbrain access list --brain <brain-id> [--json]
 fbrain access summary --brain <brain-id> [--json]
 ```
 
-`access list` is the named access report: one server snapshot with coverage
+From `fbrain` 0.7, `access list` is the named access report; its JSON carries
+`"version": "finite-brain-access-report-v1"`. Older CLIs print the metadata
+summary under `access list` with no `version` field; treat that as "use an
+updated operator CLI for the named report", never as a complete report. Do not
+roll the Agent fleet for this task. The named report is one server snapshot
+with coverage
 per scope, exact keys, permitted identity descriptions, Folder entitlements
 and their recorded sources, current-grant readiness with issuer and time, and
 Folders mounted in from other Brains. Every page must carry the same `authorityFingerprint`;
