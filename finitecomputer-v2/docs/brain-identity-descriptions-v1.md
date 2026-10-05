@@ -1,8 +1,8 @@
 # Brain identity descriptions v1
 
-Status: draft implementation contract for FIN-122. This document defines the
-replacement for PR #1050's Directory naming integration. The endpoint, schema,
-hosted hook and rollout described here are not implemented by this commit.
+Status: implemented in Core and the dashboard for FIN-122 (see
+"Implementation" below); production enablement is separate. This document
+defines the replacement for PR #1050's Directory naming integration.
 Product scope, priorities and delivery tracking remain in
 [FIN-122](https://linear.app/finitecomputer/issue/FIN-122).
 
@@ -19,7 +19,7 @@ an admin role, Folder entitlement or a Folder Key Grant.
 | Agent key | Authenticated `agent_runtimes.health_reporting_npub`, consistent active project/runtime link | Exact recorded runtime principal; not inferred from a slug |
 | Responsible account | Current `projects.owner_user_id` | Account responsible for the hosted agent; not proof of legal ownership or decryption |
 | Human key | New Core association observed through the trusted hosted identity path | Existing human key associated with a stable account ID |
-| NIP-05 | Published name-to-key binding or separately recorded binding evidence | Optional public name; not necessarily a mailbox or owner email |
+| NIP-05 | Published name-to-key binding or separately recorded binding evidence | Optional public name; not necessarily a mailbox or owner email. Core v1 returns none: `projects.agent_email` is reserved before publication and is not binding evidence. Brain shows its own dated aliases separately |
 
 Do not use `agent_creation_requests.owner_chat_account_id` as a current reverse
 registry. It is launch-time input. Do not query the operator runtime inventory
@@ -56,7 +56,7 @@ failure/retry path must not block Chat startup, onboarding, signing, normal Brai
 access or the original action's successful result. A report read does not invoke
 this writer. Older components continue without registration.
 
-Proposed ingest route:
+Ingest route:
 `POST /api/core/internal/v1/brain-account-observations`. Require both the current
 WorkOS bearer from server-only `AccountAuthContext.accessToken` and a dedicated
 hosted-observation service credential. Core uses `require_verified_identity`;
@@ -116,9 +116,8 @@ can still be shown separately, with its source and observation time.
 
 ## Private batch boundary
 
-Proposed route: `POST /api/core/internal/v1/brain-identity-descriptions` on a
-service-owned private router. Freeze the path and protocol in route tests before
-runtime implementation. Caddy must not maintain a second per-route allowlist.
+Route: `POST /api/core/internal/v1/brain-identity-descriptions` on a
+service-owned private router. Route tests freeze the path and protocol. Caddy must not maintain a second per-route allowlist.
 
 Request: protocol version, configured Brain server identity, exact Brain ID,
 calling admin key for audit, and canonical full target public keys supplied by
@@ -186,3 +185,62 @@ be proposed with a dry run, conflict report, backup and rollback; it never mints
 keys or invents disclosure scopes. Production backfill and deployment require
 separate authorization. Missing legacy/native evidence remains explicit until
 an authenticated flow establishes it. Universal identification is not claimed.
+
+## Implementation
+
+Core (`finite-saas-core`):
+
+- Migration `0038_brain_identity_descriptions.sql` adds
+  `account_brain_principals`, `account_brain_sharing_scopes`,
+  `brain_account_observation_receipts` and the partial index
+  `agent_runtimes_health_reporting_npub`. Writer: the observation route only.
+  Readers: the description route only. No existing row is rewritten.
+- Both routes are served only by `api::brain_identity_router` on the optional
+  listener `FC_CORE_BRAIN_IDENTITY_BIND`, never by the account or runtime
+  routers. Configuration: `FC_CORE_BRAIN_IDENTITY_BIND` (loopback or private
+  address with an explicit port; wildcard and public addresses are refused),
+  `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER` (the one canonical Brain origin),
+  `FC_CORE_BRAIN_OBSERVATION_TOKEN` and `FC_CORE_BRAIN_DESCRIPTION_TOKEN`.
+  All four or none. Each token must differ from the other and from every
+  existing Core credential. Partial or invalid configuration, an address
+  used by a mandatory listener, or a bind failure disables only this
+  feature, with a warning naming variables but not values. Mandatory
+  listeners bind first.
+- Brain server identity is exactly `https://host[:port]` in lowercase with no
+  path or trailing slash; local development may use
+  `http://127.0.0.1:<port>` or `http://localhost:<port>`. Anything else is
+  refused, not normalised.
+- Observation: header `x-finite-brain-observation-credential` plus the
+  account's WorkOS bearer in `Authorization`. Core resolves an existing
+  linked account by verified WorkOS id, read-only; an unknown or pending
+  account gets 403 `account_not_linked` and nothing is enrolled. One
+  transaction, serialized per account by a scoped advisory lock, stores the
+  association, scope and receipt. Errors: 400 `observation_expired`, 409
+  `operation_id_reused`, `key_associated_elsewhere`,
+  `key_conflicts_with_agent_record`, 403 `agent_not_owned`.
+- Descriptions: header `x-finite-brain-description-credential` only. One
+  REPEATABLE READ, read-only transaction with a 2-second SQL statement
+  timeout. Source fields are length-checked in SQL (email 254 bytes, display
+  name 200 bytes); oversized or control-character values make the row
+  `unknown` and are never truncated. Responses over 256 KiB fail with 503.
+  Logs carry the Brain id, the requesting admin key and counts, never contact.
+- Disclosure: `resolved` needs an active scope for the responsible account
+  (the current project owner for agents) and a linked account. `ambiguous`
+  is stated only when every implicated account shared with this Brain.
+  Missing projects or foreign active links are `notShared`. An inactive
+  sibling without completed retirement makes the agent `unknown`.
+  `responsibleAccount.humanPublicKeysHex` lists at most 8 of the owner's
+  associated keys and excludes any key that is also pinned as an agent.
+
+Dashboard: `src/lib/brain-identity-observation.ts`, called through `after()`
+from `POST /api/brain/invitations/accept` once the Brain server returns an
+acceptance by the exact hosted key. It loads the key with Hosted Device
+`identifyMember` (no mint), retries a lost response once with the same
+operation id, and never changes the join result. Configuration:
+`FC_CORE_BRAIN_IDENTITY_URL` and `FC_CORE_BRAIN_OBSERVATION_TOKEN`; the Brain
+server identity it sends is `FC_BRAIN_PUBLIC_ORIGIN` (falling back to the
+upstream origin), which must equal `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER`.
+
+Not in v1: scope revocation has no product writer (an operator can set
+`revoked_at`), there is no owner-transfer writer, and existing hosted humans
+are described only after their next qualifying action.

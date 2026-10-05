@@ -1,9 +1,17 @@
+import { after } from "next/server";
+
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import {
   BrainHostedClientError,
+  brainPublicOrigin,
   brainServerOrigin,
   hostedSignedBrainRequest,
 } from "@/lib/brain-hosted-client";
+import {
+  brainObservationConfig,
+  hostedObservationDependencies,
+  observeHostedBrainInvitationAcceptance,
+} from "@/lib/brain-identity-observation";
 import { hostedDeviceConfig } from "@/lib/hosted-web-device";
 import { requestOriginMatchesHost } from "@/lib/http-headers";
 
@@ -47,6 +55,25 @@ export async function POST(request: Request) {
       "POST",
       `/v1/brain-invitation-links/${encodeURIComponent(inviteCode)}/accept`
     );
+    // After the response: record which existing hosted key joined and that
+    // this account shares its contact with the Brain's admins. Failures are
+    // logged without contact details and never change the join result.
+    const observation = brainObservationConfig();
+    if (observation) {
+      const brainServer = brainPublicOrigin() ?? brainOrigin;
+      after(async () => {
+        const outcome = await observeHostedBrainInvitationAcceptance(
+          observation,
+          account,
+          brainServer,
+          result,
+          hostedObservationDependencies(config, account, brainServer)
+        );
+        if ("skipped" in outcome) {
+          console.warn(`Brain identity observation skipped: ${outcome.skipped}`);
+        }
+      });
+    }
     return Response.json(result ?? { status: "ok" }, { headers: NO_STORE });
   } catch (error) {
     if (error instanceof BrainHostedClientError) {
