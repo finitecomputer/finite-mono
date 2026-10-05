@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -51,6 +54,155 @@ NPUB_LENGTH = 63
 
 class RosterError(Exception):
     """Evidence could not be collected; the probe fails closed."""
+
+
+# Identity Directory operator inspect: loopback full router, exact key only.
+DIRECTORY_INSPECT_URL = "http://127.0.0.1:8790/api/v1/operator/inspect"
+DIRECTORY_TOKEN_FILE = Path("/etc/finite/identity-operator.env")
+DIRECTORY_TOKEN_VARIABLE = "FINITE_IDENTITY_OPERATOR_TOKEN"
+DIRECTORY_REQUEST_TIMEOUT_SECONDS = 3
+DIRECTORY_BUDGET_SECONDS = 90
+MAX_DIRECTORY_RESPONSE_BYTES = 64 * 1024
+MAX_BINDINGS_PER_KEY = 16
+MAX_CANDIDATE_NAMES = 1024
+VIP_NAME = re.compile(r"^[a-z0-9][a-z0-9._+-]{0,63}@[a-z0-9][a-z0-9.-]{0,188}$")
+
+
+class DirectoryUnavailable(Exception):
+    """One Directory request failed; the message never carries credentials."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+def http_directory_post(token: str) -> Callable[[bytes], tuple[int, bytes]]:
+    """POST one inspect request to the loopback Directory. No ambient proxy,
+    no redirects; the token travels only in its header."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+    def post(body: bytes) -> tuple[int, bytes]:
+        failure = None
+        try:
+            request = urllib.request.Request(
+                DIRECTORY_INSPECT_URL, data=body, method="POST",
+                headers={"content-type": "application/json", "x-finite-operator-token": token},
+            )
+            with opener.open(request, timeout=DIRECTORY_REQUEST_TIMEOUT_SECONDS) as response:
+                return response.status, response.read(MAX_DIRECTORY_RESPONSE_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            try:
+                return error.code, error.read(MAX_DIRECTORY_RESPONSE_BYTES + 1)
+            finally:
+                error.close()
+        except (urllib.error.URLError, OSError, TimeoutError, ValueError, UnicodeError) as error:
+            # Class name only: some transport errors echo header values.
+            failure = type(error).__name__
+        # Raised outside the handler so the original exception (which may
+        # hold the header value) is not kept as context.
+        raise DirectoryUnavailable(failure)
+
+    return post
+
+
+DIRECTORY_TOKEN = re.compile(r"^[\x21-\x7e]{16,512}$")
+
+
+def valid_directory_token(token: Any) -> bool:
+    """A bounded, printable-ASCII token with no spaces or control characters."""
+    return isinstance(token, str) and DIRECTORY_TOKEN.fullmatch(token) is not None
+
+
+def directory_result(npub: str, status: int, body: bytes) -> dict[str, Any]:
+    """Select kind/pubkey/vip_emails from one inspect answer. The echoed key
+    must equal the requested key exactly; anything else is invalid."""
+    invalid = lambda reason: {"state": "invalidResponse", "reason": reason}  # noqa: E731
+    if status not in (200, 404):
+        return {"state": "unavailable", "reason": f"status {status}"}
+    if len(body) > MAX_DIRECTORY_RESPONSE_BYTES:
+        return invalid("response over byte bound")
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        return invalid("response is not JSON")
+    if not isinstance(payload, dict):
+        return invalid("response is not an object")
+    if status == 404:
+        return {"state": "noBinding"} if payload.get("error") == "principal_not_found" else invalid(
+            "unexpected 404 body")
+    if payload.get("kind") != "native" or payload.get("pubkey") != npub_to_hex(npub):
+        return invalid("kind or echoed key does not match the request")
+    rows = payload.get("vip_emails")
+    if not isinstance(rows, list) or not rows:
+        return invalid("vip_emails missing or empty")
+    if len(rows) > MAX_BINDINGS_PER_KEY:
+        return invalid("too many bindings")
+    bindings = []
+    for row in rows:
+        if not isinstance(row, dict):
+            return invalid("binding is not an object")
+        name, disabled = row.get("email"), row.get("disabled")
+        created_at, disabled_at = row.get("created_at"), row.get("disabled_at")
+        if (not isinstance(name, str) or not VIP_NAME.fullmatch(name)
+                or not isinstance(disabled, bool) or not isinstance(created_at, int)
+                or not (disabled_at is None or isinstance(disabled_at, int))
+                or disabled != (disabled_at is not None)):
+            return invalid("binding fields are malformed")
+        bindings.append({"name": name, "disabled": disabled,
+                         "createdAt": created_at, "disabledAt": disabled_at})
+    active = [binding for binding in bindings if not binding["disabled"]]
+    return {
+        "state": "bound" if active else "disabledOnly",
+        "multipleActiveNames": len(active) > 1,
+        "bindings": bindings,
+    }
+
+
+def collect_directory(
+    npubs: list[str],
+    post: Callable[[bytes], tuple[int, bytes]],
+    clock: Callable[[], float] = time.monotonic,
+) -> dict[str, Any]:
+    """One exact-key inspect per canonical key, inside one overall budget."""
+    started = clock()
+    results: dict[str, dict[str, Any]] = {}
+    budget_exhausted = False
+    for npub in npubs:
+        if npub_to_hex(npub) is None:
+            continue
+        if clock() - started > DIRECTORY_BUDGET_SECONDS:
+            budget_exhausted = True
+            results[npub] = {"state": "unavailable", "reason": "Directory budget exhausted"}
+            continue
+        try:
+            status, body = post(json.dumps({"identifier": npub}).encode())
+        except DirectoryUnavailable as error:
+            results[npub] = {"state": "unavailable", "reason": str(error)}
+            continue
+        results[npub] = directory_result(npub, status, body)
+    return {"state": "checked", "checked_at": _now(), "results": results,
+            "budget_exhausted": budget_exhausted}
+
+
+def candidate_names(directory: dict[str, Any] | None) -> list[str]:
+    """Every name (active or disabled) the Directory bound to a selected key."""
+    names = sorted({binding["name"] for result in (directory or {}).get("results", {}).values()
+                    for binding in result.get("bindings", [])})
+    if len(names) > MAX_CANDIDATE_NAMES:
+        raise RosterError(f"more than {MAX_CANDIDATE_NAMES} Directory names")
+    return names
+
+
+def name_alias_query(names: list[str]) -> str:
+    """Stored Brain aliases for exact candidate names, on any key, including
+    keys outside the selected roster. Names are VIP_NAME-validated literals."""
+    if any(not VIP_NAME.fullmatch(name) for name in names):
+        raise RosterError("alias name lookup accepts only validated Directory names")
+    listed = ", ".join(f"'{name}'" for name in names) or "NULL"
+    return (f"SELECT {_text('npub', MAX_KEY_CHARS)}, preferred_nip05, nip05_verified_at,"
+            f" updated_at FROM identity_aliases WHERE preferred_nip05 IN ({listed})"
+            f" ORDER BY preferred_nip05, npub LIMIT {MAX_CANDIDATE_NAMES * 4 + 1};")
 
 
 def npub_to_hex(value: Any) -> str | None:
@@ -278,8 +430,11 @@ def collect_brain(
     brain_id: str,
     scratch_copy: Callable[[Path], Any],
     query: Callable[[Path, str], list[dict[str, Any]]],
+    directory: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Read every roster table from one scratch copy of the Brain store."""
+    """Read every roster table from one scratch copy of the Brain store. When
+    a Directory lookup is supplied, its candidate names are checked against
+    stored aliases in the same copy."""
     queries = brain_queries(brain_id)
     copy_started = _now()
     tables: dict[str, list[dict[str, Any]]] = {}
@@ -296,11 +451,17 @@ def collect_brain(
             raise RosterError(f"Brain {brain_id} was not found in the scratch copy")
         tables["aliases"] = _bounded(
             "aliases", query(scratch, alias_query(selected_npubs(tables))), MAX_KEYS)
+        directory_evidence = directory(selected_npubs(tables)) if directory else None
+        names = candidate_names(directory_evidence)
+        tables["name_aliases"] = _bounded(
+            "name aliases", query(scratch, name_alias_query(names)), MAX_CANDIDATE_NAMES * 4
+        ) if names else []
     return {
         "source": str(database),
         "copy_started_at": copy_started,
         "copied_at": copied,
         "tables": tables,
+        "directory": directory_evidence,
     }
 
 
@@ -483,6 +644,16 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "note": "global stored alias; any lookup may have written it; not rechecked",
         }
 
+    directory = brain.get("directory")
+    directory_results = (directory or {}).get("results", {})
+
+    def directory_view(npub: str) -> dict[str, Any]:
+        if directory is None:
+            return {"state": "notChecked"}
+        if npub_to_hex(npub) is None:
+            return {"state": "keyInvalid"}
+        return directory_results.get(npub, {"state": "notChecked"})
+
     by_brain: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for (brain_key, npub), row in sorted(roster.items()):
         identity = core_identity(npub, core, accounts)
@@ -500,6 +671,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "brainParticipation": row["participation"],
             "storedNip05": stored_alias(npub),
             "coreIdentity": identity,
+            "identityDirectory": directory_view(npub),
             "sharingScopes": sharing_scopes(identity, brain_key, scopes),
         })
     for (brain_key, npub), labels in sorted(references.items()):
@@ -511,6 +683,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "note": "reference only: admitted or granted others; holds no stored role here",
             "storedNip05": stored_alias(npub),
             "coreIdentity": identity,
+            "identityDirectory": directory_view(npub),
         })
     brains = []
     for record in tables["brains"]:
@@ -524,6 +697,13 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "roster": section["roster"],
             "referenceKeys": section["references"],
         })
+    report_directory = {"state": "notChecked"} if directory is None else {
+        "state": directory.get("state"),
+        "reason": directory.get("reason"),
+        "checkedAt": directory.get("checked_at"),
+        "keysChecked": len(directory_results),
+        "budgetExhausted": directory.get("budget_exhausted", False),
+    }
     report = {
         "schema_version": SCHEMA_VERSION,
         "exit_code": 0,
@@ -535,6 +715,7 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "brainScratchCopiedAt": brain["copied_at"],
             "coreCheckedAt": core.get("checked_at"),
             "coreBrainIdentitySchema": core.get("brain_identity_schema"),
+            "identityDirectory": report_directory,
         },
         "coverage": {
             "included": [
@@ -542,13 +723,15 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
                 "current-version Folder Key Grant presence and issuer metadata",
                 "exact-key participation facts",
                 "Core runtime pins, account key associations and raw sharing-scope rows",
+                "Identity Directory finite.vip bindings for each exact key (operator inspect)",
+                "stored Brain alias rows for those exact names, on any key",
             ],
             "notIncluded": [
                 "Folder entitlement, readability, and retained-but-unentitled grant detection; "
                 "use `fbrain access list --brain <id>` for authoritative access",
                 "participants known only through a Mount and holding no stored role or grant here",
                 "Core's disclosure policy; no decision about what admins may see is made",
-                "Identity Directory names, Hosted Device bindings, older key versions",
+                "Hosted Device bindings and older key versions",
             ],
         },
         "limitations": [
@@ -567,8 +750,13 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "precision can misorder events within the same second.",
             "Agent pins are runner-observed records, not key-signed proof. currentOwnerAccount is "
             "the project's owner now, not at admission time.",
+            "identityDirectory lists finite.vip name bindings for the exact key, including "
+            "disabled ones. A name is not account ownership, contact or consent.",
+            "aliasNameEvidence rows are Brain's stored alias cache, read from the same scratch "
+            "copy; the Directory is read at a different time and is the binding authority.",
         ],
         "brains": brains,
+        "aliasNameEvidence": alias_name_evidence(directory_results, tables.get("name_aliases", [])),
     }
     if len(json.dumps(report).encode()) > MAX_REPORT_BYTES:
         raise RosterError("roster report exceeded its byte bound")
@@ -583,6 +771,33 @@ def selected_npubs(tables: dict[str, list[dict[str, Any]]]) -> list[str]:
     if len(npubs) > MAX_KEYS:
         raise RosterError(f"more than {MAX_KEYS} roster and reference keys")
     return sorted(npub for npub in npubs if npub_to_hex(npub))
+
+
+def alias_name_evidence(
+    directory_results: dict[str, dict[str, Any]], alias_rows: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Per Directory name: which selected keys it is bound to, and every
+    stored Brain alias row for that exact name. Nothing is selected by order."""
+    bound: dict[str, list[dict[str, Any]]] = {}
+    for npub, result in sorted(directory_results.items()):
+        for binding in result.get("bindings", []):
+            bound.setdefault(binding["name"], []).append(
+                {"npub": npub, "disabled": binding["disabled"]})
+    evidence = []
+    for name in sorted(bound):
+        active_keys = {row["npub"] for row in bound[name] if not row["disabled"]}
+        rows = [row for row in alias_rows if row.get("preferred_nip05") == name]
+        evidence.append({
+            "name": name,
+            "directoryKeys": bound[name],
+            "brainAliasRows": [{
+                "npub": row.get("npub"),
+                "storedAt": row.get("nip05_verified_at"),
+                "updatedAt": row.get("updated_at"),
+                "matchesActiveDirectoryKey": row.get("npub") in active_keys,
+            } for row in rows],
+        })
+    return evidence
 
 
 def core_inputs(brain: dict[str, Any]) -> dict[str, str]:

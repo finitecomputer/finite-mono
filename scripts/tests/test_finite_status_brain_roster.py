@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import http.server
 import io
+import threading
 import json
 import os
 import sqlite3
@@ -86,7 +88,8 @@ CREATE TABLE shared_folder_invitations (source_brain_id TEXT, destination_admin_
   status TEXT, accepted_at TEXT);
 CREATE TABLE brain_record_index (brain_id TEXT, actor_npub TEXT, accepted_at TEXT);
 CREATE TABLE brain_approval_nonces (brain_id TEXT, signer_npub TEXT, applied_at TEXT);
-CREATE TABLE identity_aliases (npub TEXT, preferred_nip05 TEXT, nip05_verified_at TEXT);
+CREATE TABLE identity_aliases (npub TEXT, preferred_nip05 TEXT, nip05_verified_at TEXT,
+  updated_at TEXT);
 INSERT INTO brains VALUES ('content-brain','organization','Content',NULL,'2026-09-01T00:00:00Z'),
   ('other','organization','Other',NULL,'2026-09-01T00:00:00Z');
 INSERT INTO folders VALUES ('content-brain','marketing','Marketing Analytics',2),
@@ -118,7 +121,9 @@ INSERT INTO brain_invitations VALUES
 INSERT INTO brain_record_index VALUES ('content-brain','{KEYS["agent"]}','2026-10-02T00:00:00Z'),
   ('content-brain','{KEYS["agent"]}','2026-10-01T00:00:00Z');
 INSERT INTO brain_approval_nonces VALUES ('content-brain','{KEYS["approver"]}','2026-10-03T00:00:00Z');
-INSERT INTO identity_aliases VALUES ('{KEYS["added"]}','added@example.test','2026-05-01T00:00:00Z');
+INSERT INTO identity_aliases VALUES ('{KEYS["added"]}','added@example.test','2026-05-01T00:00:00Z','2026-05-01T00:00:00Z'),
+  ('{KEYS["agent"]}','jules-agent@finite.vip','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z'),
+  ('{npub("ee" * 32)}','jules-agent@finite.vip','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z');
 """)
     if oversized == "member":
         connection.execute("INSERT INTO brain_members VALUES ('content-brain', ?, NULL, 'direct', NULL)",
@@ -358,6 +363,194 @@ class CommandTests(unittest.TestCase):
                 mock.patch.object(finite_status, "run_read_only", side_effect=run), \
                 self.assertRaises(finite_status.CollectionError):
             finite_status.collect_brain_roster("content-brain")
+
+
+TOKEN = "synthetic-operator-token-must-not-leak"
+
+
+def inspect_answer(hex_key: str, *bindings: tuple[str, bool]) -> bytes:
+    return json.dumps({
+        "kind": "native", "pubkey": hex_key,
+        "vip_emails": [{"email": name, "localpart": name.split("@")[0], "domain": "finite.vip",
+                        "created_at": 1_780_000_000, "disabled": disabled,
+                        "disabled_at": 1_780_000_100 if disabled else None,
+                        "email_challenges": ["never-selected"]}
+                       for name, disabled in bindings],
+    }).encode()
+
+
+class DirectoryTests(unittest.TestCase):
+    def test_answers_are_selected_strictly_and_echo_the_exact_key(self):
+        agent, hex_key = KEYS["agent"], roster.npub_to_hex(KEYS["agent"])
+        bound = roster.directory_result(agent, 200, inspect_answer(hex_key, ("jules-agent@finite.vip", False)))
+        self.assertEqual(bound["state"], "bound")
+        self.assertEqual(bound["bindings"], [{"name": "jules-agent@finite.vip", "disabled": False,
+                                              "createdAt": 1_780_000_000, "disabledAt": None}])
+        self.assertNotIn("never-selected", json.dumps(bound))
+        multi = roster.directory_result(agent, 200, inspect_answer(
+            hex_key, ("a@finite.vip", False), ("b@finite.vip", False), ("c@finite.vip", True)))
+        self.assertTrue(multi["multipleActiveNames"])
+        self.assertEqual(len(multi["bindings"]), 3, "every binding is kept")
+        self.assertEqual(roster.directory_result(agent, 200, inspect_answer(
+            hex_key, ("old@finite.vip", True)))["state"], "disabledOnly")
+        self.assertEqual(roster.directory_result(
+            agent, 404, b'{"error":"principal_not_found"}'), {"state": "noBinding"})
+        self.assertEqual(roster.directory_result(agent, 503, b"{}")["state"], "unavailable")
+        other = roster.npub_to_hex(KEYS["member"])
+        bad_name = inspect_answer(hex_key, ("Bad Name@finite.vip", False))
+        inconsistent = json.loads(inspect_answer(hex_key, ("a@finite.vip", False)))
+        inconsistent["vip_emails"][0]["disabled_at"] = 5
+        for status, body in [
+            (200, inspect_answer(other, ("a@finite.vip", False))),
+            (200, json.dumps({"kind": "vip_email", "pubkey": hex_key}).encode()),
+            (200, bad_name),
+            (200, json.dumps(inconsistent).encode()),
+            (200, inspect_answer(hex_key, *[(f"n{i}@finite.vip", False) for i in range(17)])),
+            (200, b"x" * (roster.MAX_DIRECTORY_RESPONSE_BYTES + 1)),
+            (200, b"not json"),
+            (404, b'{"error":"invalid_identifier"}'),
+        ]:
+            self.assertEqual(roster.directory_result(agent, status, body)["state"],
+                             "invalidResponse", body[:80])
+
+    def test_malformed_tokens_are_refused_and_transport_errors_are_redacted(self):
+        self.assertTrue(roster.valid_directory_token(TOKEN))
+        for bad in ("", "short", "a" * 513, "tok\r\nX-Injected: 1" + "a" * 20,
+                    "token-with-\u00e9-" + "a" * 20, "token with space" + "a" * 20, None):
+            self.assertFalse(roster.valid_directory_token(bad), repr(bad))
+        # Even if a bad header value reached the transport, only the error
+        # class name comes back.
+        leaky = "secret-fragment-QQQQ\nX-Bad: 1"
+        with mock.patch.object(roster, "DIRECTORY_INSPECT_URL", "http://127.0.0.1:9/api"):
+            post = roster.http_directory_post(leaky)
+            with self.assertRaises(roster.DirectoryUnavailable) as raised:
+                post(b"{}")
+        self.assertNotIn("QQQQ", str(raised.exception))
+        self.assertIsNone(raised.exception.__context__)
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_collection_is_exact_key_and_budgeted(self):
+        requests = []
+
+        def post(body: bytes) -> tuple[int, bytes]:
+            requests.append(json.loads(body))
+            if len(requests) == 2:
+                raise roster.DirectoryUnavailable("URLError")
+            return 404, b'{"error":"principal_not_found"}'
+
+        ticks = iter([0, 0, 1, 10_000])
+        result = roster.collect_directory(
+            [KEYS["admin"], KEYS["agent"], "not-an-npub", KEYS["member"]], post, lambda: next(ticks))
+        self.assertEqual(requests, [{"identifier": KEYS["admin"]}, {"identifier": KEYS["agent"]}])
+        self.assertEqual(result["results"][KEYS["admin"]], {"state": "noBinding"})
+        self.assertEqual(result["results"][KEYS["agent"]],
+                         {"state": "unavailable", "reason": "URLError"})
+        self.assertNotIn("not-an-npub", result["results"])
+        self.assertEqual(result["results"][KEYS["member"]]["reason"], "Directory budget exhausted")
+        self.assertTrue(result["budget_exhausted"])
+
+    def test_http_client_sends_only_the_header_token_and_never_follows_redirects(self):
+        seen = []
+        hex_key = roster.npub_to_hex(KEYS["agent"])
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                body = self.rfile.read(int(self.headers["content-length"]))
+                seen.append((self.path, self.headers.get("x-finite-operator-token"), json.loads(body)))
+                if json.loads(body)["identifier"] == KEYS["member"]:
+                    self.send_response(302)
+                    self.send_header("location", "http://127.0.0.1:9/elsewhere")
+                    self.end_headers()
+                    return
+                answer = inspect_answer(hex_key, ("jules-agent@finite.vip", False))
+                self.send_response(200)
+                self.send_header("content-length", str(len(answer)))
+                self.end_headers()
+                self.wfile.write(answer)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        url = f"http://127.0.0.1:{server.server_port}/api/v1/operator/inspect"
+        with mock.patch.object(roster, "DIRECTORY_INSPECT_URL", url), \
+                mock.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:9",
+                                             "HTTP_PROXY": "http://127.0.0.1:9"}):
+            post = roster.http_directory_post(TOKEN)
+            result = roster.collect_directory([KEYS["agent"], KEYS["member"]], post)
+        self.assertEqual(result["results"][KEYS["agent"]]["state"], "bound")
+        self.assertEqual(result["results"][KEYS["member"]]["state"], "unavailable")
+        self.assertEqual([path for path, _, _ in seen], ["/api/v1/operator/inspect"] * 2)
+        self.assertTrue(all(token == TOKEN for _, token, _ in seen))
+        self.assertNotIn(TOKEN, json.dumps(result))
+
+    def test_alias_name_evidence_includes_rows_outside_the_roster(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        database = Path(scratch.name) / "brain.sqlite3"
+        build_brain_store(database)
+        hex_key = roster.npub_to_hex(KEYS["agent"])
+
+        def directory(npubs):
+            self.assertIn(KEYS["agent"], npubs)
+            return roster.collect_directory(npubs, lambda body: (
+                (200, inspect_answer(hex_key, ("jules-agent@finite.vip", False)))
+                if json.loads(body)["identifier"] == KEYS["agent"]
+                else (404, b'{"error":"principal_not_found"}')))
+
+        brain = roster.collect_brain(database, "content-brain", finite_status.scratch_copy_sqlite,
+                                     query, directory)
+        report = roster.build_report(brain, core_fixture(), "content-brain")
+        (evidence,) = report["aliasNameEvidence"]
+        self.assertEqual(evidence["name"], "jules-agent@finite.vip")
+        self.assertEqual(evidence["directoryKeys"], [{"npub": KEYS["agent"], "disabled": False}])
+        rows = {row["npub"]: row["matchesActiveDirectoryKey"] for row in evidence["brainAliasRows"]}
+        self.assertEqual(rows, {KEYS["agent"]: True, npub("ee" * 32): False})
+        roster_rows = {row["npub"]: row for row in report["brains"][0]["roster"]}
+        self.assertEqual(roster_rows[KEYS["agent"]]["identityDirectory"]["state"], "bound")
+        self.assertEqual(roster_rows[KEYS["admin"]]["identityDirectory"], {"state": "noBinding"})
+        self.assertEqual(roster_rows["not-an-npub"]["identityDirectory"], {"state": "keyInvalid"})
+        self.assertEqual(report["evidence"]["identityDirectory"]["state"], "checked")
+        self.assertNotIn(SECRET_MARKER, json.dumps(report))
+
+    def test_end_to_end_token_stays_internal_and_missing_token_is_explicit(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        database = Path(scratch.name) / "brain.sqlite3"
+        build_brain_store(database)
+        token_file = Path(scratch.name) / "identity-operator.env"
+        token_file.write_text(f"FINITE_IDENTITY_OPERATOR_TOKEN={TOKEN}\n")
+        core_stdout = json.dumps({"checked_at": "2026-10-05T15:00:00Z", "brain_identity_schema": True,
+                                  "agents": [], "accounts": []}) + "\n"
+        real_run = finite_status.run_read_only
+
+        def run(command, **kwargs):
+            self.assertNotIn(TOKEN, " ".join(command))
+            if command[0] == "psql":
+                return subprocess.CompletedProcess(command, 0, core_stdout, "")
+            return real_run(command, **kwargs)
+
+        def unreachable(token):
+            def post(body):
+                raise roster.DirectoryUnavailable("URLError")
+            return post
+
+        bad_token = "bad\u00e9token-fragment-ZZZZ\tvalue"
+        bad_file = Path(scratch.name) / "bad.env"
+        bad_file.write_text(f"FINITE_IDENTITY_OPERATOR_TOKEN='{bad_token}'\n")
+        for token_path, expected in ((token_file, "checked"), (Path(scratch.name) / "absent", "notConfigured"),
+                                     (bad_file, "unavailable")):
+            with mock.patch.object(roster, "BRAIN_DATABASE", database), \
+                    mock.patch.object(roster, "DIRECTORY_TOKEN_FILE", token_path), \
+                    mock.patch.object(roster, "http_directory_post", side_effect=unreachable), \
+                    mock.patch.object(finite_status, "postgres_environment", return_value={}), \
+                    mock.patch.object(finite_status, "run_read_only", side_effect=run):
+                report = finite_status.collect_brain_roster("content-brain")
+            self.assertEqual(report["evidence"]["identityDirectory"]["state"], expected)
+            self.assertNotIn(TOKEN, json.dumps(report))
+            self.assertNotIn("token-fragment-ZZZZ", json.dumps(report))
 
 
 @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")

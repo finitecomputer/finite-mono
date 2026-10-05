@@ -2641,12 +2641,30 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
     else:
         import finite_status_brain_roster as roster
 
+    def directory(npubs: list[str]) -> dict[str, Any]:
+        # The operator token is read here and used only in its request
+        # header; it never reaches arguments, output, errors or logs.
+        try:
+            token = read_environment_values(
+                roster.DIRECTORY_TOKEN_FILE, {roster.DIRECTORY_TOKEN_VARIABLE}
+            ).get(roster.DIRECTORY_TOKEN_VARIABLE)
+        except CollectionError:
+            token = None
+        if not token:
+            return {"state": "notConfigured", "reason": "Directory operator token unavailable",
+                    "results": {}}
+        if not roster.valid_directory_token(token):
+            return {"state": "unavailable", "reason": "Directory operator token is malformed",
+                    "results": {}}
+        return roster.collect_directory(npubs, roster.http_directory_post(token))
+
     try:
         brain = roster.collect_brain(
             roster.BRAIN_DATABASE,
             brain_id,
             scratch_copy_sqlite,
             lambda database, sql: sqlite_json_query(database, sql, timeout=60),
+            directory,
         )
         inputs = roster.core_inputs(brain)
     except roster.RosterError as error:
