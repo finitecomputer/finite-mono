@@ -13,7 +13,7 @@ const token = `fixture.${Buffer.from(JSON.stringify({ org_id: operatorOrg })).to
 
 // Synthetic fixtures only. No Stripe client, credentials, or production endpoints.
 test("trial admin dashboard persists and edits codes, shows account identities, and guards writes", { timeout: 180_000 }, async (t) => {
-  const state = { campaigns: fixtures(), posts: [] as Array<{ path: string; body: Record<string, unknown> }>, fail: false, reject: false };
+  const state = { campaigns: fixtures(), posts: [] as Array<{ path: string; body: Record<string, unknown> }>, fail: false, reject: false, legacy: false };
   const core = http.createServer(async (request, response) => {
     response.setHeader("content-type", "application/json");
     const reply = (data: unknown, status = 200) => { response.statusCode = status; response.end(JSON.stringify(data)); };
@@ -22,7 +22,10 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
       assert.equal(request.headers.authorization, `Bearer ${token}`);
       if (state.fail) return reply({ error: "Fixture unavailable" }, 503);
       if (state.reject) return reply({ error: "Operator access revoked" }, 403);
-      if (request.method === "GET") return reply(state.campaigns);
+      if (request.method === "GET") return reply(state.legacy ? state.campaigns.map(campaign => {
+        const legacy = { ...campaign }; delete legacy.code; delete legacy.codeRevision;
+        return legacy;
+      }) : state.campaigns);
       let raw = ""; for await (const chunk of request) raw += chunk;
       const body = JSON.parse(raw); state.posts.push({ path, body });
       if (path.endsWith("/code")) {
@@ -40,8 +43,9 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
         campaign.seatLimit = Number(body.seatLimit);
         response.statusCode = 204; return response.end();
       }
-      state.campaigns.unshift({ id: "campaign_created", ...body, code: "TEST-2345-6789-ABCD", codeRevision: 0, active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
-      return reply({ id: "campaign_created", code: "TEST-2345-6789-ABCD" });
+      const code = state.legacy ? "QRST-2345-6789-ABCD" : "TEST-2345-6789-ABCD";
+      state.campaigns.unshift({ id: "campaign_created", ...body, ...(state.legacy ? {} : { code, codeRevision: 0 }), active: true, reservedSeats: 0, redeemedSeats: 0, seatsRemaining: body.seatLimit, redemptions: [] } as TrialCampaign);
+      return reply({ id: "campaign_created", code });
     }
     if (path === "/api/core/v1/me") return reply({ email: "admin@example.test", workos_user_id: "user_admin", projects: [], claimable_candidates: [], agent_creation_requests: [] });
     if (path === "/api/core/v1/me/billing") return reply({ customer_org: null, billing_account: null, agent_creation_entitlement: null, can_create_agent: false, requires_billing: false });
@@ -111,6 +115,7 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
   await page.getByRole("article", { name: "Extra workshop" }).getByText("TEST-2345-6789-ABCD", { exact: true }).waitFor();
   await page.getByText("Extra workshop · 15 total seats · 7-day trial", { exact: true }).waitFor();
   await page.getByRole("article", { name: "Extra workshop" }).waitFor();
+  assert.equal(await page.getByRole("form", { name: "Create trial campaign" }).locator("code").count(), 0, "persisted codes must not leave a stale issuance copy in the receipt");
   assert.deepEqual(state.posts[1].body, { name: "Extra workshop", seatLimit: 15, trialDays: 7 });
   await page.getByText("Create new free trial campaign", { exact: true }).scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${screenshots}/created.png` });
@@ -175,6 +180,32 @@ test("trial admin dashboard persists and edits codes, shows account identities, 
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
   await workshop.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${screenshots}/editable-codes-mobile.png` });
+  // Mixed-version contract: older Core returns a code only from POST and
+  // omits both persisted-code fields from GET. Preserve that issuance receipt.
+  state.legacy = true;
+  for (const viewport of [{ width: 1440, height: 1400 }, { width: 390, height: 844 }]) {
+    state.campaigns = [];
+    await page.setViewportSize(viewport);
+    await open();
+    await page.getByText("Create new free trial campaign", { exact: true }).click();
+    const form = page.getByRole("form", { name: "Create trial campaign" });
+    await form.getByLabel("Campaign name", { exact: true }).fill("Legacy workshop");
+    await form.getByRole("button", { name: "Create campaign and code" }).click();
+    await form.getByText("QRST-2345-6789-ABCD", { exact: true }).waitFor();
+    await form.getByText("Copy and save this code now.", { exact: false }).waitFor();
+    const legacy = page.getByRole("article", { name: "Legacy workshop" });
+    await legacy.getByText("This code is unavailable for display.", { exact: false }).waitFor();
+    assert.equal(await legacy.getByText("Set replacement code", { exact: true }).count(), 0);
+    assert.equal(await page.getByText("You can view and edit its code below at any time.", { exact: false }).count(), 0);
+    await page.getByRole("button", { name: "Refresh counts" }).click();
+    await form.getByText("QRST-2345-6789-ABCD", { exact: true }).waitFor();
+    await form.getByRole("status").scrollIntoViewIfNeeded();
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await page.screenshot({ path: `${screenshots}/legacy-issuance-${viewport.width}.png` });
+    await open();
+    assert.equal(await page.getByText("QRST-2345-6789-ABCD", { exact: true }).count(), 0, "the receipt is honestly one-time on old Core");
+  }
+  state.legacy = false;
   state.campaigns = [];
   await open(); await page.getByText("No free trial campaigns yet.").waitFor();
   state.fail = true;

@@ -7,12 +7,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
-export function AdminTrialForm() {
+export function AdminTrialForm({ savedCampaignIds }: { savedCampaignIds: string[] }) {
   const [state, action, pending] = useActionState(issueTrialCampaignAction, {});
+  const codeSaved = !!state.campaignId && savedCampaignIds.includes(state.campaignId);
   return <details className="rounded-[var(--radius-card-inner)] border border-border p-4">
     <summary className="cursor-pointer font-medium">Create new free trial campaign</summary>
     <form action={action} className="mt-4 grid gap-4" aria-label="Create trial campaign">
-      <p className="text-sm text-muted-foreground">Generate one readable code with a bounded signup limit. Codes accept lowercase and optional spaces or hyphens. Codes remain available to view, copy and edit in this dashboard.</p>
+      <p className="text-sm text-muted-foreground">Generate one readable code with a bounded signup limit. Codes accept lowercase and optional spaces or hyphens. Saved codes can be viewed, copied and edited below. If a code is not saved for display, copy it when it is issued.</p>
       <div className="grid gap-2"><Label htmlFor="trial-event">Campaign name</Label>
         <Input id="trial-event" name="name" required maxLength={120} placeholder="October workshop" /></div>
       <div className="grid gap-4 sm:grid-cols-2">
@@ -26,7 +27,10 @@ export function AdminTrialForm() {
       {state.error ? <p role="alert">{state.error}</p> : null}
       {state.code ? <div role="status" className="rounded-lg border p-4">
         <p className="mb-2 font-medium">{state.message}</p>
-        <p className="mb-2 text-sm">Campaign created. You can view and edit its code below at any time.</p>
+        {codeSaved ? <p className="text-sm">Campaign created. You can view and edit its code below at any time.</p> : <>
+          <p className="mb-2 text-sm">Campaign created. Copy and save this code now. It is not available in the campaign list.</p>
+          <code className="break-all select-all">{state.code}</code>
+        </>}
       </div> : null}
     </form>
   </details>;
