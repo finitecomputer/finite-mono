@@ -2701,7 +2701,8 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
             roster.hosted_candidates(core, unknown),
             unknown,
             scratch_copy_sqlite,
-            lambda database, sql: sqlite_json_query(database, sql, timeout=60),
+            lambda database, sql: sqlite_json_query(
+                database, sql, timeout=roster.HOSTED_QUERY_SECONDS),
             overflow=core["hosted_overflow"],
         )
         report = roster.build_report(brain, core, brain_id)

@@ -333,6 +333,7 @@ class QueryContractTests(unittest.TestCase):
         self.assertEqual(roster.CORE_QUERY.count("workos_user_id"),
                          roster.CORE_QUERY.count("sha256(convert_to(u.workos_user_id, 'UTF8'))")
                          + roster.CORE_QUERY.count("u.workos_user_id IS NOT NULL"))
+        self.assertEqual(roster.CORE_QUERY.count("u.link_status = 'linked'\n        AND u.workos_user_id IS NOT NULL"), 2)
 
     def test_parse_core_output_requires_agent_evidence_and_bounds(self):
         with self.assertRaises(roster.RosterError):
@@ -654,7 +655,8 @@ CREATE TEMP TABLE agent_creation_requests(id text, customer_org_id text, owner_u
 INSERT INTO users VALUES ('user_jules','jules@acme.example','linked','wos_jules'),
   ('user_ray','ray@other.example','linked','wos_ray'),
   ('user_old','old@third.example','linked','wos_old'),
-  ('user_nolink','nolink@third.example','pending',NULL);
+  ('user_nolink','nolink@third.example','pending',NULL),
+  ('user_pending','pending@third.example','pending','wos_pending');
 INSERT INTO projects VALUES ('project_1','user_jules','Jules Agent','{"a" * 300}@finite.vip');
 INSERT INTO agent_runtimes VALUES ('runtime_1','project_1','{KEYS["agent"]}',NULL,now()),
   ('runtime_x','project_1','npub1unrelated',NULL,now());
@@ -662,6 +664,7 @@ INSERT INTO project_runtime_links VALUES ('project_1','runtime_1',true);
 INSERT INTO agent_creation_requests VALUES
   ('request_guest','org_1','user_old','project_9','ready','runtime_9',now(),now(),'{guest_hex}'),
   ('request_guest_2','org_1','user_nolink','project_8','failed',NULL,now(),now(),'{guest_hex}'),
+  ('request_guest_3','org_1','user_pending','project_4','failed',NULL,now(),now(),'{guest_hex}'),
   ('request_agent','org_1','user_old','project_7','ready','runtime_7',now(),now(),'{agent_hex}'),
   ('request_member','org_1','user_old','project_6','ready','runtime_6',now(),now(),'{member_hex}'),
   ('request_other','org_1','user_old','project_5','ready','runtime_5',now(),now(),'{"ab" * 32}');
@@ -695,7 +698,7 @@ class CorePostgresTests(unittest.TestCase):
         self.assertEqual([scope["brain_id"] for scope in core["scopes"]], ["content-brain"])
         emails = {account["email"] for account in core["accounts"]}
         self.assertEqual(emails, {"jules@acme.example", "ray@other.example", "old@third.example",
-                                  "nolink@third.example"})
+                                  "nolink@third.example", "pending@third.example"})
         # Real Core ids are operator metadata; unrelated rows never appear.
         self.assertEqual(core["agents"][0]["project"], "project_1")
         self.assertEqual(core["agents"][0]["runtime"], "runtime_1")
@@ -710,10 +713,12 @@ class CorePostgresTests(unittest.TestCase):
                                  row["project"], row["runtime"])
                                 for row in core["launch_chat_keys"]),
                          [("request_guest", guest_hex, "user_old", "ready", "project_9", "runtime_9"),
-                          ("request_guest_2", guest_hex, "user_nolink", "failed", "project_8", None)])
+                          ("request_guest_2", guest_hex, "user_nolink", "failed", "project_8", None),
+                          ("request_guest_3", guest_hex, "user_pending", "failed", "project_4", None)])
         self.assertTrue(all(row["created_at"] and row["updated_at"] for row in core["launch_chat_keys"]))
         # Candidates: launch submitters, the pin owner and the associated
-        # account; unlinked accounts have no Hosted namespace.
+        # account. Accounts not currently linked get no Hosted namespace, even
+        # with a stored WorkOS id (user_pending).
         candidates = {row["account"]: row["storage"] for row in core["hosted_candidates"]}
         self.assertEqual(candidates, {
             name: hashlib.sha256(f"wos_{name.removeprefix('user_')}".encode()).hexdigest()
@@ -725,7 +730,7 @@ class CorePostgresTests(unittest.TestCase):
         core = run_core_query(self, core_fixture_sql(False), core_query_inputs())
         self.assertFalse(core["brain_identity_schema"])
         self.assertEqual(sorted(row["request"] for row in core["launch_chat_keys"]),
-                         ["request_guest", "request_guest_2", "request_member"])
+                         ["request_guest", "request_guest_2", "request_guest_3", "request_member"])
 
     def test_candidate_overflow_is_reported_not_truncated(self):
         core = run_core_query(self, core_fixture_sql(True), core_query_inputs(candidate_limit="2"))
@@ -778,6 +783,7 @@ class HostedChatStoreTests(unittest.TestCase):
 
     def collect(self, candidates, unknown=None, **options) -> dict:
         unknown = sorted([self.added, self.wrapper]) if unknown is None else unknown
+        options.setdefault("free_bytes", lambda: 1 << 40)
         return roster.collect_hosted(candidates, unknown, finite_status.scratch_copy_sqlite,
                                      self.query, root=self.root, **options)
 
@@ -865,9 +871,21 @@ class HostedChatStoreTests(unittest.TestCase):
         with mock.patch.object(roster, "MAX_HOSTED_STORE_BYTES", 10):
             self.assertEqual(self.collect(candidate)["accounts"][0]["reason"],
                              "Hosted store over byte budget")
-        ticks = iter([0, roster.HOSTED_BUDGET_SECONDS + 1])
+        # A store is skipped once its query could no longer finish in budget.
+        ticks = iter([0, roster.HOSTED_BUDGET_SECONDS - roster.HOSTED_QUERY_SECONDS + 1])
         self.assertEqual(self.collect(candidate, clock=lambda: next(ticks))["accounts"][0]["reason"],
                          "Hosted time budget exhausted")
+        size = self.store.stat().st_size
+        low_disk = self.collect(candidate, free_bytes=lambda: size + roster.HOSTED_SCRATCH_HEADROOM_BYTES - 1)
+        self.assertEqual(low_disk["accounts"][0], {"account": "account-old", "state": "unavailable",
+                                                   "reason": "scratch disk below copy headroom"})
+
+        def disk_error() -> int:
+            raise PermissionError("statvfs")
+        self.assertEqual(self.collect(candidate, free_bytes=disk_error)["accounts"][0]["reason"],
+                         "PermissionError")
+        self.assertEqual((roster.MAX_HOSTED_STORE_BYTES, roster.MAX_HOSTED_TOTAL_BYTES,
+                          roster.HOSTED_BUDGET_SECONDS), (256 << 20, 1 << 30, 60))
         torn = self.root / "users" / storage("wos_torn") / "chat" / "client.sqlite3"
         torn.parent.mkdir(parents=True)
         torn.write_bytes(b"not sqlite")

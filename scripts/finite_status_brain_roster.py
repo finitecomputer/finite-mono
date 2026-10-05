@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -67,9 +69,13 @@ class RosterError(Exception):
 HOSTED_DATA_ROOT = Path("/var/lib/private/finitechat-hosted-device")
 HOSTED_DEVICE_ID = "hosted-web"
 MAX_HOSTED_CANDIDATES = 64
-MAX_HOSTED_STORE_BYTES = 1 << 30
-MAX_HOSTED_TOTAL_BYTES = 8 << 30
-HOSTED_BUDGET_SECONDS = 300
+# Sized for a bounded investigation inside the private wrapper's 180 s limit:
+# a store is only copied if its query can still finish within the budget.
+MAX_HOSTED_STORE_BYTES = 256 << 20
+MAX_HOSTED_TOTAL_BYTES = 1 << 30
+HOSTED_BUDGET_SECONDS = 60
+HOSTED_QUERY_SECONDS = 15
+HOSTED_SCRATCH_HEADROOM_BYTES = 64 << 20
 STORAGE_ID = re.compile(r"^[0-9a-f]{64}$")
 
 # Identity Directory operator inspect: loopback full router, exact key only.
@@ -433,7 +439,8 @@ SELECT json_build_object(
   'hosted_candidates', COALESCE((SELECT json_agg(json_build_object(
       'account', c.id, 'storage', c.storage, 'link_status', c.link_status)) FROM (
       SELECT u.id, u.link_status, encode(sha256(convert_to(u.workos_user_id, 'UTF8')), 'hex') AS storage
-      FROM users u WHERE u.id IN (SELECT user_id FROM human_rows) AND u.workos_user_id IS NOT NULL
+      FROM users u WHERE u.id IN (SELECT user_id FROM human_rows) AND u.link_status = 'linked'
+        AND u.workos_user_id IS NOT NULL
       ORDER BY u.id LIMIT :candidate_limit) c), '[]'::json)
 ) AS identity;
 \\else
@@ -471,7 +478,8 @@ SELECT json_build_object(
   'hosted_candidates', COALESCE((SELECT json_agg(json_build_object(
       'account', c.id, 'storage', c.storage, 'link_status', c.link_status)) FROM (
       SELECT u.id, u.link_status, encode(sha256(convert_to(u.workos_user_id, 'UTF8')), 'hex') AS storage
-      FROM users u WHERE u.id IN (SELECT user_id FROM candidates) AND u.workos_user_id IS NOT NULL
+      FROM users u WHERE u.id IN (SELECT user_id FROM candidates) AND u.link_status = 'linked'
+        AND u.workos_user_id IS NOT NULL
       ORDER BY u.id LIMIT :candidate_limit) c), '[]'::json)
 ) AS launch;
 """
@@ -731,6 +739,7 @@ def collect_hosted(
     root: Path | None = None,
     clock: Callable[[], float] = time.monotonic,
     overflow: bool = False,
+    free_bytes: Callable[[], int] | None = None,
 ) -> dict[str, Any]:
     """Look for unknown keys in candidate accounts' Hosted Chat stores.
 
@@ -739,6 +748,10 @@ def collect_hosted(
     reaches this process. Each store is read through one private scratch copy,
     selecting only the plaintext account_id and device_id key columns."""
     root = HOSTED_DATA_ROOT if root is None else root
+    if free_bytes is None:
+        # scratch_copy_sqlite copies into the default temporary directory.
+        def free_bytes() -> int:
+            return shutil.disk_usage(tempfile.gettempdir()).free
     if not unknown:
         return {"state": "notNeeded", "accounts": []}
     if overflow:
@@ -766,10 +779,17 @@ def collect_hosted(
         except OSError as error:
             entry.update(state="unavailable", reason=type(error).__name__)
             continue
-        if clock() - started > HOSTED_BUDGET_SECONDS:
+        try:
+            free = free_bytes()
+        except OSError as error:
+            entry.update(state="unavailable", reason=type(error).__name__)
+            continue
+        if clock() - started > HOSTED_BUDGET_SECONDS - HOSTED_QUERY_SECONDS:
             entry.update(state="unavailable", reason="Hosted time budget exhausted")
         elif size > MAX_HOSTED_STORE_BYTES or copied_bytes + size > MAX_HOSTED_TOTAL_BYTES:
             entry.update(state="unavailable", reason="Hosted store over byte budget")
+        elif free < size + HOSTED_SCRATCH_HEADROOM_BYTES:
+            entry.update(state="unavailable", reason="scratch disk below copy headroom")
         else:
             copied_bytes += size
             try:
