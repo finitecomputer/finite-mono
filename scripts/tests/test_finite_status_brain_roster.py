@@ -845,6 +845,12 @@ class HostedChatStoreTests(unittest.TestCase):
         self.assertEqual({row["account"]: row["state"] for row in evidence["accounts"]},
                          {"account-old": "checked", "account-1": "missingStore",
                           "account-bad": "unavailable"})
+        self.assertEqual(evidence["chargedSourceBytes"], hosted["charged_source_bytes"])
+        by_account = {row["account"]: row for row in evidence["accounts"]}
+        self.assertEqual(by_account["account-old"]["matchCount"], 1)
+        self.assertEqual(by_account["account-old"]["sourceBytes"], hosted["charged_source_bytes"])
+        self.assertIsNone(by_account["account-1"]["sourceBytes"], "no stat, no size")
+        self.assertIsNone(by_account["account-1"]["matchCount"], "not checked is not zero matches")
         text = json.dumps(report)
         for hidden in (storage("wos_old"), storage("wos_jules"), "wos_", CIPHERTEXT_MARKER.decode()):
             self.assertNotIn(hidden, text)
@@ -868,16 +874,35 @@ class HostedChatStoreTests(unittest.TestCase):
         missing_root = roster.collect_hosted(candidate, [self.added], finite_status.scratch_copy_sqlite,
                                              self.query, root=self.root / "absent")
         self.assertEqual(missing_root["state"], "unavailable")
-        with mock.patch.object(roster, "MAX_HOSTED_STORE_BYTES", 10):
-            self.assertEqual(self.collect(candidate)["accounts"][0]["reason"],
-                             "Hosted store over byte budget")
+        size = sum(Path(f"{self.store}{suffix}").stat().st_size for suffix in ("", "-wal", "-shm")
+                   if Path(f"{self.store}{suffix}").exists())
+        with mock.patch.object(roster, "MAX_HOSTED_STORE_BYTES", size - 1):
+            self.assertEqual(self.collect(candidate)["accounts"][0],
+                             {"account": "account-old", "state": "unavailable", "sourceBytes": size,
+                              "reason": "Hosted store over per-store byte budget"})
+        # The aggregate budget is charged per attempted copy, in account order.
+        second = self.root / "users" / storage("wos_second") / "chat" / "client.sqlite3"
+        build_chat_store(second, [("ef" * 32, "hosted-web")])
+        pair = [*candidate, {"account": "account-second", "storage": storage("wos_second")}]
+        with mock.patch.object(roster, "MAX_HOSTED_TOTAL_BYTES", size + 1):
+            limited = self.collect(pair)
+        self.assertEqual(limited["charged_source_bytes"], size)
+        first, skipped = limited["accounts"]
+        self.assertEqual((first["state"], first["sourceBytes"], first["matches"]),
+                         ("checked", size, [self.added]))
+        self.assertEqual((skipped["state"], skipped["reason"], skipped["sourceBytes"]),
+                         ("unavailable", "Hosted total byte budget exhausted", second.stat().st_size))
+        full = self.collect(pair)
+        self.assertEqual(full["charged_source_bytes"], size + second.stat().st_size)
+        self.assertEqual([entry["matches"] for entry in full["accounts"]], [[self.added], []],
+                         "a fully checked store with no match differs from a skipped one")
         # A store is skipped once its query could no longer finish in budget.
         ticks = iter([0, roster.HOSTED_BUDGET_SECONDS - roster.HOSTED_QUERY_SECONDS + 1])
         self.assertEqual(self.collect(candidate, clock=lambda: next(ticks))["accounts"][0]["reason"],
                          "Hosted time budget exhausted")
-        size = self.store.stat().st_size
         low_disk = self.collect(candidate, free_bytes=lambda: size + roster.HOSTED_SCRATCH_HEADROOM_BYTES - 1)
         self.assertEqual(low_disk["accounts"][0], {"account": "account-old", "state": "unavailable",
+                                                   "sourceBytes": size,
                                                    "reason": "scratch disk below copy headroom"})
 
         def disk_error() -> int:
@@ -885,14 +910,16 @@ class HostedChatStoreTests(unittest.TestCase):
         self.assertEqual(self.collect(candidate, free_bytes=disk_error)["accounts"][0]["reason"],
                          "PermissionError")
         self.assertEqual((roster.MAX_HOSTED_STORE_BYTES, roster.MAX_HOSTED_TOTAL_BYTES,
-                          roster.HOSTED_BUDGET_SECONDS), (256 << 20, 1 << 30, 60))
+                          roster.HOSTED_BUDGET_SECONDS), (1 << 30, 1 << 30, 60))
         torn = self.root / "users" / storage("wos_torn") / "chat" / "client.sqlite3"
         torn.parent.mkdir(parents=True)
         torn.write_bytes(b"not sqlite")
         failed = self.collect([{"account": "account-torn", "storage": storage("wos_torn")}])
         self.assertEqual(failed["accounts"][0], {"account": "account-torn", "state": "unavailable",
-                                                 "reason": "CollectionError"})
-        self.assertEqual(len(self.sql), 1, "only the torn store reached a query")
+                                                 "sourceBytes": 10, "reason": "CollectionError"})
+        # Queried: first store (aggregate run), both stores (full run), torn
+        # store. Every refused or skipped store reached no query.
+        self.assertEqual(len(self.sql), 4)
 
 
 if __name__ == "__main__":

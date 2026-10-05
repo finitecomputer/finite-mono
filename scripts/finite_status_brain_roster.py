@@ -75,9 +75,10 @@ class RosterError(Exception):
 HOSTED_DATA_ROOT = Path("/var/lib/private/finitechat-hosted-device")
 HOSTED_DEVICE_ID = "hosted-web"
 MAX_HOSTED_CANDIDATES = 64
-# Sized for a bounded investigation inside the private wrapper's 180 s limit:
-# a store is only copied if its query can still finish within the budget.
-MAX_HOSTED_STORE_BYTES = 256 << 20
+# Pre-copy scheduling guards for a bounded investigation. A new copy starts
+# only while at least the 15 s query reserve remains of the overall budget;
+# there is no hard deadline or byte cap on a copy already in progress.
+MAX_HOSTED_STORE_BYTES = 1 << 30
 MAX_HOSTED_TOTAL_BYTES = 1 << 30
 HOSTED_BUDGET_SECONDS = 60
 HOSTED_QUERY_SECONDS = 15
@@ -771,7 +772,9 @@ def collect_hosted(
     if not root.is_dir():
         return {"state": "unavailable", "accounts": [],
                 "reason": "Hosted data root is not present on this host"}
-    started, copied_bytes, accounts = clock(), 0, []
+    # charged counts the pre-copy stat size of every copy attempted,
+    # including failed ones; bytes physically copied are not measured.
+    started, charged, accounts = clock(), 0, []
     sql = hosted_store_query(unknown)
     for candidate in sorted(candidates, key=lambda row: str(row.get("account"))):
         entry: dict[str, Any] = {"account": candidate.get("account")}
@@ -790,6 +793,7 @@ def collect_hosted(
         except OSError as error:
             entry.update(state="unavailable", reason=type(error).__name__)
             continue
+        entry["sourceBytes"] = size
         try:
             free = free_bytes()
         except OSError as error:
@@ -797,12 +801,14 @@ def collect_hosted(
             continue
         if clock() - started > HOSTED_BUDGET_SECONDS - HOSTED_QUERY_SECONDS:
             entry.update(state="unavailable", reason="Hosted time budget exhausted")
-        elif size > MAX_HOSTED_STORE_BYTES or copied_bytes + size > MAX_HOSTED_TOTAL_BYTES:
-            entry.update(state="unavailable", reason="Hosted store over byte budget")
+        elif size > MAX_HOSTED_STORE_BYTES:
+            entry.update(state="unavailable", reason="Hosted store over per-store byte budget")
+        elif charged + size > MAX_HOSTED_TOTAL_BYTES:
+            entry.update(state="unavailable", reason="Hosted total byte budget exhausted")
         elif free < size + HOSTED_SCRATCH_HEADROOM_BYTES:
             entry.update(state="unavailable", reason="scratch disk below copy headroom")
         else:
-            copied_bytes += size
+            charged += size
             try:
                 with scratch_copy(store) as scratch:
                     rows = _bounded("hosted store", query(scratch, sql), MAX_KEYS)
@@ -812,7 +818,8 @@ def collect_hosted(
             entry.update(state="checked", matches=sorted(
                 {row.get("account_id") for row in rows
                  if row.get("device_id") == HOSTED_DEVICE_ID and row.get("account_id") in unknown}))
-    return {"state": "checked", "checked_at": _now(), "accounts": accounts}
+    return {"state": "checked", "checked_at": _now(), "charged_source_bytes": charged,
+            "accounts": accounts}
 
 
 def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> dict[str, Any]:
@@ -941,8 +948,11 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "hostedChatStores": {"state": "notChecked"} if hosted is None else {
                 "state": hosted.get("state"),
                 "checkedAt": hosted.get("checked_at"),
+                "chargedSourceBytes": hosted.get("charged_source_bytes"),
                 "accounts": [{"account": entry.get("account"), "state": entry.get("state"),
-                              "reason": entry.get("reason")} for entry in hosted.get("accounts", [])],
+                              "reason": entry.get("reason"), "sourceBytes": entry.get("sourceBytes"),
+                              "matchCount": len(entry["matches"]) if "matches" in entry else None}
+                             for entry in hosted.get("accounts", [])],
             },
         },
         "coverage": {
@@ -1003,6 +1013,12 @@ def build_report(brain: dict[str, Any], core: dict[str, Any], brain_id: str) -> 
             "deleted.",
             "Hosted time, size and scratch-disk budgets are checked before each copy starts, "
             "not enforced during it; a store that grows or copies slowly can exceed them.",
+            "sourceBytes is each store's database+WAL+SHM size at its pre-copy stat. "
+            "chargedSourceBytes sums it for every attempted copy, failed ones included; bytes "
+            "physically copied and growth during the copy are not measured.",
+            "A Hosted candidate that was not checked stays listed with its state, reason and "
+            "sourceBytes: a named coverage gap, not a negative result. Only state checked with "
+            "matchCount 0 means the store was read and held none of the unknown keys.",
         ],
         "brains": brains,
         "aliasNameEvidence": alias_name_evidence(directory_results, tables.get("name_aliases", [])),
