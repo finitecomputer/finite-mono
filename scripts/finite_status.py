@@ -4500,6 +4500,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--resource-usage", type=Path, metavar="REQUEST_JSON",
+        help="read scoped Kata Runtime incident or fleet metadata; emits private JSON",
+    )
     mode.add_argument("--runtime-assignment", metavar="PROJECT_ID",
                       help="read one Project's exact Core recovery inputs without credential values; emits JSON")
     mode.add_argument("--kata-recovery-host", action="store_true",
@@ -4580,7 +4584,13 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.runtime_assignment:
+        if options.resource_usage:
+            from finite_status_resources import collect
+            try:
+                report = collect(json.loads(options.resource_usage.read_text()))
+            except (OSError, ValueError, KeyError, TypeError, StopIteration):
+                raise CollectionError("Runtime incident evidence unavailable") from None
+        elif options.runtime_assignment:
             report = collect_runtime_assignment(options.runtime_assignment)
         elif options.kata_recovery_host:
             try:
@@ -4631,6 +4641,7 @@ def main(arguments: list[str] | None = None) -> None:
         }
     if (
         options.json
+        or options.resource_usage
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity

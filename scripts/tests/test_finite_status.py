@@ -22,6 +22,48 @@ FIXTURE = ROOT / "scripts" / "tests" / "fixtures" / "finite_status_aug1.json"
 
 
 class FiniteStatusTests(unittest.TestCase):
+    def test_invalid_incident_request_fails_closed_without_echoing_input(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        import io
+        import sys
+        with mock.patch.dict(sys.modules, {"finite_status": finite_status}):
+            from scripts import finite_status_resources
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "request.json"
+            request.write_text('{"action":"private-input-canary"}')
+            output = io.StringIO()
+            with mock.patch.dict("sys.modules", {"finite_status_resources": finite_status_resources}), \
+                 redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+                finite_status.main(["--resource-usage", str(request)])
+            self.assertEqual(exited.exception.code, 2)
+            self.assertNotIn("private-input-canary", output.getvalue())
+            self.assertEqual(json.loads(output.getvalue())["overall_status"], "unknown")
+
+    def test_incident_request_is_mutually_exclusive_with_other_modes(self):
+        with self.assertRaises(SystemExit):
+            finite_status.parse_args(["--resource-usage", "request.json", "--fixture", "fixture.json"])
+
+    def test_incident_request_cli_emits_json_and_uses_scoped_collector(self):
+        import tempfile
+        from contextlib import redirect_stdout
+        import io
+        import sys
+        with mock.patch.dict(sys.modules, {"finite_status": finite_status}):
+            from scripts import finite_status_resources
+        with tempfile.TemporaryDirectory() as directory:
+            request = Path(directory) / "request.json"
+            request.write_text('{"action":"runtime-incident","runtimes":[]}')
+            expected = {"schema_version": "finite.resource-usage.v1", "exit_code": 0}
+            output = io.StringIO()
+            with mock.patch.dict("sys.modules", {"finite_status_resources": finite_status_resources}), \
+                 mock.patch.object(finite_status_resources, "collect", return_value=expected) as collect, \
+                 redirect_stdout(output), self.assertRaises(SystemExit) as exited:
+                finite_status.main(["--resource-usage", str(request)])
+            self.assertEqual(exited.exception.code, 0)
+            collect.assert_called_once_with({"action": "runtime-incident", "runtimes": []})
+            self.assertEqual(json.loads(output.getvalue()), expected)
+
     def _shim_exit_fixture(self, *, duplicate=False, drift=False, unsafe_log=False, missing_handle=False, fail_read=None, publisher=None, publisher_drift=False, extra_options=(), filesystem_hook=None, isolated=False):
         container = "a" * 64
         executable = "/nix/store/" + "b" * 32 + "-kata/bin/containerd-shim-kata-v2"
