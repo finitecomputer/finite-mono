@@ -97,6 +97,7 @@ async fn paid_self_serve_agent_creation_requires_active_stripe_billing() {
             .expect("paid request should be leased");
         let provisioned = db
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-paid-1".to_string(),
                 lease_token: "paid-lease-1".to_string(),

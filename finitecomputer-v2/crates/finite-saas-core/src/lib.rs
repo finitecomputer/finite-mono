@@ -38,6 +38,8 @@ mod runtime_health;
 pub mod runtime_lifecycle;
 mod runtime_relocation;
 mod runtime_retirement;
+mod trial_archive;
+pub use trial_archive::TrialArchiveSnapshot;
 mod runtime_spec;
 mod schema;
 mod wire;

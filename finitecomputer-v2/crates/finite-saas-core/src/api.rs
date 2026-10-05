@@ -435,6 +435,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(retry_runtime_control_request),
         )
         .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/trial-restore-renew",
+            post(renew_trial_restore),
+        )
+        .route(
             "/api/core/v1/agent-creation-requests/{request_id}/complete",
             post(complete_agent_creation_request),
         )
@@ -448,6 +452,10 @@ fn router_from_state(state: CoreApiState) -> Router {
         )
         .route(
             "/api/core/v1/agent-creation-requests/{request_id}/finite-private-key",
+            post(provision_finite_private_runtime_key),
+        )
+        .route(
+            "/api/core/v1/agent-creation-requests/{request_id}/trial-restore-key",
             post(provision_finite_private_runtime_key),
         )
         .route(

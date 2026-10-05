@@ -143,6 +143,8 @@ pub struct CompleteRuntimeControlRequest {
     pub published_app_urls: Option<Vec<String>>,
     #[serde(default)]
     pub retirement_snapshot: Option<crate::RuntimeRetirementSnapshotReceipt>,
+    #[serde(default)]
+    pub trial_archive: Option<crate::TrialArchiveSnapshot>,
     pub now: Option<String>,
 }
 
@@ -262,7 +264,7 @@ pub struct IssueFinitePrivateApiKeyRequest {
     pub now: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionFinitePrivateRuntimeKeyRequest {
     pub runner_id: String,
@@ -270,6 +272,16 @@ pub struct ProvisionFinitePrivateRuntimeKeyRequest {
     pub source_host_id: Option<String>,
     pub source_machine_id: Option<String>,
     pub now: Option<String>,
+    /// Runner-owned, durable proposal; Core persists only its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_restore_key: Option<String>,
+}
+
+impl std::fmt::Debug for ProvisionFinitePrivateRuntimeKeyRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionFinitePrivateRuntimeKeyRequest")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,4 +360,13 @@ pub struct SettleFinitePrivateReservationRequest {
     pub upstream_status: Option<i32>,
     pub upstream_error_class: Option<String>,
     pub now: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RenewTrialRestoreRequest {
+    #[serde(flatten)]
+    pub lease: RenewRuntimeControlRequest,
+    #[serde(default)]
+    pub pause_only: bool,
 }

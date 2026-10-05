@@ -74,6 +74,7 @@ async fn cold_relocation_is_stopped_exact_targeted_and_failure_preserves_source_
             .unwrap();
         assert_eq!(stop_lease.request.id, stop.id);
         db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+            trial_archive: None,
             request_id: stop.id,
             runner_id: "runner-oslo-1".to_string(),
             lease_token: "stop-lease".to_string(),

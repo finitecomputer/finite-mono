@@ -22,6 +22,9 @@ pub struct RuntimeRelocationV1 {
     /// Additive within runtime_relocation.v1; absent means false.
     #[serde(default)]
     pub source_compute_absent: bool,
+    /// Only minted by Core after a verified trial reclaim, never by the operator API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_archive: Option<crate::TrialArchiveSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

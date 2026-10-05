@@ -47,6 +47,7 @@ where
         .unwrap_or_else(|| artifact.state_schema_version.clone());
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    trial_archives::authorize_restore(client, &request).await?;
     runtime_credentials::validate_bootstrap_source(
         client,
         &input.request_id,
@@ -112,6 +113,7 @@ where
         // Relocation registration is deliberately non-mutating. Completion
         // below is the single transaction that replaces the source binding.
         return Ok(AgentCreationLease {
+            trial_restore_allowed: None,
             project,
             request,
             provider_operation,
@@ -182,6 +184,7 @@ where
             .await?;
     runtime_credentials::bind_bootstrap(client, &input.request_id).await?;
     Ok(AgentCreationLease {
+        trial_restore_allowed: None,
         project,
         request,
         provider_operation: provider_operation_ack,
@@ -204,6 +207,7 @@ where
     }
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
+    trial_archives::authorize_restore(client, &request).await?;
     runtime_credentials::validate_bootstrap_source(
         client,
         &input.request_id,
@@ -386,6 +390,7 @@ where
     let request =
         update_agent_creation_completed(client, &input.request_id, &runtime_id, &now).await?;
     Ok(AgentCreationLease {
+        trial_restore_allowed: None,
         project,
         request,
         provider_operation: provider_operation_ack,

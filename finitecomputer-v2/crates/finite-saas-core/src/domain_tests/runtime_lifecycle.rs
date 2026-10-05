@@ -5,6 +5,7 @@ fn completion_input(
     receipt: Option<RuntimeRetirementSnapshotReceipt>,
 ) -> CompleteRuntimeControlRequestInput {
     CompleteRuntimeControlRequestInput {
+        trial_archive: None,
         request_id: "request_1".to_string(),
         runner_id: "runner-1".to_string(),
         lease_token: "lease-1".to_string(),
