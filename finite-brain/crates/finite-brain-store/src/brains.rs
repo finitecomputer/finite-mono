@@ -395,6 +395,41 @@ impl BrainStore {
             });
         }
 
+        let controller: Option<String> = self.conn.query_row(
+            "SELECT id FROM shared_folder_connections WHERE destination_brain_id = ?1 AND destination_admin_npub = ?2 AND status = 'active' LIMIT 1",
+            params![brain_id.as_str(), user_id.as_str()], |row| row.get(0)).optional()?;
+        if let Some(mount) = controller {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "Mount {mount} uses this admin as destination controller; revoke the Mount before demotion"
+                ),
+            });
+        }
+        let stored = self.load_brain(brain_id)?;
+        let mut post = brain.clone();
+        post.admins.retain(|admin| admin != user_id);
+        for folder in &brain.folders {
+            let access = stored
+                .folder_access
+                .get(&folder.id)
+                .cloned()
+                .unwrap_or_default();
+            let entitled = required_recipients(&post, folder, &access, None)?.contains(user_id);
+            let held = required_recipients(&brain, folder, &access, None)?.contains(user_id)
+                || stored.grants.iter().any(|grant| {
+                    grant.folder_id == folder.id
+                        && grant.key_version == folder.current_key_version
+                        && grant.recipient_npub == *user_id
+                });
+            if held && !entitled {
+                return Err(StoreError::BrokenInvariant {
+                    reason: format!(
+                        "Folder {} requires rotated admin demotion; upgrade the client",
+                        folder.id
+                    ),
+                });
+            }
+        }
         let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
@@ -405,7 +440,7 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Remove a Brain Member after role and restricted access cleanup.
+    /// Legacy removal is allowed only after every entitled/current-key scope is gone.
     pub fn remove_member(
         &mut self,
         brain_id: &BrainId,
@@ -432,6 +467,25 @@ impl BrainStore {
             });
         }
 
+        let stored = self.load_brain(brain_id)?;
+        for folder in &brain.folders {
+            let access = stored
+                .folder_access
+                .get(&folder.id)
+                .cloned()
+                .unwrap_or_default();
+            if required_recipients(&brain, folder, &access, None)?.contains(user_id)
+                || stored.grants.iter().any(|grant| {
+                    grant.folder_id == folder.id
+                        && grant.key_version == folder.current_key_version
+                        && grant.recipient_npub == *user_id
+                })
+            {
+                return Err(StoreError::BrokenInvariant {
+                    reason: format!("Folder {} requires rotated member removal", folder.id),
+                });
+            }
+        }
         self.conn.execute(
             "DELETE FROM brain_members WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), user_id.as_str()],

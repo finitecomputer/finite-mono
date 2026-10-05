@@ -4417,6 +4417,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         "--json", action="store_true", help="emit finite.status.v1 JSON"
     )
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--brain-access", metavar="BRAIN_ID",
+                      help="read current local Brain entitlement and grant coverage; emits JSON")
+    parser.add_argument("--brain-database", type=Path,
+                        default=Path("/var/lib/finitebrain/finite-brain.sqlite3"),
+                        help="local authority database for --brain-access; inspected through a scratch copy")
     mode.add_argument("--runtime-assignment", metavar="PROJECT_ID",
                       help="read one Project's exact Core recovery inputs without credential values; emits JSON")
     mode.add_argument("--kata-recovery-host", action="store_true",
@@ -4462,6 +4467,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.brain_access and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.brain_access):
+        parser.error("--brain-access requires one exact simple Brain identifier")
     if options.guest_agent_probe and not options.runtime_lifecycle:
         parser.error("--guest-agent-probe requires --runtime-lifecycle")
     if options.runtime_assignment and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_assignment):
@@ -4489,7 +4496,12 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
 def main(arguments: list[str] | None = None) -> None:
     options = parse_args(sys.argv[1:] if arguments is None else arguments)
     try:
-        if options.runtime_assignment:
+        if options.brain_access:
+            from finite_status_brain import collect
+
+            report = collect(options.brain_access, options.brain_database,
+                             scratch_copy_sqlite, isoformat(utc_now()))
+        elif options.runtime_assignment:
             report = collect_runtime_assignment(options.runtime_assignment)
         elif options.kata_recovery_host:
             try:
@@ -4536,8 +4548,13 @@ def main(arguments: list[str] | None = None) -> None:
                 "chat_plane": {"status": "unknown", "error": str(error)},
             },
         }
+        if options.brain_access:
+            report["brain_id"] = options.brain_access
+            report["current_access_complete"] = False
+            report["sections"] = {"brain_access": {"status": "unknown", "error": str(error)}}
     if (
         options.json
+        or options.brain_access
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity

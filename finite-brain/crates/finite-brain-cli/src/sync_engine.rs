@@ -592,13 +592,31 @@ pub(crate) fn prepare_folder_access_removals(
             "at least one Folder access target is required".to_owned(),
         ));
     }
+    let server_url = server_url_for_command(env, args)?;
+    let export = fetch_encrypted_export(env, &server_url, brain_id)?;
+    prepare_folder_access_removals_from_export(
+        env,
+        metadata,
+        brain_id,
+        folder_id,
+        target_npubs,
+        &export,
+    )
+}
+
+pub(crate) fn prepare_folder_access_removals_from_export(
+    env: &CliEnvironment,
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    target_npubs: &BTreeSet<String>,
+    export: &CliEncryptedBrainExport,
+) -> Result<serde_json::Value, CliError> {
     let folder = metadata
         .folders
         .iter()
         .find(|folder| folder.id == folder_id)
         .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
-    let server_url = server_url_for_command(env, args)?;
-    let export = fetch_encrypted_export(env, &server_url, brain_id)?;
     let export_folder = export
         .folders
         .iter()
@@ -611,7 +629,7 @@ pub(crate) fn prepare_folder_access_removals(
     }
     let auth = load_signer(env)?;
     let mut keyring = SessionFolderKeyring::default();
-    open_export_folder_key_grants_into_session(&auth, &export, &mut keyring)?;
+    open_export_folder_key_grants_into_session(&auth, export, &mut keyring)?;
     let current_key = keyring
         .get(brain_id, folder_id, folder.current_key_version)
         .ok_or_else(|| CliError::GrantOpening {
@@ -783,7 +801,7 @@ pub(crate) fn pending_working_tree_change_paths(root: &Path) -> Result<Vec<Strin
     Ok(paths)
 }
 
-fn fetch_encrypted_export(
+pub(crate) fn fetch_encrypted_export(
     env: &CliEnvironment,
     server_url: &str,
     brain_id: &str,
@@ -3706,11 +3724,11 @@ pub(crate) struct CliExportObject {
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CliFolderKeyGrant {
-    folder_id: String,
-    key_version: u32,
-    issuer_npub: String,
-    recipient_npub: String,
-    wrapped_event_json: String,
+    pub(crate) folder_id: String,
+    pub(crate) key_version: u32,
+    pub(crate) issuer_npub: String,
+    pub(crate) recipient_npub: String,
+    pub(crate) wrapped_event_json: String,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]

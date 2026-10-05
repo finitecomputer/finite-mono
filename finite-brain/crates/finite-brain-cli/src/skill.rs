@@ -81,6 +81,20 @@ and key grants. The signed rename appears in administrative sync history;
 clients learn the new display name on refresh or sync. The server must support
 rename before this CLI command is used.
 
+## Removing access (admin)
+
+For an authorized removal, run `fbrain admin member remove --target <exact key>
+--json`. It removes Admin role, Membership and direct Folder Access together,
+rotates affected current Folder Keys, and checks the result. Do not demote
+first. `admin role revoke admin` removes only the Admin role and preserves
+other entitlements. Report completion only for `state: complete`;
+`outcome: alreadyComplete` is a checked retry with no further changes.
+An unknown result requires a refresh and retry of the same command. An older
+server or unresolved Mount source stops the operation with a named blocker.
+Earlier keys and downloaded copies cannot be recalled; independent access
+in another Brain can remain. Never restore or re-invite a target to bypass a
+removal blocker.
+
 ## Sharing: inviting someone (admin)
 
 Creating and revoking invitations require Brain admin standing. Invitees

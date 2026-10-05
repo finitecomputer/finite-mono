@@ -2730,7 +2730,14 @@ fn validate_folder_grants(
                 reason: "grant key version must match folder current key version".to_owned(),
             });
         }
-        provided.insert(grant.recipient_npub.clone());
+        if !provided.insert(grant.recipient_npub.clone()) {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "Folder {} has duplicate grants for recipient {}",
+                    folder.id, grant.recipient_npub
+                ),
+            });
+        }
     }
 
     for recipient in required_recipients {
@@ -2910,7 +2917,14 @@ fn validate_connection_rotation_grants(
                     .to_owned(),
             });
         }
-        provided.insert(grant.recipient_npub.clone());
+        if !provided.insert(grant.recipient_npub.clone()) {
+            return Err(StoreError::BrokenInvariant {
+                reason: format!(
+                    "Folder {} has duplicate grants for recipient {}",
+                    folder.id, grant.recipient_npub
+                ),
+            });
+        }
     }
     if &provided != required_recipients {
         return Err(StoreError::BrokenInvariant {
@@ -3395,6 +3409,502 @@ mod tests {
     };
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    #[test]
+    fn fin159_member_removal_retires_mount_provenance_and_preserves_direct_source_access() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+        let source = BrainId::new("acme").unwrap();
+        let destination = BrainId::new("dest").unwrap();
+        let folder = FolderId::new("strategy").unwrap();
+        let target = UserId::new("npub-participant").unwrap();
+        let actor = UserId::new("npub-dest-admin").unwrap();
+        store.add_member(&destination, &target).unwrap();
+        store
+            .grant_folder_access(
+                &source,
+                &folder,
+                &target,
+                &grant(
+                    "independent-source",
+                    "strategy",
+                    1,
+                    "npub-admin",
+                    target.as_str(),
+                ),
+            )
+            .unwrap();
+        let tx = store.conn.transaction().unwrap();
+        tx.execute("INSERT INTO shared_folder_connections (id, source_brain_id, source_folder_id, destination_brain_id, destination_admin_npub, status, created_at, updated_at) VALUES ('overlap-mount', 'acme', 'strategy', 'dest', 'npub-dest-admin', 'active', 'now', 'now')", []).unwrap();
+        tx.execute("INSERT INTO shared_folder_connection_members (connection_id, member_npub, created_at) VALUES ('overlap-mount', ?1, 'now')", params![target.as_str()]).unwrap();
+        insert_folder_access_source(
+            &tx,
+            &source,
+            &folder,
+            &target,
+            "mount",
+            "overlap-mount",
+            "now",
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        assert!(folder_access_has_mount_source(&store.conn, &source, &folder, &target).unwrap());
+        store
+            .remove_member_with_rotations(
+                &destination,
+                &actor,
+                &target,
+                &[],
+                &[MemberMountRotation {
+                    connection_id: "overlap-mount".to_owned(),
+                    revoke_mount: false,
+                    new_key_version: 0,
+                    grants: vec![],
+                    reencrypted_records: vec![],
+                }],
+                "now",
+            )
+            .unwrap();
+        assert!(!folder_access_has_mount_source(&store.conn, &source, &folder, &target).unwrap());
+        let stored = store.load_brain(&source).unwrap();
+        assert!(stored.folder_access[&folder].contains(&target));
+        assert!(stored.grants.iter().any(|grant| grant.folder_id == folder
+            && grant.key_version == 1
+            && grant.recipient_npub == target));
+        assert!(
+            store
+                .load_shared_folder_connection("overlap-mount")
+                .unwrap()
+                .member_npubs
+                .is_empty()
+        );
+        // The independent source grant must not turn a safe retry into a false stranded-grant error.
+        store
+            .remove_member_with_rotations(&destination, &actor, &target, &[], &[], "now")
+            .unwrap();
+    }
+
+    #[test]
+    fn fin159_demotion_preserves_independent_member_access_and_clears_pending_wraps() {
+        let mut store = store_with_strategy_folder();
+        let brain = BrainId::new("acme").unwrap();
+        let actor = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-demoted").unwrap();
+        store.add_member(&brain, &target).unwrap();
+        store.add_admin(&brain, &target).unwrap();
+        let tx = store.conn.transaction().unwrap();
+        insert_folder_access_if_missing(&tx, &brain, &FolderId::new("strategy").unwrap(), &target)
+            .unwrap();
+        tx.execute("INSERT INTO brain_pending_grant_wraps (brain_id, folder_id, recipient_npub, key_version, reason, created_at) VALUES ('acme', 'private-project', ?1, 1, 'ensure-access', 'now')", params![target.as_str()]).unwrap();
+        tx.commit().unwrap();
+        let rotation = MemberFolderRotation {
+            folder_id: FolderId::new("private-project").unwrap(),
+            new_key_version: 2,
+            grants: vec![grant(
+                "demote-admin-v2",
+                "private-project",
+                2,
+                actor.as_str(),
+                actor.as_str(),
+            )],
+            reencrypted_records: vec![],
+        };
+        store
+            .remove_admin_with_rotations_and_control_records(
+                &brain,
+                &actor,
+                &target,
+                &[rotation],
+                "now",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let stored = store.load_brain(&brain).unwrap();
+        assert!(!stored.brain.admins.contains(&target));
+        assert!(
+            stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        assert!(stored.folder_access[&FolderId::new("strategy").unwrap()].contains(&target));
+        let pending = store.pending_grant_wraps(&brain).unwrap();
+        assert!(
+            !pending
+                .iter()
+                .any(|wrap| wrap.folder_id.as_str() == "private-project"
+                    && wrap.recipient_npub == target)
+        );
+        assert!(
+            pending.iter().any(
+                |wrap| wrap.folder_id.as_str() == "team-notes" && wrap.recipient_npub == target
+            )
+        );
+        for folder in &stored.brain.folders {
+            assert_eq!(
+                folder.current_key_version,
+                if folder.id.as_str() == "private-project" {
+                    2
+                } else {
+                    1
+                }
+            );
+        }
+        let sequence = store.latest_sequence(&brain).unwrap();
+        store
+            .remove_admin_with_rotations_and_control_records(
+                &brain,
+                &actor,
+                &target,
+                &[],
+                "now",
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(store.latest_sequence(&brain).unwrap(), sequence);
+    }
+
+    #[test]
+    fn fin159_stranded_mount_grant_and_controller_demotion_fail_before_mutation() {
+        let mut store = store_with_strategy_folder();
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+        let destination = BrainId::new("dest").unwrap();
+        let actor = UserId::new("npub-dest-admin").unwrap();
+        let target = UserId::new("npub-controller").unwrap();
+        store.add_member(&destination, &target).unwrap();
+        store.add_admin(&destination, &target).unwrap();
+        store.conn.execute("INSERT INTO shared_folder_connections (id, source_brain_id, source_folder_id, destination_brain_id, destination_admin_npub, status, created_at, updated_at) VALUES ('mount-synthetic', 'acme', 'strategy', 'dest', ?1, 'active', 'now', 'now')", params![target.as_str()]).unwrap();
+        let before = store.latest_sequence(&destination).unwrap();
+        let error = store
+            .remove_admin_with_rotations_and_control_records(
+                &destination,
+                &actor,
+                &target,
+                &[],
+                "now",
+                &BTreeMap::new(),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("destination controller"));
+        assert!(
+            store
+                .load_brain(&destination)
+                .unwrap()
+                .brain
+                .admins
+                .contains(&target)
+        );
+        let tx = store.conn.transaction().unwrap();
+        insert_grant(
+            &tx,
+            &BrainId::new("acme").unwrap(),
+            &grant(
+                "stranded-mount",
+                "strategy",
+                1,
+                "npub-admin",
+                target.as_str(),
+            ),
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let error = store
+            .remove_member_with_rotations(&destination, &actor, &target, &[], &[], "now")
+            .unwrap_err();
+        assert!(error.to_string().contains("retained source grant"));
+        assert_eq!(store.latest_sequence(&destination).unwrap(), before);
+        assert!(
+            store
+                .load_brain(&destination)
+                .unwrap()
+                .brain
+                .admins
+                .contains(&target)
+        );
+    }
+
+    #[test]
+    fn fin159_full_admin_removal_clears_both_authorities_atomically() {
+        let mut store = store_with_strategy_folder();
+        let brain = BrainId::new("acme").unwrap();
+        let actor = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-second-admin").unwrap();
+        store.add_member(&brain, &target).unwrap();
+        store.add_admin(&brain, &target).unwrap();
+        let stored = store.load_brain(&brain).unwrap();
+        let rotations = stored
+            .brain
+            .folders
+            .iter()
+            .map(|folder| MemberFolderRotation {
+                folder_id: folder.id.clone(),
+                new_key_version: 2,
+                grants: vec![grant(
+                    &format!("survivor-{}", folder.id),
+                    folder.id.as_str(),
+                    2,
+                    actor.as_str(),
+                    actor.as_str(),
+                )],
+                reencrypted_records: vec![],
+            })
+            .collect::<Vec<_>>();
+        let mut stale = rotations.clone();
+        stale[0].new_key_version = 3;
+        assert!(
+            store
+                .remove_member_with_rotations(&brain, &actor, &target, &stale, &[], "now")
+                .is_err()
+        );
+        let unchanged = store.load_brain(&brain).unwrap();
+        assert!(unchanged.brain.admins.contains(&target));
+        assert!(
+            unchanged
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        assert!(
+            unchanged
+                .brain
+                .folders
+                .iter()
+                .all(|folder| folder.current_key_version == 1)
+        );
+        store
+            .remove_member_with_rotations(&brain, &actor, &target, &rotations, &[], "now")
+            .unwrap();
+        let after = store.load_brain(&brain).unwrap();
+        assert_eq!(after.brain.admins, vec![actor]);
+        assert!(
+            !after
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        assert!(
+            after
+                .brain
+                .folders
+                .iter()
+                .all(|folder| folder.current_key_version == 2)
+        );
+    }
+
+    #[test]
+    fn fin159_absent_target_repair_is_exact_atomic_and_restores_history() {
+        let temp = TempDir::new().unwrap();
+        let source_db = temp.path().join("source.sqlite3");
+        let restored_db = temp.path().join("empty-target.sqlite3");
+        let brain_id = BrainId::new("acme").unwrap();
+        let actor = UserId::new("npub-admin").unwrap();
+        let target = UserId::new("npub-removed").unwrap();
+        let now = "2026-10-03T00:00:00Z";
+        let mut store = BrainStore::open(&source_db).unwrap();
+        bootstrap_org_and_strategy_folder(&mut store);
+        // Synthetic persisted state written by the old demote-then-remove path.
+        let tx = store.conn.transaction().unwrap();
+        for folder in ["strategy", "private-project"] {
+            insert_grant(
+                &tx,
+                &brain_id,
+                &grant(
+                    &format!("stranded-{folder}"),
+                    folder,
+                    1,
+                    actor.as_str(),
+                    target.as_str(),
+                ),
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("old-history", "obj_000000000001", 1, None, "old-ciphertext"),
+            )
+            .unwrap();
+        let rotations = ["strategy", "private-project"].map(|folder| MemberFolderRotation {
+            folder_id: FolderId::new(folder).unwrap(),
+            new_key_version: 2,
+            grants: vec![grant(
+                &format!("new-{folder}"),
+                folder,
+                2,
+                actor.as_str(),
+                actor.as_str(),
+            )],
+            reencrypted_records: if folder == "strategy" {
+                vec![revision_record_struct(
+                    "new-history",
+                    folder,
+                    "obj_000000000001",
+                    2,
+                    Some(1),
+                    "new-ciphertext",
+                )]
+            } else {
+                vec![]
+            },
+        });
+        let before = store.load_brain(&brain_id).unwrap();
+        let before_sequence = store.latest_sequence(&brain_id).unwrap();
+        let mut target_grant = rotations.to_vec();
+        target_grant[0].grants.push(grant(
+            "forbidden-target",
+            "strategy",
+            2,
+            actor.as_str(),
+            target.as_str(),
+        ));
+        let mut duplicate_grant = rotations.to_vec();
+        duplicate_grant[0].grants.push(grant(
+            "duplicate-recipient",
+            "strategy",
+            2,
+            actor.as_str(),
+            actor.as_str(),
+        ));
+        let mut extra_folder = rotations.to_vec();
+        extra_folder.push(MemberFolderRotation {
+            folder_id: FolderId::new("team-notes").unwrap(),
+            new_key_version: 2,
+            grants: vec![],
+            reencrypted_records: vec![],
+        });
+        for incomplete in [
+            vec![],
+            vec![rotations[0].clone()],
+            vec![
+                rotations[0].clone(),
+                rotations[0].clone(),
+                rotations[1].clone(),
+            ],
+            target_grant,
+            duplicate_grant,
+            extra_folder,
+        ] {
+            assert!(
+                store
+                    .remove_member_with_rotations(&brain_id, &actor, &target, &incomplete, &[], now)
+                    .is_err()
+            );
+            let unchanged = store.load_brain(&brain_id).unwrap();
+            assert_eq!(unchanged.grants, before.grants);
+            assert_eq!(unchanged.brain, before.brain);
+            assert_eq!(store.latest_sequence(&brain_id).unwrap(), before_sequence);
+        }
+        let mut stale = rotations.clone();
+        stale[0].reencrypted_records[0].base_revision = Some(0);
+        assert!(
+            store
+                .remove_member_with_rotations(&brain_id, &actor, &target, &stale, &[], now)
+                .is_err()
+        );
+        let mut missing_recipient = rotations.clone();
+        missing_recipient[1].grants.clear();
+        assert!(
+            store
+                .remove_member_with_rotations(
+                    &brain_id,
+                    &actor,
+                    &target,
+                    &missing_recipient,
+                    &[],
+                    now
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .remove_member_with_rotations(&brain_id, &target, &actor, &rotations, &[], now)
+                .is_err()
+        );
+        assert!(
+            store
+                .remove_member_with_rotations(&brain_id, &actor, &actor, &[], &[], now)
+                .is_err()
+        );
+        assert_eq!(store.latest_sequence(&brain_id).unwrap(), before_sequence);
+        store
+            .remove_member_with_rotations(&brain_id, &actor, &target, &rotations, &[], now)
+            .unwrap();
+        let after_sequence = store.latest_sequence(&brain_id).unwrap();
+        store
+            .remove_member_with_rotations(&brain_id, &actor, &target, &[], &[], now)
+            .unwrap();
+        assert_eq!(store.latest_sequence(&brain_id).unwrap(), after_sequence);
+        assert!(
+            store
+                .remove_member_with_rotations(&brain_id, &actor, &target, &rotations, &[], now)
+                .is_err()
+        );
+        drop(store);
+        // Closed SQLite database plus surviving key grants is the existing Recovery Set boundary.
+        std::fs::copy(&source_db, &restored_db).unwrap();
+        let mut restored = BrainStore::open(&restored_db).unwrap();
+        let stored = restored.load_brain(&brain_id).unwrap();
+        assert!(
+            !stored
+                .brain
+                .members
+                .iter()
+                .any(|member| member.user_id == target)
+        );
+        for folder in ["strategy", "private-project"] {
+            assert_eq!(
+                stored
+                    .brain
+                    .folders
+                    .iter()
+                    .find(|entry| entry.id.as_str() == folder)
+                    .unwrap()
+                    .current_key_version,
+                2
+            );
+            assert!(
+                stored
+                    .grants
+                    .iter()
+                    .any(|grant| grant.folder_id.as_str() == folder
+                        && grant.key_version == 2
+                        && grant.recipient_npub == actor)
+            );
+            assert!(
+                !stored
+                    .grants
+                    .iter()
+                    .any(|grant| grant.folder_id.as_str() == folder
+                        && grant.key_version == 2
+                        && grant.recipient_npub == target)
+            );
+        }
+        restored.rebuild_current_projection(&brain_id).unwrap();
+        assert_eq!(
+            restored.sync_bootstrap(&brain_id).unwrap().objects[0].revision,
+            2
+        );
+        restored
+            .submit_sync_record(
+                &brain_id,
+                &revision_record(
+                    "survivor-write",
+                    "obj_000000000001",
+                    3,
+                    Some(2),
+                    "survivor-ciphertext",
+                ),
+            )
+            .unwrap();
+        assert_eq!(
+            restored.sync_bootstrap(&brain_id).unwrap().objects[0].revision,
+            3
+        );
+    }
 
     #[test]
     fn exposes_store_crate_name() {
@@ -8202,7 +8712,14 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &old_grant)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        // Legacy fixture: this unsafe demotion is now rejected by the public writer.
+        store
+            .conn
+            .execute(
+                "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), member.as_str()],
+            )
+            .unwrap();
         // Reopen persisted pre-repair state, as a server upgrade would.
         drop(store);
         let mut store = BrainStore::open(&db).unwrap();
@@ -8317,7 +8834,14 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &retained)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        // Legacy fixture: this unsafe demotion is now rejected by the public writer.
+        store
+            .conn
+            .execute(
+                "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                params![brain_id.as_str(), member.as_str()],
+            )
+            .unwrap();
         let repair = grant("repair", "strategy", 1, "npub-admin", member.as_str());
         let key_record = folder_key_grant_control_record(&repair, "repair-key-record");
         let access_record = folder_access_control_record(
@@ -8391,7 +8915,7 @@ mod tests {
 
     #[test]
     fn removes_members_and_admins_without_breaking_admin_invariant() {
-        let mut store = org_store_with_access_test_folders();
+        let mut store = empty_org_store();
         let brain_id = BrainId::new("acme").unwrap();
         let member = UserId::new("npub-member").unwrap();
         store.add_member(&brain_id, &member).unwrap();

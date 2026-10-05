@@ -111,6 +111,9 @@ def main() -> None:
             raise SystemExit("finite-status includes a mutating SQL statement")
 
     chat = contract["chat_plane"]
+    brain_probe = (ROOT / "scripts" / "finite_status_brain.py").read_text(encoding="utf-8")
+    if re.search(r"\b(?:INSERT|UPDATE|DELETE|ALTER|DROP)\s", brain_probe, re.IGNORECASE):
+        raise SystemExit("finite-status Brain probe includes a mutating SQL statement")
     # The freeze detector's red line is derived from the server's own snapshot
     # cadence constant; it must never drift from the Rust authority.
     server_source = (

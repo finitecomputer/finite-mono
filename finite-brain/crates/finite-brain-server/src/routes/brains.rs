@@ -416,6 +416,51 @@ pub(crate) async fn remove_member_handler(
     AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
+    remove_identity_handler(
+        state,
+        headers,
+        method,
+        uri,
+        brain_id,
+        target_npub,
+        body,
+        false,
+    )
+    .await
+}
+
+pub(crate) async fn remove_admin_rotated_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
+    remove_identity_handler(
+        state,
+        headers,
+        method,
+        uri,
+        brain_id,
+        target_npub,
+        body,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn remove_identity_handler(
+    state: ServerState,
+    headers: HeaderMap,
+    method: Method,
+    uri: axum::http::Uri,
+    brain_id: String,
+    target_npub: String,
+    body: Bytes,
+    demotion: bool,
+) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
     let request: RemoveMemberRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
@@ -438,6 +483,12 @@ pub(crate) async fn remove_member_handler(
                     }),
             ),
     )?;
+    if demotion && !request.mount_rotations.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "admin demotion must preserve Mount participation",
+        ));
+    }
     let brain_id = BrainId::new(brain_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
@@ -445,7 +496,11 @@ pub(crate) async fn remove_member_handler(
         request.access_change_event,
         &brain_id,
         &actor,
-        AdminAccessAction::RemoveMember,
+        if demotion {
+            AdminAccessAction::RemoveAdmin
+        } else {
+            AdminAccessAction::RemoveMember
+        },
         None,
         Some(target.as_str()),
         None,
@@ -519,6 +574,16 @@ pub(crate) async fn remove_member_handler(
     let actor_user_id = UserId::new(&actor)?;
     let notification_state = state.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
+        if demotion {
+            return store.remove_admin_with_rotations_and_control_records(
+                brain_id,
+                &actor_user_id,
+                &target,
+                &rotations,
+                &updated_at,
+                &control_records_by_brain,
+            );
+        }
         store.remove_member_with_rotations_and_control_records(
             brain_id,
             &actor_user_id,
@@ -582,6 +647,13 @@ pub(crate) async fn remove_admin_handler(
     let brain_id = BrainId::new(brain_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub.clone())?;
+    if target.as_str() == actor {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "another current admin must perform and verify identity removal",
+        ));
+    }
+
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         &brain_id,

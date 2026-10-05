@@ -652,6 +652,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
             axum::routing::put(add_admin_handler).delete(remove_admin_handler),
         )
         .route(
+            "/brains/{brain_id}/roles/admin/{target_npub}/rotate",
+            axum::routing::delete(remove_admin_rotated_handler),
+        )
+        .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
             axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
         )
@@ -1869,6 +1873,430 @@ mod tests {
             "https://finite.example/smoke",
         );
         assert!(path_state.cors_origin_allowed("https://finite.example"));
+    }
+
+    #[tokio::test]
+    async fn fin159_signed_demotion_and_removal_rotate_only_withdrawn_access() {
+        let admin_keys = Keys::generate();
+        let target_keys = Keys::generate();
+        let admin = npub(&admin_keys);
+        let target = npub(&target_keys);
+        let temp = tempfile::TempDir::new().unwrap();
+        let source_db = temp.path().join("source.sqlite3");
+        let restored_db = temp.path().join("restored.sqlite3");
+        let state = ServerState::new(BrainStore::open(&source_db).unwrap(), TEST_BASE_URL)
+            .with_auth_clock(TEST_NOW, 60);
+        let router = router_with_state(state.clone());
+        assert_eq!(
+            post_brain(
+                router.clone(),
+                &admin_keys,
+                &create_brain_body("acme", "organization"),
+                TEST_NOW,
+                None,
+                None,
+                None
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        for (route, action, change) in [
+            (
+                format!("/v1/admin/brains/acme/members/{target}"),
+                AdminAccessAction::AddMember,
+                "member",
+            ),
+            (
+                format!("/v1/admin/brains/acme/roles/admin/{target}"),
+                AdminAccessAction::AddAdmin,
+                "admin",
+            ),
+        ] {
+            let body = serde_json::json!({"accessChangeEvent": admin_event(&admin_keys, "acme", change, action, None, Some(&target), None)}).to_string();
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    &admin_keys,
+                    "PUT",
+                    &route,
+                    Some(body),
+                    TEST_NOW
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        let old_key = FolderKey::from_bytes([9; 32]);
+        let new_key = FolderKey::generate();
+        for (folder, explicit) in [("restricted", false), ("explicit", true)] {
+            let body = serde_json::json!({"folderId": folder, "name": folder, "role": "folder", "access": "restricted", "parentFolderId": null, "path": folder,
+                "accessUserIds": if explicit { vec![target.clone()] } else { vec![] },
+                "grants": [real_folder_key_grant_value(&format!("{folder}-admin-v1"), 1, &admin_keys, "acme", folder, &admin, &old_key.to_base64()),
+                    real_folder_key_grant_value(&format!("{folder}-target-v1"), 1, &admin_keys, "acme", folder, &target, &old_key.to_base64())],
+                "accessChangeEvent": admin_event(&admin_keys, "acme", &format!("create-{folder}"), AdminAccessAction::SetFolderAccessMode, Some(folder), None, Some(1))}).to_string();
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    &admin_keys,
+                    "POST",
+                    "/v1/brains/acme/folders",
+                    Some(body),
+                    TEST_NOW
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+            let object = object_write_body(
+                &admin_keys,
+                RevisionFixture {
+                    brain_id: "acme",
+                    folder_id: folder,
+                    object_id: "obj_000000000001",
+                    operation: FolderObjectOperation::Create,
+                    revision: 1,
+                    base_revision: None,
+                    key_version: 1,
+                    content: "durable history",
+                    nonce: 23,
+                    record_type: false,
+                },
+            );
+            assert_eq!(
+                authed_request(
+                    router.clone(),
+                    &admin_keys,
+                    "PUT",
+                    &format!("/v1/brains/acme/folders/{folder}/objects/obj_000000000001"),
+                    Some(object),
+                    TEST_NOW
+                )
+                .await
+                .status(),
+                StatusCode::OK
+            );
+        }
+        let sequence = latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 1).await;
+        let legacy = serde_json::json!({"accessChangeEvent": admin_event(&admin_keys, "acme", "legacy-demote", AdminAccessAction::RemoveAdmin, None, Some(&target), None)}).to_string();
+        assert_error(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "DELETE",
+                &format!("/v1/admin/brains/acme/roles/admin/{target}"),
+                Some(legacy),
+                TEST_NOW,
+            )
+            .await,
+            StatusCode::BAD_REQUEST,
+            "requires rotated admin demotion",
+        )
+        .await;
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 2).await,
+            sequence
+        );
+        let rotation = |folder: &str| {
+            let aad = FolderObjectAad {
+                brain_id: BrainId::new("acme").unwrap(),
+                folder_id: FolderId::new(folder).unwrap(),
+                object_id: ObjectId::new("obj_000000000001").unwrap(),
+                key_version: 2,
+            };
+            let envelope =
+                finite_brain_core::encrypt_folder_object(&new_key, &aad, b"durable history")
+                    .unwrap()
+                    .canonical_json();
+            let event = revision_event_for_author(
+                &admin_keys,
+                admin.clone(),
+                RevisionEventFixture {
+                    brain_id: "acme",
+                    folder_id: folder,
+                    object_id: "obj_000000000001",
+                    operation: FolderObjectOperation::Update,
+                    revision: 2,
+                    base_revision: Some(1),
+                    key_version: 2,
+                    envelope_json: envelope.clone(),
+                },
+            );
+            serde_json::json!({"folderId": folder, "newKeyVersion": 2,
+                "grants": [real_folder_key_grant_value(&format!("{folder}-admin-v2"), 2, &admin_keys, "acme", folder, &admin, &new_key.to_base64())],
+                "reencryptedRecords": [{"objectId": "obj_000000000001", "baseRevision": 1, "keyVersion": 2, "cipher": "AES-256-GCM", "ciphertext": envelope, "revisionEvent": event}]})
+        };
+        let demote = |rotations: Vec<serde_json::Value>| {
+            serde_json::json!({"accessChangeEvent": admin_event(&admin_keys, "acme", "safe-demote", AdminAccessAction::RemoveAdmin, None, Some(&target), None), "rotations": rotations}).to_string()
+        };
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "DELETE",
+                &format!("/v1/admin/brains/acme/roles/admin/{target}/rotate"),
+                Some(demote(vec![])),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 3).await,
+            sequence
+        );
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "DELETE",
+                &format!("/v1/admin/brains/acme/roles/admin/{target}/rotate"),
+                Some(demote(vec![rotation("restricted")])),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let brain_id = BrainId::new("acme").unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            let stored = store.load_brain(&brain_id).unwrap();
+            assert!(
+                stored
+                    .brain
+                    .members
+                    .iter()
+                    .any(|member| member.user_id.as_str() == target)
+            );
+            assert!(
+                !stored
+                    .brain
+                    .admins
+                    .iter()
+                    .any(|user| user.as_str() == target)
+            );
+            assert_eq!(
+                stored
+                    .brain
+                    .folders
+                    .iter()
+                    .find(|folder| folder.id.as_str() == "explicit")
+                    .unwrap()
+                    .current_key_version,
+                1
+            );
+        }
+        let remove = serde_json::json!({"accessChangeEvent": admin_event(&admin_keys, "acme", "safe-remove", AdminAccessAction::RemoveMember, None, Some(&target), None), "rotations": [rotation("explicit")]}).to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "DELETE",
+                &format!("/v1/admin/brains/acme/members/{target}"),
+                Some(remove),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        for folder in ["restricted", "explicit"] {
+            let store = state.store.lock().unwrap();
+            let stored = store.load_brain(&brain_id).unwrap();
+            assert!(
+                !stored
+                    .brain
+                    .members
+                    .iter()
+                    .any(|member| member.user_id.as_str() == target)
+            );
+            assert!(
+                !stored
+                    .grants
+                    .iter()
+                    .any(|grant| grant.folder_id.as_str() == folder
+                        && grant.key_version == 2
+                        && grant.recipient_npub.as_str() == target)
+            );
+            let object = store
+                .load_current_object(
+                    &brain_id,
+                    &FolderId::new(folder).unwrap(),
+                    &ObjectId::new("obj_000000000001").unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+            let ciphertext = finite_brain_core::decode_sync_payload(&object.payload_json)
+                .ciphertext_or_raw(&object.payload_json);
+            let envelope =
+                finite_brain_core::EncryptedFolderObjectEnvelope::from_json(&ciphertext).unwrap();
+            let aad = FolderObjectAad {
+                brain_id: brain_id.clone(),
+                folder_id: FolderId::new(folder).unwrap(),
+                object_id: ObjectId::new("obj_000000000001").unwrap(),
+                key_version: 2,
+            };
+            assert!(finite_brain_core::open_folder_object(&old_key, &aad, &envelope).is_err());
+            let survivor_grant = stored
+                .grants
+                .iter()
+                .find(|grant| {
+                    grant.folder_id.as_str() == folder
+                        && grant.key_version == 2
+                        && grant.recipient_npub.as_str() == admin
+                })
+                .unwrap();
+            let wrapped = Event::from_json(&survivor_grant.wrapped_event_json).unwrap();
+            let opened = finite_nostr::open_gift_wrap(
+                &admin_keys,
+                &wrapped,
+                &finite_nostr::GiftWrapValidation::new(NostrPublicKey::parse(&admin).unwrap()),
+            )
+            .unwrap();
+            let grant_payload: serde_json::Value =
+                serde_json::from_str(&opened.rumor.content).unwrap();
+            let survivor_key =
+                FolderKey::from_base64(grant_payload["folderKey"].as_str().unwrap()).unwrap();
+            assert_eq!(
+                finite_brain_core::open_folder_object(&survivor_key, &aad, &envelope).unwrap(),
+                b"durable history"
+            );
+        }
+        let sequence_before_retry =
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 4).await;
+        let retry = serde_json::json!({"accessChangeEvent": admin_event(&admin_keys, "acme", "retry-remove", AdminAccessAction::RemoveMember, None, Some(&target), None), "rotations": []}).to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "DELETE",
+                &format!("/v1/admin/brains/acme/members/{target}"),
+                Some(retry),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            latest_sync_sequence_at(&router, &admin_keys, "acme", TEST_NOW - 5).await,
+            sequence_before_retry
+        );
+        let stored = state.store.lock().unwrap().load_brain(&brain_id).unwrap();
+        assert!(
+            stored
+                .brain
+                .folders
+                .iter()
+                .all(|folder| folder.current_key_version == 2)
+        );
+        drop(router);
+        drop(state);
+        std::fs::copy(&source_db, &restored_db).unwrap();
+        let restored = BrainStore::open(&restored_db).unwrap();
+        for folder in ["restricted", "explicit"] {
+            let stored = restored.load_brain(&brain_id).unwrap();
+            let grant = stored
+                .grants
+                .iter()
+                .find(|grant| {
+                    grant.folder_id.as_str() == folder
+                        && grant.key_version == 2
+                        && grant.recipient_npub.as_str() == admin
+                })
+                .unwrap();
+            let opened = finite_nostr::open_gift_wrap(
+                &admin_keys,
+                &Event::from_json(&grant.wrapped_event_json).unwrap(),
+                &finite_nostr::GiftWrapValidation::new(NostrPublicKey::parse(&admin).unwrap()),
+            )
+            .unwrap();
+            let payload: serde_json::Value = serde_json::from_str(&opened.rumor.content).unwrap();
+            let key = FolderKey::from_base64(payload["folderKey"].as_str().unwrap()).unwrap();
+            let object = restored
+                .load_current_object(
+                    &brain_id,
+                    &FolderId::new(folder).unwrap(),
+                    &ObjectId::new("obj_000000000001").unwrap(),
+                )
+                .unwrap()
+                .unwrap();
+            let ciphertext = finite_brain_core::decode_sync_payload(&object.payload_json)
+                .ciphertext_or_raw(&object.payload_json);
+            let envelope =
+                finite_brain_core::EncryptedFolderObjectEnvelope::from_json(&ciphertext).unwrap();
+            let aad = FolderObjectAad {
+                brain_id: brain_id.clone(),
+                folder_id: FolderId::new(folder).unwrap(),
+                object_id: ObjectId::new("obj_000000000001").unwrap(),
+                key_version: 2,
+            };
+            assert_eq!(
+                finite_brain_core::open_folder_object(&key, &aad, &envelope).unwrap(),
+                b"durable history"
+            );
+            assert!(finite_brain_core::open_folder_object(&old_key, &aad, &envelope).is_err());
+        }
+        let restored_router = router_with_state(
+            ServerState::new(restored, TEST_BASE_URL).with_auth_clock(TEST_NOW, 60),
+        );
+        assert_eq!(
+            authed_request(
+                restored_router.clone(),
+                &admin_keys,
+                "GET",
+                "/v1/brains/acme/sync/bootstrap",
+                None,
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let aad = FolderObjectAad {
+            brain_id,
+            folder_id: FolderId::new("restricted").unwrap(),
+            object_id: ObjectId::new("obj_000000000001").unwrap(),
+            key_version: 2,
+        };
+        let ciphertext = finite_brain_core::encrypt_folder_object(
+            &new_key,
+            &aad,
+            b"survivor write after restore",
+        )
+        .unwrap()
+        .canonical_json();
+        let event = revision_event_for_author(
+            &admin_keys,
+            admin.clone(),
+            RevisionEventFixture {
+                brain_id: "acme",
+                folder_id: "restricted",
+                object_id: "obj_000000000001",
+                operation: FolderObjectOperation::Update,
+                revision: 3,
+                base_revision: Some(2),
+                key_version: 2,
+                envelope_json: ciphertext.clone(),
+            },
+        );
+        let body = serde_json::json!({"baseRevision": 2, "keyVersion": 2, "cipher": "AES-256-GCM", "ciphertext": ciphertext, "revisionEvent": event}).to_string();
+        assert_eq!(
+            authed_request(
+                restored_router,
+                &admin_keys,
+                "PUT",
+                "/v1/brains/acme/folders/restricted/objects/obj_000000000001",
+                Some(body),
+                TEST_NOW
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
     }
 
     #[tokio::test]
@@ -5104,7 +5532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demoted_member_cannot_regrant_retained_folder_access() {
+    async fn demoted_member_cannot_regrant_folder_access() {
         let admin = Keys::generate();
         let member = Keys::generate();
         let target = npub(&member);
@@ -5137,11 +5565,11 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
         let path = format!("/v1/admin/brains/acme/folders/restricted/access/{target}");
-        let body = |signer: &Keys, id: &str| {
+        let body = |signer: &Keys, id: &str, version: u32| {
             serde_json::json!({
-            "grant": folder_key_grant_value(id, 1, &target),
+            "grant": folder_key_grant_value(id, version, &target),
             "accessChangeEvent": admin_event(signer, "acme", id,
-                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1))
+                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(version))
         }).to_string()
         };
         let grant = authed_request(
@@ -5149,7 +5577,7 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "initial-grant")),
+            Some(body(&admin, "initial-grant", 1)),
             TEST_NOW,
         )
         .await;
@@ -5158,10 +5586,12 @@ mod tests {
             router.clone(),
             &admin,
             "DELETE",
-            &format!("/v1/admin/brains/acme/roles/admin/{target}"),
+            &format!("/v1/admin/brains/acme/roles/admin/{target}/rotate"),
             Some(
                 serde_json::json!({"accessChangeEvent": admin_event(&admin, "acme", "demote",
-                AdminAccessAction::RemoveAdmin, None, Some(&target), None)})
+                AdminAccessAction::RemoveAdmin, None, Some(&target), None),
+                "rotations": [{"folderId": "restricted", "newKeyVersion": 2,
+                    "grants": [folder_key_grant_value("demotion-admin-v2", 2, &npub(&admin))], "reencryptedRecords": []}]})
                 .to_string(),
             ),
             TEST_NOW,
@@ -5186,7 +5616,7 @@ mod tests {
             &member,
             "PUT",
             &path,
-            Some(body(&member, "unauthorized-repair")),
+            Some(body(&member, "unauthorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -5213,7 +5643,7 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "authorized-repair")),
+            Some(body(&admin, "authorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -7655,6 +8085,15 @@ mod tests {
 
     #[tokio::test]
     async fn shared_folder_routes_project_mounts_and_route_writes_to_source() {
+        shared_folder_route_scenario(false).await;
+    }
+
+    #[tokio::test]
+    async fn fin159_member_removal_rotates_mount_source_through_signed_route() {
+        shared_folder_route_scenario(true).await;
+    }
+
+    async fn shared_folder_route_scenario(remove_membership: bool) {
         let source_admin_keys = Keys::generate();
         let destination_admin_keys = Keys::generate();
         let destination_member_keys = Keys::generate();
@@ -7992,11 +8431,25 @@ mod tests {
             ],
         })
         .to_string();
+        let (removal_path, remove_connection_member_body) = if remove_membership {
+            let rotation: serde_json::Value =
+                serde_json::from_str(&remove_connection_member_body).unwrap();
+            (format!("/v1/admin/brains/dest/members/{destination_member_npub}"), serde_json::json!({
+                "accessChangeEvent": admin_event(&destination_admin_keys, "dest", "atomic-member-mount-removal", AdminAccessAction::RemoveMember, None, Some(&destination_member_npub), None),
+                "rotations": [], "mountRotations": [{"mountId": connection_id, "revokeMount": false,
+                    "newKeyVersion": rotation["newKeyVersion"], "grants": rotation["grants"], "reencryptedRecords": rotation["reencryptedRecords"]}]
+            }).to_string())
+        } else {
+            (
+                format!("/v1/mounts/{connection_id}/participants/{destination_member_npub}"),
+                remove_connection_member_body,
+            )
+        };
         let remove_connection_member = authed_request(
             router.clone(),
             &destination_admin_keys,
             "DELETE",
-            &format!("/v1/mounts/{connection_id}/participants/{destination_member_npub}"),
+            &removal_path,
             Some(remove_connection_member_body),
             TEST_NOW,
         )
@@ -8010,9 +8463,31 @@ mod tests {
             TEST_NOW + 1,
         )
         .await;
-        assert_eq!(locked_metadata.status(), StatusCode::OK);
-        let locked_metadata: BrainMetadataResponse = read_json(locked_metadata).await;
-        assert_eq!(locked_metadata.mounted_folders[0].state, "locked");
+        if remove_membership {
+            assert_eq!(locked_metadata.status(), StatusCode::FORBIDDEN);
+            let connection: MountResponse = read_json(
+                authed_request(
+                    router.clone(),
+                    &destination_admin_keys,
+                    "GET",
+                    &format!("/v1/mounts/{connection_id}"),
+                    None,
+                    TEST_NOW + 2,
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(connection.status, "active");
+            assert!(
+                !connection
+                    .participant_npubs
+                    .contains(&destination_member_npub)
+            );
+        } else {
+            assert_eq!(locked_metadata.status(), StatusCode::OK);
+            let locked_metadata: BrainMetadataResponse = read_json(locked_metadata).await;
+            assert_eq!(locked_metadata.mounted_folders[0].state, "locked");
+        }
 
         let revoke_connection_body = serde_json::json!({
             "newKeyVersion": 3,
@@ -8187,7 +8662,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
-        read_json::<SyncBootstrapResponse>(response)
+        read_json_with_limit::<SyncBootstrapResponse>(response, 256 * 1024)
             .await
             .latest_sequence
     }
