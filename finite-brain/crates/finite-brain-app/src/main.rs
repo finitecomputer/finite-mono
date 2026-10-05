@@ -28,6 +28,33 @@ fn protected_rate_limit_override(value: Option<String>) -> Result<Option<(u32, u
     Ok(Some((max_requests, window_seconds)))
 }
 
+/// Pair `FINITE_BRAIN_CORE_IDENTITY_URL` with
+/// `FINITE_BRAIN_CORE_DESCRIPTION_TOKEN`. Both unset keeps descriptions off.
+/// The URL must name Core's private Brain identity listener by literal
+/// loopback or private IP and port. Errors name variables, never values.
+fn core_identity_descriptions(
+    url: Option<String>,
+    credential: Option<String>,
+) -> Result<Option<(String, String)>, String> {
+    let url = url
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    let credential = credential
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+    match (url, credential) {
+        (None, None) => Ok(None),
+        (Some(url), Some(credential)) => {
+            let url = finite_brain_server::validate_core_identity_url(&url)?;
+            Ok(Some((url, credential)))
+        }
+        _ => Err(
+            "set both FINITE_BRAIN_CORE_IDENTITY_URL and FINITE_BRAIN_CORE_DESCRIPTION_TOKEN, or neither"
+                .to_owned(),
+        ),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     if std::env::args()
@@ -81,6 +108,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+    // Optional: a bad configuration disables identity descriptions with a
+    // warning and never stops Brain. Access reports stay available.
+    match core_identity_descriptions(
+        std::env::var("FINITE_BRAIN_CORE_IDENTITY_URL").ok(),
+        std::env::var("FINITE_BRAIN_CORE_DESCRIPTION_TOKEN").ok(),
+    ) {
+        Ok(Some((url, credential))) => {
+            state = match state
+                .clone()
+                .with_core_identity_descriptions(&url, credential)
+            {
+                Ok(configured) => configured,
+                Err(error) => {
+                    eprintln!("Core identity descriptions disabled: {error}");
+                    state
+                }
+            };
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("Core identity descriptions disabled: {error}"),
+    }
     let router = finite_brain_server::router_with_state(state);
     axum::serve(listener, router).await?;
 
@@ -89,7 +137,41 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::protected_rate_limit_override;
+    use super::{core_identity_descriptions, protected_rate_limit_override};
+
+    #[test]
+    fn core_identity_descriptions_are_optional_paired_and_private_only() {
+        for refused in [
+            "http://localhost:4202",
+            "https://core.finite.example",
+            "http://64.34.80.19:4202",
+            "http://user@127.0.0.1:4202",
+            "http://127.0.0.1:4202/path?query",
+            "http://127.0.0.1",
+            "file:///tmp",
+        ] {
+            assert!(
+                core_identity_descriptions(Some(refused.to_owned()), Some("synthetic".to_owned()))
+                    .is_err(),
+                "{refused}"
+            );
+        }
+        assert_eq!(core_identity_descriptions(None, None), Ok(None));
+        assert_eq!(
+            core_identity_descriptions(Some(" ".to_owned()), Some(String::new())),
+            Ok(None)
+        );
+        for accepted in ["http://127.0.0.1:4202", "http://10.0.0.5:4202"] {
+            assert_eq!(
+                core_identity_descriptions(Some(accepted.to_owned()), Some("synthetic".to_owned())),
+                Ok(Some((accepted.to_owned(), "synthetic".to_owned())))
+            );
+        }
+        assert!(
+            core_identity_descriptions(Some("http://127.0.0.1:4202".to_owned()), None).is_err()
+        );
+        assert!(core_identity_descriptions(None, Some("synthetic".to_owned())).is_err());
+    }
 
     #[test]
     fn protected_rate_limit_unset_or_empty_keeps_defaults() {

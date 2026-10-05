@@ -99,7 +99,7 @@ fbrain search "credential rotation" --json
 fbrain status --json
 fbrain activity
 fbrain folder list --brain <brain-id>
-fbrain access list --brain <brain-id>
+fbrain access list --brain <brain-id>   # named access report; admin standing
 ```
 
 Use global `--config-dir <path>` when an agent needs a dedicated signer/config
@@ -137,6 +137,16 @@ loopback addresses, or the exact development host explicitly named by
   defaults to the public Directory `https://identity.finite.vip`; this
   variable is an override. The Brain server itself no longer takes any
   `FINITE_IDENTITY_*` or `FC_CORE_*` wiring (auth-kernel cut).
+- `FINITE_BRAIN_CORE_IDENTITY_URL` and `FINITE_BRAIN_CORE_DESCRIPTION_TOKEN`:
+  optional pair (set both or neither) letting the access report ask Core's
+  private Brain identity listener to describe exact, participating report
+  keys. The URL must be a literal loopback or private IP with a port, with no
+  host name, user info, path, query, or fragment. The token is Core's
+  read-only `FC_CORE_BRAIN_DESCRIPTION_TOKEN`. The Brain identity sent to Core
+  is `FINITE_BRAIN_PUBLIC_BASE_URL` without a trailing slash; it must equal
+  Core's `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER`. An invalid or partial pair
+  disables descriptions with a warning and Brain keeps serving. Descriptions
+  never change authorization, which stays in Brain tables.
 - `FINITE_BRAIN_INVITE_MAILER`: optional Brain invite delivery mode: `dev`,
   `resend`, or `none`.
 - `FINITE_BRAIN_INVITE_MAIL_FROM`: sender address for `resend`.

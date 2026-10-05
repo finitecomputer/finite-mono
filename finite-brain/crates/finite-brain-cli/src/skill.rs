@@ -188,12 +188,44 @@ tree; Folders you cannot read appear locked or not at all. Access changes
 are signed admin events, and Folder Keys rotate on revocation; the CLI
 prepares rotation material automatically; never hand-build rotation bodies.
 
+## Who has access?
+
+Answer "who has access?" with one fresh server report for one exact Brain ID:
+
+```sh
+fbrain access list --brain <brain-id> --json
+```
+
+The acting key must itself be an admin, owner, or Personal Agent of that
+Brain; there is no account fallback. Report `coverage` and
+`currentAccessComplete` first: never call the list complete while a scope is
+`unverified`. Each row is one exact key; distinct keys never merge, even with
+the same name or email. A row's `description` says who the key belongs to,
+when that is permitted; it is never authority:
+
+- `resolved` human: say the shared account email (or display name). It is the
+  account's current contact, not proof of mailbox control.
+- `resolved` agent: say its name, lifecycle and responsible account email.
+  Responsibility is not legal ownership or proof of decryption.
+- `notShared`: say the details are not shared. `noParticipation` means this
+  key has not acted in this Brain; never guess who it is.
+- `ambiguous`, `unknown`, `unavailable`: say exactly that, with the key.
+- `storedNip05` is a stored public name with its stored time, not rechecked
+  and not a mailbox.
+
+`revocationIncomplete` lists Folders where a current grant remains without
+entitlement; `missingCurrentGrants` lists entitled Folders without one. A
+present grant does not prove the key decrypted anything. Never remove,
+restore, re-grant, or act on another Brain because of a description or its
+absence; confirm the exact npub with the user first. An older server
+fails with `unsupported`; report that rather than substituting
+`fbrain access summary`, which names no identities and proves no coverage.
+
 ## Provenance
 
 Memberships and grants record where they came from: an invitation, a signed
 approval artifact, or a direct admin action. When reporting who has access,
-read `fbrain brain metadata --json` and `fbrain access list` rather than
-inferring from local files.
+use `fbrain access list` rather than inferring from local files.
 
 ## Error glossary
 

@@ -1,8 +1,8 @@
 # Named Brain access report v1
 
-Status: draft implementation contract for
-[FIN-122](https://linear.app/finitecomputer/issue/FIN-122). Runtime implementation
-and qualification are pending. This contract depends on
+Status: implemented for
+[FIN-122](https://linear.app/finitecomputer/issue/FIN-122) (see "Implementation"
+below); production enablement is separate. This contract depends on
 [Core identity descriptions v1](../../finitecomputer-v2/docs/brain-identity-descriptions-v1.md).
 It replaces PR #1050's naming design while retaining its useful access invariants.
 
@@ -142,3 +142,30 @@ designated Brain after rollout. FIN-159 / PR #1049 owns safe revocation separate
 this report does not rotate, remove or repair anything. If revocation tests need
 the report, update that test dependency without importing report mutations or
 coupling the two product features.
+
+## Implementation
+
+- Route `GET /v1/brains/{brain_id}/access-report`, version
+  `finite-brain-access-report-v1`, admin-only through the existing exact-key
+  rule. Each row carries `description` (`state`, optional `reason`, and for
+  `resolved` rows `kind`, `displayName`, `accountEmail`, `lifecycle`,
+  `responsibleAccount`, `source`) and optional `storedNip05` (`name`,
+  `storedAt`). Page coverage is `descriptions` (`checked`, `notConfigured`,
+  `notNeeded`, `unavailable`, `unsupported`) with Core's `checkedAt`.
+- Keys without recorded participation get `notShared` with reason
+  `noParticipation` and are never sent to Core. Participation evidence is
+  Invite Token redemption, npub Brain Invitation acceptance, Folder Invitation
+  acceptance, addressed Mount Offer acceptance, an accepted authenticated
+  Brain record, or an applied Approval by its exact signer
+  (`brain_approval_nonces`). Approval targets do not inherit it.
+- SCHEMA_V30 adds only indexes for those reads. Grant evidence is the stored
+  issuer, time and provenance; signed-audit re-verification, the Identity
+  Directory lookup and outbound NIP-05 rechecks are not part of this report.
+- Brain configuration: `FINITE_BRAIN_CORE_IDENTITY_URL` and
+  `FINITE_BRAIN_CORE_DESCRIPTION_TOKEN` (see `finite-brain/development.md` and
+  the [rollout runbook](../../infra/runbooks/brain-identity-descriptions.md)).
+  A Core outage, old Core or invalid batch keeps every row and marks
+  participating keys `unavailable`; malformed, partial, foreign or
+  extra-key batches are refused whole.
+- `fbrain access list --brain <id>` renders text and `--json`; `fbrain access
+  summary` keeps the older metadata view.

@@ -47,7 +47,9 @@ use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+mod access_report;
 mod contracts;
+mod core_descriptions;
 mod object_records;
 mod protected_routes;
 mod responses;
@@ -115,9 +117,17 @@ pub struct ServerState {
     nip05_fetcher: Nip05Fetcher,
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
+    core_descriptions: Option<CoreDescriptionClient>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
+
+/// Optional Core identity description client and this Brain's identity.
+#[derive(Clone)]
+struct CoreDescriptionClient {
+    brain_server: String,
+    lookup: core_descriptions::CoreDescriptionLookup,
+}
 
 /// Server-visible Brain invitation email payload.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -157,7 +167,47 @@ impl ServerState {
             nip05_fetcher: default_nip05_fetcher(),
             invite_mailer: None,
             brain_updates,
+            core_descriptions: None,
         }
+    }
+
+    /// Let the access report ask Core's private identity listener to describe
+    /// exact, participating report keys for this Brain's audience. The
+    /// credential is Core's read-only description credential. `base_url` must
+    /// be a literal loopback or private IP URL with a port and no user info,
+    /// path, query, or fragment. This Brain's identity sent to Core is its
+    /// public base URL. Without this the report marks descriptions
+    /// `notConfigured` and every access row is unchanged.
+    pub fn with_core_identity_descriptions(
+        mut self,
+        base_url: &str,
+        credential: impl Into<String>,
+    ) -> Result<Self, String> {
+        let lookup = core_descriptions::http_core_description_lookup(base_url, credential.into())?;
+        self.core_descriptions = Some(CoreDescriptionClient {
+            brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
+            lookup,
+        });
+        Ok(self)
+    }
+
+    #[cfg(test)]
+    fn with_core_description_fixture(
+        mut self,
+        lookup: impl Fn(
+            &core_descriptions::CoreLookupRequest,
+        ) -> Result<
+            core_descriptions::CoreDescriptionsResponse,
+            core_descriptions::CoreLookupFailure,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        self.core_descriptions = Some(CoreDescriptionClient {
+            brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
+            lookup: Arc::new(lookup),
+        });
+        self
     }
 
     fn publish_brain_update(
@@ -412,6 +462,13 @@ pub fn server_state_with_sqlite_path(
     Ok(ServerState::new(BrainStore::open(path)?, public_base_url))
 }
 
+/// Validate a Core identity description base URL: a literal loopback or
+/// private IP with a port and no user info, path, query, or fragment.
+/// Returns the normalized base URL.
+pub fn validate_core_identity_url(url: &str) -> Result<String, String> {
+    core_descriptions::validate_private_base_url(url)
+}
+
 /// Build a router with explicit state.
 pub fn router_with_state(state: ServerState) -> Router {
     let cors_state = state.clone();
@@ -450,6 +507,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/rename", post(rename_brain_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
+        .route(
+            "/brains/{brain_id}/access-report",
+            get(access_report::access_report_handler),
+        )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access",
             get(folder_access_handler),
@@ -1397,25 +1458,31 @@ fn expected_created_at(event: &Event) -> Result<String, ApiError> {
 }
 
 fn ensure_brain_admin(stored: &StoredBrain, actor_npub: &str) -> Result<(), ApiError> {
-    if stored.brain.kind == BrainKind::Personal
-        && stored
-            .brain
+    ensure_brain_admin_key(&stored.brain, stored.personal_agent.as_ref(), actor_npub)
+}
+
+/// Canonical key-based Brain admin policy: the calling key itself must be the
+/// Personal Brain owner, the Personal Brain's delegated Personal Agent, or an
+/// Organization/Brain admin. Nothing falls back to an account.
+fn ensure_brain_admin_key(
+    brain: &finite_brain_core::Brain,
+    personal_agent: Option<&finite_brain_store::PersonalAgent>,
+    actor_npub: &str,
+) -> Result<(), ApiError> {
+    if brain.kind == BrainKind::Personal
+        && brain
             .owner_user_id
             .as_ref()
             .is_some_and(|owner| owner.as_str() == actor_npub)
     {
         return Ok(());
     }
-    if stored.brain.kind == BrainKind::Personal
-        && stored
-            .personal_agent
-            .as_ref()
-            .is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub)
+    if brain.kind == BrainKind::Personal
+        && personal_agent.is_some_and(|relationship| relationship.agent_npub.as_str() == actor_npub)
     {
         return Ok(());
     }
-    let is_admin = stored
-        .brain
+    let is_admin = brain
         .admins
         .iter()
         .any(|admin| admin.as_str() == actor_npub);
@@ -9801,4 +9868,6 @@ mod tests {
         assert_eq!(replay.outcome, "noPendingWraps");
         assert_eq!(replay.completed_count, 0);
     }
+
+    mod access_report_tests;
 }
