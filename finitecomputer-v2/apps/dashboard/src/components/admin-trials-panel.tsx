@@ -1,3 +1,4 @@
+import { AdminTrialCode } from "@/components/admin-trial-code";
 import { TicketIcon } from "lucide-react";
 import { loadCoreTrialCampaigns } from "@/lib/core-client";
 import { summarizeTrialCampaigns, trialCampaignStatus, trialDate, trialSeatStatus } from "@/lib/admin-trials";
@@ -20,7 +21,7 @@ export async function AdminTrialsPanel() {
     {result.error ? <p role="alert" className="ocean-empty-state">{result.error}</p> : null}
     {result.campaigns ? <>
       <TrialSummary campaigns={result.campaigns} />
-      {enabled ? <AdminTrialForm /> : <p className="ocean-empty-state">Trial checkout is disabled in this dashboard. Campaign creation and capacity changes are unavailable here.</p>}
+      {enabled ? <AdminTrialForm /> : <p className="ocean-empty-state">Trial checkout is disabled in this dashboard. Campaign creation, code editing and capacity changes are unavailable here.</p>}
       <div className="grid gap-4" aria-label="Trial campaigns">
         {result.campaigns.length === 0 ? <p className="ocean-empty-state">No free trial campaigns yet.</p> : null}
         {result.campaigns.map(campaign => <CampaignCard key={campaign.id} campaign={campaign} enabled={enabled} />)}
@@ -70,9 +71,10 @@ function CampaignCard({ campaign, enabled }: { campaign: TrialCampaign; enabled:
   return <article className="grid min-w-0 gap-4 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4" aria-label={campaign.name}>
     <div className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0"><h3 className="break-words font-semibold">{campaign.name}</h3>
-        <p className="mt-1 text-xs text-muted-foreground">{campaign.trialDays}-day trial · Code shown only at creation · No redemption deadline</p></div>
+        <p className="mt-1 text-xs text-muted-foreground">{campaign.trialDays}-day trial · No redemption deadline</p></div>
       <span className="rounded-full border border-border px-2 py-0.5 text-xs">{trialCampaignStatus(campaign)}</span>
     </div>
+    <AdminTrialCode campaign={{ id: campaign.id, code: campaign.code, codeRevision: campaign.codeRevision }} enabled={enabled} />
     <div className="grid gap-2">
       <div className="flex flex-wrap justify-between gap-2 text-sm"><span><strong>{used} / {campaign.seatLimit}</strong> seats used</span><span>{campaign.seatsRemaining} remaining{!campaign.active ? " · inactive code" : ""}</span></div>
       <div className="h-2 overflow-hidden rounded-full bg-muted ring-1 ring-inset ring-border" role="progressbar" aria-valuemin={0} aria-valuenow={used} aria-valuemax={campaign.seatLimit} aria-label={`${campaign.name} seats used`}>
@@ -86,9 +88,14 @@ function CampaignCard({ campaign, enabled }: { campaign: TrialCampaign; enabled:
       {campaign.redemptions.length === 0 ? <p className="mt-3 text-muted-foreground">No checkout attempts yet.</p> : <div className="mt-3 overflow-x-auto">
         <table className="w-full text-left text-xs">
           <caption className="sr-only">{campaign.name} checkout attribution and billing access</caption>
-          <thead className="text-muted-foreground"><tr><th className="p-2">Account</th><th className="p-2">State / access</th><th className="p-2">Redeemed at</th><th className="p-2">Billing period end</th></tr></thead>
+          <thead className="text-muted-foreground"><tr><th className="p-2">Account / agents</th><th className="p-2">State / access</th><th className="p-2">Redeemed at</th><th className="p-2">Billing period end</th></tr></thead>
           <tbody>{campaign.redemptions.map((seat, index) => <tr className="border-t border-border" key={`${seat.customerOrgId}-${index}`}>
-            <td className="min-w-40 max-w-64 break-all p-2">{seat.ownerWorkosUserId ?? seat.customerOrgId}<span className="block text-muted-foreground">{seat.ownerWorkosUserId ? seat.customerOrgId : "Owner unknown"}</span></td>
+            <td className="min-w-40 max-w-64 break-words p-2">
+              <span className="block">{seat.ownerEmail?.trim() || "Email unavailable"}</span>
+              <span className="block">{seat.agentNames === undefined ? "Agent names unavailable" : seat.agentNames.length ? seat.agentNames.map(name => name.trim() || "Unnamed agent").join(", ") : "No agents yet"}</span>
+              <span className="block break-all text-muted-foreground">{seat.customerOrgId}</span>
+              {seat.ownerWorkosUserId ? <span className="block break-all text-muted-foreground">{seat.ownerWorkosUserId}</span> : null}
+            </td>
             <td className="min-w-40 p-2">{trialSeatStatus(seat)}</td>
             <td className="min-w-32 p-2">{seat.redeemedAt ? trialDate(seat.redeemedAt) : "—"}</td>
             <td className="min-w-32 p-2">{seat.state === "redeemed" ? trialDate(seat.trialAccess?.periodEnd ?? null) : "—"}</td>

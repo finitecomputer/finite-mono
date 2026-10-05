@@ -176,6 +176,9 @@ mod launch_codes;
 mod offboarding;
 #[cfg(test)]
 mod trial_access_gates_tests;
+mod trial_codes;
+#[cfg(test)]
+mod trial_codes_tests;
 mod trial_runtime_suspensions;
 pub(crate) mod trials;
 mod trials_access;

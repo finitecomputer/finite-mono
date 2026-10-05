@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import test from "node:test";
-import { issueTrialCampaignAction, increaseTrialCapacityAction } from "@/app/dashboard/admin/trial-actions";
+import { issueTrialCampaignAction, increaseTrialCapacityAction, updateTrialCodeAction } from "@/app/dashboard/admin/trial-actions";
 
 test("trial server actions reject non-admins and disabled trials before any mutation", async (t) => {
   const saved = { ...process.env };
@@ -26,12 +26,12 @@ test("trial server actions reject non-admins and disabled trials before any muta
   const form = new FormData();
   form.set("name", "Forged"); form.set("seatLimit", "15"); form.set("trialDays", "7");
   form.set("campaignId", "c"); form.set("expectedSeatLimit", "10"); form.set("isAdmin", "true");
-  for (const action of [issueTrialCampaignAction, increaseTrialCapacityAction]) {
+  for (const action of [issueTrialCampaignAction, increaseTrialCapacityAction, updateTrialCodeAction]) {
     assert.deepEqual(await action({}, form), { error: "Admin access required." });
   }
   process.env.FC_DASHBOARD_DEV_ADMIN_EMAILS = "member@example.test";
   process.env.FC_DASHBOARD_TRIALS_ENABLED = "false";
-  for (const action of [issueTrialCampaignAction, increaseTrialCapacityAction]) {
+  for (const action of [issueTrialCampaignAction, increaseTrialCapacityAction, updateTrialCodeAction]) {
     assert.deepEqual(await action({}, form), { error: "Trial checkout is disabled in this dashboard." });
   }
   assert.equal(writes, 0);

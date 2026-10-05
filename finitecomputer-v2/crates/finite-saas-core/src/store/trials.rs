@@ -70,8 +70,8 @@ impl CoreStore {
         let hash = hash_trial_code(&code)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        tx.execute("INSERT INTO trial_campaigns(id,name,code_hash,seat_limit,trial_days,created_by_workos_user_id) VALUES($1,$2,$3,$4,$5,$6)",
-            &[&id,&input.name.trim(),&hash,&input.seat_limit,&input.trial_days,&actor]).await.map_err(store_error)?;
+        tx.execute("INSERT INTO trial_campaigns(id,name,code_hash,seat_limit,trial_days,created_by_workos_user_id,code) VALUES($1,$2,$3,$4,$5,$6,$7)",
+            &[&id,&input.name.trim(),&hash,&input.seat_limit,&input.trial_days,&actor,&code]).await.map_err(store_error)?;
         self.finish(tx).await?;
         Ok(IssuedTrialCampaign { id, code })
     }
@@ -188,10 +188,11 @@ impl CoreStore {
             .await
             .map_err(store_error)?;
         let mut result = Vec::new();
-        for row in tx.query("SELECT id,name,seat_limit,trial_days,active FROM trial_campaigns ORDER BY created_at DESC", &[]).await.map_err(store_error)? {
+        for row in tx.query("SELECT id,name,seat_limit,trial_days,active,code,code_revision FROM trial_campaigns ORDER BY created_at DESC", &[]).await.map_err(store_error)? {
             let id: String = row.get(0);
             let rows = tx.query("SELECT r.customer_org_id,u.workos_user_id,r.state,core_rfc3339(r.redeemed_at),
-                b.subscription_status,core_rfc3339(b.current_period_end),core_trial_access_blocked(o.id,CURRENT_TIMESTAMP)
+                b.subscription_status,core_rfc3339(b.current_period_end),core_trial_access_blocked(o.id,CURRENT_TIMESTAMP),
+                u.normalized_email,ARRAY(SELECT p.display_name FROM projects p WHERE p.customer_org_id=o.id ORDER BY p.created_at,p.id)
                 FROM trial_redemptions r JOIN customer_orgs o ON o.id=r.customer_org_id JOIN users u ON u.id=o.owner_user_id
                 LEFT JOIN customer_billing_accounts b ON b.customer_org_id=o.id WHERE r.campaign_id=$1 ORDER BY r.created_at", &[&id]).await.map_err(store_error)?;
             let redemptions: Vec<_> = rows.iter().map(|r| {
@@ -199,12 +200,12 @@ impl CoreStore {
                 let trial_access = (state == "redeemed").then(|| TrialAccess {
                     blocked: r.get(6), event_name: row.get(1), subscription_status: r.get(4), period_end: r.get(5),
                 });
-                TrialRedemption { customer_org_id:r.get(0),owner_workos_user_id:r.get(1),state,redeemed_at:r.get(3),trial_access }
+                TrialRedemption { customer_org_id:r.get(0),owner_workos_user_id:r.get(1),owner_email:r.get(7),agent_names:r.get(8),state,redeemed_at:r.get(3),trial_access }
             }).collect();
             let reserved_seats = redemptions.iter().filter(|r| r.state == "reserved").count() as i64;
             let redeemed_seats = redemptions.iter().filter(|r| r.state == "redeemed").count() as i64;
             let seat_limit: i32 = row.get(2);
-            result.push(TrialCampaign { id,name:row.get(1),seat_limit,trial_days:row.get(3),active:row.get(4),reserved_seats,redeemed_seats,seats_remaining:i64::from(seat_limit)-reserved_seats-redeemed_seats,redemptions });
+            result.push(TrialCampaign { id,name:row.get(1),code:row.get(5),code_revision:row.get(6),seat_limit,trial_days:row.get(3),active:row.get(4),reserved_seats,redeemed_seats,seats_remaining:i64::from(seat_limit)-reserved_seats-redeemed_seats,redemptions });
         }
         tx.commit().await.map_err(store_error)?;
         Ok(result)
