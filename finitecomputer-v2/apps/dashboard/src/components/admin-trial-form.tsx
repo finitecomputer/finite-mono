@@ -10,6 +10,11 @@ import { Label } from "@/components/ui/label";
 export function AdminTrialForm({ savedCampaignIds }: { savedCampaignIds: string[] }) {
   const [state, action, pending] = useActionState(issueTrialCampaignAction, {});
   const codeSaved = !!state.campaignId && savedCampaignIds.includes(state.campaignId);
+  const [retiredCampaignId, setRetiredCampaignId] = useState<string>();
+  // Acknowledgment is permanent for this issuance. A rollback that omits code
+  // fields must not revive a snapshot that may since have been replaced.
+  if (codeSaved && retiredCampaignId !== state.campaignId) setRetiredCampaignId(state.campaignId);
+  const codeRetired = codeSaved || (!!state.campaignId && retiredCampaignId === state.campaignId);
   return <details className="rounded-[var(--radius-card-inner)] border border-border p-4">
     <summary className="cursor-pointer font-medium">Create new free trial campaign</summary>
     <form action={action} className="mt-4 grid gap-4" aria-label="Create trial campaign">
@@ -27,7 +32,8 @@ export function AdminTrialForm({ savedCampaignIds }: { savedCampaignIds: string[
       {state.error ? <p role="alert">{state.error}</p> : null}
       {state.code ? <div role="status" className="rounded-lg border p-4">
         <p className="mb-2 font-medium">{state.message}</p>
-        {codeSaved ? <p className="text-sm">Campaign created. You can view and edit its code below at any time.</p> : <>
+        {codeSaved ? <p className="text-sm">Campaign created. You can view and edit its code below at any time.</p> : codeRetired ?
+          <p className="text-sm">Campaign created. Its current code is unavailable in the campaign list. Refresh to try again.</p> : <>
           <p className="mb-2 text-sm">Campaign created. Copy and save this code now. It is not available in the campaign list.</p>
           <code className="break-all select-all">{state.code}</code>
         </>}
