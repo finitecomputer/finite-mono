@@ -1,5 +1,25 @@
 use super::*;
 
+/// True while a relocation for this Runtime is requested or launching, or is
+/// cancelled but its target Runner has not yet released target compute.
+pub(super) async fn relocation_holds_runtime<C>(client: &C, runtime_id: &str) -> CoreResult<bool>
+where
+    C: GenericClient + Sync,
+{
+    Ok(client
+        .query_opt(
+            "SELECT 1 FROM agent_creation_requests
+             WHERE agent_runtime_id = $1 AND relocation_spec IS NOT NULL
+               AND (status IN ('requested', 'launching')
+                    OR (status = 'cancelled' AND lease_token IS NOT NULL))
+             LIMIT 1",
+            &[&runtime_id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some())
+}
+
 /// Does `existing` carry exactly this relocation attempt (envelope and target
 /// host), making it safe to REUSE instead of inserting another row? Used both
 /// by the up-front active-relocation check and by the post-conflict re-read
@@ -48,7 +68,7 @@ where
     // failed control marks a runtime stale, and absent compute can never
     // reach `offline` because the stop that would record it fails by
     // definition. `online` is the last runner report before the source
-    // host died — under the attestation nothing could have updated it
+    // host died. Under the attestation nothing could have updated it
     // since (the dead host's runner is gone, so no control can lease and
     // no report can arrive), making it exactly as frozen as `stale`.
     // Without the attestation `online` stays movable-only-by-nothing: an
@@ -148,6 +168,22 @@ where
         durable_state_manifest_sha256: manifest,
         source_compute_absent: input.operator_observed_compute_absent,
     });
+    // A cancelled attempt whose target Runner still holds its lease may have
+    // running target compute; a new attempt must not start a second target.
+    if client
+        .query_opt(
+            "SELECT 1 FROM agent_creation_requests
+             WHERE agent_runtime_id = $1 AND relocation_spec IS NOT NULL
+               AND status = 'cancelled' AND lease_token IS NOT NULL
+             LIMIT 1",
+            &[&runtime.id],
+        )
+        .await
+        .map_err(store_error)?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
     let active_sql = "SELECT id, customer_org_id, owner_user_id, project_id, idempotency_key,
                display_name, runner_class, hosting_tier, placement_runner_class,
                runtime_resource_class, desired_runtime_artifact_id, runtime_spec,
@@ -265,8 +301,8 @@ where
     // pass the check before either commits. The insert's ON CONFLICT DO
     // NOTHING defers to the partial unique index
     // `agent_creation_requests_one_active_relocation_per_runtime`, so the
-    // loser sees `false` and re-reads the winner's committed row — reusing it
-    // when it carries this exact envelope and target, refusing otherwise —
+    // loser sees `false` and re-reads the winner's committed row, reusing it
+    // when it carries this exact envelope and target and refusing otherwise,
     // instead of erroring on the unique violation or inserting a second
     // active row.
     let inserted = upsert_agent_creation_request_row_with_conflict(

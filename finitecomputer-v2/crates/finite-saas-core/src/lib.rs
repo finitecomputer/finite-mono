@@ -53,10 +53,11 @@ pub use accounts::{
 
 pub use agent_creation::{
     AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
-    FailAgentCreationRequestInput, LeaseAgentCreationRequestInput,
-    RegisterAgentCreationRuntimeInput, ReleaseLaunchHostInput, RequestAgentCreationInput,
-    RequestAgentCreationResult, RetryTargetedLaunchCodeInput, parse_agent_creation_request_status,
+    AgentCreationRequestStatus, CancelAgentCreationRequestInput, CancelRelocationExactInput,
+    CompleteAgentCreationRequestInput, FailAgentCreationRequestInput,
+    LeaseAgentCreationRequestInput, RegisterAgentCreationRuntimeInput, ReleaseLaunchHostInput,
+    RelocationCancelOutcome, RequestAgentCreationInput, RequestAgentCreationResult,
+    RetryTargetedLaunchCodeInput, parse_agent_creation_request_status,
 };
 
 pub use error::{CoreError, CoreResult, StoreErrorDetail};

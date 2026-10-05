@@ -1,3 +1,4 @@
+mod cancellation;
 mod failures;
 mod lifecycle;
 mod recovery;
@@ -420,6 +421,34 @@ async fn complete_relocation_over_http(
         "POST",
         &format!(
             "/api/core/v1/agent-creation-requests/{}/complete",
+            fixture.request_id
+        ),
+        &[("authorization".to_string(), runner_authorization())],
+        Some(body),
+    )
+    .await
+    .0
+}
+
+async fn fail_relocation_over_http(
+    app: &Router,
+    fixture: &PreparedRelocation,
+    lease_token: &str,
+) -> StatusCode {
+    let body = serde_json::to_value(FailAgentCreationRequestInput {
+        request_id: fixture.request_id.clone(),
+        runner_id: "runner-oslo-1".to_string(),
+        lease_token: lease_token.to_string(),
+        failure_message: "completion response was lost".to_string(),
+        provisioned_finite_private_api_key_id: None,
+        now: None,
+    })
+    .unwrap();
+    send_json(
+        app,
+        "POST",
+        &format!(
+            "/api/core/v1/agent-creation-requests/{}/fail",
             fixture.request_id
         ),
         &[("authorization".to_string(), runner_authorization())],

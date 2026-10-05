@@ -247,3 +247,85 @@ async fn relocation_replaces_credential_and_preserves_later_upgrade_same_host() 
 async fn relocation_replaces_credential_and_preserves_later_upgrade_cross_host() {
     run_relocation_credential_handoff(false).await;
 }
+
+#[tokio::test]
+async fn relocation_in_flight_refuses_runtime_controls_until_it_ends() {
+    with_isolated_postgres(|db| async move {
+        for enrolled in [true, false] {
+            let run = if enrolled {
+                "control-enrolled"
+            } else {
+                "control-unenrolled"
+            };
+            let runtime = create_runtime(&db, run, enrolled).await;
+            let target_artifact = format!("relocation-{run}-v2");
+            artifact(&db, &target_artifact, '2').await;
+            let stop = || {
+                db.request_runtime_stop(RequestRuntimeStopInput {
+                    verified_email: format!("{run}@finite.vip"),
+                    workos_user_id: format!("api-relocation-{run}-owner"),
+                    project_id: runtime.project_id.clone(),
+                    now: None,
+                })
+            };
+            let upgrade = || {
+                db.admin_request_runtime_upgrade(AdminRuntimeUpgradeInput {
+                    admin_verified_email: format!("{run}-admin@finite.vip"),
+                    admin_workos_user_id: format!("api-relocation-{run}-admin"),
+                    project_id: runtime.project_id.clone(),
+                    target_runtime_artifact_id: target_artifact.clone(),
+                    now: None,
+                })
+            };
+
+            // A control enqueued mid-relocation would make completion refuse
+            // and tear down the target, so admission refuses it instead.
+            let fixture = enqueue_relocation(&db, &runtime).await;
+            let requested = stop().await.err();
+            assert!(
+                matches!(
+                    requested,
+                    Some(crate::CoreError::RuntimeControlOperationConflict)
+                ),
+                "a requested relocation must refuse an owner stop: {requested:?}"
+            );
+            let lease = format!("api-relocation-{run}-relocation-lease");
+            lease_relocation(&db, &fixture, &lease).await;
+            let launching = upgrade().await.err();
+            assert!(
+                matches!(
+                    launching,
+                    Some(crate::CoreError::RuntimeControlOperationConflict)
+                ),
+                "a launching relocation must refuse a fleet upgrade: {launching:?}"
+            );
+
+            if enrolled {
+                let (status, _) = provision_relocation_over_http(
+                    &router(db.store.clone(), scoped_test_auth()),
+                    &fixture.request_id,
+                    &lease,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK);
+                register_relocation(&db, &fixture, &lease).await;
+                complete_relocation(&db, &fixture, &lease).await;
+                assert_eq!(creation_status(&db, &fixture.request_id).await, "running");
+            } else {
+                db.fail_agent_creation_request(FailAgentCreationRequestInput {
+                    request_id: fixture.request_id.clone(),
+                    runner_id: "runner-oslo-1".to_string(),
+                    lease_token: lease.clone(),
+                    failure_message: "synthetic relocation failure".to_string(),
+                    provisioned_finite_private_api_key_id: None,
+                    now: None,
+                })
+                .await
+                .unwrap();
+            }
+            // Once the relocation ends, the Runtime accepts controls again.
+            stop().await.unwrap();
+        }
+    })
+    .await;
+}
