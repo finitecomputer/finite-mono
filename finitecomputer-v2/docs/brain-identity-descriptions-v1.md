@@ -56,6 +56,32 @@ failure/retry path must not block Chat startup, onboarding, signing, normal Brai
 access or the original action's successful result. A report read does not invoke
 this writer. Older components continue without registration.
 
+Proposed ingest route:
+`POST /api/core/internal/v1/brain-account-observations`. Require both the current
+WorkOS bearer from server-only `AccountAuthContext.accessToken` and a dedicated
+hosted-observation service credential. Core uses `require_verified_identity`;
+caller-supplied account identity/email headers remain forbidden. The credential
+identifies the trusted dashboard issuer, rather than authorizing a browser to
+submit observations directly.
+
+The versioned body contains an operation ID, configured Brain server identity,
+exact Brain ID, observation time, optional observed human public key, exact
+participating public key and action kind (`humanHostedAction` or
+`ownedAgentHostedAction`). The trusted backend derives keys from the Hosted Device
+response or exact Core-owned agent pin and verifies the Brain action's response.
+For a human action, participating key must equal the observed human key. For an
+owned-agent action, Core additionally verifies the unique current project owner
+matches the bearer account. No actor, email or ownership field from the browser
+can supply this evidence; a model message is not a receipt.
+
+Start with a 60-second observation window plus 30 seconds of clock skew. Atomically
+store the association when present, scoped sharing and operation outcome. An
+exact same-account/same-payload operation retry is idempotent; different payload,
+issuer or account reuse is refused. Return `recorded` or `unchanged`; conflicting
+active key associations return 409 without overwriting them. Keep the stored
+operation receipt free of bearer/service credentials. This is one trusted-service
+operation, with no challenge route, borrowed Brain proof URL or new signing API.
+
 ## Private contact disclosure
 
 An admin can add an arbitrary key to a Brain. That action does not authorize
