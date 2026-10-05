@@ -1995,13 +1995,66 @@ impl KataLauncher {
         write_kata_env_file(&plan.env_file, &env)
     }
 
+    fn launch_authorized(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        let launcher = KataLauncher::new(self.config_for_creation(lease)?);
+        launcher.validate_ready()?;
+        let plan = launcher.plan_launch(lease)?;
+        let _relocation_operation_lock = if lease.request.relocation.is_some() {
+            Some(launcher.acquire_runtime_operation_lock(&plan)?)
+        } else {
+            None
+        };
+        if let Some(relocation) = lease.request.relocation.as_ref() {
+            launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
+        }
+        let host_port = launcher.run_fresh(&plan, lease, options, renew)?;
+        let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
+        if let Some(relocation) = lease.request.relocation.as_ref()
+            && observed_npub != relocation.v1().expected_agent_npub
+        {
+            let _ = launcher.remove_compute(&plan.container_name);
+            return Err(RunnerError::RuntimeLaunch(
+                "cold relocation target exposed a different Agent Principal".to_string(),
+            ));
+        }
+        let public_base_url = plan.public_base_url(host_port);
+
+        Ok(RuntimeLaunchFacts {
+            source_host_id: launcher.config.source_host_id.clone(),
+            source_machine_id: plan.container_name.clone(),
+            runtime_artifact_id: launcher.config.runtime_artifact_id.clone(),
+            state_schema_version: launcher.config.runtime_state_schema_version.clone(),
+            provider_runtime_handle: None,
+            contact_endpoint: Some(plan.contact_url(host_port)),
+            display_name: Some(lease.project.display_name.clone()),
+            hostname: None,
+            runtime_host: Some(public_base_url),
+            runtime_status: RuntimeSummaryStatus::Online,
+            active_inference_profile: options
+                .finite_private
+                .as_ref()
+                .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
+            hermes_available: Some(true),
+            published_app_urls: vec![plan.contact_url(host_port)],
+        })
+    }
+
     fn run_fresh(
         &self,
         plan: &KataLaunchPlan,
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
     ) -> Result<u16, RunnerError> {
         self.prepare_plan(plan)?;
+        // The host lock can wait beyond the original lease. The journal proves
+        // provenance, never current launch or billing authority.
+        renew()?;
         self.remove_compute_if_present(plan, &lease.project.id)?;
         self.write_launch_environment(plan, lease, options)?;
         let launch_result = self.run_checked(
@@ -3087,47 +3140,43 @@ impl RuntimeLauncher for KataLauncher {
         lease: &AgentCreationLease,
         options: &RuntimeLaunchOptions,
     ) -> Result<RuntimeLaunchFacts, RunnerError> {
-        let launcher = KataLauncher::new(self.config_for_creation(lease)?);
-        launcher.validate_ready()?;
-        let plan = launcher.plan_launch(lease)?;
-        let _relocation_operation_lock = if lease.request.relocation.is_some() {
-            Some(launcher.acquire_runtime_operation_lock(&plan)?)
-        } else {
-            None
-        };
-        if let Some(relocation) = lease.request.relocation.as_ref() {
-            launcher.verify_relocation_state(&plan, lease, relocation.v1())?;
-        }
-        let host_port = launcher.run_fresh(&plan, lease, options)?;
-        let observed_npub = launcher.wait_for_agent_npub(&plan, host_port)?;
-        if let Some(relocation) = lease.request.relocation.as_ref()
-            && observed_npub != relocation.v1().expected_agent_npub
+        if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_some_and(|r| r.v1().trial_archive.is_some())
         {
-            let _ = launcher.remove_compute(&plan.container_name);
             return Err(RunnerError::RuntimeLaunch(
-                "cold relocation target exposed a different Agent Principal".to_string(),
+                "trial restore launch requires current Core authority".into(),
             ));
         }
-        let public_base_url = plan.public_base_url(host_port);
+        self.launch_authorized(lease, options, &mut || Ok(()))
+    }
 
-        Ok(RuntimeLaunchFacts {
-            source_host_id: launcher.config.source_host_id.clone(),
-            source_machine_id: plan.container_name.clone(),
-            runtime_artifact_id: launcher.config.runtime_artifact_id.clone(),
-            state_schema_version: launcher.config.runtime_state_schema_version.clone(),
-            provider_runtime_handle: None,
-            contact_endpoint: Some(plan.contact_url(host_port)),
-            display_name: Some(lease.project.display_name.clone()),
-            hostname: None,
-            runtime_host: Some(public_base_url),
-            runtime_status: RuntimeSummaryStatus::Online,
-            active_inference_profile: options
-                .finite_private
-                .as_ref()
-                .map(|_| FINITE_PRIVATE_PROFILE_ID.to_string()),
-            hermes_available: Some(true),
-            published_app_urls: vec![plan.contact_url(host_port)],
-        })
+    fn trial_restore_private_key(
+        &mut self,
+        lease: &AgentCreationLease,
+    ) -> Result<String, RunnerError> {
+        self.durable_trial_restore_private_key(lease)
+    }
+
+    fn launch_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_none_or(|r| r.v1().trial_archive.is_none())
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "trial restore snapshot required".into(),
+            ));
+        }
+        self.launch_authorized(lease, options, renew)
     }
 
     fn cleanup_failed_launch(&mut self, facts: &RuntimeLaunchFacts) -> Result<(), RunnerError> {

@@ -208,6 +208,7 @@ async fn provider_operation_ledger_is_fenced_monotonic_and_survives_re_lease() {
             .unwrap();
         let provisioned_key = db
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: request_id.clone(),
                 runner_id: "runner-a".to_string(),
                 lease_token: "token-a".to_string(),

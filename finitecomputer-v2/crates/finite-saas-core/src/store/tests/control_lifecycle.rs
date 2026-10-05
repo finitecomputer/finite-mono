@@ -71,6 +71,7 @@ async fn postgres_runtime_control_lifecycle_row_scoped() {
             // A Finite Private key bound to the runtime, to prove destroy revokes it.
             let provisioned = store
                 .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                     request_id: lease.request.id.clone(),
                     runner_id: format!("runner-{run}"),
                     lease_token: format!("lease-{run}"),

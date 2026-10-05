@@ -63,6 +63,7 @@ async fn postgres_admin_offboard_retired_runtime_completes_verified_retirement()
         assert_eq!(lease.request.id, created.request.id);
         let provisioned = store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: format!("runner-{run}"),
                 lease_token: format!("lease-{run}"),

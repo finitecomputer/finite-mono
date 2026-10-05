@@ -385,6 +385,7 @@ pub(super) async fn provision_finite_private_runtime_key(
         state
             .store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: input.trial_restore_key,
                 request_id,
                 runner_id: input.runner_id,
                 lease_token: input.lease_token,

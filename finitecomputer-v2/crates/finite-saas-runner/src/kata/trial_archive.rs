@@ -467,3 +467,72 @@ pub(super) fn reclaim_reservation_count(config: &KataConfig) -> Option<u32> {
         Err(_) => None,
     }
 }
+
+impl KataLauncher {
+    pub(super) fn durable_trial_restore_private_key(
+        &self,
+        lease: &AgentCreationLease,
+    ) -> Result<String, RunnerError> {
+        let plan = self.plan_launch(lease)?;
+        let _lock = self.acquire_runtime_operation_lock(&plan)?;
+        let (_, binding) = self.trial_restore_journal(lease, &plan)?;
+        let path = plan
+            .metadata_root
+            .join(format!("trial-key-{}.json", lease.request.id));
+        #[derive(Serialize, Deserialize)]
+        struct StoredKey {
+            binding: Vec<u8>,
+            key: String,
+        }
+        match path.symlink_metadata() {
+            Ok(metadata) => {
+                if !metadata.is_file() || metadata.len() > 64 * 1024 {
+                    return Err(invalid("Invalid trial restore key metadata"));
+                }
+                #[cfg(unix)]
+                if metadata.permissions().mode() & 0o777 != 0o600 {
+                    return Err(invalid("Trial restore key metadata is not private"));
+                }
+                let stored: StoredKey = serde_json::from_slice(
+                    &std::fs::read(&path)
+                        .map_err(|_| invalid("Cannot read trial restore key metadata"))?,
+                )
+                .map_err(|_| invalid("Invalid trial restore key metadata"))?;
+                if stored.binding != binding
+                    || !stored
+                        .key
+                        .strip_prefix("fpk_live_")
+                        .is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+                {
+                    return Err(invalid("Trial restore key binding differs"));
+                }
+                Ok(stored.key)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if self.trial_restore_journal_matches(lease, &plan)? {
+                    return Err(invalid("Restored target is missing its operation key"));
+                }
+                let key = finite_saas_core::generate_finite_private_api_key()
+                    .map_err(|_| invalid("Cannot generate trial restore key"))?;
+                let stored = StoredKey { binding, key };
+                let bytes = serde_json::to_vec(&stored)
+                    .map_err(|_| invalid("Cannot encode trial restore key"))?;
+                // create_new refuses symlinks and never overwrites a proposal.
+                // A partial write fails closed on the next attempt.
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                options.mode(0o600);
+                let mut file = options
+                    .open(&path)
+                    .map_err(|_| invalid("Cannot create trial restore key"))?;
+                file.write_all(&bytes)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|_| invalid("Cannot persist trial restore key"))?;
+                sync_directory(&plan.metadata_root)?;
+                Ok(stored.key)
+            }
+            Err(_) => Err(invalid("Cannot inspect trial restore key metadata")),
+        }
+    }
+}

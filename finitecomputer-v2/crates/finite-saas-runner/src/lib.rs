@@ -684,7 +684,7 @@ where
                 });
             }
         };
-        let restore = if lease
+        let launch = if lease
             .request
             .relocation
             .as_ref()
@@ -706,11 +706,11 @@ where
             };
             renew()
                 .and_then(|()| self.launcher.prepare_trial_restore(&lease, &mut renew))
-                .and_then(|()| renew())
+                .and_then(|()| {
+                    self.launcher
+                        .launch_trial_restore(&lease, &launch_options, &mut renew)
+                })
         } else {
-            Ok(())
-        };
-        let launch = restore.and_then(|()| {
             let mut provider_operation_journal = QueueProviderOperationJournal {
                 queue: &mut self.queue,
                 request_id: &request_id,
@@ -722,7 +722,7 @@ where
                 &launch_options,
                 &mut provider_operation_journal,
             )
-        });
+        };
         match launch {
             Ok(facts) => {
                 let launch_result = self.queue.register_agent_creation_runtime(
@@ -1286,9 +1286,20 @@ where
             .as_ref()
             .map(|value| value.source_host_id.clone())
             .or_else(|| self.launcher.source_host_id().map(str::to_string));
+        let trial_restore_key = if lease
+            .request
+            .relocation
+            .as_ref()
+            .is_some_and(|r| r.v1().trial_archive.is_some())
+        {
+            Some(self.launcher.trial_restore_private_key(lease)?)
+        } else {
+            None
+        };
         let key = self.queue.provision_finite_private_runtime_key(
             &lease.request.id,
             ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: trial_restore_key.clone(),
                 request_id: lease.request.id.clone(),
                 runner_id: self.runner_id.clone(),
                 lease_token: lease_token.to_string(),
@@ -1297,6 +1308,14 @@ where
                 now: None,
             },
         )?;
+        if trial_restore_key
+            .as_ref()
+            .is_some_and(|proposed| *proposed != key.raw_api_key)
+        {
+            return Err(RunnerError::CoreRequest(
+                "Core did not honor the durable trial restore key".into(),
+            ));
+        }
         options.finite_private = Some(FinitePrivateLaunchKey {
             api_key_id: key.api_key.id,
             raw_api_key: key.raw_api_key,
@@ -1515,6 +1534,26 @@ pub trait RuntimeLauncher {
         ))
     }
 
+    fn trial_restore_private_key(
+        &mut self,
+        _lease: &AgentCreationLease,
+    ) -> Result<String, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "durable trial restore key unsupported".into(),
+        ))
+    }
+
+    fn launch_trial_restore(
+        &mut self,
+        _lease: &AgentCreationLease,
+        _options: &RuntimeLaunchOptions,
+        _renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        Err(RunnerError::RuntimeLaunch(
+            "authorized trial restore launch unsupported".into(),
+        ))
+    }
+
     fn prepare_trial_restore(
         &mut self,
         lease: &AgentCreationLease,
@@ -1636,6 +1675,22 @@ where
     ) -> Result<(), RunnerError> {
         (**self).pause_trial_restore(lease, renew)
     }
+    fn trial_restore_private_key(
+        &mut self,
+        lease: &AgentCreationLease,
+    ) -> Result<String, RunnerError> {
+        (**self).trial_restore_private_key(lease)
+    }
+
+    fn launch_trial_restore(
+        &mut self,
+        lease: &AgentCreationLease,
+        options: &RuntimeLaunchOptions,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeLaunchFacts, RunnerError> {
+        (**self).launch_trial_restore(lease, options, renew)
+    }
+
     fn prepare_trial_restore(
         &mut self,
         l: &AgentCreationLease,
@@ -2742,11 +2797,15 @@ impl AgentCreationQueue for CoreHttpAgentCreationQueue {
         request_id: &str,
         input: ProvisionFinitePrivateRuntimeKeyInput,
     ) -> Result<ProvisionFinitePrivateRuntimeKeyResult, RunnerError> {
+        // Old Core must return 404 before minting anything; it ignores unknown
+        // JSON fields on the legacy endpoint, so a proposal field alone is unsafe.
+        let endpoint = if input.trial_restore_key.is_some() {
+            "trial-restore-key"
+        } else {
+            "finite-private-key"
+        };
         self.post_json(
-            &format!(
-                "/api/core/v1/agent-creation-requests/{}/finite-private-key",
-                request_id
-            ),
+            &format!("/api/core/v1/agent-creation-requests/{request_id}/{endpoint}"),
             &input,
         )
     }
@@ -6612,6 +6671,46 @@ mod tests {
         assert!(debug.contains("FAL_KEY"));
         assert!(!debug.contains("fal_test_secret"));
         assert!(!debug.contains("xai_test_secret"));
+    }
+
+    #[test]
+    fn trial_restore_key_provisioning_never_calls_legacy_issuance_endpoint() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let count = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with(
+                "POST /api/core/v1/agent-creation-requests/restore/trial-restore-key "
+            ));
+            // Old Core has no dedicated endpoint; no key is issued.
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let mut queue =
+            CoreHttpAgentCreationQueue::new(format!("http://{address}"), "test-runner").unwrap();
+        let input = ProvisionFinitePrivateRuntimeKeyInput {
+            request_id: "restore".into(),
+            runner_id: "runner".into(),
+            lease_token: "lease".into(),
+            source_host_id: Some("host".into()),
+            source_machine_id: Some("machine".into()),
+            trial_restore_key: Some(format!("fpk_live_{}", "a".repeat(64))),
+            now: None,
+        };
+        assert!(!format!("{input:?}").contains("fpk_live_"));
+        assert!(
+            queue
+                .provision_finite_private_runtime_key("restore", input)
+                .is_err()
+        );
+        server.join().unwrap();
     }
 
     #[test]

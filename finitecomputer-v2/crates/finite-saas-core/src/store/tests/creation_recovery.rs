@@ -247,6 +247,7 @@ async fn postgres_failed_launch_atomically_revokes_its_provisioned_key() {
         assert_eq!(lease.request.id, created.request.id);
         let provisioned = store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-failed-launch-key".to_string(),
                 lease_token: "lease-failed-launch-key".to_string(),

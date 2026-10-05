@@ -212,6 +212,25 @@ credentials or complete. A crashed worker's target stop remains asynchronous,
 bounded by lease expiry and the next reachable worker cycle. Ambiguous completion
 responses preserve compute until an authoritative retry resolves the operation.
 
+Trial launches revalidate the paid lease inside the host operation lock immediately
+before compute replacement. A restore journal grants no launch authority, and the
+ordinary launch entrypoint rejects trial restores. Generic creation cancellation
+also rejects these operations, including before boot and after uncertain failure,
+so the archive's pinned recovery request cannot be stranded.
+
+A restore reuses one operation-owned Finite Private key across pre-boot and
+uncertain post-boot failures. Runner persists the proposal before issuance in a
+private `trial-key-<request>.json` host metadata file outside the durable guest tree;
+Core stores only the key hash and an archive-to-key ID reference (migration 0040).
+The proposal is insert-only, cannot claim an existing key, and retries require the
+same active key and grant. Missing, corrupt or mismatched metadata fails closed;
+operators must preserve this file with the pinned target through recovery. A
+failed launch never revokes a key that an uncertain live target may still use.
+The dedicated `trial-restore-key` endpoint makes older Core return 404 before
+issuing a key; Runner also rejects any returned key that differs from its proposal.
+Upgrade Core and migration 0040 before enabling upgraded restore workers. Disable
+restore workers before rolling Core back; older workers must remain disabled.
+
 Archive/reclaim retries retain their original request IDs. Restore failures retain
 the same target and request, with a 30-second retry delay. Public controls conflict
 while restoration owns the lifecycle. Failed or missing-host operations remain
