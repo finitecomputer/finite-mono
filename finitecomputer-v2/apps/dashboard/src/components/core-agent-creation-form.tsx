@@ -322,7 +322,7 @@ export function CoreAgentCreationForm({
                 </div>
                 {access === "stripe" && trialsEnabled ? <div className="grid gap-2">
                   <Label htmlFor="event-trial-code">Event trial code (optional)</Label>
-                  <Input id="event-trial-code" value={trialCode} onChange={event => setTrialCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} placeholder="trial_…" />
+                  <Input id="event-trial-code" value={trialCode} onChange={event => setTrialCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} placeholder="ABCD-EFGH-JKLM-NPQR" />
                   <p className="text-sm text-muted-foreground">A valid event code starts a free trial, normally seven days. Stripe will show your exact first billing date. A card is required; then $200/month plus applicable tax.</p>
                 </div> : null}
                 <Button

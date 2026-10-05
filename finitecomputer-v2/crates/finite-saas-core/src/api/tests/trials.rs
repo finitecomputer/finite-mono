@@ -26,6 +26,24 @@ async fn trial_codes_require_operator_and_reservations_require_service() {
         assert_eq!(listed[0]["trialDays"], 7);
         assert!(!listed.to_string().contains(code));
 
+        let capacity_path = format!("/api/core/v1/admin/trial-campaigns/{}/capacity", issued["id"].as_str().unwrap());
+        for headers in [&member[..], &service[..], &[]] {
+            let (status, _) = send_json(&app, "GET", "/api/core/v1/admin/trial-campaigns", headers, None).await;
+            assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
+            let (status, _) = send_json(&app, "POST", &capacity_path, headers,
+                Some(serde_json::json!({"seatLimit":15,"expectedSeatLimit":10}))).await;
+            assert!(status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN);
+        }
+        let (status, _) = send_json(&app, "POST", &capacity_path, &operator,
+            Some(serde_json::json!({"seatLimit":15,"expectedSeatLimit":10}))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, listed) = send_json(&app, "GET", "/api/core/v1/admin/trial-campaigns", &operator, None).await;
+        assert_eq!(listed[0]["seatLimit"], 15);
+        assert_eq!(listed[0]["seatsRemaining"], 15);
+        let (status, _) = send_json(&app, "POST", &capacity_path, &operator,
+            Some(serde_json::json!({"seatLimit":20,"expectedSeatLimit":10}))).await;
+        assert!(status.is_client_error());
+
         for headers in [&member[..], &operator[..]] {
             let (status, _) = send_json(&app, "POST", "/api/core/v1/billing/trial-reservation", headers,
                 Some(serde_json::json!({"workosUserId":"user", "reservation": {

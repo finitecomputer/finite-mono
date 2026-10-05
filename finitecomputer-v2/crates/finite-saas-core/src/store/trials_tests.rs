@@ -320,3 +320,178 @@ async fn trial_subscription_lifecycle_preserves_seat_and_blocks_only_trial_accou
     })
     .await;
 }
+
+#[tokio::test]
+async fn trial_capacity_increase_is_absolute_guarded_and_preserves_attribution() {
+    with_isolated_postgres(|db| async move {
+        let campaign = db
+            .create_trial_campaign(
+                CreateTrialCampaign {
+                    name: "Workshop".into(),
+                    seat_limit: 10,
+                    trial_days: 7,
+                },
+                "operator",
+            )
+            .await
+            .unwrap();
+        let org = customer(&db, "workshop").await;
+        db.reserve_trial(
+            "workshop",
+            reservation(&campaign.code, &org, "workshop", "workshop"),
+        )
+        .await
+        .unwrap();
+        let before = db.all("trial_redemptions").await;
+        let increase = |seat_limit, expected_seat_limit| IncreaseTrialCapacity {
+            seat_limit,
+            expected_seat_limit,
+        };
+        let preview = CoreStore::connect_dry_run(&db.url).await.unwrap();
+        preview
+            .increase_trial_capacity(&campaign.id, increase(15, 10), "operator")
+            .await
+            .unwrap();
+        assert_eq!(db.list_trial_campaigns().await.unwrap()[0].seat_limit, 10);
+        // Two operators starting from the same view cannot overwrite one another.
+        let (a, b) = tokio::join!(
+            db.increase_trial_capacity(&campaign.id, increase(15, 10), "operator"),
+            db.increase_trial_capacity(&campaign.id, increase(20, 10), "other")
+        );
+        assert_ne!(a.is_ok(), b.is_ok());
+        let current = db.list_trial_campaigns().await.unwrap()[0].seat_limit;
+        for target in [0, current - 1, current, 10001] {
+            assert!(
+                db.increase_trial_capacity(&campaign.id, increase(target, current), "operator")
+                    .await
+                    .is_err()
+            );
+        }
+        assert!(
+            db.increase_trial_capacity("missing", increase(15, 10), "operator")
+                .await
+                .is_err()
+        );
+        assert!(
+            db.increase_trial_capacity(&campaign.id, increase(25, current), "")
+                .await
+                .is_err()
+        );
+        db.increase_trial_capacity(&campaign.id, increase(25, current), "operator")
+            .await
+            .unwrap();
+        let listed = db.list_trial_campaigns().await.unwrap();
+        assert_eq!(listed[0].seat_limit, 25);
+        assert_eq!(listed[0].reserved_seats, 1);
+        assert_eq!(listed[0].seats_remaining, 24);
+        assert_eq!(db.all("trial_redemptions").await, before);
+        assert_eq!(db.trial_offer(&campaign.code).await.unwrap().trial_days, 7);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trial_admin_billing_projection_distinguishes_checkout_trial_and_paid() {
+    with_isolated_postgres(|db| async move {
+        let campaign = db
+            .create_trial_campaign(
+                CreateTrialCampaign {
+                    name: "Workshop".into(),
+                    seat_limit: 2,
+                    trial_days: 7,
+                },
+                "operator",
+            )
+            .await
+            .unwrap();
+        let org = customer(&db, "projection").await;
+        db.reserve_trial(
+            "projection",
+            reservation(&campaign.code, &org, "projection", "projection"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            db.list_trial_campaigns().await.unwrap()[0].redemptions[0]
+                .trial_access
+                .is_none()
+        );
+        let mut trial = subscription(&org, "projection", BillingSubscriptionStatus::Trialing, 10);
+        trial.current_period_end = Some("2099-01-01T00:00:00Z".into());
+        db.sync_trial_stripe_subscription(trial, Some("projection"))
+            .await
+            .unwrap();
+        let listed = db.list_trial_campaigns().await.unwrap();
+        let access = listed[0].redemptions[0].trial_access.as_ref().unwrap();
+        assert!(!access.blocked);
+        assert_eq!(access.subscription_status.as_deref(), Some("trialing"));
+        assert_eq!(access.period_end.as_deref(), Some("2099-01-01T00:00:00Z"));
+        let mut ended = subscription(&org, "projection", BillingSubscriptionStatus::Trialing, 11);
+        ended.current_period_end = Some("2020-01-01T00:00:00Z".into());
+        db.sync_trial_stripe_subscription(ended, None)
+            .await
+            .unwrap();
+        assert!(
+            db.list_trial_campaigns().await.unwrap()[0].redemptions[0]
+                .trial_access
+                .as_ref()
+                .unwrap()
+                .blocked
+        );
+        db.sync_trial_stripe_subscription(
+            subscription(&org, "projection", BillingSubscriptionStatus::Active, 12),
+            None,
+        )
+        .await
+        .unwrap();
+        let listed = db.list_trial_campaigns().await.unwrap();
+        let access = listed[0].redemptions[0].trial_access.as_ref().unwrap();
+        assert_eq!(access.subscription_status.as_deref(), Some("active"));
+        assert!(!access.blocked);
+        assert_eq!(listed[0].redeemed_seats, 1);
+        assert_eq!(listed[0].seats_remaining, 1);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn trial_workshop_codes_are_readable_normalized_and_legacy_compatible() {
+    with_isolated_postgres(|db| async move {
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..128 {
+            let code = generate_trial_code().unwrap();
+            assert_eq!(code.len(), 19);
+            assert_eq!(code.split('-').map(str::len).collect::<Vec<_>>(), [4, 4, 4, 4]);
+            assert!(code.chars().all(|c| c == '-' || "23456789ABCDEFGHJKLMNPQRSTUVWXYZ".contains(c)));
+            assert!(seen.insert(code));
+        }
+        let issued = db.create_trial_campaign(CreateTrialCampaign {
+            name: "Readable".into(), seat_limit: 10, trial_days: 7,
+        }, "operator").await.unwrap();
+        // Displayed spelling must still work on an older Core during rollout/rollback.
+        assert_eq!(hash_trial_code(&issued.code).unwrap(), hash_launch_code(&issued.code).unwrap());
+        let compact = issued.code.replace('-', "");
+        assert_eq!(db.trial_offer(&compact).await.unwrap().campaign_id, issued.id);
+        let mut typo = issued.code.clone();
+        typo.replace_range(0..1, if issued.code.starts_with('2') { "3" } else { "2" });
+        assert!(db.trial_offer(&typo).await.is_err());
+        let typed = issued.code.replace('-', " ").to_ascii_lowercase();
+        assert_eq!(db.trial_offer(&typed).await.unwrap().campaign_id, issued.id);
+        let org = customer(&db, "readable").await;
+        db.reserve_trial("readable", reservation(&typed, &org, "readable", "readable")).await.unwrap();
+        let reused = db.reserve_trial("readable", reservation(&compact, &org, "readable", "retry_spelling")).await.unwrap();
+        assert_eq!(reused.stripe_session_id, "cs_readable");
+        let stored = db.row("trial_campaigns", &issued.id).await.unwrap();
+        assert_eq!(stored["code_hash"], hash_trial_code(&issued.code).unwrap());
+        assert!(!stored.to_string().contains(&issued.code));
+        assert!(!serde_json::to_string(&db.list_trial_campaigns().await.unwrap()).unwrap().contains(&issued.code));
+        let legacy = "trial_0123456789abcdef0123";
+        let legacy_hash = hash_launch_code(legacy).unwrap();
+        db.query_json("UPDATE trial_campaigns SET code_hash=$2 WHERE id=$1 RETURNING to_jsonb(trial_campaigns.*)", &[&issued.id, &legacy_hash]).await;
+        assert_eq!(db.trial_offer(legacy).await.unwrap().campaign_id, issued.id);
+        assert!(db.trial_offer(&legacy.to_ascii_uppercase()).await.is_err());
+        assert_eq!(hash_trial_code(legacy).unwrap(), legacy_hash);
+        let legacy_org = customer(&db, "legacy").await;
+        db.reserve_trial("legacy", reservation(legacy, &legacy_org, "legacy", "legacy")).await.unwrap();
+    }).await;
+}
