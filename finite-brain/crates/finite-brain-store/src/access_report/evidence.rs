@@ -188,6 +188,63 @@ mod tests {
         }
     }
     #[test]
+    fn brain_invitation_lookup_work_is_constant_as_accepted_history_grows() {
+        // Real create/accept/remove cycles: accepted rows are retained and
+        // are not bounded by the pending-invitation capacity counter.
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output =
+            finite_brain_core::bootstrap_organization_brain("source", "Source", "npub-admin")
+                .unwrap();
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+        let brain = BrainId::new("source").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let recipient = UserId::new("npub-recipient").unwrap();
+        let at = "2026-06-23T00:00:00Z";
+        let measure = |store: &BrainStore| {
+            let mut statement = store.conn.prepare(INVITATION_ACCEPTANCE_SQL).unwrap();
+            let found: Option<String> = statement
+                .query_row(params!["source", "npub-recipient"], |row| row.get(0))
+                .unwrap();
+            assert_eq!(found.as_deref(), Some(at));
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let mut cycles = 0;
+        let mut baseline = None;
+        for target in [1, 100, 1001] {
+            while cycles < target {
+                let id = format!("invitation-history-{cycles}");
+                let code = format!("history-code-{cycles}");
+                store
+                    .create_brain_invitation(
+                        &brain,
+                        &id,
+                        &recipient,
+                        &code,
+                        "/accept",
+                        &[],
+                        &admin,
+                        "2026-06-30T00:00:00Z",
+                        at,
+                    )
+                    .unwrap();
+                store
+                    .accept_brain_invitation_by_code(&code, &recipient, at)
+                    .unwrap();
+                store.remove_member(&brain, &recipient).unwrap();
+                cycles += 1;
+            }
+            let steps = measure(&store);
+            match baseline {
+                None => baseline = Some(steps),
+                Some(first) => assert_eq!(
+                    steps, first,
+                    "{target} accepted invitations must not add scan work"
+                ),
+            }
+        }
+    }
+
+    #[test]
     fn acceptance_lookup_work_is_constant_as_same_key_history_grows() {
         let mut store = BrainStore::open_in_memory().unwrap();
         let output =
