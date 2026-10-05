@@ -69,3 +69,16 @@ export function trialDate(value: string | null) {
     dateStyle: "medium", timeStyle: "short", timeZone: "UTC",
   }).format(parsed) + " UTC" : "Unknown";
 }
+
+export function trialCodeInput(form: FormData) {
+  const id = String(form.get("campaignId") ?? "").trim();
+  if (!id || id.length > 200) throw new Error("Campaign is required.");
+  const code = String(form.get("code") ?? "");
+  const compact = code.replace(/[-\t\n\f\r ]/g, "");
+  if (code.length > 128 || !/^[A-Za-z0-9]{8,64}$/.test(compact)) {
+    throw new Error("Use 8–64 letters or numbers, with optional spaces or hyphens.");
+  }
+  const revision = form.get("expectedCodeRevision");
+  if (revision === null || revision === "") throw new Error("Refresh before editing this code.");
+  return { id, code, expectedCodeRevision: wholeNumber(revision, 0, 2147483646, "Code revision") };
+}

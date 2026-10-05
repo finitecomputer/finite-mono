@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { summarizeTrialCampaigns, trialCampaignInput, trialCapacityInput, trialCampaignStatus, trialSeatStatus } from "./admin-trials";
+import { summarizeTrialCampaigns, trialCampaignInput, trialCapacityInput, trialCodeInput, trialCampaignStatus, trialSeatStatus } from "./admin-trials";
 import type { TrialCampaign } from "./trial-types";
 
 const campaign: TrialCampaign = {
@@ -51,4 +51,14 @@ test("campaign form preserves existing bounds and capacity updates use absolute 
   form.set("seatLimit", "5"); assert.throws(() => trialCapacityInput(form), /must exceed/);
   form.set("seatLimit", "10"); form.set("name", "bad\u0085name"); assert.throws(() => trialCampaignInput(form), /campaign name/);
   form.set("name", "ok"); form.set("trialDays", "31"); assert.throws(() => trialCampaignInput(form), /Trial days/);
+});
+
+test("code editing validates spelling and requires an observed revision", () => {
+  const form = new FormData(); form.set("campaignId", "c"); form.set("code", "workshop-2026");
+  assert.throws(() => trialCodeInput(form), /Refresh/);
+  form.set("expectedCodeRevision", "0");
+  assert.deepEqual(trialCodeInput(form), { id: "c", code: "workshop-2026", expectedCodeRevision: 0 });
+  for (const invalid of ["short", "workshop_2026", "x".repeat(65), "évent2026", "workshop💥2026", "ßßßß"]) {
+    form.set("code", invalid); assert.throws(() => trialCodeInput(form), /8–64/);
+  }
 });

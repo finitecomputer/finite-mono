@@ -4,9 +4,12 @@ use crate::trials::*;
 pub(super) async fn list(
     State(state): State<CoreApiState>,
     headers: HeaderMap,
-) -> Result<Json<Vec<TrialCampaign>>, ApiError> {
+) -> Result<impl IntoResponse, ApiError> {
     require_admin_identity(&state, &headers).await?;
-    Ok(Json(state.store.list_trial_campaigns().await?))
+    Ok((
+        [("cache-control", "no-store, private")],
+        Json(state.store.list_trial_campaigns().await?),
+    ))
 }
 pub(super) async fn create(
     State(state): State<CoreApiState>,
@@ -34,6 +37,19 @@ pub(super) async fn increase_capacity(
     state
         .store
         .increase_trial_capacity(&id, input, &admin.workos_user_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+pub(super) async fn update_code(
+    State(state): State<CoreApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateTrialCode>,
+) -> Result<StatusCode, ApiError> {
+    let admin = require_admin_identity(&state, &headers).await?;
+    state
+        .store
+        .update_trial_code(&id, input, &admin.workos_user_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

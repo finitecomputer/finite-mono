@@ -372,6 +372,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             "/api/core/v1/admin/trial-campaigns",
             get(trials::list).post(trials::create),
         )
+        .route(
+            "/api/core/v1/admin/trial-campaigns/{id}/code",
+            post(trials::update_code),
+        )
         .route("/api/core/v1/me/billing/trial-offer", post(trials::offer))
         .route(
             "/api/core/v1/admin/trial-campaigns/{id}/capacity",

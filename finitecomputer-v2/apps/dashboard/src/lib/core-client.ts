@@ -1784,3 +1784,9 @@ export async function increaseCoreTrialCapacity(id: string, input: { seatLimit: 
     method: "POST", body: JSON.stringify(input),
   });
 }
+
+export async function updateCoreTrialCode(id: string, input: { code: string; expectedCodeRevision: number }) {
+  await coreAdminFetch<void>(`/api/core/v1/admin/trial-campaigns/${encodeURIComponent(id)}/code`, {
+    method: "POST", body: JSON.stringify(input),
+  });
+}
