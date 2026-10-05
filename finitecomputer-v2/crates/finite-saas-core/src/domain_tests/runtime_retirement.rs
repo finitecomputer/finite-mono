@@ -135,6 +135,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
         let retirement_capable =
             serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
                 runtime_retirement: true,
+                trial_archive: false,
                 ..*kata_runtime_capabilities().v1()
             }))
             .unwrap();
@@ -156,6 +157,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
             runner_classes: vec![RunnerClass::Kata],
             runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
                 runtime_retirement: true,
+                trial_archive: false,
                 ..*kata_runtime_capabilities().v1()
             })),
             ..RunnerLeaseCapacity::default()
@@ -193,6 +195,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
 
         let bare = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-1".to_string(),
@@ -246,6 +249,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
         assert_eq!(second.request.id, request.id);
 
         let completion = CompleteRuntimeControlRequestInput {
+            trial_archive: None,
             request_id: request.id.clone(),
             runner_id: "runner-oslo-1".to_string(),
             lease_token: "destroy-lease-2".to_string(),
@@ -289,6 +293,7 @@ async fn retirement_requires_exact_immutable_receipt_and_retries_same_request() 
         conflicting.zip_sha256 = "c".repeat(64);
         let conflict = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "destroy-lease-2".to_string(),
@@ -340,6 +345,7 @@ async fn admin_runtime_retirement_requires_the_exact_active_binding() {
         let retirement_capable =
             serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
                 runtime_retirement: true,
+                trial_archive: false,
                 ..*kata_runtime_capabilities().v1()
             }))
             .unwrap();

@@ -73,6 +73,7 @@ fn rollout_overview(
             runtime_upgrade,
             stop: true,
             runtime_retirement: false,
+            trial_archive: false,
         }),
         offboarding_phase: None,
         runtime_health: RuntimeHealthProjection::unreported(),

@@ -199,6 +199,7 @@ async fn postgres_cold_relocation_routes_exactly_and_register_failure_keeps_sour
         assert_eq!(stop_lease.request.id, stop.id);
         store
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: stop.id,
                 runner_id: format!("runner-{source_host}"),
                 lease_token: "stop-lease".to_string(),
@@ -573,6 +574,7 @@ async fn postgres_concurrent_identical_cold_relocation_reuses_one_request() {
         assert_eq!(stop_lease.request.id, stop.id);
         store
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: stop.id,
                 runner_id: format!("runner-{source_host}"),
                 lease_token: "stop-lease".to_string(),

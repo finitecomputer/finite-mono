@@ -175,6 +175,7 @@ async fn postgres_row_native_create_lease_complete_and_visible_reads() {
 
         let provisioned = store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-row-native-1".to_string(),
                 lease_token: "lease-row-native-1".to_string(),

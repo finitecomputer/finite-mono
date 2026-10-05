@@ -2966,6 +2966,7 @@ mod tests {
         let placement =
             RuntimePlacement::for_hosting_tier(finite_saas_core::HostingTier::Confidential);
         AgentCreationLease {
+            trial_restore_allowed: None,
             project: Project {
                 id: "project_123".to_string(),
                 customer_org_id: "org_123".to_string(),
@@ -3070,6 +3071,8 @@ mod tests {
         handle: Option<ProviderRuntimeHandleEnvelope>,
     ) -> RuntimeControlLease {
         RuntimeControlLease {
+            archive_principal: None,
+            trial_archive: None,
             request: RuntimeControlRequest {
                 id: "runtime_control_fixture".to_string(),
                 project_id: "project_123".to_string(),

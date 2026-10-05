@@ -86,6 +86,7 @@ async fn finish_control(
     );
     let is_upgrade = request.kind == RuntimeControlKind::Upgrade;
     db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
         request_id: request.id,
         runner_id: "canary-runner".into(),
         lease_token: "canary-lease".into(),

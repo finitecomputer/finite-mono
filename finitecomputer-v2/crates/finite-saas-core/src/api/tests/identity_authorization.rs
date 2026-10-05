@@ -131,6 +131,10 @@ async fn route_scoped_credentials_cannot_cross_user_admin_or_runner_boundaries()
                 }),
             ),
             (
+                "/api/core/v1/agent-creation-requests/missing/trial-restore-key",
+                serde_json::json!({"runnerId":"runner-auth-boundary","leaseToken":"lease-auth-boundary","trialRestoreKey":"test-proposal"}),
+            ),
+            (
                 "/api/core/v1/agent-creation-requests/missing/finite-private-key",
                 serde_json::json!({
                     "runnerId": "runner-auth-boundary",
