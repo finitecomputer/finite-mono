@@ -21,7 +21,7 @@ export async function AdminTrialsPanel() {
     {result.error ? <p role="alert" className="ocean-empty-state">{result.error}</p> : null}
     {result.campaigns ? <>
       <TrialSummary campaigns={result.campaigns} />
-      {enabled ? <AdminTrialForm /> : <p className="ocean-empty-state">Trial checkout is disabled in this dashboard. Campaign creation, code editing and capacity changes are unavailable here.</p>}
+      {enabled ? <AdminTrialForm savedCampaignIds={result.campaigns.filter(campaign => !!campaign.code).map(campaign => campaign.id)} /> : <p className="ocean-empty-state">Trial checkout is disabled in this dashboard. Campaign creation, code editing and capacity changes are unavailable here.</p>}
       <div className="grid gap-4" aria-label="Trial campaigns">
         {result.campaigns.length === 0 ? <p className="ocean-empty-state">No free trial campaigns yet.</p> : null}
         {result.campaigns.map(campaign => <CampaignCard key={campaign.id} campaign={campaign} enabled={enabled} />)}
