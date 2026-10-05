@@ -7,7 +7,7 @@ export type TrialCampaign = {
   reservedSeats: number;
   redeemedSeats: number;
   seatsRemaining: number;
-  redemptions: { customerOrgId: string; ownerWorkosUserId: string | null; state: string; redeemedAt: string | null }[];
+  redemptions: { customerOrgId: string; ownerWorkosUserId: string | null; state: string; redeemedAt: string | null; trialAccess?: TrialAccess | null }[];
 };
 
 export type TrialAccess = {

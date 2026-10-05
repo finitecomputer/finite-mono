@@ -24,6 +24,19 @@ pub(super) async fn create(
         ),
     ))
 }
+pub(super) async fn increase_capacity(
+    State(state): State<CoreApiState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(input): Json<IncreaseTrialCapacity>,
+) -> Result<StatusCode, ApiError> {
+    let admin = require_admin_identity(&state, &headers).await?;
+    state
+        .store
+        .increase_trial_capacity(&id, input, &admin.workos_user_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 pub(super) async fn offer(
     State(state): State<CoreApiState>,
     headers: HeaderMap,

@@ -14,6 +14,14 @@ fn default_trial_days() -> i32 {
     7
 }
 
+/// Absolute capacity, guarded by the operator's last observed limit.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct IncreaseTrialCapacity {
+    pub seat_limit: i32,
+    pub expected_seat_limit: i32,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrialCampaign {
@@ -35,6 +43,7 @@ pub struct TrialRedemption {
     pub owner_workos_user_id: Option<String>,
     pub state: String,
     pub redeemed_at: Option<String>,
+    pub trial_access: Option<TrialAccess>,
 }
 
 // No Debug: the code is returned only at issuance.
@@ -92,4 +101,47 @@ pub struct TrialAccess {
     pub event_name: String,
     pub subscription_status: Option<String>,
     pub period_end: Option<String>,
+}
+
+// 16 independent base32 symbols preserve the previous code's 80 random bits.
+// O/I/0/1 are absent; groups can be read aloud. Plaintext is returned only once.
+const TRIAL_CODE_ALPHABET: &[u8; 32] = b"23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
+
+pub(crate) fn generate_trial_code() -> crate::CoreResult<String> {
+    let mut random = [0u8; 16];
+    getrandom::getrandom(&mut random).map_err(|error| {
+        crate::CoreError::Store(format!("failed to generate trial code: {error}"))
+    })?;
+    let compact: String = random
+        .iter()
+        .map(|byte| TRIAL_CODE_ALPHABET[(byte & 31) as usize] as char)
+        .collect();
+    Ok(group_trial_code(&compact))
+}
+
+pub(crate) fn hash_trial_code(value: &str) -> crate::CoreResult<String> {
+    let compact: String = value
+        .chars()
+        .filter(|c| *c != '-' && !c.is_ascii_whitespace())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if compact.len() == 16
+        && compact
+            .bytes()
+            .all(|byte| TRIAL_CODE_ALPHABET.contains(&byte))
+    {
+        crate::launch_codes::hash_launch_code(&group_trial_code(&compact))
+    } else {
+        // Existing trial_<hex> codes retain their exact, case-sensitive hashes.
+        crate::launch_codes::hash_launch_code(value)
+    }
+}
+
+fn group_trial_code(compact: &str) -> String {
+    compact
+        .as_bytes()
+        .chunks(4)
+        .map(|group| std::str::from_utf8(group).expect("ASCII trial code"))
+        .collect::<Vec<_>>()
+        .join("-")
 }

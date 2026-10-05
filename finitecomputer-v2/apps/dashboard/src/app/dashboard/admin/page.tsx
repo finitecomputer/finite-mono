@@ -62,9 +62,10 @@ export default async function AdminOpsPage() {
       </section>
 
       <Tabs defaultValue="users" className="gap-4">
-        <TabsList aria-label="Admin sections">
+        <TabsList aria-label="Admin sections" className="max-w-full">
           <TabsTrigger value="users">Users</TabsTrigger>
           <TabsTrigger value="invites">Invites</TabsTrigger>
+          <TabsTrigger value="trials">Free trials</TabsTrigger>
           <TabsTrigger value="finite-private">Finite Private</TabsTrigger>
         </TabsList>
         <TabsContent value="users">
@@ -73,7 +74,9 @@ export default async function AdminOpsPage() {
         </TabsContent>
         <TabsContent value="invites">
           <LaunchCodeBatchesPanel result={launchCodeBatches} />
-          {process.env.FC_DASHBOARD_TRIALS_ENABLED === "true" ? <AdminTrialsPanel /> : null}
+        </TabsContent>
+        <TabsContent value="trials">
+          <AdminTrialsPanel />
         </TabsContent>
         <TabsContent value="finite-private">
           <FinitePrivateOpsPanel result={finitePrivate} />

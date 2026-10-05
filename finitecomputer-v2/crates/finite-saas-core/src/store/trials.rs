@@ -2,6 +2,52 @@ use super::*;
 use crate::trials::*;
 
 impl CoreStore {
+    #[tracing::instrument(skip_all, fields(operator = actor, campaign = id))]
+    pub async fn increase_trial_capacity(
+        &self,
+        id: &str,
+        input: IncreaseTrialCapacity,
+        actor: &str,
+    ) -> CoreResult<()> {
+        if actor.trim().is_empty() || !(1..=10000).contains(&input.seat_limit) {
+            return Err(CoreError::TrialUnavailable(
+                "Total signup limit must be 1–10000.",
+            ));
+        }
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        // Share reserve_trial's campaign lock: capacity and reservations cannot race.
+        let row = tx
+            .query_opt(
+                "SELECT seat_limit,active FROM trial_campaigns WHERE id=$1 FOR UPDATE",
+                &[&id],
+            )
+            .await
+            .map_err(store_error)?
+            .ok_or(CoreError::TrialUnavailable("Trial campaign not found."))?;
+        let current: i32 = row.get(0);
+        if !row.get::<_, bool>(1) {
+            return Err(CoreError::TrialUnavailable("This campaign is inactive."));
+        }
+        if current != input.expected_seat_limit {
+            return Err(CoreError::TrialUnavailable(
+                "The signup limit changed. Refresh before increasing it.",
+            ));
+        }
+        if input.seat_limit <= current {
+            return Err(CoreError::TrialUnavailable(
+                "New total signup limit must exceed the current limit.",
+            ));
+        }
+        tx.execute(
+            "UPDATE trial_campaigns SET seat_limit=$2 WHERE id=$1",
+            &[&id, &input.seat_limit],
+        )
+        .await
+        .map_err(store_error)?;
+        self.finish(tx).await
+    }
+
     #[tracing::instrument(skip_all, fields(operator = actor))]
     pub async fn create_trial_campaign(
         &self,
@@ -20,8 +66,8 @@ impl CoreStore {
             ));
         }
         let id = crate::generate_surrogate_id("trial_campaign")?;
-        let code = crate::generate_surrogate_id("trial")?;
-        let hash = hash_launch_code(&code)?;
+        let code = generate_trial_code()?;
+        let hash = hash_trial_code(&code)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
         tx.execute("INSERT INTO trial_campaigns(id,name,code_hash,seat_limit,trial_days,created_by_workos_user_id) VALUES($1,$2,$3,$4,$5,$6)",
@@ -32,7 +78,7 @@ impl CoreStore {
 
     pub async fn trial_offer(&self, code: &str) -> CoreResult<TrialOffer> {
         let client = self.connection().await?;
-        let hash = hash_launch_code(code)?;
+        let hash = hash_trial_code(code)?;
         let row = client
             .query_opt(
                 "SELECT id,trial_days FROM trial_campaigns WHERE code_hash=$1 AND active",
@@ -70,7 +116,7 @@ impl CoreStore {
                 "This checkout has expired. Please try again.",
             ));
         }
-        let hash = hash_launch_code(&input.code)?;
+        let hash = hash_trial_code(&input.code)?;
         let campaign = tx.query_opt("SELECT id,seat_limit,trial_days FROM trial_campaigns WHERE code_hash=$1 AND active FOR UPDATE", &[&hash]).await.map_err(store_error)?
             .ok_or(CoreError::TrialUnavailable("This trial code is invalid or inactive."))?;
         let id: String = campaign.get(0);
@@ -144,9 +190,17 @@ impl CoreStore {
         let mut result = Vec::new();
         for row in tx.query("SELECT id,name,seat_limit,trial_days,active FROM trial_campaigns ORDER BY created_at DESC", &[]).await.map_err(store_error)? {
             let id: String = row.get(0);
-            let rows = tx.query("SELECT r.customer_org_id,u.workos_user_id,r.state,core_rfc3339(r.redeemed_at) FROM trial_redemptions r
-                JOIN customer_orgs o ON o.id=r.customer_org_id JOIN users u ON u.id=o.owner_user_id WHERE r.campaign_id=$1 ORDER BY r.created_at", &[&id]).await.map_err(store_error)?;
-            let redemptions: Vec<_> = rows.iter().map(|r| TrialRedemption { customer_org_id:r.get(0),owner_workos_user_id:r.get(1),state:r.get(2),redeemed_at:r.get(3) }).collect();
+            let rows = tx.query("SELECT r.customer_org_id,u.workos_user_id,r.state,core_rfc3339(r.redeemed_at),
+                b.subscription_status,core_rfc3339(b.current_period_end),core_trial_access_blocked(o.id,CURRENT_TIMESTAMP)
+                FROM trial_redemptions r JOIN customer_orgs o ON o.id=r.customer_org_id JOIN users u ON u.id=o.owner_user_id
+                LEFT JOIN customer_billing_accounts b ON b.customer_org_id=o.id WHERE r.campaign_id=$1 ORDER BY r.created_at", &[&id]).await.map_err(store_error)?;
+            let redemptions: Vec<_> = rows.iter().map(|r| {
+                let state: String = r.get(2);
+                let trial_access = (state == "redeemed").then(|| TrialAccess {
+                    blocked: r.get(6), event_name: row.get(1), subscription_status: r.get(4), period_end: r.get(5),
+                });
+                TrialRedemption { customer_org_id:r.get(0),owner_workos_user_id:r.get(1),state,redeemed_at:r.get(3),trial_access }
+            }).collect();
             let reserved_seats = redemptions.iter().filter(|r| r.state == "reserved").count() as i64;
             let redeemed_seats = redemptions.iter().filter(|r| r.state == "redeemed").count() as i64;
             let seat_limit: i32 = row.get(2);
