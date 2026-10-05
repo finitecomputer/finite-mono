@@ -536,3 +536,55 @@ fn access_list_renders_withheld_ambiguous_and_unknown_keys_by_exact_key() {
     assert!(!text.contains("@example.org"));
     server.join().unwrap();
 }
+
+#[test]
+fn access_list_text_carries_every_admission_and_delegation_fact_in_the_json() {
+    let tmp = TempDir::new().unwrap();
+    import_identity_secret(&tmp, SECRET);
+    let mut first: Value = serde_json::from_str(&first_page('a')).unwrap();
+    let delegated = &mut first["identities"][1];
+    delegated["membership"] = serde_json::json!({
+        "origin": "approval", "delegatedBy": "npub1syntheticapprover",
+        "originRef": "approval-event-synthetic",
+    });
+    delegated["participation"] = serde_json::json!({
+        "kind": "authenticatedBrainAction", "recordedAt": "2026-06-24T20:40:00Z",
+    });
+    let admin = &mut first["identities"][0];
+    admin["folders"][0]["grant"]["provenance"] = serde_json::json!({
+        "origin": "invitation", "delegatedBy": "npub1syntheticinviter",
+        "originRef": "invitation-synthetic",
+    });
+    let (url, server) = start_scripted_capture_server(vec![
+        (200, first.to_string()),
+        (200, second_page('a', 'a')),
+        (200, first.to_string()),
+        (200, second_page('a', 'a')),
+    ]);
+    let json: Value = serde_json::from_slice(&run_list(&url, &tmp, true).unwrap()).unwrap();
+    let text = String::from_utf8(run_list(&url, &tmp, false).unwrap()).unwrap();
+    server.join().unwrap();
+    let rows = json["identities"].as_array().unwrap();
+    let facts = [
+        &rows[1]["membership"]["origin"],
+        &rows[1]["membership"]["delegatedBy"],
+        &rows[1]["membership"]["originRef"],
+        &rows[1]["participation"]["kind"],
+        &rows[1]["participation"]["recordedAt"],
+        &rows[0]["folders"][0]["grant"]["provenance"]["origin"],
+        &rows[0]["folders"][0]["grant"]["provenance"]["delegatedBy"],
+        &rows[0]["folders"][0]["grant"]["provenance"]["originRef"],
+    ];
+    for fact in facts {
+        let fact = fact.as_str().expect("fact present in JSON");
+        assert!(text.contains(fact), "text lacks {fact}: {text}");
+    }
+    assert!(text.contains(
+        "admitted: approval, delegated by npub1syntheticapprover (ref approval-event-synthetic)"
+    ));
+    assert!(text.contains("acted in this Brain: authenticatedBrainAction at 2026-06-24T20:40:00Z"));
+    assert!(text.contains(
+        "grant origin: invitation, delegated by npub1syntheticinviter (ref invitation-synthetic)"
+    ));
+    assert!(text.contains("acted in this Brain: no recorded action by this key"));
+}

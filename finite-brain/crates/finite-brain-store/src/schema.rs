@@ -401,8 +401,12 @@ const SCHEMA_V30: &str = r#"
 CREATE INDEX brain_record_index_by_actor
     ON brain_record_index(brain_id, actor_npub, accepted_at);
 
+-- Ordered by accepted_at under exactly the evidence predicate, so MIN() is
+-- one seek however much removal/re-invitation history one key accumulates.
 CREATE INDEX brain_invitations_accepted_by_user
-    ON brain_invitations(brain_id, user_id, status, target_kind);
+    ON brain_invitations(brain_id, user_id, accepted_at)
+    WHERE status = 'accepted' AND target_kind = 'npub' AND accepted_at IS NOT NULL
+      AND (claimed_by_npub IS NULL OR claimed_by_npub = user_id);
 
 CREATE INDEX brain_invite_tokens_by_redeemer
     ON brain_invite_tokens(brain_id, redeemed_by_npub, redeemed_at);

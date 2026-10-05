@@ -739,6 +739,26 @@ fn write_identity<W: Write>(output: &mut W, row: &Value) -> Result<(), CliError>
         .collect::<Vec<_>>()
         .join(", ");
     writeln!(output, "  role: {} ({sources})", text(&row["brainRole"]))?;
+    if row["membership"].is_object() {
+        writeln!(
+            output,
+            "  admitted: {}",
+            provenance_text(&row["membership"], &text)
+        )?;
+    }
+    if row["participation"].is_object() {
+        writeln!(
+            output,
+            "  acted in this Brain: {} at {}",
+            text(&row["participation"]["kind"]),
+            text(&row["participation"]["recordedAt"])
+        )?;
+    } else {
+        writeln!(
+            output,
+            "  acted in this Brain: no recorded action by this key"
+        )?;
+    }
     let description = &row["description"];
     if description["source"].is_object() {
         writeln!(
@@ -797,11 +817,11 @@ fn write_identity<W: Write>(output: &mut W, row: &Value) -> Result<(), CliError>
                 text(&grant["issuedBy"]),
                 text(&grant["issuedAt"])
             )?;
-            if grant["provenance"]["origin"].is_string() {
+            if grant["provenance"].is_object() {
                 writeln!(
                     output,
-                    "    origin {}",
-                    text(&grant["provenance"]["origin"])
+                    "    grant origin: {}",
+                    provenance_text(&grant["provenance"], &text)
                 )?;
             }
         }
@@ -857,4 +877,20 @@ fn identity_headline(row: &Value, text: &dyn Fn(&Value) -> String) -> String {
         }
         _ => format!("{key} · details not shared"),
     }
+}
+
+/// Stored admission or grant provenance: its origin, who delegated it, and
+/// the reference (for example the approval or invitation) that supports it.
+fn provenance_text(provenance: &Value, text: &dyn Fn(&Value) -> String) -> String {
+    let mut line = text(&provenance["origin"]);
+    if provenance["delegatedBy"].is_string() {
+        line.push_str(&format!(
+            ", delegated by {}",
+            text(&provenance["delegatedBy"])
+        ));
+    }
+    if provenance["originRef"].is_string() {
+        line.push_str(&format!(" (ref {})", text(&provenance["originRef"])));
+    }
+    line
 }
