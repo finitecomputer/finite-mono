@@ -2491,6 +2491,86 @@ class HostedHermesStatusTests(unittest.TestCase):
         self.assertEqual(report["sections"]["host_health"]["hosted_hermes"]["state"], "not-observed")
 
 
+class BrainIdentityStatusTests(unittest.TestCase):
+    def test_probe_is_one_read_only_transaction_and_prints_json(self):
+        identity = {"schema_present": True, "key_associations": {"active": 2}}
+        completed = subprocess.CompletedProcess([], 0, json.dumps(identity) + "\n", "")
+        stdout = io.StringIO()
+        with mock.patch.object(finite_status, "postgres_environment", return_value={}), \
+                mock.patch.object(finite_status, "run_read_only", return_value=completed) as run, \
+                contextlib.redirect_stdout(stdout), \
+                self.assertRaises(SystemExit) as exit:
+            finite_status.main(["--brain-identity"])
+        sql = run.call_args.kwargs["input_text"]
+        self.assertTrue(sql.startswith("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"))
+        self.assertTrue(sql.endswith("ROLLBACK;\n"))
+        for private in ("normalized_email", "public_key_hex,", "SELECT user_id", "brain_id,"):
+            self.assertNotIn(private, finite_status.BRAIN_IDENTITY_QUERY)
+        self.assertEqual(exit.exception.code, 0)
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(report["schema_version"], "finite.brain-identity-status.v1")
+        self.assertEqual(report["brain_identity"], identity)
+
+    def test_query_failure_or_invalid_json_is_a_collection_error(self):
+        for completed in (
+            subprocess.CompletedProcess([], 1, "", "ERROR: permission denied\n"),
+            subprocess.CompletedProcess([], 0, "not json", ""),
+        ):
+            with self.subTest(returncode=completed.returncode), \
+                    mock.patch.object(finite_status, "postgres_environment", return_value={}), \
+                    mock.patch.object(finite_status, "run_read_only", return_value=completed), \
+                    self.assertRaises(finite_status.CollectionError):
+                finite_status.collect_brain_identity()
+
+    @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
+    def test_query_counts_without_contact_and_handles_absent_schema(self):
+        def run(sql: str) -> dict:
+            result = subprocess.run(
+                ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet", "--set", "ON_ERROR_STOP=1",
+                 "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]],
+                input="BEGIN;\n" + sql + finite_status.BRAIN_IDENTITY_QUERY + "ROLLBACK;\n",
+                text=True, capture_output=True, check=True,
+            )
+            return json.loads(result.stdout)
+
+        self.assertEqual(run(""), {"schema_present": False})
+        # Temp tables shadow any real Core tables; the rollback discards them.
+        fixture = """
+CREATE TEMP TABLE account_brain_principals(user_id text, public_key_hex text, status text);
+CREATE TEMP TABLE account_brain_sharing_scopes(user_id text, brain_server text, brain_id text, revoked_at timestamptz);
+CREATE TEMP TABLE brain_account_observation_receipts(outcome text, recorded_at timestamptz);
+CREATE TEMP TABLE agent_runtimes(id text, project_id text, health_reporting_npub text, offboarding_phase text);
+CREATE TEMP TABLE project_runtime_links(project_id text, agent_runtime_id text, active boolean);
+INSERT INTO account_brain_principals VALUES ('u1','aa','active'),('u1','bb','active'),('u2','cc','retired');
+INSERT INTO account_brain_sharing_scopes VALUES ('u1','https://b','x',NULL),('u2','https://b','x',NULL),
+  ('u1','https://b','y',now());
+INSERT INTO brain_account_observation_receipts VALUES ('recorded',now()),('unchanged',now()),
+  ('recorded',now()-interval '2 days');
+INSERT INTO agent_runtimes VALUES
+  ('r-live','p1','npub1live',NULL),
+  ('r-ret','p2','npub1retired','archived'),
+  ('r-a','p3','npub1shared',NULL),('r-b','p4','npub1shared',NULL),
+  ('r-old','p5','npub1legacy','archived'),('r-sib','p5','npub1legacy',NULL),
+  ('r-foreign','p6','npub1foreign',NULL),
+  ('r-dual-live','p8','npub1dual',NULL),('r-dual-dormant','p8','npub1dual',NULL),
+  ('r-none','p7',NULL,NULL);
+INSERT INTO project_runtime_links VALUES ('p1','r-live',true),('p3','r-a',true),('p4','r-b',true),
+  ('p9','r-foreign',true),('p8','r-dual-live',true),('p8','r-dual-dormant',false);
+"""
+        identity = run(fixture)
+        self.assertEqual(identity["key_associations"], {"active": 2, "retired": 1, "accounts": 1})
+        self.assertEqual(identity["sharing_scopes"], {"active": 2, "revoked": 1, "brains": 1})
+        self.assertEqual(identity["observations_last_24h"], {"recorded": 1, "unchanged": 1})
+        self.assertEqual(identity["agent_keys"], {
+            "pinned": 6, "live": 2, "retired": 1, "ambiguous_projects": 1,
+            "unsupported_lifecycle": 1, "foreign_active_link": 1,
+            # The legacy key (archived + unoffboarded sibling) and the live key
+            # whose inactive sibling never offboarded.
+            "same_project_inactive_unoffboarded_sibling": 2,
+        })
+        self.assertNotIn("npub1", json.dumps(identity))
+
+
 class FinitePrivateUsageStatusTests(unittest.TestCase):
     def test_probe_is_one_read_only_transaction_and_prints_json(self):
         usage = {"profiles": [{"id": "finite-private-generous-v2", "burst_limit_units": 200000000}]}
