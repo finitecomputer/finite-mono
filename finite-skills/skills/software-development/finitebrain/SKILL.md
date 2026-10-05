@@ -417,8 +417,14 @@ Unsupported, so never offer them:
   Folder Invitations target one key.
 
 To answer "who has access?", run `fbrain access list --brain <brain-id> --json`
-for one exact Brain ID. The acting key must itself be that Brain's admin,
-owner, or Personal Agent; there is no account fallback. Report `coverage` and
+for one exact Brain ID. This needs `fbrain` 0.7 or newer. Check that the JSON
+has `"version": "finite-brain-access-report-v1"` before calling it the named
+report or quoting `currentAccessComplete`. Without that field it is the older
+summary from an older CLI: say only that a newer `fbrain` is needed for the
+named report, and do not describe it as complete. Use an updated operator CLI
+for the named report; do not roll the Agent fleet for this task. The acting
+key must itself be that Brain's admin, owner, or Personal Agent; there is no
+account fallback. Report `coverage` and
 `currentAccessComplete` first and never call the list complete while a scope
 is `unverified` (for example while Folders are mounted in from another Brain;
 that Brain's admins report other routes to its Folders). Each row is one

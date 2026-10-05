@@ -100,16 +100,18 @@ optional setting unset, then switch each part on separately.
    before going further.
 4. Add the four Core variables to `/etc/finite/core.env` and run
    `systemctl restart finite-saas-core.service`. Confirm the listener log line
-   and that neither route answers on the main (4200) or runtime (4201)
-   listener.
+   and that both routes return 404 on the main (4200) and runtime (4201)
+   listeners.
 5. Create `/etc/finite/brain-identity.env` and run
    `systemctl restart finite-brain-app.service`.
 6. Add the two dashboard variables to `/etc/finite/dashboard.env` and run
    `systemctl restart podman-finite-saas-dashboard.service`.
 7. From an ordinary admin session on a designated Brain, run
    `fbrain access list --brain <exact-id>` with `fbrain` 0.7.0 and keep the
-   output as the read-only qualification. Then run `scripts/finite-status`
-   again.
+   output as the read-only qualification. Before the public release, the
+   operator may use a locally built 0.7.0 binary from the reviewed revision
+   whose checksum they verified; never build on a production server. Then
+   run `scripts/finite-status` again.
 
 `fbrain` 0.7.0 is published through the normal CLI release
 ([release-cli.md](release-cli.md)) after the closure is live. Do not upgrade
@@ -143,6 +145,10 @@ Brain SQLite Recovery Set; restoring them restores descriptions, not keys.
 
 ## Known limits
 
+- Hosted Agents keep the `fbrain` in their pinned Runtime until that Runtime
+  is upgraded separately. Their `access list` is the older summary; the
+  managed FiniteBrain skill tells them to check the report `version` and say
+  a newer CLI is needed rather than claim a complete report.
 - Only hosted human actions (Join, applied Approve) record sharing. No current
   flow emits an owned-agent observation, so an agent whose owner never acted
   as a hosted human in that Brain stays `notShared` there.
