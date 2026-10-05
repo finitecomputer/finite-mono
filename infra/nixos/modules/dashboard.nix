@@ -4,15 +4,11 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Brain identity descriptions (FIN-122): Join/Approve contact disclosure
-    # and the optional Core observation hook, off until its two variables are
-    # set in /etc/finite/dashboard.env.
-    # Source b5d982e0fdff9d1449bb7a37f47b46e1cb181077 (dashboard code from
-    # Core 03fbf08f with the Join cards reading the Brain server's pending
-    # invitation list, plus the FiniteBrain skill catalog with the
-    # access-report version guard).
-    # https://github.com/finitecomputer/finite-mono/actions/runs/37262266185
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:d3613a0b336b5415c2069e81b564db7305fe946e93bb05a8ce6a7bcf0beaabc3";
+    # PR1054: Free trials admin tab and guarded campaign capacity increases.
+    # Roll out Core from this source before enabling the new dashboard actions.
+    # Source 6ea4cd859013fc395d4eda31d923d147588704f1; excludes PR1055.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37360936330
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:9b7ff2689473407ded8ff78f21c7f4fd5f53408ba4f5a9d82609049489d89e15";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
