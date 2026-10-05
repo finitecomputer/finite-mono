@@ -214,7 +214,7 @@ Core (`finite-saas-core`):
   account's WorkOS bearer in `Authorization`. Core resolves an existing
   linked account by verified WorkOS id, read-only; an unknown or pending
   account gets 403 `account_not_linked` and nothing is enrolled. One
-  transaction, serialized per account by a scoped advisory lock, stores the
+  transaction, serialized per account by a row lock on that account, stores the
   association, scope and receipt. Errors: 400 `observation_expired`, 409
   `operation_id_reused`, `key_associated_elsewhere`,
   `key_conflicts_with_agent_record`, 403 `agent_not_owned`.

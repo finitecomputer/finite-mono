@@ -248,11 +248,16 @@ impl CoreStore {
         tx.batch_execute("SET LOCAL statement_timeout = '5s'")
             .await
             .map_err(store_error)?;
-        // Read-only account resolution: an existing linked account only. No
-        // user, personal org or link is created or changed here.
+        // Resolve an existing linked account only; no user, personal org or
+        // link is created or changed here. The row lock (scoped to this
+        // account) serializes its observations, so a concurrent duplicate of
+        // one operation reads the first attempt's receipt instead of failing
+        // on its unique constraint. It does not block key-share readers.
         let user_id: String = tx
             .query_opt(
-                "SELECT id FROM users WHERE workos_user_id = $1 AND link_status = 'linked'",
+                "SELECT id FROM users
+                 WHERE workos_user_id = $1 AND link_status = 'linked'
+                 FOR NO KEY UPDATE",
                 &[&workos_user_id],
             )
             .await
@@ -260,15 +265,6 @@ impl CoreStore {
             .ok_or(BrainObservationError::AccountNotLinked)?
             .get("id");
         let user_id = user_id.as_str();
-        // Serialize this account's observations (scoped, not a global lock).
-        // A concurrent duplicate of one operation then reads the first
-        // attempt's receipt instead of failing on its unique constraint.
-        tx.execute(
-            "SELECT pg_advisory_xact_lock(hashtextextended('brain-account-observation:' || $1, 0))",
-            &[&user_id],
-        )
-        .await
-        .map_err(store_error)?;
 
         if let Some(receipt) = tx
             .query_opt(
