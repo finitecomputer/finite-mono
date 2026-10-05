@@ -1110,6 +1110,7 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
+ "bech32",
  "clap",
  "deadpool-postgres",
  "futures-util",

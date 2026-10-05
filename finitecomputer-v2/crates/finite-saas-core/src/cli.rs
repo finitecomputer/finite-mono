@@ -24,17 +24,38 @@ pub(crate) async fn serve() -> Result<()> {
             bail!("FC_CORE_HOSTED_HERMES_ORIGINS_JSON must be UTF-8")
         }
     };
+    let brain_identity =
+        match finite_saas_core::brain_identity::BrainIdentityConfig::from_env(&auth) {
+            Ok(config) => config,
+            Err(error) => {
+                // Optional feature: a bad configuration disables it and never
+                // stops Core. The error names variables, never their values.
+                tracing::warn!(error = %error, "Brain identity listener disabled");
+                None
+            }
+        };
     let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
     let app = router_with_hosted_hermes_origins(
         store.clone(),
-        auth,
+        auth.clone(),
         agent_creation_placement,
         hosted_hermes_origins.clone(),
     )
     .layer(TraceLayer::new_for_http());
+    // Mandatory listeners bind first so an optional listener can never take
+    // their address.
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "finite-saas-core listening");
+    let runtime_listener = match env::var("FC_CORE_RUNTIME_BIND") {
+        Ok(bind) => Some(TcpListener::bind(bind.parse::<SocketAddr>()?).await?),
+        Err(_) => None,
+    };
+    let mut reserved = vec![listener.local_addr()?];
+    if let Some(runtime_listener) = &runtime_listener {
+        reserved.push(runtime_listener.local_addr()?);
+    }
+    spawn_optional_brain_identity_listener(brain_identity, &reserved, store.clone(), auth).await;
     let trial_store = store.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(5));
@@ -47,8 +68,7 @@ pub(crate) async fn serve() -> Result<()> {
             }
         }
     });
-    if let Ok(bind) = env::var("FC_CORE_RUNTIME_BIND") {
-        let runtime_listener = TcpListener::bind(bind.parse::<SocketAddr>()?).await?;
+    if let Some(runtime_listener) = runtime_listener {
         let runtime_app = finite_saas_core::api::runtime_router(store, hosted_hermes_origins);
         tokio::try_join!(async { axum::serve(listener, app).await }, async {
             axum::serve(runtime_listener, runtime_app).await
@@ -57,6 +77,62 @@ pub(crate) async fn serve() -> Result<()> {
         axum::serve(listener, app).await?;
     }
     Ok(())
+}
+
+/// Start the optional, service-owned Brain identity listener after the
+/// mandatory listeners are bound. It never stops Core.
+pub(crate) async fn spawn_optional_brain_identity_listener(
+    config: Option<finite_saas_core::brain_identity::BrainIdentityConfig>,
+    reserved: &[SocketAddr],
+    store: CoreStore,
+    auth: CoreAuth,
+) -> Option<SocketAddr> {
+    let config = config?;
+    let bind = config.bind.clone();
+    let router = finite_saas_core::api::brain_identity_router(store, auth, config)
+        .layer(TraceLayer::new_for_http());
+    spawn_optional_listener("Brain identity", &bind, reserved, router).await
+}
+
+/// Serve an optional router on its own address. A reserved (mandatory)
+/// address, an invalid address or a bind failure disables it with a warning
+/// and leaves every mandatory listener untouched. Returns the bound address.
+pub(crate) async fn spawn_optional_listener(
+    name: &'static str,
+    bind: &str,
+    reserved: &[SocketAddr],
+    router: axum::Router,
+) -> Option<SocketAddr> {
+    let Ok(bind) = bind.parse::<SocketAddr>() else {
+        tracing::warn!(
+            listener = name,
+            "optional listener disabled: invalid bind address"
+        );
+        return None;
+    };
+    if reserved.iter().any(|taken| {
+        taken.port() == bind.port() && (taken.ip() == bind.ip() || taken.ip().is_unspecified())
+    }) {
+        tracing::warn!(listener = name, %bind,
+            "optional listener disabled: address belongs to a mandatory listener");
+        return None;
+    }
+    let listener = match TcpListener::bind(bind).await {
+        Ok(listener) => listener,
+        Err(error) => {
+            tracing::warn!(listener = name, %bind, error = %error,
+                "optional listener disabled: bind failed");
+            return None;
+        }
+    };
+    let local = listener.local_addr().ok()?;
+    tracing::info!(listener = name, %local, "finite-saas-core optional listener");
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, router).await {
+            tracing::warn!(listener = name, error = %error, "optional listener stopped");
+        }
+    });
+    Some(local)
 }
 
 /// Commit-vs-dry-run switch for every admin CLI write. The name is a leftover

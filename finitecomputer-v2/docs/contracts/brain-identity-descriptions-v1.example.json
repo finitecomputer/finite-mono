@@ -1,0 +1,67 @@
+{
+  "version": "finite-core-brain-identity-descriptions-v1",
+  "brainId": "brain_synthetic_fixture",
+  "checkedAt": "2026-10-04T00:00:00Z",
+  "results": [
+    {
+      "publicKeyHex": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Ada",
+      "lifecycle": "active",
+      "responsibleAccount": {
+        "email": "sam@example.org",
+        "source": "coreAccountContact",
+        "observedAt": "2026-10-03T00:00:00Z",
+        "humanPublicKeysHex": [
+          "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9"
+        ]
+      },
+      "source": {
+        "kind": "finiteRuntimeRecord",
+        "observedAt": "2026-10-03T00:00:00Z",
+        "revision": "synthetic-runtime-record-1"
+      }
+    },
+    {
+      "publicKeyHex": "c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9",
+      "state": "resolved",
+      "kind": "human",
+      "accountEmail": "sam@example.org",
+      "source": {
+        "kind": "hostedDeviceObservation",
+        "observedAt": "2026-10-03T00:00:00Z",
+        "revision": "synthetic-account-key-1"
+      }
+    },
+    {
+      "publicKeyHex": "e493dbf1c10d80f3581e4904930b1404cc6c13900ee0758474fa94abe8c4cd13",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Retired Helper",
+      "lifecycle": "retired",
+      "responsibleAccount": {
+        "email": "lee@example.net",
+        "source": "coreAccountContact",
+        "observedAt": "2026-09-01T00:00:00Z"
+      },
+      "source": {
+        "kind": "finiteRuntimeRecord",
+        "observedAt": "2026-09-01T00:00:00Z",
+        "revision": "synthetic-runtime-record-2"
+      }
+    },
+    {
+      "publicKeyHex": "2f8bde4d1a07209355b4a7250a5c5128e88b84bddc619ab7cba8d569b240efe4",
+      "state": "ambiguous"
+    },
+    {
+      "publicKeyHex": "fff97bd5755eeea420453a14355235d382f6472f8568a18b2f057a1460297556",
+      "state": "unknown"
+    }
+  ]
+}

@@ -18,6 +18,14 @@ impl ApiError {
         }
     }
 
+    pub(super) fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+            correlation_id: None,
+        }
+    }
+
     pub(super) fn forbidden(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FORBIDDEN,

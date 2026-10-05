@@ -206,7 +206,9 @@ function BrainApprovalCard({
         </p>
       ) : (
         <p className="finite-brain-card__body">
-          Your agent requested this action. Approving signs it with your account key.
+          Your agent requested this action. Approving signs it with your account key and lets
+          this Brain&apos;s admins see your account email and that you are responsible for your
+          agents there.
         </p>
       )}
       {state === "error" ? (
@@ -226,6 +228,7 @@ function BrainApprovalCard({
                   brainId: reference.brainId,
                   requestId: reference.requestId,
                   payload: detail?.payload ?? null,
+                  shareAccountContact: true,
                 },
                 "approved",
                 `Approved: ${label.toLowerCase()} for ${brainName}`
@@ -358,7 +361,9 @@ export function BrainInvitationCards({
               <span className="finite-brain-card__brain">{card.ref ?? card.brainId ?? ""}</span>
             </header>
             <p className="finite-brain-card__body">
-              You were invited to a Brain. Joining adds your account as a member.
+              You were invited to a Brain. Joining adds your account as a member and lets this
+              Brain&apos;s admins see your account email and that you are responsible for your
+              agents there.
             </p>
             {state === "error" ? (
               <p className="finite-brain-card__error" role="alert">
@@ -373,7 +378,7 @@ export function BrainInvitationCards({
                   act(
                     key,
                     "/api/brain/invitations/accept",
-                    { inviteCode: card.inviteCode },
+                    { inviteCode: card.inviteCode, shareAccountContact: true },
                     `Joined ${card.ref ?? card.brainId ?? "a Brain"}`
                   )
                 }
