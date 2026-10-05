@@ -4,10 +4,13 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Trial access gates and payment recovery (FIN-150/151/152).
-    # Source 9feeb647ff3c2dc5b5a01af46afbfb217ca07f23.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/36901472130
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:099b26b2bf3a584f4fcc0dba99cad7bcb0790b745e0a891d6ae60279ad306e53";
+    # Brain identity descriptions (FIN-122): Join/Approve contact disclosure
+    # and the optional Core observation hook, off until its two variables are
+    # set in /etc/finite/dashboard.env.
+    # Source 5875f70d0f8964b4bd6b5bb8dbd6617bb13c6932 (dashboard code from
+    # Core 03fbf08f plus the updated FiniteBrain skill catalog).
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37259843180
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:8fe23abe9c0d7828f840e945ce87da13705f290e4ef4a3acc9101e99de219853";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -50,6 +53,8 @@
     #   STRIPE_WEBHOOK_SECRET
     #   GOOGLE_WORKSPACE_CLIENT_ID        (optional in the manifest)
     #   GOOGLE_WORKSPACE_CLIENT_SECRET    (optional in the manifest)
+    #   FC_CORE_BRAIN_IDENTITY_URL        optional; Core's private Brain identity
+    #   FC_CORE_BRAIN_OBSERVATION_TOKEN   listener, set both or neither (FIN-122)
     environmentFiles = [
       "/etc/finite/dashboard.env"
       "/etc/finite/hosted-web-device.env"
