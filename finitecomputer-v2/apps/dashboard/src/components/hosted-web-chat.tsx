@@ -77,7 +77,6 @@ import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
 import {
   BrainApprovalCards,
-  BrainInvitationCards,
   useBrainApprovalDetails,
 } from "@/components/brain-action-cards";
 import {
@@ -1061,23 +1060,6 @@ export function HostedWebChat({
                     {activityLabel && !waitingToolRollupId
                       ? <LiveActivity label={activityLabel} />
                       : null}
-                    <BrainInvitationCards
-                      className="finite-chat__brain-cards"
-                      revision={messages.length}
-                      onSendMessage={
-                        selectedRoom
-                          ? (text) =>
-                              dispatch(
-                                messageAction(
-                                  selectedRoom.room_id,
-                                  text,
-                                  selectedTopic,
-                                  selectedChat
-                                )
-                              ).then(() => undefined)
-                          : undefined
-                      }
-                    />
                   </div>
                 ) : null}
               </div>
