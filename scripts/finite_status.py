@@ -950,6 +950,104 @@ def collect_finite_private_usage() -> dict[str, Any]:
     }
 
 
+BRAIN_IDENTITY_QUERY = """
+SELECT to_regclass('account_brain_principals') IS NOT NULL AS finite_has_brain_identity \\gset
+\\if :finite_has_brain_identity
+WITH pins AS (
+  SELECT r.health_reporting_npub AS npub, r.project_id, r.offboarding_phase,
+    EXISTS (SELECT 1 FROM project_runtime_links l WHERE l.agent_runtime_id = r.id
+            AND l.project_id = r.project_id AND l.active) AS active_link,
+    EXISTS (SELECT 1 FROM project_runtime_links l WHERE l.agent_runtime_id = r.id
+            AND l.project_id IS DISTINCT FROM r.project_id AND l.active) AS foreign_link
+  FROM agent_runtimes r WHERE r.health_reporting_npub IS NOT NULL
+), keys AS (
+  SELECT npub, COUNT(DISTINCT project_id) AS projects, COUNT(*) AS incarnations,
+    bool_or(NOT active_link AND offboarding_phase IS NULL) AS unoffboarded_inactive,
+    bool_or(active_link) AS live,
+    bool_and(COALESCE(offboarding_phase IN ('link_deactivated', 'archived'), false)) AS retired,
+    bool_or(foreign_link) AS foreign_link
+  FROM pins GROUP BY npub
+)
+SELECT json_build_object(
+  'schema_present', true,
+  'key_associations', (SELECT json_build_object(
+    'active', COUNT(*) FILTER (WHERE status = 'active'),
+    'retired', COUNT(*) FILTER (WHERE status = 'retired'),
+    'accounts', COUNT(DISTINCT user_id) FILTER (WHERE status = 'active'))
+    FROM account_brain_principals),
+  'sharing_scopes', (SELECT json_build_object(
+    'active', COUNT(*) FILTER (WHERE revoked_at IS NULL),
+    'revoked', COUNT(*) FILTER (WHERE revoked_at IS NOT NULL),
+    'brains', COUNT(DISTINCT (brain_server, brain_id)) FILTER (WHERE revoked_at IS NULL))
+    FROM account_brain_sharing_scopes),
+  'observations_last_24h', (SELECT json_build_object(
+    'recorded', COUNT(*) FILTER (WHERE outcome = 'recorded'),
+    'unchanged', COUNT(*) FILTER (WHERE outcome = 'unchanged'))
+    FROM brain_account_observation_receipts WHERE recorded_at > NOW() - INTERVAL '24 hours'),
+  'agent_keys', (SELECT json_build_object(
+    'pinned', COUNT(*),
+    'live', COUNT(*) FILTER (WHERE projects = 1 AND live AND NOT foreign_link),
+    'retired', COUNT(*) FILTER (WHERE projects = 1 AND NOT live AND retired AND NOT foreign_link),
+    'ambiguous_projects', COUNT(*) FILTER (WHERE projects > 1),
+    'unsupported_lifecycle', COUNT(*) FILTER (WHERE projects = 1 AND NOT foreign_link
+      AND NOT live AND NOT retired),
+    'foreign_active_link', COUNT(*) FILTER (WHERE foreign_link),
+    'same_project_inactive_unoffboarded_sibling', COUNT(*) FILTER (WHERE projects = 1
+      AND incarnations > 1 AND unoffboarded_inactive))
+    FROM keys)
+);
+\\else
+SELECT json_build_object('schema_present', false);
+\\endif
+"""
+
+
+def collect_brain_identity() -> dict[str, Any]:
+    """Aggregate, contact-free Brain identity description state from Core."""
+    result = run_read_only(
+        [
+            "psql",
+            "--no-psqlrc",
+            "--tuples-only",
+            "--no-align",
+            "--quiet",
+            "--set",
+            "ON_ERROR_STOP=1",
+            "--dbname",
+            CONTRACT["database"]["name"],
+        ],
+        environment=postgres_environment(),
+        input_text=(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '15s';\n"
+            f"{BRAIN_IDENTITY_QUERY}ROLLBACK;\n"
+        ),
+    )
+    if result.returncode != 0:
+        message = result.stderr.strip().splitlines()
+        detail = message[-1] if message else f"exit {result.returncode}"
+        raise CollectionError(f"read-only Brain identity query failed: {detail}")
+    try:
+        identity = json.loads(result.stdout)
+    except ValueError as error:
+        raise CollectionError("Brain identity query returned invalid JSON") from error
+    return {
+        "schema_version": "finite.brain-identity-status.v1",
+        "generated_at": isoformat(utc_now()),
+        "exit_code": 0,
+        "limitations": [
+            "Counts only: no email, account id, key or Brain id is read into this report.",
+            "Hosted humans are described only after a qualifying action; absent associations are not errors.",
+            "Agent keys with ambiguous, foreign-link or unsupported lifecycle records are described as "
+            "notShared or unknown by Core, never guessed; they need read-only investigation, not repair.",
+            "same_project_inactive_unoffboarded_sibling counts keys whose project has another runtime row "
+            "with no active link and no offboarding phase. Such a key resolves while a sibling is live and "
+            "becomes unknown once retired; it is legacy state to qualify before rollout, not to repair.",
+        ],
+        "brain_identity": identity,
+    }
+
+
 def systemd_properties(unit: str) -> dict[str, str]:
     result = run_read_only(
         [
@@ -4348,6 +4446,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
+        "--brain-identity",
+        action="store_true",
+        help="read only aggregate, contact-free Brain identity description state; emits JSON",
+    )
+    mode.add_argument(
         "--fixture",
         type=Path,
         help="read an offline recorded fixture instead of host/production evidence",
@@ -4404,6 +4507,8 @@ def main(arguments: list[str] | None = None) -> None:
             report = collect()
         elif options.finite_private_usage:
             report = collect_finite_private_usage()
+        elif options.brain_identity:
+            report = collect_brain_identity()
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -4435,6 +4540,7 @@ def main(arguments: list[str] | None = None) -> None:
         options.json
         or options.tinfoil
         or options.finite_private_usage
+        or options.brain_identity
         or options.runtime_route
         or options.runtime_lifecycle
         or options.runtime_assignment

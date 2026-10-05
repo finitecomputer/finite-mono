@@ -11,6 +11,7 @@ fresh read-only evidence establish observed state.
 | Cross-component deployment order | [Platform rollout](platform-rollout.md) |
 | Chat deployment and single-writer constraints | [Chat server](deploy-finitechat-server.md) |
 | Brain deployment | [Brain](deploy-brain.md) |
+| Named access report identity descriptions | [Brain identity descriptions](brain-identity-descriptions.md) |
 | Sites deployment, backup and redirects | [Sites](deploy-sites.md) |
 | Identity Directory | [Identity](identity-authority.md) |
 | CLI releases and aliases | [CLI release](release-cli.md) |

@@ -108,6 +108,18 @@ impl BrainStore {
                 params![29, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V30 is additive only: indexes for the access report's per-key
+        // participation reads over existing facts. A V29 binary reopening a
+        // V30 database never looks for version 30, and SQLite maintains the
+        // indexes on its writes.
+        if !migration_applied(&tx, 30)? {
+            tx.execute_batch(SCHEMA_V30)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![30, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -380,6 +392,38 @@ CREATE TABLE brain_invite_tokens (
 
 CREATE INDEX brain_invite_tokens_by_brain
     ON brain_invite_tokens(brain_id, created_at);
+"#;
+
+const SCHEMA_V30: &str = r#"
+-- Access report participation evidence: one indexed point read per report
+-- key ("did this exact key act on this Brain itself?") instead of grouping a
+-- Brain's whole history.
+CREATE INDEX brain_record_index_by_actor
+    ON brain_record_index(brain_id, actor_npub, accepted_at);
+
+-- Ordered by accepted_at under exactly the evidence predicate, so MIN() is
+-- one seek however much removal/re-invitation history one key accumulates.
+CREATE INDEX brain_invitations_accepted_by_user
+    ON brain_invitations(brain_id, user_id, accepted_at)
+    WHERE status = 'accepted' AND target_kind = 'npub' AND accepted_at IS NOT NULL
+      AND (claimed_by_npub IS NULL OR claimed_by_npub = user_id);
+
+CREATE INDEX brain_invite_tokens_by_redeemer
+    ON brain_invite_tokens(brain_id, redeemed_by_npub, redeemed_at);
+
+-- One exact Brain/key seek finds its earliest acceptance without scanning
+-- unrelated or pending offers. Older revocations may retain accepted_at.
+CREATE INDEX share_links_accepted_by_recipient
+    ON share_links(brain_id, recipient_npub, accepted_at)
+    WHERE status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL;
+
+CREATE INDEX shared_folder_invitations_accepted_by_controller
+    ON shared_folder_invitations(source_brain_id, destination_admin_npub, accepted_at)
+    WHERE status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL;
+
+-- An applied Approval records its exact signer; that is the signer acting.
+CREATE INDEX brain_approval_nonces_by_signer
+    ON brain_approval_nonces(brain_id, signer_npub, applied_at);
 "#;
 
 const SCHEMA_V24: &str = r#"
@@ -2787,7 +2831,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 29);
+        assert_eq!(latest_version, 30);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(
