@@ -83,6 +83,61 @@ fn row<'a>(report: &'a Value, npub: &str) -> &'a Value {
         .unwrap()
 }
 
+fn accept_folder_as_guest(
+    binary: &Path,
+    owner: &Path,
+    tree: &Path,
+    guest: &Path,
+    url: &str,
+) -> String {
+    let key = run(binary, guest, guest, url, &["signer", "public-key"])["npub"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let invitation = run(
+        binary,
+        owner,
+        tree,
+        url,
+        &[
+            "invite",
+            "folder",
+            "create",
+            "--brain",
+            "access-proof",
+            "--folder",
+            "knowledge",
+            "--target",
+            &key,
+        ],
+    );
+    let accepted = run(
+        binary,
+        guest,
+        guest,
+        url,
+        &[
+            "invite",
+            "folder",
+            "accept",
+            "--id",
+            invitation["id"].as_str().unwrap(),
+        ],
+    );
+    assert_eq!(accepted["status"], "accepted");
+    assert!(accepted["acceptedAt"].as_str().is_some());
+    key
+}
+
+fn assert_named_folder_guest(report: &Value, key: &str, name: &str) {
+    let guest = row(report, key);
+    assert_eq!(guest["brainRole"], "guest");
+    assert_eq!(guest["participation"]["kind"], "folderInvitationAcceptance");
+    assert_eq!(guest["name"]["state"], "verified");
+    assert_eq!(guest["name"]["display"], name);
+    assert_eq!(guest["folders"][0]["currentGrant"], "present");
+}
+
 #[test]
 fn built_cli_uses_private_directory_and_withholds_names_until_exact_key_participates() {
     let scratch = TempDir::new().unwrap();
@@ -274,12 +329,23 @@ fn built_cli_uses_private_directory_and_withholds_names_until_exact_key_particip
     ] {
         assert!(human.contains(expected), "missing {expected:?}: {human}");
     }
+    // The ordinary process suite covers a Guest who only accepts and reads,
+    // without needing baseline binaries or a recipient content write.
+    let guest = home(scratch.path(), "read-only-guest");
+    let guest_key = accept_folder_as_guest(&binary, &owner, &tree, &guest, &authority.url);
+    let guest_hex =
+        finite_identity::hex::encode(&finite_identity::npub::decode(&guest_key).unwrap());
+    store
+        .bind_vip_email("read-only-guest@fixture.invalid", &guest_hex, 1_780_000_000)
+        .unwrap();
+    let with_guest = report(&binary, &owner, &authority.url);
+    assert_named_folder_guest(&with_guest, &guest_key, "read-only-guest@fixture.invalid");
     // Losing the optional Directory changes evidence, never roles or grants.
     drop(private_directory);
     let unavailable = report(&binary, &owner, &authority.url);
     assert_eq!(unavailable["directory"]["state"], "unavailable");
     assert_eq!(unavailable["currentAccessComplete"], true);
-    assert_eq!(unavailable["totals"], after["totals"]);
+    assert_eq!(unavailable["totals"], with_guest["totals"]);
     assert_eq!(
         row(&unavailable, &added_key)["folders"],
         participating["folders"]
@@ -289,7 +355,7 @@ fn built_cli_uses_private_directory_and_withholds_names_until_exact_key_particip
 
 #[test]
 #[ignore = "requires actual baseline CLI and server via FBRAIN_COMPAT_BINARY and FBRAIN_COMPAT_SERVER_BINARY"]
-fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
+fn actual_v29_server_reopens_v31_without_losing_authority_or_content() {
     let old_cli =
         PathBuf::from(std::env::var_os("FBRAIN_COMPAT_BINARY").expect("set actual baseline CLI"));
     let old_server = PathBuf::from(
@@ -299,9 +365,23 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
     let binary = candidate_binary();
     let scratch = TempDir::new().unwrap();
     let owner = home(scratch.path(), "owner");
+    let guest_before = home(scratch.path(), "guest-before-migration");
+    let guest_after = home(scratch.path(), "guest-after-migration");
+    let names = IdentityStore::open_memory().unwrap();
+    let private_directory = directory(names.clone(), false);
     let database = scratch.path().join("authority.sqlite3");
     let old = reference(&old_server, &database);
     let tree = create_content(&old_cli, &owner, &old.url);
+    let first_guest = accept_folder_as_guest(&old_cli, &owner, &tree, &guest_before, &old.url);
+    let first_hex =
+        finite_identity::hex::encode(&finite_identity::npub::decode(&first_guest).unwrap());
+    names
+        .bind_vip_email(
+            "old-guest-before@fixture.invalid",
+            &first_hex,
+            1_780_000_000,
+        )
+        .unwrap();
     let before = run(&old_cli, &owner, &tree, &old.url, &["brain", "export"]);
     let unsupported = execute(
         &binary,
@@ -326,17 +406,20 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
     assert_eq!(
         schema_version(&database),
         29,
-        "reference must be actual pre-V30 server"
+        "reference must be actual pre-V31 server"
     );
 
-    let candidate = brain(&database, None);
+    let candidate = brain(&database, Some(&private_directory.url));
     assert_eq!(
         before,
         run(&binary, &owner, &tree, &candidate.url, &["brain", "export"])
     );
-    assert_eq!(
-        report(&binary, &owner, &candidate.url)["currentAccessComplete"],
-        true
+    let migrated_report = report(&binary, &owner, &candidate.url);
+    assert_eq!(migrated_report["currentAccessComplete"], true);
+    assert_named_folder_guest(
+        &migrated_report,
+        &first_guest,
+        "old-guest-before@fixture.invalid",
     );
     run(&binary, &owner, &tree, &candidate.url, &["sync", "now"]);
     assert_eq!(
@@ -344,7 +427,7 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
         "# Retained knowledge\n"
     );
     drop(candidate);
-    assert_eq!(schema_version(&database), 30);
+    assert_eq!(schema_version(&database), 31);
 
     let reopened = reference(&old_server, &database);
     assert_eq!(
@@ -370,9 +453,22 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
         fs::read_to_string(fresh_tree.join("Knowledge/wiki/retained.md")).unwrap(),
         "# Retained knowledge\n"
     );
+    // The actual old writer also maintains the new acceptance indexes when
+    // it accepts an invitation after reopening the V31 database.
+    let second_guest =
+        accept_folder_as_guest(&old_cli, &owner, &fresh_tree, &guest_after, &reopened.url);
+    let second_hex =
+        finite_identity::hex::encode(&finite_identity::npub::decode(&second_guest).unwrap());
+    names
+        .bind_vip_email(
+            "old-guest-after@fixture.invalid",
+            &second_hex,
+            1_780_000_000,
+        )
+        .unwrap();
     fs::write(
         fresh_tree.join("Knowledge/wiki/retained.md"),
-        "# Edited by baseline after V30\n",
+        "# Edited by baseline after V31\n",
     )
     .unwrap();
     run(
@@ -391,9 +487,9 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
     );
     assert_ne!(before, after_old_write);
     drop(reopened);
-    assert_eq!(schema_version(&database), 30);
+    assert_eq!(schema_version(&database), 31);
 
-    let final_server = brain(&database, None);
+    let final_server = brain(&database, Some(&private_directory.url));
     assert_eq!(
         after_old_write,
         run(
@@ -421,9 +517,19 @@ fn actual_v29_server_reopens_v30_without_losing_authority_or_content() {
     );
     assert_eq!(
         fs::read_to_string(fresh_candidate.join("Knowledge/wiki/retained.md")).unwrap(),
-        "# Edited by baseline after V30\n"
+        "# Edited by baseline after V31\n"
     );
     let final_report = report(&binary, &owner, &final_server.url);
+    assert_named_folder_guest(
+        &final_report,
+        &first_guest,
+        "old-guest-before@fixture.invalid",
+    );
+    assert_named_folder_guest(
+        &final_report,
+        &second_guest,
+        "old-guest-after@fixture.invalid",
+    );
     assert_eq!(final_report["currentAccessComplete"], true);
     assert_eq!(final_report["totals"]["grantsMissing"], 0);
 }

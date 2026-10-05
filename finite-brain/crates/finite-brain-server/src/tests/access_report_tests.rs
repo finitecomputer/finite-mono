@@ -143,6 +143,10 @@ fn directory_fixture(
             hex_of(&cast.shared),
             ("shared-runtime@finite.vip", "mailbox"),
         ),
+        (
+            hex_of(&cast.mount_admin),
+            ("mount-controller@finite.vip", "mailbox"),
+        ),
         // Would leak if the outsider's key were ever sent.
         (
             hex_of(&cast.outsider),
@@ -641,6 +645,9 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
     // Mount participation comes from the recorded access source.
     let mount = row(&report, &cast.mount_admin);
     assert_eq!(mount["brainRole"], "mountParticipant");
+    assert_eq!(mount["participation"]["kind"], "mountOfferAcceptance");
+    assert_eq!(mount["name"]["state"], "verified");
+    assert_eq!(mount["name"]["label"], "mount-controller@finite.vip");
     let mount_folder = folder(mount, "restricted").unwrap();
     let sources = mount_folder["entitlementSources"].as_array().unwrap();
     assert_eq!(sources.len(), 1);
@@ -1425,4 +1432,274 @@ fn default_nip05_transport_has_total_deadline_even_when_response_drips() {
     assert!(fetch_nip05_document(&request, &request.url).is_err());
     assert!(started.elapsed() < Duration::from_secs(5));
     peer.join().unwrap();
+}
+
+#[tokio::test]
+async fn accepted_folder_invitation_enables_only_its_exact_recipient_name() {
+    let admin = Keys::generate();
+    let recipient = Keys::generate();
+    let pending = Keys::generate();
+    let wrong = Keys::generate();
+    let calls = DirectoryCalls::default();
+    let recorded = calls.clone();
+    let known = BTreeMap::from([
+        (
+            hex_of(&recipient),
+            ("accepted-folder@finite.vip", "mailbox"),
+        ),
+        (hex_of(&pending), ("pending-folder@finite.vip", "mailbox")),
+        (hex_of(&wrong), ("admin-added@finite.vip", "mailbox")),
+    ]);
+    let state = test_state().with_directory_name_fixture(move |keys: &[String]| {
+        recorded.lock().unwrap().push(keys.to_vec());
+        Ok(directory_answer(keys, &known))
+    });
+    let router = router_with_state(state.clone());
+    assert_eq!(
+        post_brain(
+            router.clone(),
+            &admin,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    add_test_org_folders(&router, &admin).await;
+    // These keys already appear in the report. Neither admin-added roles nor
+    // pending invitations may expose their Directory names.
+    for keys in [&pending, &wrong] {
+        state
+            .store
+            .lock()
+            .unwrap()
+            .add_member(&BrainId::new("acme").unwrap(), &user(keys))
+            .unwrap();
+    }
+    let mut invitations = Vec::new();
+    for (index, keys) in [&recipient, &pending].into_iter().enumerate() {
+        let target = npub(keys);
+        let change_id = format!("folder-accept-evidence-{index}");
+        let created = authed_request(router.clone(), &admin, "POST", "/v1/brains/acme/folders/restricted/invitations", Some(serde_json::json!({
+            "recipientNpub": target,
+            "grant": folder_key_grant_value(&change_id, 1, &target),
+            "accessChangeEvent": admin_event(&admin, "acme", &change_id, AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1)),
+            "expiresAt": "2026-06-04T20:26:40Z",
+        }).to_string()), TEST_NOW + index as u64 + 1).await;
+        assert_eq!(created.status(), StatusCode::OK);
+        invitations.push(read_json::<FolderInvitationResponse>(created).await);
+    }
+    let (status, before) = get_report(&router, &admin, "", TEST_NOW + 3).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    for keys in [&pending, &wrong] {
+        assert!(row(&before, keys).get("participation").is_none());
+        assert_eq!(row(&before, keys)["name"]["state"], "unknown");
+    }
+    assert!(
+        !before["identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["npub"] == npub(&recipient))
+    );
+    assert!(
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .any(|key| key == &hex_of(&recipient))
+    );
+    let accept_path = format!("/v1/invitations/{}/accept", invitations[0].id);
+    let denied = authed_request(
+        router.clone(),
+        &wrong,
+        "POST",
+        &accept_path,
+        None,
+        TEST_NOW + 4,
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    let accepted = authed_request(
+        router.clone(),
+        &recipient,
+        "POST",
+        &accept_path,
+        None,
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let accepted: FolderInvitationResponse = read_json(accepted).await;
+    calls.lock().unwrap().clear();
+    let before_report = state
+        .store
+        .lock()
+        .unwrap()
+        .latest_sequence(&BrainId::new("acme").unwrap())
+        .unwrap();
+    let (status, after) = get_report(&router, &admin, "", TEST_NOW + 6).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    let named = row(&after, &recipient);
+    assert_eq!(named["brainRole"], "guest");
+    assert_eq!(named["participation"]["kind"], "folderInvitationAcceptance");
+    assert_eq!(
+        named["participation"]["recordedAt"],
+        serde_json::json!(accepted.accepted_at)
+    );
+    assert_eq!(named["name"]["state"], "verified");
+    assert_eq!(named["name"]["label"], "accepted-folder@finite.vip");
+    assert_eq!(
+        folder(named, "restricted").unwrap()["currentGrant"],
+        "present"
+    );
+    let requested = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(requested.contains(&hex_of(&recipient)));
+    for keys in [&pending, &wrong] {
+        assert!(!requested.contains(&hex_of(keys)));
+        assert!(row(&after, keys).get("participation").is_none());
+        assert_eq!(row(&after, keys)["name"]["state"], "unknown");
+    }
+    assert_eq!(
+        state
+            .store
+            .lock()
+            .unwrap()
+            .latest_sequence(&BrainId::new("acme").unwrap())
+            .unwrap(),
+        before_report
+    );
+}
+
+#[tokio::test]
+async fn accepted_personal_mount_names_only_the_accepting_controller_in_source_brain() {
+    let admin = Keys::generate();
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let calls = DirectoryCalls::default();
+    let recorded = calls.clone();
+    let known = BTreeMap::from([
+        (hex_of(&owner), ("mount-owner@finite.vip", "mailbox")),
+        (
+            hex_of(&agent),
+            ("automatic-agent@finite.vip", "managed_agent"),
+        ),
+    ]);
+    let state = personal_test_state(&owner, &agent).with_directory_name_fixture(
+        move |keys: &[String]| {
+            recorded.lock().unwrap().push(keys.to_vec());
+            Ok(directory_answer(keys, &known))
+        },
+    );
+    let router = router_with_state(state.clone());
+    assert_eq!(
+        post_brain(
+            router.clone(),
+            &admin,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    add_test_org_folders(&router, &admin).await;
+    // Make both keys visible before acceptance without letting either act.
+    for keys in [&owner, &agent] {
+        state
+            .store
+            .lock()
+            .unwrap()
+            .add_member(&BrainId::new("acme").unwrap(), &user(keys))
+            .unwrap();
+    }
+    let target = npub(&owner);
+    let created = authed_request(router.clone(), &admin, "POST", "/v1/brains/acme/folders/restricted/mount-offers", Some(serde_json::json!({
+        "destinationBrainId": "personal", "destinationControllerNpub": target,
+        "grant": folder_key_grant_value("mount-evidence-owner", 1, &target),
+        "accessChangeEvent": admin_event(&admin, "acme", "mount-evidence-offer", AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1)),
+        "expiresAt": "2026-06-04T20:26:40Z",
+    }).to_string()), TEST_NOW + 1).await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let offer: MountOfferResponse = read_json(created).await;
+    let (status, before) = get_report(&router, &admin, "", TEST_NOW + 2).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    for keys in [&owner, &agent] {
+        assert!(row(&before, keys).get("participation").is_none());
+        assert_eq!(row(&before, keys)["name"]["state"], "unknown");
+    }
+    let accept_path = format!("/v1/mount-offers/{}/accept", offer.id);
+    // The Agent also controls the Personal Brain but is not the addressed
+    // controller. Controller capability alone does not prove acceptance.
+    let wrong = authed_request(
+        router.clone(),
+        &agent,
+        "POST",
+        &accept_path,
+        Some(String::new()),
+        TEST_NOW + 3,
+    )
+    .await;
+    assert_eq!(wrong.status(), StatusCode::NOT_FOUND);
+    let accepted = authed_request(
+        router.clone(),
+        &owner,
+        "POST",
+        &accept_path,
+        Some(
+            serde_json::json!({
+                "grants": [folder_key_grant_value("mount-evidence-agent", 1, &npub(&agent))],
+            })
+            .to_string(),
+        ),
+        TEST_NOW + 4,
+    )
+    .await;
+    let status = accepted.status();
+    let text = read_text(accepted).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    calls.lock().unwrap().clear();
+    let (status, after) = get_report(&router, &admin, "", TEST_NOW + 5).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(
+        row(&after, &owner)["participation"]["kind"],
+        "mountOfferAcceptance"
+    );
+    assert_eq!(row(&after, &owner)["name"]["state"], "verified");
+    assert_eq!(
+        row(&after, &owner)["name"]["label"],
+        "mount-owner@finite.vip"
+    );
+    assert!(row(&after, &agent).get("participation").is_none());
+    assert_eq!(row(&after, &agent)["name"]["state"], "unknown");
+    assert_eq!(
+        folder(row(&after, &agent), "restricted").unwrap()["currentGrant"],
+        "present"
+    );
+    let requested = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert!(requested.contains(&hex_of(&owner)));
+    assert!(!requested.contains(&hex_of(&agent)));
+    let (status, destination) = get_report_for(&router, &owner, "personal", "", TEST_NOW + 6).await;
+    assert_eq!(status, StatusCode::OK, "{destination}");
+    assert!(row(&destination, &owner).get("participation").is_none());
 }

@@ -5041,6 +5041,13 @@ mod tests {
         assert_eq!(accepted.status, LinkStatus::Accepted);
         assert_eq!(accepted.accepted_at.as_deref(), Some(now));
         assert!(!accepted.duplicate_accept);
+        let snapshot = store.access_report_snapshot(&brain_id, None, 100).unwrap();
+        let participation = snapshot.verified_participation.get(&recipient).expect(
+            "recipient-authenticated Folder acceptance is participation without content writes",
+        );
+        assert_eq!(participation.kind.as_str(), "folderInvitationAcceptance");
+        assert_eq!(participation.recorded_at, now);
+        assert!(!snapshot.verified_participation.contains_key(&wrong_user));
 
         let stored = store.load_brain(&brain_id).unwrap();
         assert!(
@@ -6927,6 +6934,151 @@ mod tests {
     }
 
     #[test]
+    fn acceptance_evidence_migrates_v30_and_retains_only_authenticated_history() {
+        let scratch = TempDir::new().unwrap();
+        let database = scratch.path().join("acceptance.sqlite3");
+        let mut store = BrainStore::open(&database).unwrap();
+        bootstrap_org_and_strategy_folder(&mut store);
+        bootstrap_org_named(&mut store, "dest", "Destination", "npub-controller");
+        let brain = BrainId::new("acme").unwrap();
+        let destination = BrainId::new("dest").unwrap();
+        let folder = FolderId::new("strategy").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let recipient = UserId::new("npub-recipient").unwrap();
+        let controller = UserId::new("npub-controller").unwrap();
+        let now = "2026-06-23T00:00:00Z";
+        let recipient_grant = grant(
+            "acceptance-recipient",
+            "strategy",
+            1,
+            admin.as_str(),
+            recipient.as_str(),
+        );
+        store
+            .create_share_link(
+                &brain,
+                &folder,
+                "folder-acceptance",
+                &recipient,
+                &admin,
+                "2026-06-30T00:00:00Z",
+                "/folder-acceptance",
+                &recipient_grant,
+                now,
+            )
+            .unwrap();
+        store
+            .accept_share_link(
+                "folder-acceptance",
+                &recipient,
+                &[folder_key_grant_control_record(
+                    &recipient_grant,
+                    "folder-acceptance-record",
+                )],
+                now,
+            )
+            .unwrap();
+        store
+            .create_shared_folder_invitation(
+                &brain,
+                &folder,
+                &destination,
+                "mount-acceptance",
+                &controller,
+                &admin,
+                "/mount-acceptance",
+                &grant(
+                    "acceptance-controller",
+                    "strategy",
+                    1,
+                    admin.as_str(),
+                    controller.as_str(),
+                ),
+                "2026-06-30T00:00:00Z",
+                now,
+            )
+            .unwrap();
+        accept_mount_for_test(
+            &mut store,
+            "mount-acceptance",
+            &controller,
+            "acceptance-connection",
+            "acceptance-mount",
+            &[],
+            now,
+        )
+        .unwrap();
+        let before = store.load_brain(&brain).unwrap();
+        // V30 already stores every acceptance fact. Reconstruct only its
+        // schema boundary, then reopen through the real migration path.
+        store
+            .conn
+            .execute_batch(
+                "DROP INDEX share_links_accepted_by_recipient;
+             DROP INDEX shared_folder_invitations_accepted_by_controller;
+             DELETE FROM schema_migrations WHERE version = 31;",
+            )
+            .unwrap();
+        drop(store);
+        let store = BrainStore::open(&database).unwrap();
+        assert_eq!(store.load_brain(&brain).unwrap(), before);
+        assert_eq!(
+            store
+                .load_share_link("folder-acceptance")
+                .unwrap()
+                .accepted_at
+                .as_deref(),
+            Some(now)
+        );
+        assert_eq!(
+            store
+                .load_shared_folder_invitation("mount-acceptance")
+                .unwrap()
+                .accepted_at
+                .as_deref(),
+            Some(now)
+        );
+        let version: u32 = store
+            .conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, 31);
+        for (status, timestamp, eligible) in [
+            ("accepted", Some(now), true),
+            ("revoked", Some(now), true),
+            ("pending", Some(now), false),
+            ("revoked", None, false),
+            ("accepted", None, false),
+            ("accepted", Some("malformed"), false),
+        ] {
+            // Legacy revocation retained accepted_at. Pending/never-accepted
+            // and malformed rows are deliberately not participation proof.
+            store.conn.execute("UPDATE share_links SET status = ?1, accepted_at = ?2 WHERE id = 'folder-acceptance'", params![status, timestamp]).unwrap();
+            store.conn.execute("UPDATE shared_folder_invitations SET status = ?1, accepted_at = ?2 WHERE id = 'mount-acceptance'", params![status, timestamp]).unwrap();
+            let snapshot = store.access_report_snapshot(&brain, None, 100).unwrap();
+            assert_eq!(
+                snapshot.verified_participation.contains_key(&recipient),
+                eligible,
+                "Folder {status} {timestamp:?}"
+            );
+            assert_eq!(
+                snapshot.verified_participation.contains_key(&controller),
+                eligible,
+                "Mount {status} {timestamp:?}"
+            );
+            let other = store
+                .access_report_snapshot(&destination, None, 100)
+                .unwrap();
+            assert!(!other.verified_participation.contains_key(&controller));
+        }
+        drop(store);
+        // The additive migration is also idempotent.
+        BrainStore::open(&database).unwrap();
+    }
+
+    #[test]
     fn mount_offer_acceptance_supports_every_brain_kind_pair() {
         for source_personal in [false, true] {
             for destination_personal in [false, true] {
@@ -7057,6 +7209,30 @@ mod tests {
                     expected.insert(UserId::new("npub-destination-agent").unwrap());
                 }
                 assert_eq!(connection.member_npubs, expected, "{suffix}");
+                let source_report = store
+                    .access_report_snapshot(&source_brain_id, None, 100)
+                    .unwrap();
+                let participation = source_report
+                    .verified_participation
+                    .get(&destination_controller)
+                    .expect("accepted Mount Offer proves the controller acted on the source Brain");
+                assert_eq!(participation.kind.as_str(), "mountOfferAcceptance");
+                assert_eq!(participation.recorded_at, now);
+                assert!(
+                    !source_report
+                        .verified_participation
+                        .contains_key(&UserId::new("npub-destination-agent").unwrap()),
+                    "automatic initial participants did not accept the offer"
+                );
+                let destination_report = store
+                    .access_report_snapshot(&destination_brain_id, None, 100)
+                    .unwrap();
+                assert!(
+                    !destination_report
+                        .verified_participation
+                        .contains_key(&destination_controller),
+                    "Mount acceptance is scoped to its source Brain"
+                );
             }
         }
     }

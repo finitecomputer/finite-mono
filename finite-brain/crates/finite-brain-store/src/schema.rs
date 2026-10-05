@@ -119,6 +119,15 @@ impl BrainStore {
                 params![30, MIGRATION_TIMESTAMP],
             )?;
         }
+        // V31 adds only indexes over existing acceptance facts. V29/V30
+        // binaries can reopen the database and maintain these on old writes.
+        if !migration_applied(&tx, 31)? {
+            tx.execute_batch(SCHEMA_V31)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![31, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -391,6 +400,18 @@ CREATE TABLE brain_invite_tokens (
 
 CREATE INDEX brain_invite_tokens_by_brain
     ON brain_invite_tokens(brain_id, created_at);
+"#;
+
+const SCHEMA_V31: &str = r#"
+-- One exact Brain/key seek finds its earliest acceptance without scanning
+-- unrelated or pending offers. Older revocations may retain accepted_at.
+CREATE INDEX share_links_accepted_by_recipient
+    ON share_links(brain_id, recipient_npub, accepted_at)
+    WHERE status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL;
+
+CREATE INDEX shared_folder_invitations_accepted_by_controller
+    ON shared_folder_invitations(source_brain_id, destination_admin_npub, accepted_at)
+    WHERE status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL;
 "#;
 
 const SCHEMA_V30: &str = r#"
@@ -2812,7 +2833,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 30);
+        assert_eq!(latest_version, 31);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(

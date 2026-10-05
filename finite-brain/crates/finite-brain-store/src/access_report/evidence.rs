@@ -13,6 +13,11 @@ pub enum ParticipationKind {
     InviteTokenRedemption,
     /// The key accepted a Brain Invitation addressed to that exact npub.
     InvitationAcceptance,
+    /// The exact recipient accepted a Folder Invitation in this Brain.
+    FolderInvitationAcceptance,
+    /// The addressed destination controller accepted a Mount Offer from this
+    /// source Brain. Other initial participants did not accept the offer.
+    MountOfferAcceptance,
     /// A Brain record was accepted from a request authenticated (NIP-98) by
     /// this key. This is request authentication, not a durable signature over
     /// the stored record: Folder Key Grant records are ephemeral-key gift
@@ -25,6 +30,8 @@ impl ParticipationKind {
         match self {
             Self::InviteTokenRedemption => "inviteTokenRedemption",
             Self::InvitationAcceptance => "invitationAcceptance",
+            Self::FolderInvitationAcceptance => "folderInvitationAcceptance",
+            Self::MountOfferAcceptance => "mountOfferAcceptance",
             Self::AuthenticatedBrainAction => "authenticatedBrainAction",
         }
     }
@@ -50,11 +57,25 @@ pub(super) const INVITATION_ACCEPTANCE_SQL: &str = "SELECT MIN(accepted_at) FROM
    AND accepted_at IS NOT NULL
    AND (claimed_by_npub IS NULL OR claimed_by_npub = user_id)";
 
+// Older writers could revoke an accepted offer while retaining accepted_at.
+// Revocation removes authority, not the historical fact that this exact key
+// accepted. Never-accepted revoked offers have no acceptance timestamp.
+pub(super) const FOLDER_INVITATION_ACCEPTANCE_SQL: &str = "SELECT MIN(accepted_at) FROM share_links
+ WHERE brain_id = ?1 AND recipient_npub = ?2
+   AND status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL";
+
+// Scope is deliberately the source Brain. Do not infer participation for a
+// Personal Brain's automatically added owner/agent or other Mount members.
+pub(super) const MOUNT_OFFER_ACCEPTANCE_SQL: &str =
+    "SELECT MIN(accepted_at) FROM shared_folder_invitations
+ WHERE source_brain_id = ?1 AND destination_admin_npub = ?2
+   AND status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL";
+
 pub(super) const AUTHENTICATED_ACTION_SQL: &str = "SELECT MIN(accepted_at) FROM brain_record_index
  WHERE brain_id = ?1 AND actor_npub = ?2";
 
 impl BrainStore {
-    /// Participation for `keys` only (one report page), three indexed point
+    /// Participation for `keys` only (one report page), five indexed point
     /// reads per key.
     pub(super) fn participation_for_keys(
         &self,
@@ -69,6 +90,14 @@ impl BrainStore {
             (
                 ParticipationKind::InvitationAcceptance,
                 INVITATION_ACCEPTANCE_SQL,
+            ),
+            (
+                ParticipationKind::FolderInvitationAcceptance,
+                FOLDER_INVITATION_ACCEPTANCE_SQL,
+            ),
+            (
+                ParticipationKind::MountOfferAcceptance,
+                MOUNT_OFFER_ACCEPTANCE_SQL,
             ),
             (
                 ParticipationKind::AuthenticatedBrainAction,
@@ -125,6 +154,14 @@ mod tests {
                 INVITATION_ACCEPTANCE_SQL,
                 "brain_invitations_accepted_by_user",
             ),
+            (
+                FOLDER_INVITATION_ACCEPTANCE_SQL,
+                "share_links_accepted_by_recipient",
+            ),
+            (
+                MOUNT_OFFER_ACCEPTANCE_SQL,
+                "shared_folder_invitations_accepted_by_controller",
+            ),
             (AUTHENTICATED_ACTION_SQL, "brain_record_index_by_actor"),
         ] {
             let plan = query_plan(&store, sql, &[&"brain", &"npub1synthetic"]);
@@ -137,6 +174,64 @@ mod tests {
                 "{sql}: {plan:?}"
             );
             assert!(!sql.contains("GROUP BY"));
+        }
+    }
+    #[test]
+    fn acceptance_lookup_work_is_constant_as_same_key_history_grows() {
+        let mut store = BrainStore::open_in_memory().unwrap();
+        let output =
+            finite_brain_core::bootstrap_organization_brain("source", "Source", "npub-admin")
+                .unwrap();
+        store.create_brain_bootstrap(&output, &[]).unwrap();
+        // Synthetic historic offers, with real schema, foreign keys, triggers,
+        // and production indexes. No acceptance or authority writer is changed.
+        store.conn.execute_batch("INSERT INTO folders
+            (brain_id, id, name, role, access, parent_folder_id, parent_folder_key, path, current_key_version, shared_folder_source, setup_incomplete, created_at)
+            VALUES ('source', 'folder', 'Folder', 'folder', 'restricted', NULL, '', 'Folder', 1, 0, 0, '2026-06-23T00:00:00Z');").unwrap();
+        let measure = |store: &BrainStore, sql: &str| {
+            let mut statement = store.conn.prepare(sql).unwrap();
+            let found: Option<String> = statement
+                .query_row(params!["source", "npub-recipient"], |row| row.get(0))
+                .unwrap();
+            assert_eq!(found.as_deref(), Some("2026-06-23T00:00:00Z"));
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        };
+        let mut baseline = Vec::new();
+        for count in [1, 1000] {
+            for index in 0..count {
+                let id = format!("history-{count}-{index}");
+                let status = if index % 2 == 0 {
+                    "accepted"
+                } else {
+                    "revoked"
+                };
+                store.conn.execute("INSERT INTO share_links
+                    (id, brain_id, folder_id, recipient_npub, created_by_npub, status,
+                     accept_path, expires_at, created_at, updated_at, accepted_at,
+                     grant_id, grant_key_version, grant_wrapped_event_json, access_change_event_json,
+                     create_personal_mount)
+                    VALUES (?1, 'source', 'folder', 'npub-recipient', 'npub-admin', ?2,
+                     '/accept', '2026-06-30T00:00:00Z', '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z',
+                     '2026-06-23T00:00:00Z', ?1, 1, '{}', '{}', 0)", params![id, status]).unwrap();
+                store.conn.execute("INSERT INTO shared_folder_invitations
+                    (id, source_brain_id, source_folder_id, destination_brain_id, destination_admin_npub,
+                     created_by_npub, status, current_key_version, accept_path, created_at, updated_at,
+                     accepted_at, grant_id, grant_wrapped_event_json, access_change_event_json, expires_at)
+                    VALUES (?1, 'source', 'folder', 'source', 'npub-recipient', 'npub-admin', ?2, 1,
+                     '/accept', '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z', '2026-06-23T00:00:00Z',
+                     ?1, '{}', '{}', '2026-06-30T00:00:00Z')", params![id, status]).unwrap();
+            }
+            let steps = [FOLDER_INVITATION_ACCEPTANCE_SQL, MOUNT_OFFER_ACCEPTANCE_SQL]
+                .map(|sql| measure(&store, sql));
+            if count == 1 {
+                baseline.extend(steps);
+            } else {
+                assert_eq!(
+                    steps.as_slice(),
+                    baseline.as_slice(),
+                    "same-key accepted history must not add scan work"
+                );
+            }
         }
     }
 }

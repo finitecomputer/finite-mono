@@ -239,8 +239,9 @@ APIs must not be rebuilt. This route stays inside the Directory's existing
 name-binding job: it answers "which published names bind this exact key"
 for keys a product has already authorized, and never answers who may access
 anything. The Brain sends only keys whose own participation it recorded
-(redeemed an Invite Token, accepted an npub invitation, or made an
-authenticated Brain request), after its own exact-key admin policy admitted
+(redeemed an Invite Token, accepted an exact-key Brain or Folder Invitation,
+accepted a Mount Offer as its addressed controller in the source Brain, or
+made an authenticated Brain request), after its own exact-key admin policy admitted
 the caller; adding an arbitrary key to a Brain never makes it eligible.
 
 The route exists only on the loopback router, never on `public_router`. It
