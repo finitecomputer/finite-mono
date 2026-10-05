@@ -7,10 +7,11 @@
     # Brain identity descriptions (FIN-122): Join/Approve contact disclosure
     # and the optional Core observation hook, off until its two variables are
     # set in /etc/finite/dashboard.env.
-    # Source 5875f70d0f8964b4bd6b5bb8dbd6617bb13c6932 (dashboard code from
-    # Core 03fbf08f plus the updated FiniteBrain skill catalog).
-    # https://github.com/finitecomputer/finite-mono/actions/runs/37259843180
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:8fe23abe9c0d7828f840e945ce87da13705f290e4ef4a3acc9101e99de219853";
+    # Source c7be107d2ec9f530f9f74647d313902b5459413a (dashboard code from
+    # Core 03fbf08f plus the FiniteBrain skill catalog with the access-report
+    # version guard).
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37260552357
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ae3a5c4dc7b41d2b2b6d4a6304f908058a8188b2f6eb64622229496d3a90491b";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
