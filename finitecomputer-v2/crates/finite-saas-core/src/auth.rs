@@ -258,6 +258,19 @@ impl CoreAuth {
     pub(crate) fn finite_private_usage_api_token(&self) -> &str {
         &self.finite_private_usage_api_token
     }
+
+    /// True when `token` equals any configured service, usage or Runner
+    /// credential (revoked Runner credentials included), so a new scoped
+    /// credential can be refused at startup if it would be shared.
+    pub(crate) fn credential_in_use(&self, token: &str) -> bool {
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        token == self.service_api_token.as_ref()
+            || token == self.finite_private_usage_api_token.as_ref()
+            || self
+                .runner_credentials
+                .iter()
+                .any(|credential| bool::from(digest.ct_eq(&credential.token_digest)))
+    }
 }
 
 #[derive(Clone)]

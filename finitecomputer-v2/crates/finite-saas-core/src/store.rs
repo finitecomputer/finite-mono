@@ -145,7 +145,9 @@ pub enum RuntimeRecoveryStatus {
 mod artifacts;
 use artifacts::*;
 mod billing_accounts;
+mod brain_identity;
 use billing_accounts::*;
+pub use brain_identity::BrainObservationError;
 mod control_admin;
 use control_admin::*;
 mod control_completion;

@@ -255,6 +255,7 @@ async fn offboarding_phase_of(store: &TestDb, runtime_id: &str) -> serde_json::V
 
 mod admin_runtime;
 mod billing_lifecycle;
+mod brain_identity;
 mod canary_retry;
 mod connection;
 mod control_lifecycle;

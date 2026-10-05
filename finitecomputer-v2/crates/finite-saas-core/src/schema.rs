@@ -73,7 +73,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0036_trial_runtime_suspensions.sql"),
     "\n",
-    include_str!("../migrations/0037_finite_private_usage_user.sql")
+    include_str!("../migrations/0037_finite_private_usage_user.sql"),
+    "\n",
+    include_str!("../migrations/0038_brain_identity_descriptions.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =

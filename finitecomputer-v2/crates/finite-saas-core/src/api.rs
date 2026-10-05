@@ -74,6 +74,8 @@ mod runtime_lifecycle;
 use runtime_lifecycle::*;
 mod authorization;
 use authorization::*;
+mod brain_identity;
+pub use brain_identity::brain_identity_router;
 #[cfg(test)]
 mod tests;
 

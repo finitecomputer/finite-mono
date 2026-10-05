@@ -14,6 +14,7 @@ mod account_email_change;
 mod admin_authorization;
 mod agent_creation;
 mod agent_creation_control;
+mod brain_identity;
 mod finite_private_keys;
 mod finite_private_usage;
 mod hosted_access;

@@ -3,6 +3,7 @@
 pub mod api;
 pub mod auth;
 pub mod billing;
+pub mod brain_identity;
 pub mod hosted_hermes;
 pub mod hosted_hermes_session;
 pub mod launch_codes;
