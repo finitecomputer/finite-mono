@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import copy
 import hashlib
 import json
 import logging
@@ -69,6 +70,24 @@ _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvar
 )
 _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
     contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
+)
+
+
+class _FiniteTurn(NamedTuple):
+    """One background turn, as its completion hook needs to settle it."""
+
+    event: MessageEvent
+    session_key: str
+    # A gateway command or a reply to a pending prompt, which Hermes answers
+    # itself; anything else is ordinary work.
+    control: bool
+    # The run generation the pinned gateway had bound to the session guard
+    # when the turn began. It binds a fresh one before each agent run.
+    run_generation: Any
+
+
+_FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVar(
+    "finitechat_turn", default=None
 )
 APPROVAL_CONTROL_TEXT = frozenset(
     {
@@ -583,9 +602,20 @@ class FiniteChatAdapter(BasePlatformAdapter):
         token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
         requester_context = _authenticated_requester_context_for_event(event)
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
+        turn_token = _FINITE_TURN.set(
+            _FiniteTurn(
+                event=event,
+                session_key=session_key,
+                control=self._is_gateway_control(event, session_key),
+                run_generation=getattr(
+                    self._active_sessions.get(session_key), "_hermes_run_generation", None
+                ),
+            )
+        )
         try:
             await super()._process_message_background(event, session_key)
         finally:
+            _FINITE_TURN.reset(turn_token)
             _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
@@ -1227,18 +1257,18 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # The queue can be waiting on its next handoff with no active turn.
             # Hermes's busy-command path alone cannot cover this idle window.
             await self._interrupt_admissions(session_key, event)
-        if self._should_defer_admission(event, session_key):
-            self._defer_admission(
-                session_key,
+        if not self._should_defer_admission(event, session_key) and (
+            await self._admit_finitechat_event(
                 event,
                 room_id,
                 seq,
                 message_id,
                 event_key or "",
             )
+        ):
             return
-
-        await self._admit_finitechat_event(
+        self._defer_admission(
+            session_key,
             event,
             room_id,
             seq,
@@ -1253,7 +1283,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         seq: Any,
         message_id: str,
         event_key: str,
-    ) -> None:
+    ) -> bool:
+        """Hand the event to Hermes; False if it must wait in the ordered queue."""
         raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
@@ -1264,6 +1295,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = False
+        session_active = False
+        held = False
         # The sidecar leased this entry on delivery. Its lease is settled only
         # by the turn: the completion hook acks on success, failure, or a user
         # /stop, and a shutdown-cancelled turn releases it. A turn that fails
@@ -1272,10 +1305,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
         try:
             await self._hydrate_hermes_home_channel_if_needed()
             activity_set = await self._set_processing_activity(room_id, activity_metadata)
-            session_active = self._session_is_active(session_key)
-            if event_key:
-                self._inflight_admissions.add(event_key)
-            await self.handle_message(event)
+            # A drain can begin during the awaits above. Nothing awaits
+            # between this check and handle_message handing the event over;
+            # a drain that begins after the handoff is settled by the hook.
+            # (The startup gate only ever opens once the adapter connects.)
+            held = self._gateway_draining() and not self._is_gateway_control(event, session_key)
+            if not held:
+                session_active = self._session_is_active(session_key)
+                if event_key:
+                    self._inflight_admissions.add(event_key)
+                await self.handle_message(event)
         except asyncio.CancelledError:
             self._inflight_admissions.discard(event_key)
             # The activity RPC can have completed remotely before cancellation
@@ -1289,6 +1328,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 await self._clear_processing_activity(room_id, activity_metadata)
             await self._release_finitechat_event(room_id, seq, message_id)
             raise
+        if held:
+            if activity_set:
+                await self._clear_processing_activity(room_id, activity_metadata)
+            return False
         queued_for_later = getattr(self, "_pending_messages", {}).get(session_key) is event
         if (
             event_key
@@ -1302,6 +1345,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # event is acked (or released) by the completion hook.
             self._inflight_admissions.discard(event_key)
             await self._ack_finitechat_event(room_id, seq, message_id)
+        return True
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
         if self._home_channel_hydrated:
@@ -1345,15 +1389,22 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if self._gateway_startup_restoring():
             # Commands included: the gate queues every non-internal event.
             return True
-        if (event.text or "").lstrip().startswith("/"):
-            return False
-        if self._is_immediate_text_control(event, session_key):
+        if self._is_gateway_control(event, session_key):
             return False
         return (
             session_key in self._deferred_admissions
             or self._session_is_active(session_key)
             or self._gateway_draining()
         )
+
+    def _is_gateway_control(self, event: MessageEvent, session_key: str) -> bool:
+        """Hermes answers this event itself instead of starting new work.
+
+        Gateway commands and replies to a pending clarify or approval prompt
+        stay live while a turn runs or the gateway drains. Everything else is
+        ordinary work: it waits its turn, and a draining gateway refuses it.
+        """
+        return _is_gateway_command(event) or self._is_immediate_text_control(event, session_key)
 
     def _gateway_draining(self) -> bool:
         """The pinned gateway refuses new turns while it drains to stop or restart.
@@ -1455,13 +1506,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     continue
                 event, room_id, seq, message_id, event_key = next(iter(admissions.values()))
                 try:
-                    await self._admit_finitechat_event(
+                    if not await self._admit_finitechat_event(
                         event,
                         room_id,
                         seq,
                         message_id,
                         event_key,
-                    )
+                    ):
+                        # A drain began during the handoff. The head keeps
+                        # its place and the checks above hold it.
+                        continue
                 except Exception:
                     # Handoff failure may release the lease. Retain its place
                     # until retry succeeds; a redelivery coalesces with this
@@ -1602,6 +1656,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         turn finishing during the stop is released. A turn that completed in
         that window may run once more after restart; acking would lose the
         interrupted ones.
+
+        A turn can also return without running. A draining gateway refuses
+        ordinary work with a reply, which reports SUCCESS; that turn is
+        released so the message runs after the restart. A gateway that queues
+        the event behind a reserved or busy session slot returns at once, and
+        the queued turn settles it.
         """
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         room_id = str(raw_message.get("room_id") or self.room_id)
@@ -1609,16 +1669,41 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id = str(raw_message.get("message_id") or "")
         if not message_id:
             return
+        turn = _FINITE_TURN.get()
+        if turn is not None and turn.event is not event:
+            turn = None
+        if (
+            turn is not None
+            and outcome_name != "cancelled"
+            and getattr(self, "_pending_messages", {}).get(turn.session_key) is event
+        ):
+            return
         # Claim the in-flight marker so the inline-admission path does not also
         # ack this event once its background turn's completion hook has fired.
         event_key = _adapter_event_key(room_id, seq, message_id)
         if event_key:
             self._inflight_admissions.discard(event_key)
         user_cancelled = asyncio.current_task() in self._user_cancelled_tasks
-        if not user_cancelled and (outcome_name == "cancelled" or self._gateway_stopping()):
+        if not user_cancelled and (
+            outcome_name == "cancelled" or self._gateway_stopping() or self._refused_by_drain(turn)
+        ):
             await self._release_finitechat_event(room_id, seq, message_id)
             return
         await self._ack_finitechat_event(room_id, seq, message_id)
+
+    def _refused_by_drain(self, turn: _FiniteTurn | None) -> bool:
+        """The draining gateway answered this ordinary turn without running it.
+
+        The pinned gateway refuses new work only while ``_draining`` is set,
+        which stays set until the process stops. Before each agent run it
+        binds a fresh run generation to the adapter's session guard, so a
+        refused turn leaves the guard as the turn found it. A turn that ran
+        and finished during the drain is not refused.
+        """
+        if turn is None or turn.control or not self._gateway_draining():
+            return False
+        guard = self._active_sessions.get(turn.session_key)
+        return getattr(guard, "_hermes_run_generation", None) == turn.run_generation
 
     @staticmethod
     def _route_metadata(
@@ -2226,6 +2311,27 @@ def _adapter_event_key(room_id: str, seq: Any, message_id: str) -> str | None:
     if not isinstance(seq, int):
         return None
     return f"{room_id}\x1f{seq}\x1f{message_id}"
+
+
+def _is_gateway_command(event: MessageEvent) -> bool:
+    """Hermes dispatches ``event`` as a gateway command rather than a turn.
+
+    This is the pinned base adapter's own rule for what bypasses a busy
+    session: a registry command, after it rewrites a DM ``restart the
+    gateway`` to ``/restart``. Unknown slash words and path-like text such as
+    ``/usr/bin/x`` are ordinary work. The probe is a copy, so the base adapter
+    still rewrites the event itself.
+    """
+    try:
+        from gateway.platforms.base import coerce_plaintext_gateway_command
+        from hermes_cli.commands import should_bypass_active_session
+    except ImportError:
+        # Gateway test doubles only; the pinned runtime ships both.
+        return (event.text or "").lstrip().startswith("/")
+    probe = copy.copy(event)
+    if getattr(probe, "allow_gateway_control", True):
+        coerce_plaintext_gateway_command(probe)
+    return bool(should_bypass_active_session(probe.get_command()))
 
 
 def _is_hermes_resume_event(event: MessageEvent) -> bool:

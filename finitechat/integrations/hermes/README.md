@@ -144,8 +144,17 @@ its own.
   `stop()` interrupts running turns cooperatively and reports them as
   success, so every turn that finishes after `stop()` begins is released; a
   turn that completed in that window can run once more after restart. While
-  Hermes drains to stop or restart it refuses new turns with a reply, so the
-  adapter holds delivered events instead and releases them on disconnect. It
+  Hermes drains to stop or restart it refuses ordinary work with a reply that
+  reports success, so the adapter holds delivered work instead and releases it
+  on disconnect. Ordinary work is anything Hermes would not dispatch as a
+  gateway command, by the pinned base adapter's own rule, so path-like text
+  such as `/usr/bin/x` waits too. A drain can begin after admission but
+  before Hermes checks: the adapter re-checks just before handoff, and
+  releases a turn Hermes answered without binding a run to it. A turn that
+  ran and finished during a restart drain is still acked. A message handed
+  over as the drain begins can show Hermes's refusal reply and still run
+  after the restart. A message Hermes queues behind a reserved or busy session
+  slot is settled by the turn that runs it. The adapter
   also holds every non-internal event, commands included, while Hermes's
   startup-restore gate is closed: the gate queues events in memory and
   reports them handled, which would ack them before they run. The inbox is
@@ -175,7 +184,7 @@ its own.
   overtake those released events when the session becomes idle. Renewed leases
   for a queued or running event are coalesced without changing its position.
   These in-memory holders grow with the delivered backlog; the Rust inbox
-  remains the only durable queue. Slash commands, pending approval responses, and pending
+  remains the only durable queue. Gateway commands, pending approval responses, and pending
   clarification replies still reach the active turn immediately, and one busy
   session does not pause another. Text, photos, audio, video, and files each
   enter their own background turn and retain their lease until its completion
