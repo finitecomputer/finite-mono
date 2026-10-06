@@ -589,6 +589,27 @@ class FiniteChatAdapter(BasePlatformAdapter):
             _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
 
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Decline Hermes's synthetic auto-resume turn for Finite sessions.
+
+        The durable inbox owns recovery of interrupted Finite turns: a stop
+        releases the turn's lease and a crash leaves it to lease expiry, so
+        the message runs again whole. At boot the pinned gateway also starts
+        its own resume turn for every session it marked ``resume_pending``,
+        and the model sees the interrupted message in that turn too, so the
+        same work would run twice. Hermes frees the session slot it reserved
+        for the resume when no turn starts, and the session stays marked, so
+        the redelivered message runs with Hermes's recovery note.
+        """
+        if _is_hermes_resume_event(event):
+            logger.info(
+                "[finitechat] declined Hermes auto-resume for chat %s; "
+                "the Finite inbox redelivers interrupted turns",
+                getattr(event.source, "chat_id", None),
+            )
+            return
+        await super().handle_message(event)
+
     async def _dispatch_active_session_command(
         self,
         event: MessageEvent,
@@ -1321,6 +1342,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # Admit each event as its own turn so its hook alone settles it.
         if event.internal:
             return False
+        if self._gateway_startup_restoring():
+            # Commands included: the gate queues every non-internal event.
+            return True
         if (event.text or "").lstrip().startswith("/"):
             return False
         if self._is_immediate_text_control(event, session_key):
@@ -1339,6 +1363,19 @@ class FiniteChatAdapter(BasePlatformAdapter):
         leases are released when the adapter disconnects.
         """
         return bool(getattr(getattr(self, "gateway_runner", None), "_draining", False))
+
+    def _gateway_startup_restoring(self) -> bool:
+        """The pinned gateway's startup-restore gate is closed.
+
+        While it is closed, ``_handle_message`` queues inbound events in
+        memory and returns, so the completion hook would ack an event before
+        it reaches the model, and a stop or crash before the queue drains
+        would lose it. The gate's replay also bypasses this adapter's ordered
+        admission. Held leases wait for the gate to open, or are released
+        when the adapter disconnects.
+        """
+        runner = getattr(self, "gateway_runner", None)
+        return bool(getattr(runner, "_startup_restore_in_progress", False))
 
     def _gateway_stopping(self) -> bool:
         """``stop()`` has begun, so turns still running are being interrupted.
@@ -1406,7 +1443,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         retry_delay = ADMISSION_RETRY_SECS
         try:
             while admissions := self._deferred_admissions.get(session_key):
-                if self._gateway_draining():
+                if self._gateway_draining() or self._gateway_startup_restoring():
                     await asyncio.sleep(ADMISSION_RECHECK_SECS)
                     continue
                 if self._session_is_active(session_key):
@@ -2189,6 +2226,23 @@ def _adapter_event_key(room_id: str, seq: Any, message_id: str) -> str | None:
     if not isinstance(seq, int):
         return None
     return f"{room_id}\x1f{seq}\x1f{message_id}"
+
+
+def _is_hermes_resume_event(event: MessageEvent) -> bool:
+    """The exact shape of the pinned ``_schedule_resume_pending_sessions`` event.
+
+    Every Finite event carries its inbox record as ``raw_message``. Other
+    internal gateway events (background completions, wakeups, plugin
+    injections, handoffs) carry text or routing metadata.
+    """
+    return bool(
+        event.internal
+        and not (event.text or "").strip()
+        and event.raw_message is None
+        and event.message_id is None
+        and not event.media_urls
+        and not event.metadata
+    )
 
 
 def _read_service_ready_file(path: Path) -> dict[str, Any]:
