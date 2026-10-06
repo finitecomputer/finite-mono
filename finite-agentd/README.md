@@ -82,6 +82,10 @@ A phase that misses its bound is logged and abandoned. That can happen when a
 slot is still inside a restart's 10-second drain. When agentd exits, the
 runtime is dropped and any child still running gets SIGKILLed. A lease that
 was never released stays stranded until the sidecar's 45-minute lease expiry.
+The pinned Hermes also waits up to 30 seconds for an active cron job before
+disconnecting its Chat adapter. That can exceed the gateway's 8-second grace
+and leave Chat leases waiting for expiry. This bounded stop does not prove
+graceful completion of active cron work.
 
 ## Optional hosted Hermes process
 

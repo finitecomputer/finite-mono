@@ -515,9 +515,9 @@ def require_graceful_inbox_released(
 ) -> dict[str, str]:
     """A graceful stop must leave no lease behind for restart to wait out.
 
-    Each expected entry is Pending (released for redelivery) or Acked (its
-    turn legitimately settled before the stop); anything Leased means the
-    gateway died before releasing it, which is the not-awaited shutdown bug.
+    Both expected entries must be Pending: the fake provider is still stalled
+    and the queued turn has never reached it, so neither turn can have
+    completed. Accepting Acked here would conceal a dropped interrupted turn.
     """
     leased = [
         f"seq={event.get('seq')} lease_id={(event.get('lease') or {}).get('lease_id')}"
@@ -541,6 +541,8 @@ def require_graceful_inbox_released(
             raise SmokeFailure(f"{role} message {message_id} vanished from the inbox")
     if states.get("queued") != "pending":
         raise SmokeFailure(f"queued follow-up was settled before it ran: {states}")
+    if states.get("active") != "pending":
+        raise SmokeFailure(f"stalled active turn was settled without completing: {states}")
     return states
 
 

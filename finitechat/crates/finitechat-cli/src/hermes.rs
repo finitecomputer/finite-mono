@@ -1039,14 +1039,14 @@ fn handle_hermes_service_poll(
 
     loop {
         let observed_generation = bridge_generation(state);
-        let payload = collect_hermes_service_inbound_payload(state, &home, &request)?;
+        let (payload, _leases) = collect_hermes_service_inbound_payload(state, &home, &request)?;
         if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
             return Ok(payload);
         }
 
         let remaining = timeout.saturating_sub(started.elapsed()).as_millis() as u64;
         wait_for_bridge_update(state, observed_generation, remaining);
-        let payload = collect_hermes_service_inbound_payload(state, &home, &request)?;
+        let (payload, _leases) = collect_hermes_service_inbound_payload(state, &home, &request)?;
         if hermes_inbound_payload_has_records(&payload) || started.elapsed() >= timeout {
             return Ok(payload);
         }
@@ -1106,12 +1106,65 @@ fn run_hermes_inbound_stream(
 
     loop {
         let observed_generation = bridge_generation(&state);
-        let payload = collect_hermes_service_inbound_payload(&state, &home, &request)?;
-        if !send_hermes_inbound_payload(&tx, &payload)? {
-            return Ok(());
+        let step = stream_hermes_inbound_batch(&state.agent_home, &state.inbox_lock, &tx, || {
+            collect_hermes_service_inbound_payload(&state, &home, &request)
+        })?;
+        match step {
+            HermesStreamStep::Sent => {
+                wait_for_bridge_update(&state, observed_generation, timeout_millis);
+            }
+            HermesStreamStep::ClientGone { released } => {
+                if released {
+                    signal_bridge_update(&state);
+                }
+                return Ok(());
+            }
         }
-        wait_for_bridge_update(&state, observed_generation, timeout_millis);
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HermesStreamStep {
+    Sent,
+    ClientGone { released: bool },
+}
+
+/// Lease one inbound batch and send it to the stream's client.
+///
+/// The body receiver closes when the client disconnects, but a stream thread
+/// only learns that on its next send. Leasing for a closed stream would strand
+/// the entries until the lease TTL, so a closed receiver stops the thread
+/// before it leases, and a batch that still cannot be sent is released.
+fn stream_hermes_inbound_batch(
+    agent_home: &Path,
+    inbox_lock: &Mutex<()>,
+    tx: &tokio::sync::mpsc::Sender<Result<Bytes, Infallible>>,
+    lease_batch: impl FnOnce() -> Result<(Value, Vec<HermesInboxLeaseRef>), CliError>,
+) -> Result<HermesStreamStep, CliError> {
+    if tx.is_closed() {
+        return Ok(HermesStreamStep::ClientGone { released: false });
+    }
+    let (payload, leases) = lease_batch()?;
+    if send_hermes_inbound_payload(tx, &payload)? {
+        return Ok(HermesStreamStep::Sent);
+    }
+    let released = release_unsent_hermes_leases(agent_home, inbox_lock, &leases)?;
+    Ok(HermesStreamStep::ClientGone { released })
+}
+
+/// Return a stream batch that never reached its client to `Pending`. Only
+/// the leases this batch took are released, never a later consumer's.
+fn release_unsent_hermes_leases(
+    agent_home: &Path,
+    inbox_lock: &Mutex<()>,
+    leases: &[HermesInboxLeaseRef],
+) -> Result<bool, CliError> {
+    if leases.is_empty() {
+        return Ok(false);
+    }
+    let _guard = lock_service_mutex(inbox_lock)?;
+    let mut inbox = load_hermes_inbox(agent_home)?;
+    release_hermes_inbox_leases(agent_home, &mut inbox, leases)
 }
 
 fn run_agentd_inbound_stream(
@@ -1165,7 +1218,7 @@ fn collect_hermes_service_inbound_payload(
     state: &HermesServiceState,
     home: &AgentHome,
     request: &PollRequest,
-) -> Result<Value, CliError> {
+) -> Result<(Value, Vec<HermesInboxLeaseRef>), CliError> {
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_hermes_inbox(&state.agent_home)?;
@@ -1178,13 +1231,15 @@ fn collect_hermes_service_inbound_payload(
         request.room_id.as_deref(),
         &mut inbox,
     )?;
-    let events = lease_pending_hermes_inbox_events(
+    let (events, leases): (Vec<_>, Vec<_>) = lease_pending_hermes_inbox_entries(
         &state.agent_home,
         &mut inbox,
         request.room_id.as_deref(),
         limit,
-    )?;
-    Ok(json!({ "events": events, "joined": joined }))
+    )?
+    .into_iter()
+    .unzip();
+    Ok((json!({ "events": events, "joined": joined }), leases))
 }
 
 fn send_hermes_inbound_payload(
@@ -2246,6 +2301,27 @@ fn lease_pending_hermes_inbox_events(
     room_filter: Option<&str>,
     limit: usize,
 ) -> Result<Vec<HermesPollEventV1>, CliError> {
+    Ok(
+        lease_pending_hermes_inbox_entries(home_dir, inbox, room_filter, limit)?
+            .into_iter()
+            .map(|(event, _lease)| event)
+            .collect(),
+    )
+}
+
+/// One lease a delivery took, so an undelivered batch can release exactly it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HermesInboxLeaseRef {
+    key: String,
+    lease_id: String,
+}
+
+fn lease_pending_hermes_inbox_entries(
+    home_dir: &Path,
+    inbox: &mut HermesInboxState,
+    room_filter: Option<&str>,
+    limit: usize,
+) -> Result<Vec<(HermesPollEventV1, HermesInboxLeaseRef)>, CliError> {
     let now = now_ms();
     let ttl = hermes_inbox_lease_ttl_ms();
     let mut leased = Vec::new();
@@ -2262,12 +2338,19 @@ fn lease_pending_hermes_inbox_events(
         if !entry.lease.is_deliverable(now, ttl) {
             continue;
         }
+        let lease_id = next_hermes_lease_id(now);
         entry.lease = HermesInboxLease::Leased {
-            lease_id: next_hermes_lease_id(now),
+            lease_id: lease_id.clone(),
             leased_at_ms: now,
         };
         changed = true;
-        leased.push(entry.event.clone());
+        leased.push((
+            entry.event.clone(),
+            HermesInboxLeaseRef {
+                key: entry.key.clone(),
+                lease_id,
+            },
+        ));
     }
     if changed {
         save_hermes_inbox(home_dir, inbox)?;
@@ -2313,6 +2396,32 @@ fn release_hermes_inbox_entry(
     let mut released = false;
     for entry in inbox.events.iter_mut() {
         if entry.key == key && matches!(entry.lease, HermesInboxLease::Leased { .. }) {
+            entry.lease = HermesInboxLease::Pending;
+            released = true;
+        }
+    }
+    if released {
+        save_hermes_inbox(home_dir, inbox)?;
+    }
+    Ok(released)
+}
+
+/// Return entries still held by exactly these leases to `Pending`. An entry
+/// leased again since (a different lease id) or already settled is left alone.
+fn release_hermes_inbox_leases(
+    home_dir: &Path,
+    inbox: &mut HermesInboxState,
+    leases: &[HermesInboxLeaseRef],
+) -> Result<bool, CliError> {
+    let mut released = false;
+    for entry in inbox.events.iter_mut() {
+        let HermesInboxLease::Leased { lease_id, .. } = &entry.lease else {
+            continue;
+        };
+        if leases
+            .iter()
+            .any(|lease| lease.key == entry.key && &lease.lease_id == lease_id)
+        {
             entry.lease = HermesInboxLease::Pending;
             released = true;
         }
@@ -5506,6 +5615,95 @@ mod tests {
         let again = lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
         assert_eq!(again.len(), 1);
         assert_eq!(again[0].message_id, "msg-5");
+    }
+
+    #[test]
+    fn stream_stops_before_leasing_for_a_disconnected_client() {
+        let home = tempfile::tempdir().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
+        drop(rx);
+        let step = stream_hermes_inbound_batch(home.path(), &Mutex::new(()), &tx, || {
+            panic!("a disconnected stream must not lease")
+        })
+        .unwrap();
+        assert_eq!(step, HermesStreamStep::ClientGone { released: false });
+    }
+
+    #[test]
+    fn stream_batch_for_a_client_that_left_mid_lease_is_released() {
+        let home = tempfile::tempdir().unwrap();
+        let mut inbox = HermesInboxState::default();
+        for seq in [5, 6] {
+            enqueue_hermes_inbox_event(
+                home.path(),
+                &mut inbox,
+                sample_inbox_event(seq, &format!("msg-{seq}")),
+            )
+            .unwrap();
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, Infallible>>(1);
+        let step = stream_hermes_inbound_batch(home.path(), &Mutex::new(()), &tx, || {
+            let (events, leases): (Vec<_>, Vec<_>) =
+                lease_pending_hermes_inbox_entries(home.path(), &mut inbox, None, 10)?
+                    .into_iter()
+                    .unzip();
+            // The client disconnects after the open check, before the send.
+            drop(rx);
+            Ok((json!({ "events": events, "joined": [] }), leases))
+        })
+        .unwrap();
+
+        assert_eq!(step, HermesStreamStep::ClientGone { released: true });
+        let inbox = load_hermes_inbox(home.path()).unwrap();
+        assert!(
+            inbox
+                .events
+                .iter()
+                .all(|entry| matches!(entry.lease, HermesInboxLease::Pending))
+        );
+    }
+
+    #[test]
+    fn unsent_stream_batch_releases_only_the_leases_it_took() {
+        let home = tempfile::tempdir().unwrap();
+        let inbox_lock = Mutex::new(());
+        let mut inbox = HermesInboxState::default();
+        for seq in [5, 6, 7] {
+            enqueue_hermes_inbox_event(
+                home.path(),
+                &mut inbox,
+                sample_inbox_event(seq, &format!("msg-{seq}")),
+            )
+            .unwrap();
+        }
+        let leases: Vec<_> = lease_pending_hermes_inbox_entries(home.path(), &mut inbox, None, 2)
+            .unwrap()
+            .into_iter()
+            .map(|(_event, lease)| lease)
+            .collect();
+        assert_eq!(leases.len(), 2);
+        // msg-7 belongs to another consumer; msg-6 was released and leased
+        // again by a live stream before this batch's send failed.
+        lease_pending_hermes_inbox_events(home.path(), &mut inbox, None, 10).unwrap();
+        inbox.events[1].lease = HermesInboxLease::Leased {
+            lease_id: "live-stream".to_owned(),
+            leased_at_ms: now_ms(),
+        };
+        save_hermes_inbox(home.path(), &inbox).unwrap();
+
+        assert!(release_unsent_hermes_leases(home.path(), &inbox_lock, &leases).unwrap());
+
+        let inbox = load_hermes_inbox(home.path()).unwrap();
+        assert!(matches!(inbox.events[0].lease, HermesInboxLease::Pending));
+        assert!(matches!(
+            &inbox.events[1].lease,
+            HermesInboxLease::Leased { lease_id, .. } if lease_id == "live-stream"
+        ));
+        assert!(matches!(
+            inbox.events[2].lease,
+            HermesInboxLease::Leased { .. }
+        ));
+        assert!(!release_unsent_hermes_leases(home.path(), &inbox_lock, &[]).unwrap());
     }
 
     #[test]

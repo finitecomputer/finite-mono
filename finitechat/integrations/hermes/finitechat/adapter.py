@@ -1041,10 +1041,38 @@ class FiniteChatAdapter(BasePlatformAdapter):
             finally:
                 stop_event.set()
                 await asyncio.to_thread(worker.join, 0.5)
+                await self._release_stranded_stream_events(queue)
             if not self.is_connected:
                 break
             await asyncio.sleep(_stream_reconnect_delay(reconnect_attempt))
             reconnect_attempt += 1
+
+    async def _release_stranded_stream_events(self, queue: asyncio.Queue) -> None:
+        """Release events the stream worker queued after consumption stopped.
+
+        Hermes cancels background turns before ``disconnect()`` cancels this
+        loop, so a lease a cancelled turn released can be re-leased onto the
+        stream in between. Every delivered event holds a sidecar lease; one
+        left unconsumed would stay leased until the lease TTL.
+        """
+        while not queue.empty():
+            result = queue.get_nowait()
+            if not result.ok:
+                continue
+            for raw_record in result.data.get("records") or []:
+                if not isinstance(raw_record, dict):
+                    continue
+                record_type = str(raw_record.get("type") or "")
+                raw_event = raw_record.get("event") if record_type == "event" else None
+                if not record_type:
+                    raw_event = raw_record
+                if not isinstance(raw_event, dict) or not raw_event.get("message_id"):
+                    continue
+                await self._release_finitechat_event(
+                    str(raw_event.get("room_id") or self.room_id),
+                    raw_event.get("seq"),
+                    str(raw_event["message_id"]),
+                )
 
     def _inbound_request_payload(self) -> dict[str, Any]:
         timeout_millis = self.poll_timeout_secs * 1000
@@ -1297,7 +1325,29 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return False
         if self._is_immediate_text_control(event, session_key):
             return False
-        return session_key in self._deferred_admissions or self._session_is_active(session_key)
+        return (
+            session_key in self._deferred_admissions
+            or self._session_is_active(session_key)
+            or self._gateway_draining()
+        )
+
+    def _gateway_draining(self) -> bool:
+        """The pinned gateway refuses new turns while it drains to stop or restart.
+
+        It replies with a refusal that the completion hook sees as a successful
+        turn, so a handed-off event would be acked without running. Held
+        leases are released when the adapter disconnects.
+        """
+        return bool(getattr(getattr(self, "gateway_runner", None), "_draining", False))
+
+    def _gateway_stopping(self) -> bool:
+        """``stop()`` has begun, so turns still running are being interrupted.
+
+        Only ``stop()`` clears ``_running`` while draining. A restart drain
+        keeps it set while running turns finish normally.
+        """
+        runner = getattr(self, "gateway_runner", None)
+        return self._gateway_draining() and not getattr(runner, "_running", True)
 
     @staticmethod
     def _is_immediate_text_control(event: MessageEvent, session_key: str) -> bool:
@@ -1356,6 +1406,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         retry_delay = ADMISSION_RETRY_SECS
         try:
             while admissions := self._deferred_admissions.get(session_key):
+                if self._gateway_draining():
+                    await asyncio.sleep(ADMISSION_RECHECK_SECS)
+                    continue
                 if self._session_is_active(session_key):
                     owner = self._session_tasks.get(session_key)
                     if owner is not None and not owner.done():
@@ -1505,6 +1558,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         the user stopped. Success or failure acks too (a failed turn still ran
         to completion and answered the user, so re-running it on redelivery
         would be wrong). Ack and release are both idempotent on the sidecar.
+
+        Once ``stop()`` begins, the pinned gateway interrupts running turns
+        cooperatively (``restart_drain_timeout`` defaults to 0s). It reports
+        the interrupted turn as SUCCESS or FAILURE, never CANCELLED, so any
+        turn finishing during the stop is released. A turn that completed in
+        that window may run once more after restart; acking would lose the
+        interrupted ones.
         """
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         room_id = str(raw_message.get("room_id") or self.room_id)
@@ -1517,7 +1577,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         event_key = _adapter_event_key(room_id, seq, message_id)
         if event_key:
             self._inflight_admissions.discard(event_key)
-        if outcome_name == "cancelled" and asyncio.current_task() not in self._user_cancelled_tasks:
+        user_cancelled = asyncio.current_task() in self._user_cancelled_tasks
+        if not user_cancelled and (outcome_name == "cancelled" or self._gateway_stopping()):
             await self._release_finitechat_event(room_id, seq, message_id)
             return
         await self._ack_finitechat_event(room_id, seq, message_id)
