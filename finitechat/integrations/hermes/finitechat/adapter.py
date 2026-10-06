@@ -562,6 +562,8 @@ def is_connected(config: PlatformConfig) -> bool:
 class FiniteChatAdapter(BasePlatformAdapter):
     """Bridge Finite Chat messages to Hermes through the resident service."""
 
+    durable_child_work = True
+
     MAX_MESSAGE_LENGTH = 12000
     SUPPORTS_MESSAGE_EDITING = False
 
@@ -726,6 +728,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """
 
         async def handle(event: MessageEvent) -> Any:
+            if getattr(event, "_finite_goal_work", None) and not self._gateway_draining():
+                from gateway.finite_child_work import begin_goal
+
+                if not begin_goal(self.gateway_runner, event):
+                    return None
             turn = _FINITE_TURN.get()
             if turn is None or turn.event is not event:
                 return await handler(event)
@@ -867,6 +874,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
         transient notice, while the dashboard continues to show authoritative state.
         """
         outcome_name = str(getattr(outcome, "value", getattr(outcome, "name", outcome))).lower()
+        if getattr(event, "_finite_goal_work", None):
+            from gateway.finite_child_work import end_goal
+
+            turn = _FINITE_TURN.get()
+            end_goal(
+                self.gateway_runner,
+                event,
+                outcome_name == "success" and turn is not None and turn.answered_before_stop,
+                launched=turn is not None and self._model_run_started(turn),
+            )
         await self._settle_event_ack(event, outcome_name)
         if outcome_name != "success":
             return
@@ -1532,6 +1549,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         ``_HERMES_TURN_COMMANDS`` to completion there, outside any background
         turn and its settlement. Such a command waits for its own turn. With a
         gateway turn running, Hermes answers it with its busy-command policy.
+        A /goal control form starts no turn, so it stays live there: a goal
+        loop keeps its chat busy between its turns, and a held /goal pause
+        would wait out the whole loop.
         """
         if self._gateway_startup_restoring():
             # Commands included: the gate queues every non-internal event.
@@ -1551,6 +1571,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return behind or self._session_is_active(session_key)
         return (
             command in _HERMES_TURN_COMMANDS
+            and not (command == "goal" and _goal_control(event))
             and self._session_is_active(session_key)
             and not self._gateway_turn_running(session_key)
         )
@@ -2721,6 +2742,25 @@ def _gateway_command(event: MessageEvent) -> str | None:
     if definition is None or definition.name in _HERMES_MODEL_TEXT_COMMANDS:
         return None
     return definition.name
+
+
+# /goal arguments the pinned handler answers without queueing goal work.
+# "resume" queues a continuation; any other text sets (or drafts) a goal.
+_GOAL_CONTROL_ARGS = frozenset(
+    {"", "status", "show", "pause", "clear", "stop", "done", "wait", "unwait", "gate"}
+)
+
+
+def _goal_control(event: MessageEvent) -> bool:
+    """``event``'s /goal is a control form: it reads or changes goal state only.
+
+    The pinned idle ``_handle_goal_command`` grammar, which the gateway runs
+    in a finished turn's tail: the whole stripped, lowercased argument, or
+    ``wait <pid>`` and ``gate <subcommand>``. A pinned test checks it against
+    the handler.
+    """
+    args = (event.get_command_args() or "").strip().lower()
+    return args in _GOAL_CONTROL_ARGS or args.startswith(("wait ", "gate "))
 
 
 def _watch_retry_rewinds(store: Any) -> None:

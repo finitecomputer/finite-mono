@@ -33,7 +33,14 @@ upstream.override {
             mv "$site/gateway-patched" "$site/gateway"
             chmod -R u+w "$site/gateway"
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-stop-generation.patch}
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-goal-judge-supersede.patch}
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-child-work.patch}
+            cp ${./finite_child_work.py} "$site/gateway/finite_child_work.py"
+            rm -f "$site/gateway/platforms/__pycache__/base."*.pyc
+            rm -f "$site/gateway/__pycache__/slash_commands."*.pyc
+            rm -f "$site/gateway/__pycache__/status."*.pyc
             rm -f "$site/gateway/__pycache__/run."*.pyc
+            rm -f "$site/hermes_cli/__pycache__/goals."*.pyc
           '';
         });
       }

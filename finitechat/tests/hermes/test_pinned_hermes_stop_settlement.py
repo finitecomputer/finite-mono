@@ -23,6 +23,7 @@ import importlib.util
 import inspect
 import os
 import socket
+import sqlite3
 import sys
 import tempfile
 import textwrap
@@ -1338,6 +1339,44 @@ class PinnedHermesModelCommandTests(DrainScenario):
             pinned_model_text_commands(), load_adapter_module()._HERMES_MODEL_TEXT_COMMANDS
         )
 
+    def test_goal_control_forms_match_the_pinned_handler(self):
+        """A /goal the adapter keeps live in a turn's tail queues no goal work.
+
+        Each form runs through the pinned idle handler against a paused goal,
+        so /goal resume has work to queue. Near-misses set a new goal.
+        """
+        args = (
+            *("", "status", "STATUS", " show ", "pause", "Pause", "clear", "stop", "done"),
+            *("wait", "wait 1", "wait 1 build", "unwait", "gate", "gate list", "gate add true"),
+            *("resume", "draft a plan", "synthetic task", "status please", "stopper"),
+            *("waiting for rain", "wait\t1", "gateway work", "unwait now"),
+        )
+
+        async def scenario(home: str):
+            from hermes_cli.goals import GoalManager
+
+            h = GatewayHarness(home, timeline=[], stall=False)
+            queued: list[str] = []
+            enqueue = patch.object(
+                h.runner, "_enqueue_fifo", lambda _key, event, _adapter: queued.append(event.text)
+            )
+            try:
+                session_id = chat_session_id(h)
+                for arg in args:
+                    with self.subTest(arg=arg), enqueue:
+                        goal = GoalManager(session_id=session_id)
+                        goal.set("synthetic task")
+                        goal.pause()
+                        queued.clear()
+                        event = MessageEvent(text=f"/goal {arg}", source=chat_source(h))
+                        await h.runner._handle_goal_command(event)
+                        self.assertEqual(h.module._goal_control(event), not queued, queued)
+            finally:
+                await h.close()
+
+        with patch("hermes_cli.goals.draft_contract", lambda _objective: None):
+            self.run_scenario(scenario)
+
     def test_model_commands_run_once_without_a_drain(self):
         for text in self.MODEL_COMMANDS:
             with self.subTest(text=text):
@@ -1773,6 +1812,22 @@ def chat_transcript(h: StopHarness) -> list[tuple[str, str]]:
     ]
 
 
+def durable_chat_transcript(db_path: Path, session_id: str) -> list[tuple[str, str]]:
+    """``chat_transcript`` read from state.db itself, through a fresh read-only connection.
+
+    A stopped gateway has closed its session store, so a read through it
+    races the close.
+    """
+    with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        rows = db.execute(
+            "SELECT role, content FROM messages"
+            " WHERE session_id = ? AND active = 1 AND role IN ('user', 'assistant')"
+            " ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return [(role, str(content)) for role, content in rows]
+
+
 async def seed_exchanges(h: GatewayHarness) -> None:
     """Three finished exchanges in an idle chat, then a clear timeline."""
     for seq, text in enumerate(("first question", "second question", "third question"), 1):
@@ -1883,6 +1938,8 @@ class PinnedHermesRetryRewindTests(DrainScenario):
                     stops: list[asyncio.Task] = []
                     try:
                         await seed_exchanges(h)
+                        db_path = Path(home) / "state.db"
+                        session_id = chat_session_id(h)
 
                         async def begin_stop() -> None:
                             stops.append(asyncio.create_task(h.stop_gracefully()))
@@ -1906,7 +1963,9 @@ class PinnedHermesRetryRewindTests(DrainScenario):
                         self.assertNotIn(("ack", "msg-4"), timeline)
                         self.assertEqual(h.state("msg-4"), "pending")
                         self.assertEqual(h.models(), [])
-                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+                        self.assertEqual(
+                            durable_chat_transcript(db_path, session_id), SEEDED_EXCHANGES
+                        )
                     finally:
                         await h.close()
 
@@ -2511,7 +2570,7 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 await eventually(lambda: bool(stops))
                 await stops[0]
                 # The handler saved the goal and queued its kickoff; the stop
-                # dropped the kickoff, which is the documented limit.
+                # dropped the in-memory kickoff; its child journal owns recovery.
                 self.assertEqual(h.state("msg-1"), "acked")
                 self.assertNotIn(("release", "msg-1"), timeline)
             finally:
@@ -2519,7 +2578,11 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
 
             restarted = await self.boot_after_restart(home, h.inbox)
             try:
-                self.assertEqual(restarted.handed, [])
+                await eventually(lambda: len(restarted.runs) == 1)
+                await restarted.wait_turns_finished()
+                self.assertEqual(restarted.handed, [None])
+                self.assertEqual(restarted.runs, ["synthetic task"])
+                self.assertNotIn("msg-1", restarted.handed)
             finally:
                 await restarted.close()
 
@@ -2631,6 +2694,95 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
 
                 self.run_scenario(scenario)
 
+    def test_goal_control_sent_between_goal_turns_answers_at_once(self):
+        """Fable round 09: a /goal pause sent between goal turns waited out the loop.
+
+        The judge keeps the goal going, so the next continuation is queued
+        while the kickoff turn finishes after its ack. A control form answers
+        there and stops the loop; a goal or other work still waits its turn.
+        """
+        cases = {
+            "/goal pause": "paused",
+            "/goal clear": "cleared",
+            "/goal status": "live",
+            "/goal resume": "held",
+            "/goal waiting for rain": "held",
+            "/retry": "held",
+            "follow-up question": "held",
+        }
+        for text, expect in cases.items():
+            with self.subTest(text=text):
+
+                async def scenario(home: str, text: str = text, expect: str = expect):
+                    from hermes_cli.goals import GoalManager
+
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    verdicts = ["continue"] * 3
+                    tail = h.hold_turn_tails()
+                    delivery: asyncio.Task | None = None
+                    try:
+                        with patch(
+                            "hermes_cli.goals.judge_goal",
+                            lambda *_a, **_k: (
+                                verdicts.pop(0) if verdicts else "done",
+                                "synthetic judge",
+                                False,
+                                None,
+                                False,
+                            ),
+                        ):
+                            await h.deliver(raw_event(1, "/goal synthetic task"))
+                            await h.wait_settled("msg-1")
+                            # The command's own tail, then the kickoff turn's.
+                            await eventually(lambda: h.notices_held == 1)
+                            tail.set()
+                            await eventually(lambda: ("model", "synthetic task") in timeline)
+                            tail = h.hold_turn_tails()
+                            await eventually(lambda: h.notices_held == 2)
+                            self.assertEqual(len(h.adapter._pending_messages), 1)
+                            runs = len(h.models())
+
+                            delivery = asyncio.create_task(h.deliver(raw_event(2, text)))
+                            if expect == "held":
+                                await eventually(lambda: bool(h.adapter._deferred_admissions))
+                                self.assertNotIn("msg-2", h.handed)
+                                self.assertEqual(h.state("msg-2"), "leased")
+                            else:
+                                # Answered while the kickoff turn is still in its tail.
+                                await eventually(lambda: "msg-2" in h.inbox)
+                                await h.wait_settled("msg-2")
+                                self.assertEqual(h.state("msg-2"), "acked")
+                                self.assertEqual(h.handed.count("msg-2"), 1)
+                                self.assertFalse(tail.is_set())
+                            tail.set()
+                            await delivery
+                            await h.wait_settled("msg-2")
+                            await eventually(
+                                lambda: not verdicts or expect in ("paused", "cleared")
+                            )
+                            await h.wait_turns_finished()
+                            await h.settle_loop()
+
+                        goal = GoalManager(session_id=chat_session_id(h))
+                        if expect in ("paused", "cleared"):
+                            self.assertEqual(len(h.models()), runs, timeline)
+                            if expect == "paused":
+                                self.assertIsNotNone(goal.state)
+                                self.assertEqual(getattr(goal.state, "status", None), "paused")
+                            else:
+                                self.assertFalse(goal.has_goal())
+                        else:
+                            # The loop went on to the judge's verdict.
+                            self.assertEqual(verdicts, [])
+                    finally:
+                        tail.set()
+                        if delivery is not None:
+                            await asyncio.gather(delivery, return_exceptions=True)
+                        await h.close()
+
+                self.run_scenario(scenario)
+
     def test_retry_queued_behind_a_reserved_slot_is_undone_when_a_stop_drops_it(self):
         from gateway.run import _AGENT_PENDING_SENTINEL
 
@@ -2676,6 +2828,238 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 await h.close()
 
             await self.assert_retried_once_after_restart(home, h.inbox)
+
+        self.run_scenario(scenario)
+
+
+class HeldJudge:
+    """The /goal judge, giving ``verdicts`` in turn; the first call waits for ``release``."""
+
+    def __init__(self, verdicts: list[str], *, hold: bool = True):
+        self.loop = asyncio.get_running_loop()
+        self.verdicts = verdicts
+        self.calls = 0
+        self.entered = asyncio.Event()
+        self.release = threading.Event()
+        if not hold:
+            self.release.set()
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+        self.calls += 1
+        if self.calls == 1:
+            self.loop.call_soon_threadsafe(self.entered.set)
+            if not self.release.wait(10):
+                raise RuntimeError("the test never released the judge")
+        verdict = self.verdicts.pop(0) if self.verdicts else "done"
+        return verdict, "synthetic judge", False, None, False
+
+
+@contextlib.contextmanager
+def real_agent_runs(h: GatewayHarness, judge: HeldJudge) -> Iterator[None]:
+    """Run turns through the real pinned ``_run_agent``; only the model call is synthetic."""
+    from gateway import run as gateway_run
+
+    loop = asyncio.get_running_loop()
+    h.runner._run_agent = GatewayRunner._run_agent.__get__(h.runner)
+
+    def run_sync(turn: Any) -> dict[str, Any]:
+        ctx = turn._ctx
+
+        class Agent:
+            def interrupt(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def hard_interrupt(self, *_args: Any, **_kwargs: Any) -> None:
+                pass
+
+            def steer(self, _text: str) -> bool:
+                return True
+
+        ctx.agent_holder[0] = Agent()
+        loop.call_soon_threadsafe(h.timeline.append, ("model", ctx.message))
+        result = {"final_response": "done", "messages": [], "completed": True, "api_calls": 1}
+        ctx.result_holder[0] = result
+        return result
+
+    with (
+        patch.object(gateway_run.TurnRunner, "run_sync", run_sync),
+        patch.object(
+            gateway_run, "_load_gateway_config", return_value={"display": {"tool_progress": "off"}}
+        ),
+        patch("agent.model_metadata.fetch_model_metadata", lambda *_a, **_k: {}),
+        patch("hermes_cli.goals.judge_goal", judge),
+        patch.dict(os.environ, {"HERMES_AGENT_TIMEOUT": "0"}),
+    ):
+        yield
+
+
+class PinnedHermesGoalJudgeTests(DrainScenario):
+    """Root review of 5755791f: a /goal control sent while the goal judge runs.
+
+    The pinned runner releases the chat's agent slot before it awaits the
+    judge, so the adapter answers a /goal control there at once. The judge's
+    GoalManager had loaded the goal before; its verdict wrote that state back,
+    reviving a paused or cleared goal and queueing another turn after the
+    control's reply. The Finite patch hermes-goal-judge-supersede.patch keeps
+    a decision only while the stored goal is still the one judged. These run
+    the real ``_run_agent``, post-turn judge and goal state; only the model
+    call, the verdict and transport are synthetic.
+    """
+
+    CONTINUING = "↻ Continuing toward goal"
+
+    async def control_goal_loop(self, home: str, text: str, when: str) -> None:
+        """Send ``text`` to a goal loop whose judge keeps going, at ``when``.
+
+        "judging": while the first judge call runs. "committed": after the
+        judge's state is saved, before the gateway acts on its decision.
+        "queued": after its continuation is queued, before that turn runs.
+        """
+        from hermes_cli.goals import GoalManager, load_goal
+
+        timeline: list[tuple[str, str]] = []
+        h = GatewayHarness(home, timeline=timeline, stall=False)
+        judge = HeldJudge(["continue"], hold=when == "judging")
+        tail = h.hold_turn_tails() if when == "queued" else asyncio.Event()
+        committed, resume = asyncio.Event(), asyncio.Event()
+        if when == "committed":
+            executor = h.runner._run_in_executor_with_context
+
+            async def hold_after_the_judge(func: Any, *args: Any) -> Any:
+                result = await executor(func, *args)
+                decision = isinstance(result, dict) and "should_continue" in result
+                if decision and not committed.is_set():
+                    committed.set()
+                    await resume.wait()
+                return result
+
+            h.runner._run_in_executor_with_context = hold_after_the_judge
+        delivery: asyncio.Task | None = None
+        try:
+            with real_agent_runs(h, judge):
+                await h.deliver(raw_event(1, "/goal synthetic task"))
+                sid = chat_session_id(h)
+                if when == "judging":
+                    await asyncio.wait_for(judge.entered.wait(), 5)
+                elif when == "committed":
+                    await asyncio.wait_for(committed.wait(), 5)
+                    self.assertEqual(getattr(load_goal(sid), "turns_used", None), 1)
+                else:
+                    await eventually(lambda: h.notices_held == 1)
+                    tail.set()
+                    tail = h.hold_turn_tails()
+                    await eventually(lambda: h.notices_held == 2)
+                    self.assertEqual(len(h.adapter._pending_messages), 1)
+                self.assertEqual(h.models(), ["synthetic task"])
+
+                delivery = asyncio.create_task(h.deliver(raw_event(2, text)))
+                await eventually(lambda: "msg-2" in h.inbox)
+                await h.wait_settled("msg-2")
+                # Answered at once, before the judge's decision is acted on.
+                self.assertEqual(h.state("msg-2"), "acked")
+                answered = len(h.replies)
+                judge.release.set()
+                resume.set()
+                tail.set()
+                await delivery
+                await h.wait_settled("msg-1")
+                await h.wait_turns_finished()
+                for _ in range(20):
+                    await h.settle_loop()
+
+            goal = load_goal(sid)
+            if text == "/goal status":
+                # A read leaves the loop going to the judge's verdict.
+                self.assertEqual(len(h.models()), 2, timeline)
+                self.assertIn(self.CONTINUING, " ".join(h.replies))
+                self.assertEqual((getattr(goal, "status", None), judge.calls), ("done", 2))
+                return
+            self.assertEqual(h.models(), ["synthetic task"], timeline)
+            self.assertEqual(judge.calls, 1)
+            self.assertNotIn(self.CONTINUING, " ".join(h.replies[answered:]))
+            if when != "queued":
+                self.assertNotIn(self.CONTINUING, " ".join(h.replies))
+            self.assertIsNotNone(goal)
+            assert goal is not None
+            if text == "/goal pause":
+                self.assertEqual(goal.status, "paused")
+            elif text.startswith("/goal wait"):
+                self.assertEqual((goal.status, goal.waiting_on_pid), ("active", os.getpid()))
+            elif text.startswith("/goal gate"):
+                self.assertEqual((goal.status, len(goal.gates)), ("active", 1))
+            else:
+                self.assertEqual(goal.status, "cleared")
+                self.assertFalse(GoalManager(session_id=sid).has_goal())
+        finally:
+            judge.release.set()
+            resume.set()
+            tail.set()
+            if delivery is not None:
+                await asyncio.gather(delivery, return_exceptions=True)
+            await h.close()
+
+    def test_goal_control_stays_in_force_when_an_earlier_judge_returns(self):
+        cases = [
+            ("judging", "/goal pause"),
+            ("judging", "/goal clear"),
+            ("judging", "/goal stop"),
+            ("judging", f"/goal wait {os.getpid()}"),
+            ("judging", "/goal gate add true"),
+            ("judging", "/goal status"),
+            ("committed", "/goal pause"),
+            ("committed", "/goal clear"),
+            ("queued", "/goal pause"),
+            ("queued", "/goal clear"),
+        ]
+        for when, text in cases:
+            with self.subTest(when=when, text=text):
+                self.run_scenario(
+                    lambda home, when=when, text=text: self.control_goal_loop(home, text, when)
+                )
+
+    def test_another_chats_goal_control_leaves_the_judged_goal_going(self):
+        async def scenario(home: str):
+            from hermes_cli.goals import GoalManager, load_goal
+
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            judge = HeldJudge(["continue"])
+            other = raw_event(2, "/goal clear", segment="segment-2")
+            delivery: asyncio.Task | None = None
+            try:
+                with real_agent_runs(h, judge):
+                    other_source = h.adapter.build_source(
+                        chat_id=ROOM_ID, chat_type="group", user_id="alice", thread_id="segment-2"
+                    )
+                    other_sid = h.runner.session_store.get_or_create_session(
+                        other_source
+                    ).session_id
+                    GoalManager(session_id=other_sid).set("another task")
+                    await h.deliver(raw_event(1, "/goal synthetic task"))
+                    sid = chat_session_id(h)
+                    self.assertNotEqual(sid, other_sid)
+                    await asyncio.wait_for(judge.entered.wait(), 5)
+
+                    delivery = asyncio.create_task(h.deliver(other))
+                    await eventually(lambda: "msg-2" in h.inbox)
+                    await h.wait_settled("msg-2")
+                    self.assertEqual(getattr(load_goal(other_sid), "status", None), "cleared")
+                    judge.release.set()
+                    await delivery
+                    await h.wait_settled("msg-1")
+                    await eventually(lambda: judge.calls == 2)
+                    await h.wait_turns_finished()
+                    await h.settle_loop()
+
+                self.assertEqual(len(h.models()), 2, timeline)
+                self.assertEqual(getattr(load_goal(sid), "status", None), "done")
+                self.assertEqual(getattr(load_goal(other_sid), "status", None), "cleared")
+                self.assertIn("✓ Goal achieved: synthetic judge", h.replies)
+            finally:
+                judge.release.set()
+                if delivery is not None:
+                    await asyncio.gather(delivery, return_exceptions=True)
+                await h.close()
 
         self.run_scenario(scenario)
 

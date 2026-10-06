@@ -1,0 +1,216 @@
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -9210,8 +9210,10 @@
+
+     def _active_work_count(self) -> int:
+         """All agent work the gateway must expose and drain as one total."""
++        from gateway.finite_child_work import active_count
+         return (
+-            self._running_agent_count()
++            active_count(self)
++            + self._running_agent_count()
+             + self._active_cron_job_count()
+             + self._active_api_run_count()
+         )
+@@ -9770,6 +9772,7 @@
+                 exit_reason=exit_reason,
+                 restart_requested=self._restart_requested,
+                 active_agents=self._active_work_count(),
++                child_work_contract="finite-child-work-v1",
+             )
+         except Exception:
+             pass
+@@ -9792,7 +9795,7 @@
+         """
+         try:
+             from gateway.status import write_runtime_status
+-            write_runtime_status(active_agents=self._active_work_count())
++            write_runtime_status(active_agents=self._active_work_count(), child_work_contract="finite-child-work-v1")
+         except Exception:
+             pass
+
+@@ -13084,6 +13087,8 @@
+         agent is already running are skipped regardless, so a session
+         scheduled at startup is never resumed a second time.
+         """
++        from gateway.finite_child_work import schedule_recovery
++        schedule_recovery(self)
+         window = _auto_continue_freshness_window()
+         try:
+             with self.session_store._lock:  # noqa: SLF001 — snapshot under lock
+@@ -23580,6 +23585,8 @@
+                     message_id=None,
+                     channel_prompt=None,
+                 )
++                from gateway.finite_child_work import save_goal
++                save_goal(self, cont_event, cont_event, sid)
+                 self._enqueue_fifo(_quick_key, cont_event, adapter)
+         except Exception as exc:
+             logger.debug("goal continuation: enqueue failed: %s", exc)
+@@ -24466,6 +24473,9 @@
+         if not adapter:
+             logger.warning("No adapter for platform %s in background task %s", source.platform, task_id)
+             return
++
++        from gateway.finite_child_work import capture_adapter
++        adapter = capture_adapter(adapter)
+
+         _thread_metadata = self._thread_metadata_for_source(source, event_message_id)
+
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -2741,6 +2741,9 @@
+         agent starts working on it immediately — the post-turn
+         continuation hook then takes over from there.
+         """
++        from gateway.finite_child_work import prior_goal, save_goal
++        if prior_goal(self, event):
++            return "This goal command already has a durable continuation or outcome."
+         args = (event.get_command_args() or "").strip()
+         lower = args.lower()
+
+@@ -2790,9 +2793,10 @@
+                         message_id=None,
+                         channel_prompt=None,
+                     )
++                    save_goal(self, event, cont_event, session_entry.session_id)
+                     self._enqueue_fifo(_quick_key, cont_event, adapter)
+             except Exception as exc:
+-                logger.debug("goal resume: continuation enqueue failed: %s", exc)
++                raise RuntimeError("Goal continuation was not durably accepted") from exc
+             return t("gateway.goal.resumed", goal=state.goal)
+
+         if lower in {"clear", "stop", "done"}:
+@@ -2911,9 +2915,10 @@
+                     message_id=event.message_id,
+                     channel_prompt=event.channel_prompt,
+                 )
++                save_goal(self, event, kickoff_event, session_entry.session_id)
+                 self._enqueue_fifo(_quick_key, kickoff_event, adapter)
+             except Exception as exc:
+-                logger.debug("goal kickoff enqueue failed: %s", exc)
++                raise RuntimeError("Goal kickoff was not durably accepted") from exc
+
+         base = t("gateway.goal.set", budget=state.max_turns, goal=state.goal)
+         if state.has_contract():
+@@ -3636,19 +3641,15 @@
+         media_urls = list(event.media_urls) if event.media_urls else []
+         media_types = list(event.media_types) if event.media_types else []
+
+-        # Fire-and-forget the background task
+-        _task = asyncio.create_task(
+-            self._run_background_task(
++        from gateway.finite_child_work import start
++        start(self, event, "background", lambda: self._run_background_task(
+                 prompt,
+                 source,
+                 task_id,
+                 event_message_id=event_message_id,
+                 media_urls=media_urls,
+                 media_types=media_types,
+-            )
+-        )
+-        self._background_tasks.add(_task)
+-        _task.add_done_callback(self._background_tasks.discard)
++            ))
+
+         preview = prompt[:60] + ("..." if len(prompt) > 60 else "")
+         return t("gateway.background.started", preview=preview, task_id=task_id)
+@@ -3717,6 +3718,8 @@
+         preview = question[:60] + ("..." if len(question) > 60 else "")
+
+         async def _run_side_question() -> None:
++            from gateway.finite_child_work import capture_adapter
++            delivery_adapter = capture_adapter(adapter)
+             from agent.side_question import answer_side_question
+             try:
+                 answer = await asyncio.to_thread(
+@@ -3729,22 +3732,21 @@
+             except Exception as e:
+                 logger.warning("/btw side question failed: %s", e)
+                 if adapter is not None:
+-                    await adapter.send(
++                    await delivery_adapter.send(
+                         source.chat_id,
+                         t("gateway.btw.failed", preview=preview, error=str(e)),
+                         metadata=_thread_metadata,
+                     )
+                 return
+             if adapter is not None:
+-                await adapter.send(
++                await delivery_adapter.send(
+                     source.chat_id,
+                     t("gateway.btw.answer", preview=preview, answer=answer or ""),
+                     metadata=_thread_metadata,
+                 )
+
+-        _task = asyncio.create_task(_run_side_question())
+-        self._background_tasks.add(_task)
+-        _task.add_done_callback(self._background_tasks.discard)
++        from gateway.finite_child_work import start
++        start(self, event, "side question", _run_side_question)
+
+         return t("gateway.btw.started", preview=preview)
+
+--- a/gateway/status.py
++++ b/gateway/status.py
+@@ -1173,6 +1173,7 @@
+     exit_reason: Any = _UNSET,
+     restart_requested: Any = _UNSET,
+     active_agents: Any = _UNSET,
++    child_work_contract: Any = _UNSET,
+     platform: Any = _UNSET,
+     platform_state: Any = _UNSET,
+     error_code: Any = _UNSET,
+@@ -1219,6 +1220,12 @@
+         payload["exit_reason"] = exit_reason
+     if restart_requested is not _UNSET:
+         payload["restart_requested"] = bool(restart_requested)
++    if child_work_contract is not _UNSET:
++        payload["child_work_contract"] = {
++            "version": child_work_contract,
++            "pid": current_record["pid"],
++            "start_time": current_record["start_time"],
++        }
+     if active_agents is not _UNSET:
+         payload["active_agents"] = parse_active_agents(active_agents)
+     if served_profiles is not _UNSET:
+--- a/gateway/platforms/base.py
++++ b/gateway/platforms/base.py
+@@ -6708,6 +6708,26 @@
+                     except Exception as tts_err:
+                         logger.warning("[%s] Auto-TTS failed: %s", self.name, tts_err)
+
++                # Finite accepted goal work owns every final component before
++                # any send. Recovery retries the persisted manifest, never the
++                # model/tool turn, including when text already reached the user.
++                if getattr(event, "_finite_goal_work", None):
++                    from gateway.finite_child_work import goal_output
++                    if await goal_output(
++                        self, event, text_content, images, media_files,
++                        local_files, _tts_paths, _final_thread_metadata,
++                        force_document_attachments,
++                    ):
++                        for _owned_tts in _tts_paths:
++                            try:
++                                os.remove(_owned_tts)
++                            except OSError:
++                                pass
++                        text_content, images, media_files, local_files = "", [], [], []
++                        _tts_paths = []
++                        response = None
++                        _response_pre_extract = ""
++
+                 # Play TTS audio before text (voice-first experience)
+                 _tts_caption_delivered = False
+                 _tts_cleanup_paths = {_tts_requested_path, *_tts_paths} - {None}
+@@ -6776,7 +6796,8 @@
+                     # Slash-command and ephemeral replies are cheap to
+                     # regenerate and are not recorded.
+                     _obligation_id = None
+-                    if not is_ephemeral_response and not str(
++                    _child_key = getattr(event, "_finite_goal_work", None)
++                    if not _child_key and not is_ephemeral_response and not str(
+                         event.text or ""
+                     ).lstrip().startswith(("/", self.typed_command_prefix or "!")):
+                         try:
