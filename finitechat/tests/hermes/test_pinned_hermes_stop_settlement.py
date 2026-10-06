@@ -83,6 +83,7 @@ def raw_event(
 
 
 _LOOPBACK_HOSTS = frozenset({None, "localhost", "127.0.0.1", "::1"})
+USAGE_NOTICE = "synthetic usage notice"
 
 
 @contextlib.contextmanager
@@ -90,9 +91,11 @@ def offline_gateway(home: str) -> Iterator[None]:
     """Keep the pinned gateway off the network and out of the real Hermes home.
 
     Provider resolution reads ambient credentials and walks a fallback chain,
-    the gateway constructor downloads the tirith scanner, and /restart
-    launches a detached ``hermes gateway restart``. ``gateway.run`` fixes its
-    home at import, before a test points ``HERMES_HOME`` at a scratch dir.
+    the gateway constructor downloads the tirith scanner, /restart launches a
+    detached ``hermes gateway restart``, and the /goal judge asks an
+    auxiliary model after each goal turn (here it finds the goal done).
+    ``gateway.run`` fixes its home at import, before a test points
+    ``HERMES_HOME`` at a scratch dir.
     """
     real_getaddrinfo = socket.getaddrinfo
 
@@ -107,11 +110,15 @@ def offline_gateway(home: str) -> Iterator[None]:
     async def no_detached_restart(_runner: Any) -> None:
         return None
 
+    def goal_done(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+        return "done", "synthetic judge", False, None, False
+
     with (
         patch("socket.getaddrinfo", loopback_only),
         patch("gateway.run._hermes_home", Path(home)),
         patch("gateway.run._resolve_runtime_agent_kwargs", no_provider),
         patch("tools.tirith_security.ensure_installed", lambda **_kwargs: None),
+        patch("hermes_cli.goals.judge_goal", goal_done),
         patch.object(GatewayRunner, "_launch_detached_restart_command", no_detached_restart),
     ):
         yield
@@ -188,9 +195,19 @@ class StopHarness:
             message_id = payload["message_id"]
             self.settled.append((action, message_id))
             raw, state = self.inbox[message_id]
-            if state == "leased":
-                self.inbox[message_id] = (raw, "acked" if action == "ack" else "pending")
-            if action == "release" and self.redeliver_on_release and self.stream_open:
+            # As the sidecar's cmd_ack and cmd_release: an ack removes the
+            # entry whatever its lease, and a release returns only a leased
+            # entry to pending.
+            if action == "ack":
+                self.inbox[message_id] = (raw, "acked")
+            elif state == "leased":
+                self.inbox[message_id] = (raw, "pending")
+            if (
+                action == "release"
+                and self.state(message_id) == "pending"
+                and self.redeliver_on_release
+                and self.stream_open
+            ):
                 self.redeliveries.append(message_id)
                 self.inbox[message_id] = (raw, "leased")
                 task = asyncio.create_task(self.adapter._handle_finitechat_event(raw))
@@ -268,6 +285,20 @@ class StopHarness:
 
         await asyncio.wait_for(settled(), 5)
 
+    async def wait_turns_finished(self) -> None:
+        """Wait for every background turn to end, past its ack and its completion tail.
+
+        An entry is acked inside its turn's completion hook. The base adapter
+        keeps the chat's session guard until the turn's task ends, after the
+        hook's usage call and cleanup.
+        """
+
+        async def finished():
+            while tasks := [task for task in self.adapter._background_tasks if not task.done()]:
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        await asyncio.wait_for(finished(), 5)
+
     async def close(self) -> None:
         if self._stream_tasks:
             await asyncio.gather(*self._stream_tasks, return_exceptions=True)
@@ -311,8 +342,14 @@ class GatewayHarness(StopHarness):
         self.steerless: set[str] = set()
         # How long a reply send takes, as a real transport would.
         self.reply_delay = 0.0
+        # Usage notices held in a finished turn's tail (``hold_turn_tails``).
+        self.notices_held = 0
         # Awaited before each reply is sent, once a test sets it.
         self.before_reply: Callable[[str], Awaitable[None]] | None = None
+        # Awaited before an ack or release reaches the sidecar, once a test
+        # sets it; False makes the sidecar refuse the call. A cancelled call
+        # never reaches it.
+        self.before_settle: Callable[[str, str], Awaitable[bool]] | None = None
         # The next admission await at which a restart drain begins:
         # "home-channel-show" or "activity" (the adapter's RPCs before
         # handoff), or "dispatch" (the base background turn, before the
@@ -326,9 +363,27 @@ class GatewayHarness(StopHarness):
             await processing_start(event)
 
         self.adapter.on_processing_start = on_processing_start
+        # An in-band restart calls stop() 50ms after the last agent run ends.
+        # The gateway's own work after that run can outlast it; the turn is
+        # then released and runs once more after the restart, a documented
+        # limit. A test that asserts what a turn finishing during the drain
+        # settles to sets this, so the restart's stop() waits for it.
+        self.restart_after_finished_turns_settle = False
+        stop = self.runner.stop
+
+        async def stop_after_finished_turns_settle(*args: Any, **kwargs: Any) -> None:
+            if self.restart_after_finished_turns_settle and kwargs.get("restart"):
+                await self.wait_turns_finished()
+            await stop(*args, **kwargs)
+
+        self.runner.stop = stop_after_finished_turns_settle
 
     async def _sidecar(self, action, payload, *, timeout):
         if action in ("ack", "release"):
+            if self.before_settle is not None and not await self.before_settle(
+                action, payload["message_id"]
+            ):
+                return self.module._FiniteChatResult(False, {}, "synthetic sidecar error", True)
             self.timeline.append((action, payload["message_id"]))
         if action == self.drain_window and payload.get("action", "set") == "set":
             self.begin_restart_drain()
@@ -339,6 +394,30 @@ class GatewayHarness(StopHarness):
             await self.before_reply(content)
         await asyncio.sleep(self.reply_delay)
         return await super()._send(chat_id, content, **kwargs)
+
+    def hold_turn_tails(self) -> asyncio.Event:
+        """Hold each turn that finishes from now on in its tail until the returned gate is set.
+
+        After the completion hook acks a successful turn, it asks Finite
+        Private for a usage notice and sends any it gets; the turn is held in
+        that send. Its chat stays busy to the adapter while the gateway is
+        idle.
+        """
+        gate = asyncio.Event()
+        self.module._finite_private_control_request = lambda *_args: {
+            "notice": {"message": USAGE_NOTICE}
+        }
+        before_reply = self.before_reply
+
+        async def hold_notice(content: str) -> None:
+            if content == USAGE_NOTICE:
+                self.notices_held += 1
+                await gate.wait()
+            elif before_reply is not None:
+                await before_reply(content)
+
+        self.before_reply = hold_notice
+        return gate
 
     def begin_restart_drain(self) -> None:
         """What an in-band ``/restart`` does: refuse new work at once, keep
@@ -856,6 +935,32 @@ class DrainScenario(unittest.TestCase):
             await restarted.close()
         return timeline
 
+    async def assert_retried_once_after_restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
+    ) -> None:
+        timeline: list[tuple[str, str]] = []
+        restarted = GatewayHarness(home, timeline=timeline, inbox=inbox, stall=False)
+        try:
+            await restarted.boot_with_gate_closed()
+            await restarted.open_gate()
+            await restarted.wait_settled("msg-4")
+            await restarted.settle_loop()
+            # The last question, once, then the ack; nothing older is retried.
+            self.assertEqual(timeline, [("model", "third question"), ("ack", "msg-4")])
+            self.assertEqual(chat_transcript(restarted), SEEDED_EXCHANGES)
+        finally:
+            await restarted.close()
+
+    async def boot_after_restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
+    ) -> GatewayHarness:
+        restarted = GatewayHarness(home, timeline=[], inbox=inbox, stall=False)
+        await restarted.boot_with_gate_closed()
+        await restarted.open_gate()
+        for _ in range(50):
+            await restarted.settle_loop()
+        return restarted
+
     def assert_ran_once_then_acked(
         self,
         timeline: list[tuple[str, str]],
@@ -951,6 +1056,7 @@ class PinnedHermesRestartDrainAdmissionTests(DrainScenario):
                 async def scenario(home: str, window: str = window):
                     timeline: list[tuple[str, str]] = []
                     h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.restart_after_finished_turns_settle = True
                     h.redeliver_on_release = True
                     h.adapter._home_channel_hydrated = False
                     try:
@@ -985,6 +1091,7 @@ class PinnedHermesRestartDrainAdmissionTests(DrainScenario):
                 async def scenario(home: str, window: str = window):
                     timeline: list[tuple[str, str]] = []
                     h = GatewayHarness(home, timeline=timeline)
+                    h.restart_after_finished_turns_settle = True
                     h.redeliver_on_release = True
                     h.adapter._home_channel_hydrated = False
                     try:
@@ -1024,6 +1131,7 @@ class PinnedHermesRestartDrainAdmissionTests(DrainScenario):
         async def scenario(home: str):
             timeline: list[tuple[str, str]] = []
             h = GatewayHarness(home, timeline=timeline)
+            h.restart_after_finished_turns_settle = True
             h.redeliver_on_release = True
             try:
                 await h.deliver(raw_event(1, "long running work"))
@@ -1404,6 +1512,7 @@ class PinnedHermesModelCommandTests(DrainScenario):
         async def scenario(home: str):
             timeline: list[tuple[str, str]] = []
             h = GatewayHarness(home, timeline=timeline)
+            h.restart_after_finished_turns_settle = True
             h.redeliver_on_release = True
             try:
                 await h.deliver(raw_event(1, "long running work"))
@@ -1431,6 +1540,7 @@ class PinnedHermesModelCommandTests(DrainScenario):
                 async def scenario(home: str, draining: bool = draining):
                     timeline: list[tuple[str, str]] = []
                     h = GatewayHarness(home, timeline=timeline)
+                    h.restart_after_finished_turns_settle = True
                     h.redeliver_on_release = True
                     try:
                         await h.deliver(raw_event(1, "long running work"))
@@ -1664,11 +1774,11 @@ def chat_transcript(h: StopHarness) -> list[tuple[str, str]]:
 
 
 async def seed_exchanges(h: GatewayHarness) -> None:
-    """Three finished exchanges in the chat, then a clear timeline."""
+    """Three finished exchanges in an idle chat, then a clear timeline."""
     for seq, text in enumerate(("first question", "second question", "third question"), 1):
         await h.deliver(raw_event(seq, text))
         await h.wait_settled(f"msg-{seq}")
-    await h.settle_loop()
+        await h.wait_turns_finished()
     assert chat_transcript(h) == SEEDED_EXCHANGES, chat_transcript(h)
     h.timeline.clear()
 
@@ -1707,22 +1817,6 @@ class PinnedHermesRetryRewindTests(DrainScenario):
 
         setattr(facade, method, call)
 
-    async def assert_retried_once_after_restart(
-        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
-    ) -> None:
-        timeline: list[tuple[str, str]] = []
-        restarted = GatewayHarness(home, timeline=timeline, inbox=inbox, stall=False)
-        try:
-            await restarted.boot_with_gate_closed()
-            await restarted.open_gate()
-            await restarted.wait_settled("msg-4")
-            await restarted.settle_loop()
-            # The last question, once, then the ack; nothing older is retried.
-            self.assertEqual(timeline, [("model", "third question"), ("ack", "msg-4")])
-            self.assertEqual(chat_transcript(restarted), SEEDED_EXCHANGES)
-        finally:
-            await restarted.close()
-
     def test_retry_runs_the_last_message_once_without_a_drain(self):
         async def scenario(home: str):
             timeline: list[tuple[str, str]] = []
@@ -1746,6 +1840,7 @@ class PinnedHermesRetryRewindTests(DrainScenario):
                 async def scenario(home: str, window: str = window):
                     timeline: list[tuple[str, str]] = []
                     h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.restart_after_finished_turns_settle = True
                     h.redeliver_on_release = True
                     try:
                         await seed_exchanges(h)
@@ -1946,16 +2041,6 @@ class PinnedHermesCommandFinalityTests(DrainScenario):
         h.before_reply = before_reply
         return stops
 
-    async def boot_after_restart(
-        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
-    ) -> GatewayHarness:
-        restarted = GatewayHarness(home, timeline=[], inbox=inbox, stall=False)
-        await restarted.boot_with_gate_closed()
-        await restarted.open_gate()
-        for _ in range(50):
-            await restarted.settle_loop()
-        return restarted
-
     def test_restart_whose_reply_a_stop_cuts_off_does_not_restart_again(self):
         async def scenario(home: str):
             timeline: list[tuple[str, str]] = []
@@ -2039,6 +2124,558 @@ class PinnedHermesCommandFinalityTests(DrainScenario):
                 self.assertEqual(chat_transcript(restarted), SEEDED_EXCHANGES[:4])
             finally:
                 await restarted.close()
+
+        self.run_scenario(scenario)
+
+
+class PinnedHermesTurnBoundaryTests(DrainScenario):
+    """Where a turn's work begins and ends, as its settlement sees it.
+
+    Linux CI job 112252876639 at 338eb795 and reviews 5427930434 and round 08.
+    The pinned base adapter runs the completion hook a second time, as
+    CANCELLED, when a shutdown cancels the turn's task after the hook began:
+    in the usage-notice tail after the ack, or while a settlement is still on
+    its way. That second run released an acked turn, released the steer the
+    turn had taken, and acked a /retry the first run had just released, which
+    removes the entry. Settling a model-launching command by its unchanged
+    text acked one a stop cancelled before Hermes ran it. A command sent while
+    the previous turn finished after its ack ran inline, outside any
+    background turn, where a drain after a /retry rewind lost the last
+    message. A /retry whose re-sent message Hermes queued behind a reserved
+    slot kept its rewind when a stop dropped that queue.
+    """
+
+    # Each command that can start model work, with the text its model run carries.
+    MODEL_COMMANDS = (
+        ("/queue synthetic task", "synthetic task"),
+        ("/steer synthetic task", "synthetic task"),
+        ("/plan synthetic task", "synthetic task"),
+        ("/learn synthetic task", "synthetic task"),
+        ("/init", "[/init]"),
+        ("/blueprint morning-brief", "Morning briefing"),
+        ("/moa synthetic task", "synthetic task"),
+        ("/goal synthetic task", "synthetic task"),
+    )
+
+    @staticmethod
+    def stop_here(h: GatewayHarness, stops: list[asyncio.Task]) -> Callable[[], Awaitable[None]]:
+        """A step that begins a graceful stop once and waits there until the stop cancels it."""
+
+        async def step() -> None:
+            if not stops:
+                stops.append(asyncio.create_task(h.stop_gracefully()))
+                await eventually(h.adapter._gateway_stopping)
+            await asyncio.Event().wait()
+
+        return step
+
+    async def run_command_after_restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]], task: str
+    ) -> list[tuple[str, str]]:
+        """Boot over ``inbox`` and run until ``task`` reached the model and the turns ended."""
+        timeline: list[tuple[str, str]] = []
+        restarted = GatewayHarness(home, timeline=timeline, inbox=inbox, stall=False)
+        try:
+            await restarted.boot_with_gate_closed()
+            await restarted.open_gate()
+            await eventually(
+                lambda: any(task in text for kind, text in timeline if kind == "model")
+            )
+            await restarted.wait_turns_finished()
+        finally:
+            await restarted.close()
+        return timeline
+
+    def assert_command_ran_once(
+        self, timeline: list[tuple[str, str]], command: str, task: str
+    ) -> None:
+        runs = [text for kind, text in timeline if kind == "model" and task in text]
+        self.assertEqual(len(runs), 1, timeline)
+        self.assertEqual(timeline.count(("ack", "msg-1")), 1, timeline)
+        self.assertNotIn(("release", "msg-1"), timeline)
+        if not command.startswith("/goal"):
+            # /goal acks once the goal is saved; its kickoff turn follows.
+            self.assert_ran_once_then_acked(timeline, "msg-1", task=task)
+
+    def test_a_stop_after_the_ack_leaves_the_finished_turn_acked(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            tail = h.hold_turn_tails()
+            try:
+                await h.deliver(raw_event(1, "synthetic task"))
+                await h.wait_settled("msg-1")
+                await eventually(lambda: h.notices_held == 1)
+                # The stop cancels the turn's task in its usage-notice send.
+                await h.stop_gracefully()
+                self.assertEqual(timeline, [("model", "synthetic task"), ("ack", "msg-1")])
+                self.assertEqual(h.state("msg-1"), "acked")
+            finally:
+                tail.set()
+                await h.close()
+
+            self.assertEqual(await self.run_after_restart(home, h.inbox), [])
+
+        self.run_scenario(scenario)
+
+    def test_a_stop_after_an_unconfirmed_ack_settles_the_turn_and_its_steer_once(self):
+        # "on its way": the stop cancels the turn while its ack is still on
+        # its way to the sidecar. "refused": the sidecar refused the ack, and
+        # the stop cancels the turn in its tail.
+        for case in ("on its way", "refused"):
+            with self.subTest(case=case):
+
+                async def scenario(home: str, case: str = case):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    sent = asyncio.Event()
+                    first_ack: list[str] = []
+
+                    async def first_ack_unconfirmed(action: str, message_id: str) -> bool:
+                        if action != "ack" or first_ack:
+                            return True
+                        first_ack.append(message_id)
+                        if case == "refused":
+                            return False
+                        await sent.wait()
+                        return True
+
+                    tail = h.hold_turn_tails() if case == "refused" else asyncio.Event()
+                    try:
+                        await h.deliver(raw_event(1, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        await h.deliver(raw_event(2, "/steer change course"))
+                        self.assertIn(("steer", "change course"), timeline)
+                        h.before_settle = first_ack_unconfirmed
+                        h.turn_gate.set()
+                        await eventually(lambda: first_ack == ["msg-1"])
+                        if case == "refused":
+                            await eventually(lambda: h.notices_held == 1)
+                            self.assertEqual(h.state("msg-1"), "leased")
+                            await h.stop_gracefully()
+                        else:
+                            stop = asyncio.create_task(h.stop_gracefully())
+                            await eventually(
+                                lambda: bool(h.adapter._expected_cancelled_tasks) or stop.done()
+                            )
+                            sent.set()
+                            await stop
+                        self.assertEqual(h.state("msg-1"), "acked")
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        self.assertNotIn(("release", "msg-1"), timeline)
+                        self.assertNotIn(("release", "msg-2"), timeline)
+                    finally:
+                        sent.set()
+                        tail.set()
+                        await h.close()
+
+                    self.assertEqual(await self.run_after_restart(home, h.inbox), [])
+
+                self.run_scenario(scenario)
+
+    def test_a_released_retry_stays_released_when_the_stop_cancels_its_turn(self):
+        # "tail": the stop cancels the turn after it released the /retry, in
+        # the usage call. "restore": the stop cancels it while the rewind is
+        # still being undone in a worker thread.
+        for boundary in ("tail", "restore"):
+            with self.subTest(boundary=boundary):
+
+                async def scenario(home: str, boundary: str = boundary):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    stops: list[asyncio.Task] = []
+                    restoring = threading.Event()
+                    proceed = threading.Event()
+                    try:
+                        await seed_exchanges(h)
+                        if boundary == "tail":
+                            tail = h.hold_turn_tails()
+                            proceed.set()
+                        else:
+                            tail = asyncio.Event()
+                            tail.set()
+                            restore = h.module._restore_retry_rewind
+
+                            def held_restore(rewind: Any) -> str:
+                                restoring.set()
+                                proceed.wait(5)
+                                return restore(rewind)
+
+                            h.module._restore_retry_rewind = held_restore
+
+                        # The stop reaches the adapter's teardown, which
+                        # cancels the turn, only once the turn is there.
+                        cancel = h.adapter.cancel_background_tasks
+
+                        async def cancel_at_the_boundary() -> None:
+                            if boundary == "tail":
+                                await eventually(lambda: h.notices_held == 1)
+                            else:
+                                await eventually(restoring.is_set)
+                            await cancel()
+
+                        h.adapter.cancel_background_tasks = cancel_at_the_boundary
+
+                        async def begin_stop() -> None:
+                            stops.append(asyncio.create_task(h.stop_gracefully()))
+                            await eventually(lambda: h.runner._draining)
+
+                        PinnedHermesRetryRewindTests.begin_after(
+                            h, "rewrite_transcript", begin_stop
+                        )
+                        await h.deliver(raw_event(4, "/retry"))
+                        await eventually(lambda: bool(stops))
+                        if boundary == "restore":
+                            await eventually(
+                                lambda: bool(h.adapter._expected_cancelled_tasks) or stops[0].done()
+                            )
+                            proceed.set()
+                        await stops[0]
+                        await h.settle_loop()
+                        self.assertNotIn(("ack", "msg-4"), timeline)
+                        self.assertEqual(timeline.count(("release", "msg-4")), 1, timeline)
+                        self.assertEqual(h.state("msg-4"), "pending")
+                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+                    finally:
+                        proceed.set()
+                        tail.set()
+                        await h.close()
+
+                    await self.assert_retried_once_after_restart(home, h.inbox)
+
+                self.run_scenario(scenario)
+
+    def test_turn_that_finished_before_the_stop_is_acked_when_its_reply_lands_after(self):
+        # Round 08 finding 4: a turn that finished during a restart drain, or
+        # just before a graceful stop, was released and ran again when its
+        # completion hook came after stop() began.
+        for how in ("restart", "graceful"):
+            with self.subTest(how=how):
+
+                async def scenario(home: str, how: str = how):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    stops: list[asyncio.Task] = []
+
+                    async def reply_once_stopping(_content: str) -> None:
+                        if how == "graceful" and not stops:
+                            stops.append(asyncio.create_task(h.stop_gracefully()))
+                        await eventually(h.adapter._gateway_stopping)
+
+                    # Teardown cancels unsettled turns; this turn settles first.
+                    cancel = h.adapter.cancel_background_tasks
+
+                    async def cancel_once_settled() -> None:
+                        await h.wait_settled("msg-1")
+                        await cancel()
+
+                    h.adapter.cancel_background_tasks = cancel_once_settled
+                    try:
+                        if how == "restart":
+                            gate = await h.hold_turn_open(raw_event(1, "synthetic task"))
+                            h.begin_restart_drain()
+                            h.before_reply = reply_once_stopping
+                            gate.set()
+                            await h.finish_restart()
+                        else:
+                            h.before_reply = reply_once_stopping
+                            await h.deliver(raw_event(1, "synthetic task"))
+                            await eventually(lambda: bool(stops))
+                            await stops[0]
+                        self.assertEqual(timeline, [("model", "synthetic task"), ("ack", "msg-1")])
+                        self.assertEqual(h.state("msg-1"), "acked")
+                    finally:
+                        await h.close()
+
+                    self.assertEqual(await self.run_after_restart(home, h.inbox), [])
+
+                self.run_scenario(scenario)
+
+    def test_model_command_a_stop_cancels_before_the_gateway_runs_it_runs_after_restart(self):
+        for command, task in self.MODEL_COMMANDS:
+            with self.subTest(command=command):
+
+                async def scenario(home: str, command: str = command, task: str = task):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    stops: list[asyncio.Task] = []
+                    step = self.stop_here(h, stops)
+                    processing_start = h.adapter.on_processing_start
+
+                    async def stop_at_processing_start(event):
+                        if event.message_id == "msg-1":
+                            await step()
+                        await processing_start(event)
+
+                    h.adapter.on_processing_start = stop_at_processing_start
+                    try:
+                        await h.deliver(raw_event(1, command))
+                        await eventually(lambda: bool(stops))
+                        await stops[0]
+                        self.assertEqual(h.handed, [])
+                        self.assertEqual(timeline, [("release", "msg-1")])
+                        self.assertEqual(h.state("msg-1"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_command_after_restart(home, h.inbox, task)
+                    self.assert_command_ran_once(after, command, task)
+
+                self.run_scenario(scenario)
+
+    def test_model_command_a_stop_cancels_during_its_acknowledgment_runs_after_restart(self):
+        for command in (
+            "/plan synthetic task",
+            "/learn synthetic task",
+            "/init",
+            "/blueprint morning-brief",
+        ):
+            task = dict(self.MODEL_COMMANDS)[command]
+            with self.subTest(command=command):
+
+                async def scenario(home: str, command: str = command, task: str = task):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    stops: list[asyncio.Task] = []
+                    step = self.stop_here(h, stops)
+
+                    async def stop_at_the_acknowledgment(_content: str) -> None:
+                        await step()
+
+                    h.before_reply = stop_at_the_acknowledgment
+                    try:
+                        await h.deliver(raw_event(1, command))
+                        await eventually(lambda: bool(stops))
+                        await stops[0]
+                        # The handler had begun, but nothing was rewritten or run.
+                        self.assertEqual(h.handed, ["msg-1"])
+                        self.assertEqual(h.models(), [])
+                        self.assertEqual(timeline, [("release", "msg-1")])
+                        self.assertEqual(h.state("msg-1"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_command_after_restart(home, h.inbox, task)
+                    self.assert_command_ran_once(after, command, task)
+
+                self.run_scenario(scenario)
+
+    def test_control_a_stop_cancels_before_the_gateway_runs_it_runs_once_after_restart(self):
+        from tools import approval
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            session_key = h.runner._session_key_for_source(chat_source(h))
+            stops: list[asyncio.Task] = []
+            step = self.stop_here(h, stops)
+            processing_start = h.adapter.on_processing_start
+
+            async def stop_at_processing_start(event):
+                await step()
+                await processing_start(event)
+
+            h.adapter.on_processing_start = stop_at_processing_start
+            try:
+                await h.deliver(raw_event(1, "/yolo"))
+                await eventually(lambda: bool(stops))
+                await stops[0]
+                self.assertFalse(approval.is_session_yolo_enabled(session_key))
+                self.assertEqual(timeline, [("release", "msg-1")])
+            finally:
+                await h.close()
+
+            timeline.clear()
+            restarted = GatewayHarness(home, timeline=timeline, inbox=h.inbox, stall=False)
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await restarted.wait_settled("msg-1")
+                await restarted.wait_turns_finished()
+                self.assertEqual(restarted.handed, ["msg-1"])
+                self.assertEqual(timeline, [("ack", "msg-1")])
+                self.assertTrue(approval.is_session_yolo_enabled(session_key))
+            finally:
+                await restarted.close()
+
+        with patch.object(approval, "_session_yolo", set()):
+            self.run_scenario(scenario)
+
+    def test_goal_saved_before_a_stop_is_not_set_again(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            stops = PinnedHermesCommandFinalityTests.stop_before_reply(h)
+            try:
+                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await eventually(lambda: bool(stops))
+                await stops[0]
+                # The handler saved the goal and queued its kickoff; the stop
+                # dropped the kickoff, which is the documented limit.
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertNotIn(("release", "msg-1"), timeline)
+            finally:
+                await h.close()
+
+            restarted = await self.boot_after_restart(home, h.inbox)
+            try:
+                self.assertEqual(restarted.handed, [])
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_retry_sent_while_the_last_turn_finishes_keeps_its_message(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            h.restart_after_finished_turns_settle = True
+            h.redeliver_on_release = True
+            fourth = [*SEEDED_EXCHANGES, ("user", "fourth question"), ("assistant", "done")]
+            try:
+                await seed_exchanges(h)
+                other = await h.hold_turn_open(raw_event(9, "other work", segment="s2"))
+                tail = h.hold_turn_tails()
+                await h.deliver(raw_event(4, "fourth question"))
+                await h.wait_settled("msg-4")
+                await eventually(lambda: h.notices_held == 1)
+                session_key = h.runner._session_key_for_source(chat_source(h))
+                # Busy to the adapter, idle to the gateway.
+                self.assertTrue(h.adapter._session_is_active(session_key))
+                self.assertFalse(h.runner._is_session_running(session_key))
+
+                async def begin_drain() -> None:
+                    h.begin_restart_drain()
+
+                PinnedHermesRetryRewindTests.begin_after(h, "rewrite_transcript", begin_drain)
+                delivery = asyncio.create_task(h.deliver(raw_event(5, "/retry")))
+                await h.settle_loop()
+                self.assertNotIn("msg-5", h.handed)
+                self.assertEqual(h.state("msg-5"), "leased")
+
+                # Its own turn rewinds, the drain begins, the rewind is undone.
+                tail.set()
+                await delivery
+                await eventually(
+                    lambda: bool({("ack", "msg-5"), ("release", "msg-5")} & set(timeline))
+                )
+                await h.settle_loop()
+                self.assertNotIn(("ack", "msg-5"), timeline)
+                self.assertEqual(chat_transcript(h), fourth)
+
+                other.set()
+                await h.finish_restart()
+                self.assertEqual(h.state("msg-5"), "pending")
+            finally:
+                await h.close()
+
+            after: list[tuple[str, str]] = []
+            restarted = GatewayHarness(home, timeline=after, inbox=h.inbox, stall=False)
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await restarted.wait_settled("msg-5")
+                await restarted.wait_turns_finished()
+                self.assertEqual(after, [("model", "fourth question"), ("ack", "msg-5")])
+                self.assertEqual(chat_transcript(restarted), fourth)
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_model_command_sent_while_the_last_turn_finishes_runs_as_its_own_turn(self):
+        from agent.plan_prompt import build_plan_prompt
+
+        cases = {
+            "/plan synthetic task": build_plan_prompt("synthetic task"),
+            "/moa synthetic task": "synthetic task",
+        }
+        for command, prompt in cases.items():
+            with self.subTest(command=command):
+
+                async def scenario(home: str, command: str = command, prompt: str = prompt):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    tail = h.hold_turn_tails()
+                    gate = h.held_turns[prompt] = asyncio.Event()
+                    delivery: asyncio.Task | None = None
+                    try:
+                        await h.deliver(raw_event(1, "first question"))
+                        await h.wait_settled("msg-1")
+                        await eventually(lambda: h.notices_held == 1)
+                        # A control still answers at once.
+                        await h.deliver(raw_event(2, "/status"))
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        delivery = asyncio.create_task(h.deliver(raw_event(3, command)))
+                        await h.settle_loop()
+                        self.assertNotIn("msg-3", h.handed)
+                        self.assertEqual(h.state("msg-3"), "leased")
+
+                        tail.set()
+                        await delivery
+                        await eventually(lambda: ("model", prompt) in timeline)
+                        # A stop interrupts the command's own turn, which settles it.
+                        await h.stop_gracefully()
+                        self.assertTrue(gate.is_set())
+                        self.assertNotIn(("ack", "msg-3"), timeline)
+                        self.assertEqual(h.state("msg-3"), "pending")
+                    finally:
+                        tail.set()
+                        gate.set()
+                        if delivery is not None:
+                            await asyncio.gather(delivery, return_exceptions=True)
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-3")
+                    self.assert_ran_once_then_acked(after, "msg-3", task="synthetic task")
+
+                self.run_scenario(scenario)
+
+    def test_retry_queued_behind_a_reserved_slot_is_undone_when_a_stop_drops_it(self):
+        from gateway.run import _AGENT_PENDING_SENTINEL
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            session_key = h.runner._session_key_for_source(chat_source(h))
+            queued: list[str] = []
+            background = h.adapter._process_message_background
+
+            async def queued_turn_never_starts(event: MessageEvent, key: str) -> None:
+                raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+                if raw.get("message_id") == "msg-4" and event.text != "/retry":
+                    # The stop cancels it before it runs, with no completion hook.
+                    queued.append(event.text)
+                    await asyncio.Event().wait()
+                await background(event, key)
+
+            try:
+                await seed_exchanges(h)
+                h.adapter._process_message_background = queued_turn_never_starts
+
+                async def reserve_the_slot() -> None:
+                    # As the pinned cold path claims it for a competing turn,
+                    # right after the rewind: the re-sent message is queued.
+                    h.runner._session_state(session_key).turn.agent = _AGENT_PENDING_SENTINEL
+
+                PinnedHermesRetryRewindTests.begin_after(h, "rewrite_transcript", reserve_the_slot)
+                await h.deliver(raw_event(4, "/retry"))
+                await eventually(lambda: bool(queued))
+                h.runner._release_running_agent_state(session_key)
+                self.assertEqual(queued, ["third question"])
+                self.assertEqual(len(h.adapter._retry_rewinds), 1)
+                self.assertEqual(h.state("msg-4"), "leased")
+                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES[:4])
+
+                await h.stop_gracefully()
+                self.assertEqual(h.adapter._retry_rewinds, {})
+                self.assertEqual(timeline, [("release", "msg-4")])
+                self.assertEqual(h.state("msg-4"), "pending")
+                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+            finally:
+                await h.close()
+
+            await self.assert_retried_once_after_restart(home, h.inbox)
 
         self.run_scenario(scenario)
 

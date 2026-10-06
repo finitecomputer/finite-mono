@@ -140,14 +140,30 @@ its own.
   flip them to `Leased`, so a leased entry is not re-emitted on the next tick.
   The adapter settles the lease from the turn: the completion hook `ack`s on
   success or failure, and a turn cancelled by shutdown or recovery calls
-  `release`, which returns the entry to `Pending` for redelivery. Hermes
-  `stop()` interrupts running turns cooperatively and reports them as
-  success, so every model turn that finishes after `stop()` begins is
-  released; a turn that completed in that window can run once more after
-  restart. A command Hermes answers itself, such as `/restart`, `/undo`,
-  `/yolo` or `/goal`, or a reply to a pending prompt, is acked once even when
-  a stop follows or cancels it, so a restart never repeats its effect. A stop
-  that cancels it before it runs leaves a command the user resends. While
+  `release`, which returns the entry to `Pending` for redelivery. It decides
+  once per turn. The pinned base adapter runs the hook again, as cancelled,
+  when a shutdown cancels the turn after the hook began, and a second decision
+  could reverse the first: the sidecar's `ack` removes an entry that a
+  `release` has just returned to `Pending`. So the settlement runs as its own
+  task, which that cancellation cannot interrupt, and the second run waits for
+  it and resends the same decision to any entry the sidecar did not confirm.
+  Hermes `stop()` interrupts running turns cooperatively and reports them as
+  success, so model work whose gateway handler returns after `stop()` begins
+  is released. Work whose handler returned before `stop()` began ran
+  uninterrupted, so it is acked even when it settles after `stop()` began,
+  unless the stop cancels it before its reply is sent. The gateway still has
+  its own work to do after an agent run ends, and that can overlap the start
+  of `stop()`: a restart drain calls `stop()` 50 ms after the last run ends.
+  Such a turn is released and can run once more after restart. A command
+  Hermes carries out itself is acked once even when a stop follows or cancels
+  it, so a restart never repeats its effect. Controls such as `/restart`,
+  `/undo` and `/yolo`, and replies to a pending prompt, count once the
+  gateway's handler has received them; `/goal` (the saved goal) and
+  `/blueprint` (a scheduled job) once the handler has returned without
+  rewriting them. A stop that cancels a control after the handler received it
+  but before it took effect leaves a command the user resends. A command the
+  handler never received, or one that starts model work before Hermes ran or
+  rewrote it, is released like other model work. While
   Hermes drains to stop or restart it refuses any new model turn with a reply
   that reports success, so the adapter holds delivered work instead and
   releases it on disconnect. Work is anything Hermes would not dispatch as a
@@ -162,8 +178,7 @@ its own.
   adapter re-checks just before handoff, and releases ordinary work, or a
   command Hermes rewrote into the turn's input, that Hermes answered without
   binding a run to the turn's session guard; a redelivery then waits out the
-  drain. A turn that ran and finished during a restart drain is still acked.
-  A message handed over as the drain begins can show Hermes's refusal reply
+  drain. A message handed over as the drain begins can show Hermes's refusal reply
   and still run after the restart. A `/goal` handed over in that window is
   acked: it has saved the goal, and only its kickoff turn is refused,
   visibly. A stop that interrupts the kickoff loses that turn too; the saved
@@ -177,7 +192,9 @@ its own.
   adapter wraps the gateway session store's `rewrite_transcript` and
   `rewind_session`, which run unchanged outside a Finite `/retry` turn. A message Hermes
   queues behind a reserved or busy session slot, or a `/queue` it copies
-  there, is settled by the turn that runs it. The adapter
+  there, is settled by the turn that runs it. If that is a `/retry`'s
+  re-sent message and a stop drops the queue first, the adapter undoes the
+  rewind the same way when it disconnects and releases the entry. The adapter
   also holds every non-internal event, commands included, while Hermes's
   startup-restore gate is closed: the gate queues events in memory and
   reports them handled, which would ack them before they run. The inbox is
@@ -219,7 +236,11 @@ its own.
   stop that interrupts that turn redelivers both. A steer that arrives after
   the agent's last tool call becomes Hermes's in-memory follow-up, which a
   drain still drops. Commands Hermes rejects mid-turn, such as `/plan`, keep
-  its visible "can't run mid-turn" reply. During a drain Hermes also refuses
+  its visible "can't run mid-turn" reply. After a turn's ack, its background
+  task still runs the usage-notice call and cleanup; the base adapter treats
+  the session as busy until then while Hermes is idle, and would run a
+  command inline outside any background turn. A command that starts model
+  work, such as `/retry` or `/plan`, waits for its own turn instead. During a drain Hermes also refuses
   clarification and approval text sent to a busy session; that refusal is
   shown and acked, because replaying it later would start a turn without its
   prompt. Text, photos, audio, video, and files each

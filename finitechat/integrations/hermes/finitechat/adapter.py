@@ -105,24 +105,41 @@ class _FiniteTurn:
     # Busy-session /steer entries the turn's running agent accepted. They
     # are settled with the turn, so a stopped turn's steer is redelivered.
     riders: list[tuple[str, Any, str]] = field(default_factory=list)
+    # Whether the gateway's message handler received this turn's event,
+    # whether it returned, and whether it returned before ``stop()`` began.
+    dispatched: bool = False
+    answered: bool = False
+    answered_before_stop: bool = False
+    # Set once the completion hook decides how to settle; no rider joins after.
     settled: bool = False
+    # That decision: release (True) or ack, once any /retry rewind is
+    # settled, the entries still to deliver it to, and the task delivering it.
+    release: bool | None = None
+    undelivered: list[tuple[str, Any, str]] = field(default_factory=list)
+    settlement: asyncio.Task[None] | None = None
     # The transcript this turn's /retry rewound before it re-sent the message,
     # and whether settlement has closed it to a rewind still on its way.
     retry_rewind: _RetryRewind | None = None
     retry_closed: bool = False
 
     def answered_by_gateway(self) -> bool:
-        """Hermes answered this turn itself instead of running model work.
+        """Hermes carried out this turn's command or prompt reply itself.
 
-        Each pinned gateway command but /retry is answered by its dispatch
-        branch, before the drain refusal, unless Hermes rewrote the event
-        into the model's input (/queue, /plan, ...). /retry re-sends the last
-        message as a new event. A reply to a pending clarify or approval
-        prompt is answered by that prompt.
+        Read from what the gateway's handler did, not from the text alone. A
+        command Hermes rewrote into the model's input is model work. Otherwise
+        a control command, or a reply to a pending clarify or approval
+        prompt, counts once the handler has received it: its effect may be
+        under way, so a stop then leaves it unrun at worst, for the user to
+        resend. A command that can start model work counts only once the
+        handler has returned: /goal then saved the goal and queued its kickoff
+        as separate work, and /blueprint scheduled its job. /retry never
+        counts: it re-sends the last message as model work.
         """
-        return (
-            not self.ordinary and self.command != "retry" and (self.event.text or "") == self.text
-        )
+        if self.ordinary or self.command == "retry" or (self.event.text or "") != self.text:
+            return False
+        if self.command in _HERMES_TURN_COMMANDS:
+            return self.answered
+        return self.dispatched
 
 
 _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVar(
@@ -645,8 +662,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # The drain ends in stop(), so this lives no longer than the process.
         self._drain_refused: set[str] = set()
         # The rewind of a /retry entry whose re-sent message Hermes queued
-        # behind a reserved slot, for the queued turn that settles the entry.
-        self._retry_rewinds: dict[str, _RetryRewind] = {}
+        # behind a reserved slot, with the entry, for the queued turn that
+        # settles it. Disconnect settles any whose queued turn never ran.
+        self._retry_rewinds: dict[str, tuple[_RetryRewind, tuple[str, Any, str]]] = {}
+        # Settlements in flight. Each outlives a cancellation of its turn.
+        self._settlements: set[asyncio.Task[None]] = set()
 
     async def _process_message_background(
         self,
@@ -694,6 +714,28 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 turn.settled = True
                 for room_id, seq, message_id in turn.riders:
                     await self._release_finitechat_event(room_id, seq, message_id)
+
+    def set_message_handler(self, handler: Any) -> None:
+        """Record when the gateway's handler receives and returns each turn's event.
+
+        Settlement reads a command's progress from these: a stop can cancel
+        the turn before the base adapter calls the handler, or while the
+        handler is still running. ``stop()`` marks the gateway stopping before
+        it interrupts running turns, so a handler that returned before then
+        finished its work uninterrupted.
+        """
+
+        async def handle(event: MessageEvent) -> Any:
+            turn = _FINITE_TURN.get()
+            if turn is None or turn.event is not event:
+                return await handler(event)
+            turn.dispatched = True
+            response = await handler(event)
+            turn.answered = True
+            turn.answered_before_stop = not self._gateway_stopping()
+            return response
+
+        super().set_message_handler(handle)
 
     async def handle_message(self, event: MessageEvent) -> None:
         """Decline Hermes's synthetic auto-resume turn for Finite sessions.
@@ -808,6 +850,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 await self._poll_task
             self._poll_task = None
         await self._cancel_admission_tasks()
+        await self._settle_orphaned_retry_rewinds()
         await self._stop_service()
         await self.cancel_background_tasks()
         self._mark_disconnected()
@@ -1482,6 +1525,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         it refuses any new model turn, so ordinary work and every command in
         ``_HERMES_TURN_COMMANDS`` wait for the restart; a /steer into a
         running turn still reaches it.
+
+        The base adapter runs a command inline while the session's guard is
+        set. If no gateway turn is running then, as while the previous turn
+        finishes after its ack, Hermes would run a command in
+        ``_HERMES_TURN_COMMANDS`` to completion there, outside any background
+        turn and its settlement. Such a command waits for its own turn. With a
+        gateway turn running, Hermes answers it with its busy-command policy.
         """
         if self._gateway_startup_restoring():
             # Commands included: the gate queues every non-internal event.
@@ -1497,7 +1547,19 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 or event_key in self._drain_refused
             )
         next_turn = command in (None, "queue") or (command == "steer" and not steers_running_turn)
-        return next_turn and (behind or self._session_is_active(session_key))
+        if next_turn:
+            return behind or self._session_is_active(session_key)
+        return (
+            command in _HERMES_TURN_COMMANDS
+            and self._session_is_active(session_key)
+            and not self._gateway_turn_running(session_key)
+        )
+
+    def _gateway_turn_running(self, session_key: str) -> bool:
+        """The gateway holds a running turn (or one being set up) for the session."""
+        runner = getattr(self, "gateway_runner", None)
+        running = getattr(runner, "_is_session_running", None)
+        return not callable(running) or bool(running(session_key))
 
     def _running_agent_takes_steer(self, session_key: str) -> bool:
         """The session's running agent can take a /steer into its current turn.
@@ -1752,9 +1814,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.debug("[finitechat] activity %s failed: %s", action, exc)
         return False
 
-    async def _ack_finitechat_event(self, room_id: str, seq: Any, message_id: str) -> None:
+    async def _ack_finitechat_event(self, room_id: str, seq: Any, message_id: str) -> bool:
+        """Ack an inbox entry; True once the sidecar has it."""
         if not isinstance(seq, int):
-            return
+            return True
         ack = await self._finitechat_json(
             "ack",
             {"room_id": room_id, "seq": seq, "message_id": message_id},
@@ -1762,10 +1825,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         if not ack.ok:
             logger.warning("[finitechat] failed to ack %s/%s: %s", room_id, seq, ack.error)
+        return ack.ok
 
-    async def _release_finitechat_event(self, room_id: str, seq: Any, message_id: str) -> None:
+    async def _release_finitechat_event(self, room_id: str, seq: Any, message_id: str) -> bool:
+        """Release an inbox entry for redelivery; True once the sidecar has it."""
         if not isinstance(seq, int):
-            return
+            return True
         result = await self._finitechat_json(
             "release",
             {"room_id": room_id, "seq": seq, "message_id": message_id},
@@ -1773,60 +1838,70 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         if not result.ok:
             logger.warning("[finitechat] failed to release %s/%s: %s", room_id, seq, result.error)
+        return result.ok
 
     async def _settle_event_ack(self, event: MessageEvent, outcome_name: str) -> None:
         """Settle the sidecar's inbox lease once the event's turn has run.
 
-        The completion hook fires exactly once per background turn. Ack and
-        release are both idempotent on the sidecar, and steers the turn's
-        agent took settle with it. A gateway that queues the event behind a
-        reserved or busy session slot returns at once; the queued turn
-        settles it.
+        Steers the turn's agent took settle with it. A gateway that queues the
+        event behind a reserved or busy session slot returns at once; the
+        queued turn settles it.
 
         Two kinds of turn are acked whatever happens around them. A turn the
         user ended with /stop, /new or /reset is acked, because redelivering
         it would restart the very work the user stopped. The base adapter can
         finish a stopped turn before it marks the task cancelled, so the
-        session's interrupt boundary decides too. A command Hermes answered
-        itself (``/restart``, ``/undo``, ``/yolo``, ``/goal``, a reply to a
-        pending prompt) is acked too, even when a stop cancels it: running it
-        again after the restart would repeat its effect, and a stop that came
-        before it executed leaves a command the user can resend.
+        session's interrupt boundary decides too. A command Hermes carried out
+        itself (see ``_FiniteTurn.answered_by_gateway``) is acked too, even
+        when a stop cancels it, because running it again after the restart
+        would repeat its effect.
 
         Model work (ordinary text, a command Hermes rewrote into the model's
-        input, and /retry) is released when a shutdown cancels it, when it
-        finishes after ``stop()`` begins, or when a draining gateway refused
-        it, so it runs after the restart. ``stop()`` interrupts running turns
-        cooperatively (``restart_drain_timeout`` defaults to 0s) and reports
-        them as SUCCESS or FAILURE, never CANCELLED; a turn that completed in
-        that window may run once more. Any other success or failure acks: a
-        failed turn still ran and answered the user. A /retry rewinds the
-        transcript before it re-sends, so its rewind is undone first unless
-        the re-sent message took effect.
+        input or has not carried out yet, and /retry) is released when a
+        shutdown cancels it, when its handler returns after ``stop()`` begins,
+        or when a draining gateway refused it, so it runs after the restart.
+        ``stop()`` interrupts running turns cooperatively
+        (``restart_drain_timeout`` defaults to 0s) and reports them as SUCCESS
+        or FAILURE, never CANCELLED; a turn that completed in that window may
+        run once more. A turn whose handler returned before ``stop()`` began
+        finished uninterrupted and is acked, even if this hook comes later,
+        unless the stop cancels it first. Any other success or failure acks: a failed turn still
+        ran and answered the user. A /retry rewinds the transcript before it
+        re-sends, so its rewind is undone first unless the re-sent message
+        took effect.
+
+        The decision is made once per turn. The pinned base adapter runs this
+        hook a second time, as CANCELLED, when a shutdown cancels the turn's
+        task after the hook began: in the usage call after the ack, or while
+        the settlement is still on its way. Deciding again could reverse the
+        first decision, and the sidecar's ack removes an entry a release has
+        just returned to Pending. So the settlement runs as its own task,
+        which the cancellation does not reach, and the second run joins it.
         """
-        raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
-        room_id = str(raw_message.get("room_id") or self.room_id)
-        seq = raw_message.get("seq")
-        message_id = str(raw_message.get("message_id") or "")
+        room_id, seq, message_id = _inbox_entry(event, self.room_id)
         if not message_id:
             return
         event_key = _adapter_event_key(room_id, seq, message_id)
         turn = _FINITE_TURN.get()
         if turn is not None and turn.event is not event:
             turn = None
+        if turn is not None and turn.settlement is not None:
+            await self._join_settlement(turn)
+            return
         if (
             turn is not None
             and outcome_name != "cancelled"
             and self._hermes_queued(turn.session_key, event)
         ):
             if turn.retry_rewind is not None and event_key:
-                self._retry_rewinds[event_key] = turn.retry_rewind
+                self._retry_rewinds[event_key] = (turn.retry_rewind, (room_id, seq, message_id))
             return
         # Claim the in-flight marker so the inline-admission path does not also
         # ack this event once its background turn's completion hook has fired.
         if event_key:
             self._inflight_admissions.discard(event_key)
-        rewind = self._retry_rewinds.pop(event_key, None) if event_key else None
+        queued_rewind = self._retry_rewinds.pop(event_key, None) if event_key else None
+        rewind = queued_rewind[0] if queued_rewind is not None else None
         if turn is not None and turn.retry_rewind is not None:
             rewind = turn.retry_rewind
         user_ended = asyncio.current_task() in self._user_cancelled_tasks or (
@@ -1837,23 +1912,95 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 seq,
             )
         )
-        final = user_ended or (turn is not None and turn.answered_by_gateway())
         model_started = turn is not None and self._model_run_started(turn)
+        final = user_ended or (
+            turn is not None and not model_started and turn.answered_by_gateway()
+        )
         refused = not final and turn is not None and self._gateway_draining() and not model_started
         if refused and event_key:
             self._drain_refused.add(event_key)
-        release = not final and (outcome_name == "cancelled" or self._gateway_stopping() or refused)
-        if rewind is not None or (turn is not None and turn.command == "retry"):
-            release = await self._settle_retry_rewind(
-                turn, rewind, release=release, model_started=model_started
-            )
-        riders: list[tuple[str, Any, str]] = []
+        interrupted_by_stop = self._gateway_stopping() and not (
+            turn is not None and turn.answered_before_stop
+        )
+        release = not final and (outcome_name == "cancelled" or interrupted_by_stop or refused)
+        retry = rewind is not None or (turn is not None and turn.command == "retry")
+        entries = [(room_id, seq, message_id)]
         if turn is not None:
             turn.settled = True
-            riders = turn.riders
+            entries.extend(turn.riders)
+        settlement = asyncio.ensure_future(
+            self._settle_turn(
+                turn, entries, rewind, release=release, model_started=model_started, retry=retry
+            )
+        )
+        self._settlements.add(settlement)
+        settlement.add_done_callback(self._settlements.discard)
+        if turn is not None:
+            turn.settlement = settlement
+        await asyncio.shield(settlement)
+
+    async def _settle_turn(
+        self,
+        turn: _FiniteTurn | None,
+        entries: list[tuple[str, Any, str]],
+        rewind: _RetryRewind | None,
+        *,
+        release: bool,
+        model_started: bool,
+        retry: bool,
+    ) -> None:
+        """Settle ``entries`` one way, once any /retry rewind is settled."""
+        try:
+            if retry:
+                release = await self._settle_retry_rewind(
+                    turn, rewind, release=release, model_started=model_started
+                )
+            if turn is not None:
+                turn.release = release
+                turn.undelivered = entries
+            await self._deliver_settlement(entries, release=release)
+        except Exception:
+            logger.exception("[finitechat] could not settle %s", entries[0])
+
+    async def _join_settlement(self, turn: _FiniteTurn) -> None:
+        """Wait out the turn's settlement, then resend it to entries the sidecar missed."""
+        if turn.settlement is not None:
+            await asyncio.shield(turn.settlement)
+        if turn.release is not None and turn.undelivered:
+            await self._deliver_settlement(turn.undelivered, release=turn.release)
+
+    async def _deliver_settlement(
+        self, entries: list[tuple[str, Any, str]], *, release: bool
+    ) -> None:
+        """Ack or release each entry; one stays listed until the sidecar has it.
+
+        The sidecar's ack and release are idempotent, so resending one is safe.
+        """
         settle = self._release_finitechat_event if release else self._ack_finitechat_event
-        for entry_room_id, entry_seq, entry_message_id in [(room_id, seq, message_id), *riders]:
-            await settle(entry_room_id, entry_seq, entry_message_id)
+        for entry in list(entries):
+            if await settle(*entry):
+                entries.remove(entry)
+
+    async def _settle_orphaned_retry_rewinds(self) -> None:
+        """Settle each /retry whose re-sent message Hermes queued and then dropped.
+
+        Hermes queues the re-sent message behind a reserved session slot, and
+        a stop clears that queue, so the turn that would settle the entry
+        never runs and its lease would outlive the restart with the rewind in
+        place. The rewind is undone under the same no-overwrite check and the
+        entry released, as for a refused re-send. A rewind whose queued turn
+        is still running is left to that turn.
+        """
+        running = {
+            _adapter_event_key(*_inbox_entry(turn.event, self.room_id))
+            for turn in self._running_turns.values()
+        }
+        for event_key in [key for key in self._retry_rewinds if key not in running]:
+            rewind, entry = self._retry_rewinds.pop(event_key)
+            release = await self._settle_retry_rewind(
+                None, rewind, release=True, model_started=False
+            )
+            await self._deliver_settlement([entry], release=release)
 
     def _model_run_started(self, turn: _FiniteTurn) -> bool:
         """The gateway started an agent run for this turn's work.
@@ -1893,6 +2040,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         A stop can cancel the turn while its rewind is still running in a
         worker thread. Settlement closes the turn under the store's
         transcript lock, so that rewind is either recorded first or refused.
+        The turn's settlement task runs this once; a cancellation of the turn
+        does not reach it.
         """
         store = rewind.store if rewind is not None else self._gateway_session_store()
         if not _watching_retry_rewinds(store):
@@ -1911,7 +2060,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     return "kept"
                 return _restore_retry_rewind(recorded)
 
-        outcome = await asyncio.to_thread(settle)
+        try:
+            outcome = await asyncio.to_thread(settle)
+        except Exception:
+            logger.exception("[finitechat] could not check a /retry rewind")
+            outcome = "failed"
         if outcome in ("unchanged", "restored") or (outcome == "changed" and model_started):
             return release
         if release:
@@ -2525,6 +2678,16 @@ def _finitechat_service_health(service_url: str, timeout: int) -> bool:
     except Exception:
         return False
     return isinstance(data, dict) and data.get("status") == "ok"
+
+
+def _inbox_entry(event: MessageEvent, default_room_id: Any) -> tuple[str, Any, str]:
+    """The inbox entry an event came from: room id, seq and message id."""
+    raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
+    return (
+        str(raw_message.get("room_id") or default_room_id),
+        raw_message.get("seq"),
+        str(raw_message.get("message_id") or ""),
+    )
 
 
 def _adapter_event_key(room_id: str, seq: Any, message_id: str) -> str | None:
