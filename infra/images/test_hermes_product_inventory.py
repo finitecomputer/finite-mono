@@ -95,6 +95,9 @@ if mode == "oversize":
 if mode == "slow":
     (home / "pid").write_text(str(os.getpid()))
     time.sleep(60)
+if sys.argv[1:3] == ["access", "list"]:
+    print((home / "access.json").read_text())
+    sys.exit(0)
 if "--existing-identity" not in sys.argv:
     sys.exit(2)
 if sys.argv[1:3] == ["brain", "metadata"]:
@@ -214,6 +217,70 @@ print(json.dumps(payload))
         response = self.get()
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["brains"][0]["folders"])
+
+    def test_brain_identities_project_only_core_resolved_roster_fields(self):
+        agent = {
+            "state": "resolved",
+            "kind": "agent",
+            "displayName": "Ada",
+            "lifecycle": "active",
+            "responsibleAccount": {"email": "sam@example.test", "id": "private-account"},
+            "source": {"kind": "private-source", "observedAt": "2026-10-05T00:00:00Z"},
+        }
+        unshared = {"state": "notShared", "kind": "human", "accountEmail": "private@example.test"}
+        folder = {"folderId": "folder", "path": "private-path", "state": "ready"}
+        report = {
+            "version": "finite-brain-access-report-v1",
+            "brainId": "agent-brain",
+            "currentAccessComplete": False,
+            "identities": [
+                {
+                    "npub": "npub1a",
+                    "brainRole": "member",
+                    "description": agent,
+                    "folders": [folder],
+                },
+                {"npub": "npub1b", "brainRole": "admin", "description": unshared, "folders": []},
+            ],
+        }
+        (self.agent / "access.json").write_text(json.dumps(report))
+        response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+        self.assertEqual(response.status_code, 200, response.text)
+        empty = {"kind": None, "name": None, "email": None, "ownerEmail": None}
+        self.assertEqual(
+            response.json()["identities"],
+            [
+                {
+                    "npub": "npub1a",
+                    "role": "member",
+                    "kind": "agent",
+                    "name": "Ada",
+                    "email": None,
+                    "ownerEmail": "sam@example.test",
+                    "folders": [{"id": "folder", "state": "ready"}],
+                },
+                {"npub": "npub1b", "role": "admin", **empty, "folders": []},
+            ],
+        )
+        self.assertNotIn("private", response.text)
+        calls = [json.loads(line) for line in (self.agent / "calls").read_text().splitlines()]
+        self.assertEqual(
+            calls,
+            [
+                ["brain", "list", "--json", "--existing-identity"],
+                ["access", "list", "--brain", "agent-brain", "--json"],
+            ],
+        )
+        report["brainId"] = "other-brain"
+        (self.agent / "access.json").write_text(json.dumps(report))
+        response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+        self.assertEqual(response.status_code, 503)
+        before = len((self.agent / "calls").read_text().splitlines())
+        for brain in ("--server", "a" * 129, "invitation", "not-a-member"):
+            response = self.client.get(f"/api/plugins/finite-brain/identities/{brain}")
+            self.assertEqual(response.status_code, 403)
+        calls = (self.agent / "calls").read_text().splitlines()[before:]
+        self.assertNotIn("access", "".join(calls))
 
     def test_sites_use_site_visibility_and_exclude_source_only_repositories(self):
         response = self.get("sites")

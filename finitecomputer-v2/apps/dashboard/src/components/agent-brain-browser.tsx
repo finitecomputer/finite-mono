@@ -1,4 +1,6 @@
 "use client";
+import { useState } from "react";
+import { BrainIdentityRoster } from "@/components/brain-identity-roster";
 import { BrainChatState } from "@/components/brain-chat-state";
 import { BrainTable } from "@/components/brain-membership-table";
 import { AgentInventoryRefresh } from "@/components/agent-inventory-refresh";
@@ -8,7 +10,9 @@ import headingStyles from "@/styles/agent-page-heading.module.css";
 
 export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string; agentName: string }) {
   const inventory = useAgentInventory(runtimeId, readBrainInventory);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const brains = inventory.data?.brains;
+  const selected = brains?.find(brain => brain.id === selectedId);
   const accessible = brains?.filter(brain => !brain.pending).length ?? 0;
   const pending = brains?.filter(brain => brain.pending).length ?? 0;
   return <>
@@ -19,11 +23,14 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
         : inventory.busy ? `Loading brains accessible to ${agentName}…` : `Brain access unavailable for ${agentName}`}</p>
     </header>
     <section aria-label="Brain memberships" aria-busy={inventory.busy}>
-      {brains && brains.length > 0 && <BrainTable key={inventory.revision} brains={brains} />}
+      {brains && brains.length > 0 && <BrainTable key={inventory.revision} brains={brains} onSelect={brain => setSelectedId(brain.id)} />}
       {brains?.length === 0 && <BrainChatState agentName={agentName} machineId={runtimeId} />}
       {!brains && !inventory.busy && <BrainChatState agentName={agentName} machineId={runtimeId} unavailable />}
     </section>
     <AgentInventoryRefresh {...inventory} label="brains" />
     {brains && brains.length > 0 && <p className="text-xs text-muted-foreground">Shows folder information this agent can access. Linked folders aren’t included.</p>}
+    {selected && (["Admin", "Owner", "Personal agent"].includes(selected.role)
+      ? <BrainIdentityRoster key={`${selected.id}:${inventory.revision}`} runtimeId={runtimeId} brain={selected} />
+      : <p className="mt-8 text-sm text-muted-foreground">Only Brain admins can see who has access to {selected.name}.</p>)}
   </>;
 }
