@@ -145,7 +145,14 @@ its own.
   success, so every turn that finishes after `stop()` begins is released; a
   turn that completed in that window can run once more after restart. While
   Hermes drains to stop or restart it refuses new turns with a reply, so the
-  adapter holds delivered events instead and releases them on disconnect. The
+  adapter holds delivered events instead and releases them on disconnect. It
+  also holds every non-internal event, commands included, while Hermes's
+  startup-restore gate is closed: the gate queues events in memory and
+  reports them handled, which would ack them before they run. The inbox is
+  the only owner of interrupted-turn recovery, so the adapter declines the
+  synthetic auto-resume turn Hermes starts at boot for sessions `stop()` or
+  crash recovery marked. The redelivered message runs once, with Hermes's
+  recovery note. After a crash nothing runs until the lease expires. The
   stream never leases for a client that has disconnected, and it releases a
   batch it could not send. A user
   `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held

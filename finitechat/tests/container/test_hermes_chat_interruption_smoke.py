@@ -434,6 +434,9 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
         self.assertIn('if kill:\n            set_stage("simulate_lease_expiry"', flow)
         self.assertLess(restart, flow.index("require_restart_order("))
         self.assertLess(flow.index('case["fresh_turns"]'), flow.index("wait_inbox_settled("))
+        self.assertLess(
+            flow.index("wait_inbox_settled("), flow.index("require_acks_after_handoff(")
+        )
 
     def test_settled_inbox_requires_both_acked_and_nothing_leased(self) -> None:
         inbox = self.released()
@@ -471,6 +474,39 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
         ):
             with self.subTest(message), self.assertRaisesRegex(smoke.SmokeFailure, message):
                 check(requests)
+
+    def test_acks_must_follow_the_model_handoff_after_restart(self) -> None:
+        def req(text: str, received_at_ms: int) -> dict:
+            return {"latest_user_text": text, "received_at_ms": received_at_ms}
+
+        def inbox(active_ack: int, queued_ack: int) -> dict:
+            return {
+                "events": [],
+                "acked": [
+                    {"key": "room-a\x1f4\x1factive", "acked_at_ms": active_ack},
+                    {"key": "room-a\x1f6\x1fqueued", "acked_at_ms": queued_ack},
+                ],
+            }
+
+        markers = {"active": "FINITE_INTERRUPT_STALL:c", "queued": "c queued follow-up ok"}
+        requests = [
+            req("FINITE_INTERRUPT_STALL:c keep this turn open", 1_000),
+            req("Reply with exactly: c queued follow-up ok", 1_100),
+        ]
+        check = lambda requests, inbox: smoke.require_acks_after_handoff(  # noqa: E731
+            requests, inbox, message_ids=self.IDS, markers=markers
+        )
+        self.assertEqual(check(requests, inbox(1_050, 1_150)), {"active": 50, "queued": 50})
+        # Run 37428809877: both acked about 2.2s before the first model request.
+        with self.assertRaisesRegex(smoke.SmokeFailure, "active turn was acked 2260 ms before"):
+            check(
+                [req(r["latest_user_text"], r["received_at_ms"] + 2_260) for r in requests],
+                inbox(1_000, 1_036),
+            )
+        with self.assertRaisesRegex(smoke.SmokeFailure, "active turn was acked without reaching"):
+            check(requests[1:], inbox(1_050, 1_150))
+        with self.assertRaisesRegex(smoke.SmokeFailure, "queued turn has no ack time"):
+            check(requests, {"acked": inbox(1_050, 1_150)["acked"][:1]})
 
     def test_dispatch_workflow_runs_and_uploads_the_matrix(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
