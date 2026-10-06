@@ -116,8 +116,9 @@ was removed in the auth-kernel cut (2026-08). A Personal Brain is now created
 with two signatures the Brain checks against its own records: the owner signs
 `POST /v1/brains`, and the Agent signs a
 `finite-brain-personal-agent-consent-v1` event naming that owner
-(`fbrain brain personal-agent-consent`), which only the owner's dashboard grant
-can request from its runtime. One Agent serves one Personal Brain, and
+(`fbrain brain personal-agent-consent`), which the dashboard requests from the
+Agent's runtime. The managed skill limits this command to that flow; the Agent
+can still sign a consent itself. One Agent serves one Personal Brain, and
 Organization Brains cannot take a Personal Brain ID.
 The dashboard Brain page drives both signatures. Replacing a Personal Agent is
 not available; existing Personal Agent relationships keep working.

@@ -101,8 +101,11 @@ Runtime; this release needs no Runtime upgrade.
 
 ### fbrain 0.7.1, Personal Brain setup and descriptions v2
 
-Deploy the lat2 closure (Core, Brain and the dashboard image together) before
-publishing the CLI. No Core or Brain schema changes. The Brain server now
+Deploy Core and Brain in a lat2 closure retaining the current dashboard pin,
+then qualify and upgrade the Runtime, then deploy the new dashboard pin.
+Sync existing Agents' managed skills after the dashboard setup button is
+available. Publish the CLI only after the new Brain server is live. No Core or
+Brain schema changes. The Brain server now
 creates a Personal Brain from an owner-signed `POST /v1/brains` carrying the
 Agent's signed consent; the older server refused every Personal Brain
 creation. Organization Brain IDs shaped like `personal-<16 hex>` are now
