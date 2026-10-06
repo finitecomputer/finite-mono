@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -555,6 +556,43 @@ class ObserveTests(unittest.TestCase):
             with self.subTest(write.__name__), mock.patch.object(idle.os, "write", write):
                 result = self.observe()
                 self.assertEqual((result["verdict"], result["reasons"]), expected)
+
+    def test_copies_left_by_a_killed_read_are_removed_by_the_next_read(self) -> None:
+        # SIGKILL, OOM or a reboot mid-copy skips cleanup and leaves the user's chat database in TMPDIR.
+        now = time.time()
+        outside = Path(self.temporary.name).resolve() / "outside"
+        outside.mkdir()
+        (outside / "keep").write_text(SECRET)
+
+        def entry(name: str, age_s: float, file_age_s: float | None = None, kind: str = "dir") -> None:
+            path = self.scratch / name
+            if kind == "dir":
+                path.mkdir()
+                (path / "state.db").write_text(SECRET)
+                stamp = now - (age_s if file_age_s is None else file_age_s)
+                os.utime(path / "state.db", (stamp, stamp))
+            elif kind == "file":
+                path.write_text(SECRET)
+            else:
+                path.symlink_to(outside)
+            os.utime(path, (now - age_s, now - age_s), follow_symlinks=kind != "link")
+
+        entry("finite-status-idle.killed", 11 * 60)
+        entry("finite-status-idle.recent", 9 * 60)
+        entry("finite-status-idle.copying", 3600, file_age_s=0)  # a concurrent read's large copy
+        entry("finite-status-sqlite.other", 3600)
+        entry("finite-status-idle.file", 3600, kind="file")
+        entry("finite-status-idle.link", 3600, kind="link")
+        result = idle.observe(self.home.root, NOW_MS)
+        self.assertEqual(result["verdict"], "idle")
+        self.assertEqual(sorted(path.name for path in self.scratch.iterdir()), [
+            "finite-status-idle.copying", "finite-status-idle.file", "finite-status-idle.link",
+            "finite-status-idle.recent", "finite-status-sqlite.other"])
+        self.assertEqual((outside / "keep").read_text(), SECRET)
+        entry("finite-status-idle.another-user", 3600)
+        with mock.patch.object(idle.os, "geteuid", return_value=os.geteuid() + 1):
+            idle.observe(self.home.root, NOW_MS)
+        self.assertTrue((self.scratch / "finite-status-idle.another-user").is_dir())
 
     def _drop_sessions_table(self) -> None:
         with contextlib.closing(sqlite3.connect(self.home.agent / "hermes-home" / "state.db")) as db:
