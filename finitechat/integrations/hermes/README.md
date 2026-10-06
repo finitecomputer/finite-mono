@@ -152,7 +152,11 @@ its own.
   the only owner of interrupted-turn recovery, so the adapter declines the
   synthetic auto-resume turn Hermes starts at boot for sessions `stop()` or
   crash recovery marked. The redelivered message runs once, with Hermes's
-  recovery note. After a crash nothing runs until the lease expires. The
+  recovery note. An interrupted internal event has no inbox redelivery and
+  no automatic restored-session notice; its transcript and recovery mark stay
+  until the next real message. The default session-reset mode is `none`;
+  Agents opting into a reset mode retain Hermes's stale-mark reset behavior.
+  After a crash nothing runs until the lease expires. The
   stream never leases for a client that has disconnected, and it releases a
   batch it could not send. A user
   `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held

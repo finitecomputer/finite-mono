@@ -189,6 +189,8 @@ class FakeModelState:
                         str(request.get("latest_user_text") or "")
                     ),
                     "received_at_ms": request.get("received_at_ms"),
+                    "stall_entered_at_ms": request.get("stall_entered_at_ms"),
+                    "stall_wait_finished_at_ms": request.get("stall_wait_finished_at_ms"),
                     "finished_at_ms": request.get("finished_at_ms"),
                     "outcome": request.get("outcome"),
                 }
@@ -196,10 +198,40 @@ class FakeModelState:
             ],
         }
 
-    def mark_seen(self, name: str) -> None:
+    def mark_seen(self, name: str, request: dict[str, Any]) -> None:
         with self.condition:
+            if request.get("stream") is not True or request.get("stall") != name:
+                raise SmokeFailure("only an SSE request can enter its stall barrier")
+            request["stall_entered_at_ms"] = int(time.time() * 1000)
             self.seen.add(name)
             self.condition.notify_all()
+
+    def require_stream_in_flight(self, name: str) -> dict[str, Any]:
+        """Prove the actual open SSE barrier, not markers retained in prompt history."""
+        with self.condition:
+            candidates = [
+                (index, request)
+                for index, request in enumerate(self.requests)
+                if request.get("stall") == name and request.get("stall_entered_at_ms") is not None
+            ]
+            if len(candidates) != 1:
+                raise SmokeFailure(f"{name} requires exactly one entered SSE barrier")
+            index, request = candidates[0]
+            if (
+                request.get("stream") is not True
+                or request.get("outcome") != "pending"
+                or request.get("stall_wait_finished_at_ms") is not None
+                or name in self.released
+            ):
+                raise SmokeFailure(f"{name} SSE barrier is no longer in flight")
+            return {
+                "request_index": index,
+                "stream": True,
+                "stall": name,
+                "entered_at_ms": request["stall_entered_at_ms"],
+                "checked_at_ms": int(time.time() * 1000),
+                "outcome": "pending",
+            }
 
     def wait_seen(self, name: str, *, timeout: float = 60) -> None:
         deadline = time.monotonic() + timeout
@@ -210,14 +242,15 @@ class FakeModelState:
                     raise SmokeFailure(f"fake model never observed stalled turn {name!r}")
                 self.condition.wait(remaining)
 
-    def wait_released(self, name: str, *, timeout: float = 120) -> None:
+    def wait_released(self, name: str, request: dict[str, Any], *, timeout: float = 120) -> None:
         deadline = time.monotonic() + timeout
         with self.condition:
             while name not in self.released:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    return
+                    break
                 self.condition.wait(remaining)
+            request["stall_wait_finished_at_ms"] = int(time.time() * 1000)
 
     def release(self, name: str) -> None:
         with self.condition:
@@ -273,8 +306,8 @@ def start_fake_model(state: FakeModelState, port: int) -> ThreadingHTTPServer:
                 self.end_headers()
                 self.wfile.flush()
                 if stall:
-                    state.mark_seen(stall)
-                    state.wait_released(stall)
+                    state.mark_seen(stall, request)
+                    state.wait_released(stall, request)
                 chunk = {
                     "id": "chatcmpl-finite-interruption-smoke",
                     "object": "chat.completion.chunk",
@@ -718,11 +751,11 @@ def require_acks_after_handoff(
     after_handoff_ms: dict[str, int] = {}
     for role, message_id in message_ids.items():
         acked_at = [
-            entry.get("acked_at_ms")
+            ack_time
             for entry in inbox.get("acked") or []
             if isinstance(entry, dict)
             and inbox_key_message_id(entry.get("key")) == message_id
-            and isinstance(entry.get("acked_at_ms"), int)
+            and isinstance(ack_time := entry.get("acked_at_ms"), int)
         ]
         if not acked_at:
             raise SmokeFailure(f"{role} turn has no ack time in the acked ring")
@@ -1023,7 +1056,6 @@ def main() -> int:
             )
         case.update(
             {
-                "provider_stream_in_flight": True,
                 "queued_before_restart": {
                     "prompt_message_id": queued_message_id,
                     "durable_unacked": True,
@@ -1032,6 +1064,9 @@ def main() -> int:
             }
         )
         case["diagnostics"].append(diagnose("before_stop", live=True))
+        set_stage("check_streaming_path", case)
+        case["provider_stream_barrier"] = model_state.require_stream_in_flight(case_name)
+        case["provider_stream_in_flight"] = True
         set_stage("stop_container", case)
         if kill:
             smoke.run(["docker", "kill", "--signal", "KILL", name], timeout=30)
@@ -1132,6 +1167,11 @@ def main() -> int:
         ]
         set_stage("wait_inbox_settled", case)
         case["final_inbox"] = wait_inbox_settled(message_ids)
+        case["restart_order"] = require_restart_order(
+            model_state.requests[restart_request_index:],
+            active_marker=active_marker,
+            queued_expected=queued_expected,
+        )
         set_stage("check_acks_after_handoff", case)
         case["acked_after_handoff_ms"] = require_acks_after_handoff(
             model_state.requests[restart_request_index:],
@@ -1242,12 +1282,8 @@ def main() -> int:
             interrupt(graceful_case, kill=False, restore=False)
         interrupt("sigkill", kill=True, restore=False)
         interrupt("empty-target-restore", kill=False, restore=True)
-        set_stage("check_streaming_path")
-        stalled_requests = [request for request in model_state.requests if request.get("stall")]
-        if not stalled_requests or not all(
-            request.get("stream") is True for request in stalled_requests
-        ):
-            raise SmokeFailure("an interrupted Hermes turn did not use the streaming provider path")
+        # Each case proves its own still-open SSE barrier immediately before stop.
+        # Later non-streaming requests can legitimately retain its marker in history.
         report["provider_request_count"] = len(model_state.requests)
         report["status"] = "passed"
         report.pop("stage", None)
