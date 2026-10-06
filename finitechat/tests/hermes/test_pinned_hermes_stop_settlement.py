@@ -247,7 +247,17 @@ class GatewayHarness(StopHarness):
             self.timeline.append((action, payload["message_id"]))
         return await super()._sidecar(action, payload, timeout=timeout)
 
-    async def _run_agent(self, message, context_prompt, history, source, session_id, **kwargs):
+    async def _run_agent(
+        self,
+        message,
+        context_prompt,
+        history,
+        source,
+        session_id,
+        session_key: str | None = None,
+        *_args: Any,
+        **_kwargs: Any,
+    ):
         del context_prompt, history, source, session_id
         self.timeline.append(("model", message))
         self.runs.append(message)
@@ -261,7 +271,8 @@ class GatewayHarness(StopHarness):
             def hard_interrupt(self, *_args, **_kwargs):
                 self.interrupt()
 
-        self.runner._session_state(kwargs["session_key"]).turn.agent = Agent()
+        assert session_key is not None, "the gateway must bind the model turn to a session"
+        self.runner._session_state(session_key).turn.agent = Agent()
         if self.stall and message == "long running work":
             self.started.set()
             await self.turn_gate.wait()
