@@ -232,10 +232,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         _ = sigterm.recv() => Ok(false),
     };
     if !matches!(readiness, Ok(true)) {
-        supervisor.shutdown().await;
-        if let Some(hosted) = &hosted_hermes {
-            hosted.shutdown().await;
-        }
+        stop_children(&supervisor, hosted_hermes.as_ref()).await;
         return readiness.map(|_| ());
     }
     let (delivery_tx, delivery_rx) = mpsc::channel::<RuntimeCommandDeliveryV1>(64);
@@ -272,11 +269,31 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     };
     // Every exit drains here: returning drops the runtime, which SIGKILLs any
     // child still running, so the stop must be awaited before we return.
-    supervisor.shutdown().await;
-    if let Some(hosted) = &hosted_hermes {
-        hosted.shutdown().await;
-    }
+    stop_children(&supervisor, hosted_hermes.as_ref()).await;
     result
+}
+
+/// Stop the supervised children and the optional hosted backend together.
+/// The hosted backend holds no Finite Chat leases and does not need the
+/// sidecar, so it need not wait behind the supervisor's ordered phases;
+/// running both at once keeps agentd's whole exit within `SHUTDOWN_BOUND`.
+async fn stop_children(
+    supervisor: &SupervisorHandle,
+    hosted: Option<&crate::hosted_hermes::HostedHermesHandle>,
+) {
+    let hosted = async {
+        if let Some(hosted) = hosted
+            && tokio::time::timeout(crate::supervisor::SHUTDOWN_BOUND, hosted.shutdown())
+                .await
+                .is_err()
+        {
+            eprintln!(
+                "finite-agentd: the hosted Hermes backend did not stop in time; \
+                 it is killed when agentd exits"
+            );
+        }
+    };
+    tokio::join!(supervisor.shutdown(), hosted);
 }
 
 /// agentd leads its own session/process group when PID 1 (entrypoint.sh) is

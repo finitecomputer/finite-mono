@@ -158,6 +158,10 @@ pub(crate) const TERMINATE_GRACE: Duration = Duration::from_secs(10);
 const GATEWAY_STOP_GRACE: Duration = Duration::from_secs(8);
 const SERVICE_STOP_GRACE: Duration = Duration::from_secs(2);
 const STOP_REAP_SLACK: Duration = Duration::from_secs(1);
+/// Worst case for `SupervisorHandle::shutdown`: both phases at their bound.
+pub(crate) const SHUTDOWN_BOUND: Duration = Duration::from_secs(
+    GATEWAY_STOP_GRACE.as_secs() + SERVICE_STOP_GRACE.as_secs() + 2 * STOP_REAP_SLACK.as_secs(),
+);
 
 #[derive(Debug)]
 enum ProcessAction {
@@ -227,10 +231,12 @@ impl SupervisorHandle {
         self.status.read().await.clone()
     }
 
-    /// Stop every slot phase by phase and return once their children are
-    /// reaped. Callers exit right after this, and dropping the runtime would
-    /// SIGKILL any child still draining (`kill_on_drop`), so the wait is the
-    /// graceful stop. Each phase is bounded by its grace plus reap slack.
+    /// Stop every slot phase by phase, waiting for each phase's children to
+    /// be reaped. Callers exit right after this, and dropping the runtime
+    /// SIGKILLs any child still draining (`kill_on_drop`), so the wait is the
+    /// graceful stop. Each phase is bounded by its grace plus reap slack. A
+    /// slot still finishing a restart's 10s drain can miss that bound; the
+    /// phase is then logged and abandoned, and runtime drop kills the rest.
     pub async fn shutdown(&self) {
         for (grace, phase) in self.stop_phases.iter() {
             let grace = *grace;
@@ -243,7 +249,15 @@ impl SupervisorHandle {
                 }
             });
             let bound = grace + STOP_REAP_SLACK;
-            let _ = tokio::time::timeout(bound, futures_util::future::join_all(stops)).await;
+            if tokio::time::timeout(bound, futures_util::future::join_all(stops))
+                .await
+                .is_err()
+            {
+                eprintln!(
+                    "finite-agentd: a shutdown phase did not finish within {bound:?}; \
+                     its remaining children are killed when agentd exits"
+                );
+            }
         }
     }
 }
@@ -287,6 +301,20 @@ async fn supervise_process(
     let mut restart_count = 0u64;
     let mut retry_delay = Duration::from_millis(250);
     loop {
+        // A stop that arrived while the last child was exiting or the backoff
+        // was elapsing is taken before anything new is spawned.
+        match actions.try_recv() {
+            Ok(ProcessAction::Stop { done, .. }) => {
+                stop_slot(&statuses, spec.name, restart_count, Some(done)).await;
+                return;
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                stop_slot(&statuses, spec.name, restart_count, None).await;
+                return;
+            }
+            // A restart request is satisfied by the spawn below.
+            Ok(ProcessAction::Restart) | Err(mpsc::error::TryRecvError::Empty) => {}
+        }
         set_status(
             &statuses,
             spec.name,
@@ -391,12 +419,14 @@ async fn backoff(
     tokio::pin!(sleep);
     loop {
         tokio::select! {
-            () = &mut sleep => return None,
+            // Prefer a queued stop over a sleep that has also elapsed.
+            biased;
             action = actions.recv() => match action {
                 Some(ProcessAction::Restart) => {}
                 Some(ProcessAction::Stop { done, .. }) => return Some(Some(done)),
                 None => return Some(None),
             },
+            () = &mut sleep => return None,
         }
     }
 }
@@ -689,7 +719,7 @@ mod tests {
     }
 
     fn shutdown_bound() -> Duration {
-        GATEWAY_STOP_GRACE + SERVICE_STOP_GRACE + STOP_REAP_SLACK * 2
+        SHUTDOWN_BOUND
     }
 
     #[test]
