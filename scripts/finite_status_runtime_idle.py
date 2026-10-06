@@ -17,7 +17,8 @@ Reads only `<state_root>/agent` (the guest's `/data/agent`):
   `-shm`): /bg children run an AIAgent with session id `bg_*` whose row stays
   `ended_at IS NULL` until the child finishes, then is ended just before the
   result is delivered. Open rows started before the current gateway process
-  are dead children of an earlier process and only reported.
+  are dead children of an earlier process and only reported. A read killed
+  mid-copy leaves its copy behind; the next read removes it.
 
 The finitechat loaders default the three inbox/marker files to empty on
 NotFound, so absence reads as empty only beneath a valid root with a running
@@ -49,6 +50,7 @@ import os
 import shutil
 import stat
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -68,6 +70,9 @@ BUSY_REASONS = ("active_agents", "inbox_pending", "inbox_leased", "agentd_inbox"
                 "recent_ack", "background_sessions")
 MISSING = object()  # an absent file; distinct from a parsed JSON null
 COPY_CHUNK_BYTES = 1024 * 1024
+SCRATCH_PREFIX = "finite-status-idle."
+# A read writes its copy continuously; one untouched this long was left by a killed read.
+STALE_SCRATCH_S = 10 * 60
 BACKGROUND_SQL = """
 SELECT COALESCE(SUM(ended_at IS NULL AND started_at >= ?1), 0),
        COALESCE(SUM(ended_at IS NULL AND started_at < ?1), 0),
@@ -252,6 +257,29 @@ def _copy_stable(directory: int, name: str, target: Path, required: bool) -> tup
     return _identity(before)
 
 
+def _sweep_stale_scratch() -> None:
+    """Remove copies of the chat database left by a read that was killed
+    mid-copy (SIGTERM, SIGKILL, OOM, reboot): only this tool's directories,
+    owned by this user and untouched for STALE_SCRATCH_S. Best effort."""
+    parent = tempfile.gettempdir()
+    try:
+        names = [name for name in os.listdir(parent) if name.startswith(SCRATCH_PREFIX)]
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(parent, name)
+        try:
+            info = os.lstat(path)
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+                continue
+            touched = max([info.st_mtime] + [os.lstat(os.path.join(path, entry)).st_mtime
+                                              for entry in os.listdir(path)])
+        except OSError:
+            continue
+        if time.time() - touched > STALE_SCRATCH_S:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
     """Count /bg sessions from a scratch copy; never opens the live database."""
     try:
@@ -268,8 +296,9 @@ def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
         raise Unreadable("sqlite_unavailable") from None
     # Rows hold guest times: move the host-stamped process start and now to the guest clock.
     cutoffs = (pid.st_mtime_ns / 1e9 - offset_ms / 1000, (now_ms - offset_ms) / 1000 - BACKGROUND_DELIVERY_S)
+    _sweep_stale_scratch()
     for _attempt in range(3):
-        scratch = Path(tempfile.mkdtemp(prefix="finite-status-idle."))
+        scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX))
         try:
             database = _copy_stable(home, "state.db", scratch / "state.db", required=True)
             _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
