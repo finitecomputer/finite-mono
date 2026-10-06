@@ -7,7 +7,9 @@ import importlib.util
 import json
 import re
 import subprocess
+import threading
 import unittest
+import urllib.request
 from pathlib import Path
 from typing import ClassVar
 from unittest import mock
@@ -26,7 +28,7 @@ spec.loader.exec_module(smoke)
 class HermesChatInterruptionSmokeTest(unittest.TestCase):
     def test_fake_provider_stall_barrier_is_explicit(self) -> None:
         state = smoke.FakeModelState()
-        stall = state.observe(
+        request, stall = state.record(
             {
                 "stream": True,
                 "messages": [
@@ -37,8 +39,75 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
 
         self.assertEqual(stall, "sigkill")
         self.assertNotIn("sigkill", state.seen)
-        state.mark_seen("sigkill")
+        state.mark_seen("sigkill", request)
         state.wait_seen("sigkill", timeout=0.1)
+        self.assertEqual(state.require_stream_in_flight("sigkill")["request_index"], 0)
+
+    def test_barrier_rejects_missing_nonstream_finished_released_and_timed_out(self) -> None:
+        for mutation in ("missing", "nonstream", "finished", "released", "timed_out", "duplicate"):
+            with self.subTest(mutation=mutation):
+                state = smoke.FakeModelState()
+                payload = {
+                    "stream": True,
+                    "messages": [{"role": "user", "content": "FINITE_INTERRUPT_STALL:sigkill"}],
+                }
+                request, _ = state.record(payload)
+                if mutation != "missing":
+                    state.mark_seen("sigkill", request)
+                if mutation == "nonstream":
+                    request["stream"] = False
+                elif mutation == "finished":
+                    state.finish(request, "streamed")
+                elif mutation == "released":
+                    state.release("sigkill")
+                elif mutation == "timed_out":
+                    state.wait_released("sigkill", request, timeout=0)
+                elif mutation == "duplicate":
+                    duplicate, _ = state.record(payload)
+                    state.mark_seen("sigkill", duplicate)
+                with self.assertRaises(smoke.SmokeFailure):
+                    state.require_stream_in_flight("sigkill")
+
+    def test_http_barrier_distinguishes_history_requests_from_the_open_stream(self) -> None:
+        state = smoke.FakeModelState()
+        server = smoke.start_fake_model(state, 0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
+
+        def request(stream: bool) -> urllib.request.Request:
+            return urllib.request.Request(
+                url,
+                data=json.dumps(
+                    {
+                        "stream": stream,
+                        "messages": [{"role": "user", "content": "FINITE_INTERRUPT_STALL:sigkill"}],
+                    }
+                ).encode(),
+                headers={"Content-Type": "application/json"},
+            )
+
+        try:
+            with urllib.request.urlopen(request(False), timeout=2) as response:
+                response.read()
+            self.assertNotIn("sigkill", state.seen)
+            with self.assertRaises(smoke.SmokeFailure):
+                state.require_stream_in_flight("sigkill")
+            with urllib.request.urlopen(request(True), timeout=2) as response:
+                self.assertEqual(response.headers["Content-Type"], "text/event-stream")
+                state.wait_seen("sigkill", timeout=2)
+                barrier = state.require_stream_in_flight("sigkill")
+                self.assertEqual(barrier["request_index"], 1)
+                self.assertLessEqual(barrier["entered_at_ms"], barrier["checked_at_ms"])
+                state.release("sigkill")
+                self.assertIn(b"data: [DONE]", response.read())
+            with self.assertRaises(smoke.SmokeFailure):
+                state.require_stream_in_flight("sigkill")
+        finally:
+            state.release("sigkill")
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_fake_provider_returns_the_requested_fresh_reply(self) -> None:
         self.assertEqual(
