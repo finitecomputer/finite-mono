@@ -53,9 +53,9 @@ Repository docs describe current behavior, supported operations and retained
 contracts. Product plans and transition narratives belong in Linear; at most,
 leave a TODO linked to its issue. Do not add repo-local PRDs or work logs.
 
-The root `AGENTS.md` defines the GitHub–Linear boundary and issue conventions.
-Locate owners in the code and component `AGENTS.md` files; consult retained
-contracts when changing compatibility, security or recovery boundaries.
+The root `AGENTS.md` defines the repository–Linear boundary and work-tracking
+conventions. Locate owners in the code and component `AGENTS.md` files; consult
+retained contracts when changing compatibility, security or recovery boundaries.
 Prune stale legacy documents and scripts after checking current callers,
 production boundaries, migration gates, and test contracts; history is the
 archive.
