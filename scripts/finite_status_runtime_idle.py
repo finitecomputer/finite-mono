@@ -23,10 +23,11 @@ Reads only `<state_root>/agent` (the guest's `/data/agent`):
 The finitechat loaders default the three inbox/marker files to empty on
 NotFound, so absence reads as empty only beneath a valid root with a running
 gateway record. Idle requires `gateway_state == "running"`, `active_agents == 0`,
-both inboxes empty, no running markers, no inbox entry acked within
-QUIET_AFTER_ACK_S, no open `bg_*` session of the current gateway process and
-none ended within BACKGROUND_DELIVERY_S. Anything malformed, oversized,
-symlinked, unreadable or not a regular file is unknown, never idle.
+both inboxes empty, no running markers, no inbox entry acked and no inbox
+write within QUIET_AFTER_ACK_S, no open `bg_*` session of the current gateway
+process, none ended within BACKGROUND_DELIVERY_S, and a measured guest clock
+offset within MAX_CLOCK_OFFSET_MS. Anything malformed, oversized, symlinked,
+unreadable or not a regular file is unknown, never idle.
 
 Two clocks: `now_ms` and file mtimes are the host's (virtiofsd writes the
 guest's files on the host), while `acked_at_ms`, lease and event times and the
