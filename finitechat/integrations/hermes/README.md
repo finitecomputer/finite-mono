@@ -202,17 +202,19 @@ its own.
   reports them handled, which would ack them before they run. The inbox owns
   recovery of the turns it delivered, so the adapter declines the synthetic
   auto-resume turn Hermes starts at boot for a session `stop()` or crash
-  recovery marked, when that session's latest turn settled an inbox entry.
-  Each turn start records this in `FINITECHAT_HOME/hermes-turn-owners/`, one
-  file per session named by a hash of its key: a turn with an inbox entry
-  writes the file and any other turn removes it. An ack leaves it, because
-  crash recovery also marks recently active sessions whose last turn
-  finished. The redelivered message runs once, with Hermes's recovery note.
-  A turn with no inbox entry, such as a goal continuation or a background
-  notice, has no other owner, so Hermes resumes it, as the 458a baseline did.
-  A home without that directory was last run by the 458a baseline, whose
-  stop acks the turns it interrupts and leaves them to Hermes's resume, so on
-  the first boot after that upgrade Hermes resumes them as 458a would. The default session-reset mode is `none`;
+  recovery marked, when the inbox owns that session's latest turn.
+  A per-session file under `FINITECHAT_HOME/hermes-turn-owners/` records
+  this. A turn with an inbox entry writes it, and so does a stop that
+  releases one, because that entry runs again whatever turn starts next. Any
+  other turn removes it, unless the draining gateway refuses that turn. An
+  ack leaves it, because crash recovery also marks recently active sessions
+  whose last turn finished. The redelivered message runs once, with Hermes's
+  recovery note. A turn with no inbox entry, such as a goal continuation or a
+  background notice, has no other owner, so Hermes resumes it. A session with
+  no file was last served by the previous release, which acked the turns its
+  stop interrupted and left them to Hermes's resume, so Hermes resumes them on
+  the first boot after the upgrade.
+  The default session-reset mode is `none`;
   Agents opting into a reset mode retain Hermes's stale-mark reset behavior.
   After a crash nothing runs until the lease expires. The
   stream never leases for a client that has disconnected, and it releases a

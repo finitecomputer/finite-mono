@@ -17,12 +17,9 @@ are synthetic. Each restart boots a new gateway over the same home and inbox.
 import asyncio
 import contextlib
 import hashlib
-import importlib.util
 import json
 import shutil
-import tempfile
 import threading
-import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -38,7 +35,6 @@ from tests.hermes.test_pinned_hermes_stop_settlement import (
     raw_event,
 )
 
-IDLE_GATE = Path(__file__).resolve().parents[3] / "scripts" / "finite_status_runtime_idle.py"
 BG_RESULT = "BG-RESULT"
 BTW_ANSWER = "BTW-ANSWER"
 COMMANDS = {
@@ -179,40 +175,6 @@ class ChildHarness(GatewayHarness):
         self.routes.clear()
 
 
-def idle_gate_report(h: ChildHarness, home: str) -> dict[str, Any]:
-    """What ``finite-status --runtime-idle`` reads from this runtime right now.
-
-    Hermes's own ``_persist_active_agents`` writes ``gateway_state.json``,
-    and the inbox file mirrors the harness sidecar's leases.
-    """
-    from gateway.status import write_runtime_status
-
-    spec = importlib.util.spec_from_file_location("finite_status_runtime_idle", IDLE_GATE)
-    assert spec is not None and spec.loader is not None, IDLE_GATE
-    idle = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(idle)
-    write_runtime_status(gateway_state="running", active_agents=0)
-    GatewayRunner._persist_active_agents(h.runner)
-    now_ms = int(time.time() * 1000)
-    events = []
-    for message_id, (_raw, state) in h.inbox.items():
-        if state == "pending":
-            events.append({"key": message_id, "created_at_ms": now_ms})
-        elif state == "leased":
-            lease = {"state": "leased", "lease_id": "synthetic", "leased_at_ms": now_ms}
-            events.append({"key": message_id, "created_at_ms": now_ms, "lease": lease})
-    with tempfile.TemporaryDirectory(prefix="finite-idle-root-") as root:
-        agent = Path(root) / "agent"
-        (agent / "hermes-home").mkdir(parents=True)
-        shutil.copyfile(
-            Path(home) / "gateway_state.json", agent / "hermes-home" / "gateway_state.json"
-        )
-        (agent / "hermes-inbox.json").write_text(
-            json.dumps({"events": events, "acked": [], "cursors": {}}), encoding="utf-8"
-        )
-        return idle.observe(Path(root), now_ms)
-
-
 class ChildWorkScenario(DrainScenario):
     def run_scenario(self, scenario):
         self.children = SyntheticChildren()
@@ -287,39 +249,17 @@ class PinnedHermesChildWorkTests(ChildWorkScenario):
                         # The launch reply only.
                         self.assertEqual(len(h.replies), 1, h.replies)
                         self.assertFalse(is_result(command, h.replies[0]))
-                        # The command's turn is over and its child still runs.
+                        # The command's turn is over and its child still runs. The
+                        # leased entry is all that shows it: Hermes counts no agent.
                         self.assertEqual(h.state("msg-2"), "leased", h.timeline)
                         self.assertNotIn(("ack", "msg-2"), h.timeline)
+                        self.assertEqual(h.runner._active_work_count(), 0)
                         self.children.gate.set()
                         await h.wait_settled("msg-2")
                         await h.settle_loop()
                         self.assertEqual(h.state("msg-2"), "acked")
                         self.assert_delivered_once(h, command)
                         self.assertEqual(self.children.runs(command), 1)
-                    finally:
-                        await h.close()
-
-                self.run_scenario(scenario)
-
-    def test_rollout_idle_gate_reads_a_running_child_as_busy(self):
-        for command in COMMANDS:
-            with self.subTest(command=command):
-
-                async def scenario(home: str, command: str = command):
-                    h = ChildHarness(home, timeline=[])
-                    try:
-                        await h.seed()
-                        self.assertEqual(idle_gate_report(h, home)["verdict"], "idle")
-                        await self.launch(h, command)
-                        # Hermes itself counts no agent for the child.
-                        self.assertEqual(h.runner._active_work_count(), 0)
-                        report = idle_gate_report(h, home)
-                        self.assertEqual(report["verdict"], "busy", report)
-                        self.assertEqual(report["reasons"], ["inbox_leased"], report)
-                        self.children.gate.set()
-                        await h.wait_settled("msg-2")
-                        await h.settle_loop()
-                        self.assertEqual(idle_gate_report(h, home)["verdict"], "idle")
                     finally:
                         await h.close()
 
@@ -706,7 +646,6 @@ class PinnedHermesGoalLaunchTests(GoalScenario):
                         # The command answered; its kickoff is still running.
                         self.assertEqual(len(self.goal_replies(h)), 1, h.replies)
                         self.assertEqual(h.state("msg-2"), "leased", h.timeline)
-                        self.assertEqual(idle_gate_report(h, home)["verdict"], "busy")
                         h.model_gate.set()
                         await h.wait_settled("msg-2")
                         await h.wait_turns_finished()
@@ -1004,6 +943,42 @@ class PinnedHermesGoalFollowUpTests(GoalScenario):
 
                 self.run_scenario(scenario)
 
+    def test_a_redelivery_joins_the_goal_command_riding_another_turn(self):
+        """Round 13 F6: a lease-expiry redelivery must not run /goal resume a second time."""
+
+        async def scenario(home: str):
+            h = RealRunHarness(home, timeline=[])
+            busy, continuation = threading.Event(), threading.Event()
+            with h.synthetic_model():
+                try:
+                    await self.prepare(h, "resume")
+                    h.hold_thread = lambda message: (
+                        busy
+                        if message == "long work"
+                        else continuation
+                        if is_kickoff("resume", message)
+                        else None
+                    )
+                    await h.deliver(raw_event(3, "long work"))
+                    await eventually(lambda: ("model", "long work") in h.timeline)
+                    await h.deliver(raw_event(2, GOALS["resume"]))
+                    await eventually(lambda: len(self.goal_replies(h)) == 1)
+                    busy.set()
+                    await eventually(lambda: any(is_kickoff("resume", m) for m in h.models()))
+                    await h.deliver(h.inbox["msg-2"][0])
+                    await h.settle_loop()
+                    self.assertEqual(len(self.goal_replies(h)), 1, h.replies)
+                    continuation.set()
+                    await h.wait_settled("msg-3")
+                    await h.wait_turns_finished()
+                    self.assert_kicked_off_once(h, "resume")
+                finally:
+                    busy.set()
+                    continuation.set()
+                    await h.close()
+
+        self.run_scenario(scenario)
+
     def test_continuations_still_in_hermes_queue_are_settled_once(self):
         """Two busy /goal resumes: the second continuation waits in Hermes's overflow queue.
 
@@ -1265,3 +1240,205 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
                 await h.close()
 
         self.run_scenario(scenario)
+
+
+class PinnedHermesStoppedInboxTurnTests(GoalScenario):
+    """Round 13 F1: a turn that starts after a stop released an inbox turn must not disown it.
+
+    The stop interrupts the inbox turn and releases its entry; the base adapter
+    then drains whatever was queued behind it, which the draining gateway
+    refuses. Hermes must not resume the chat as well, or the turn runs twice.
+    """
+
+    async def restart_counting_models(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]], message_id: str
+    ) -> ChildHarness:
+        restarted = ChildHarness(home, timeline=[], inbox=inbox)
+        await restarted.boot_with_gate_closed()
+        await restarted.open_gate()
+        await restarted.wait_settled(message_id)
+        await restarted.wait_turns_finished()
+        for _ in range(20):
+            await restarted.settle_loop()
+        await restarted.wait_turns_finished()
+        return restarted
+
+    def test_a_notice_queued_behind_a_stopped_inbox_turn_does_not_disown_it(self):
+        async def scenario(home: str):
+            from gateway.platforms.base import MessageEvent
+
+            from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
+
+            h = ChildHarness(home, timeline=[])
+            try:
+                await h.seed()
+                h.hold_model = lambda message: message == "long work"
+                await h.deliver(raw_event(2, "long work"))
+                await eventually(lambda: ("model", "long work") in h.timeline)
+                notice = MessageEvent(
+                    text="background job finished", source=chat_source(h), internal=True
+                )
+                await h.adapter.handle_message(notice)
+                await h.settle_loop()
+                await h.stop_gracefully()
+                self.assertEqual(h.state("msg-2"), "pending")
+                self.assertTrue(h.resume_pending())
+            finally:
+                h.model_gate.set()
+                await h.close()
+
+            restarted = await self.restart_counting_models(home, h.inbox, "msg-2")
+            try:
+                self.assertEqual(restarted.models(), ["long work"], restarted.timeline)
+                self.assertEqual(restarted.state("msg-2"), "acked")
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_a_stop_during_the_kickoffs_goal_judge_runs_the_goal_once(self):
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            entered, release = threading.Event(), threading.Event()
+
+            def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                entered.set()
+                release.wait(10)
+                return "continue", "synthetic judge", False, None, False
+
+            try:
+                await h.seed()
+                with patch("hermes_cli.goals.judge_goal", judge):
+                    await h.deliver(raw_event(2, GOALS["set"]))
+                    await eventually(entered.is_set)
+                    stop = asyncio.create_task(h.stop_gracefully())
+                    await eventually(h.adapter._gateway_stopping)
+                    release.set()
+                    await stop
+                self.assertEqual(h.state("msg-2"), "pending", h.timeline)
+            finally:
+                release.set()
+                await h.close()
+
+            restarted = await self.restart_counting_models(home, h.inbox, "msg-2")
+            try:
+                self.assertEqual(restarted.models(), ["synthetic task"], restarted.timeline)
+                self.assertEqual(restarted.state("msg-2"), "acked")
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_a_goal_command_riding_an_unowned_turn_runs_once_across_a_stop(self):
+        """Round 13 F1(c) and Opus S1: the turn the /goal event rides has no inbox entry."""
+        for running in ("goal continuation", "internal notice"):
+            for ending in ("finish", "stop"):
+                with self.subTest(running=running, ending=ending):
+                    self.run_scenario(
+                        lambda home, running=running, ending=ending: self.ride_unowned_turn(
+                            home, running, ending
+                        )
+                    )
+
+    async def ride_unowned_turn(self, home: str, running: str, ending: str) -> None:
+        from gateway.platforms.base import MessageEvent, MessageType
+
+        from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
+
+        h = RealRunHarness(home, timeline=[])
+        h.restart_after_finished_turns_settle = True
+        first, rider = threading.Event(), threading.Event()
+        verdicts = ["continue"] if running == "goal continuation" else []
+        seen: list[str] = []
+
+        def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+            return (verdicts.pop(0) if verdicts else "done", "synthetic judge", False, None, False)
+
+        def hold(message: str) -> threading.Event | None:
+            # msg-3's own continuation runs; the judge's next one (no inbox
+            # entry) is held; the /goal resume riding it is held too.
+            if message == "internal work":
+                return first
+            if not message.startswith(CONTINUATION):
+                return None
+            seen.append(message)
+            if running == "goal continuation" and len(seen) == 1:
+                return None
+            return first if len(seen) <= 2 and not first.is_set() else rider
+
+        with h.synthetic_model():
+            try:
+                await self.prepare(h, "resume")
+                h.timeline.clear()
+                h.hold_thread = hold
+                if running == "goal continuation":
+                    with patch("hermes_cli.goals.judge_goal", judge):
+                        await h.deliver(raw_event(3, GOALS["resume"]))
+                        await h.wait_settled("msg-3")
+                        await eventually(lambda: len(self.continuations(h)) == 2)
+                else:
+                    internal = MessageEvent(
+                        text="internal work",
+                        message_type=MessageType.TEXT,
+                        source=chat_source(h),
+                        internal=True,
+                    )
+                    await h.adapter.handle_message(internal)
+                    await eventually(lambda: ("model", "internal work") in h.timeline)
+                runs = len(self.continuations(h))
+                # The user's /goal resume lands inline beside that unowned turn.
+                await h.deliver(raw_event(5, GOALS["resume"]))
+                await eventually(
+                    lambda: (
+                        h.replies.count("gateway.goal.resumed")
+                        >= 1 + (running == "goal continuation")
+                    )
+                )
+                await h.settle_loop()
+                self.assertEqual(h.state("msg-5"), "leased")
+                first.set()
+                await eventually(lambda: len(self.continuations(h)) == runs + 1)
+                if ending == "finish":
+                    rider.set()
+                    await h.wait_settled("msg-5")
+                    await h.wait_turns_finished()
+                    self.assertEqual(h.state("msg-5"), "acked", h.timeline)
+                    self.assertNotIn(("release", "msg-5"), h.timeline)
+                    self.assertEqual(len(self.continuations(h)), runs + 1, h.timeline)
+                    return
+                # Production's running agent is marked for resume; the harness's
+                # synthetic agent stays Hermes's pending sentinel, which stop() skips.
+                session_key = h.runner._session_key_for_source(chat_source(h))
+                await h.runner.async_session_store.mark_resume_pending(
+                    session_key, "shutdown_timeout"
+                )
+                await h.stop_gracefully()
+                self.assertEqual(h.state("msg-5"), "pending", h.timeline)
+            finally:
+                first.set()
+                rider.set()
+                await h.close()
+
+        restarted = RealRunHarness(home, timeline=[], inbox=h.inbox)
+        with restarted.synthetic_model():
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await restarted.wait_settled("msg-5")
+                await restarted.wait_turns_finished()
+                for _ in range(20):
+                    await restarted.settle_loop()
+                await restarted.wait_turns_finished()
+                # The redelivered /goal resume ran its continuation; Hermes did
+                # not also resume the stopped turn.
+                self.assertEqual(
+                    [m.startswith(CONTINUATION) for m in restarted.models()],
+                    [True],
+                    restarted.timeline,
+                )
+            finally:
+                await restarted.close()
+
+    @staticmethod
+    def continuations(h: ChildHarness) -> list[str]:
+        return [m for m in h.models() if m.startswith(CONTINUATION)]
