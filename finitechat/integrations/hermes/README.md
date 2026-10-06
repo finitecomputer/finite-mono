@@ -144,17 +144,26 @@ its own.
   `stop()` interrupts running turns cooperatively and reports them as
   success, so every turn that finishes after `stop()` begins is released; a
   turn that completed in that window can run once more after restart. While
-  Hermes drains to stop or restart it refuses ordinary work with a reply that
-  reports success, so the adapter holds delivered work instead and releases it
-  on disconnect. Ordinary work is anything Hermes would not dispatch as a
+  Hermes drains to stop or restart it refuses any new model turn with a reply
+  that reports success, so the adapter holds delivered work instead and
+  releases it on disconnect. Work is anything Hermes would not dispatch as a
   gateway command, by the pinned base adapter's own rule, so path-like text
-  such as `/usr/bin/x` waits too. A drain can begin after admission but
-  before Hermes checks: the adapter re-checks just before handoff, and
-  releases a turn Hermes answered without binding a run to it. A turn that
-  ran and finished during a restart drain is still acked. A message handed
-  over as the drain begins can show Hermes's refusal reply and still run
-  after the restart. A message Hermes queues behind a reserved or busy session
-  slot is settled by the turn that runs it. The adapter
+  such as `/usr/bin/x` waits too. So do the commands Hermes turns into a model
+  turn for their message: `/queue`, `/steer`, `/plan`, `/learn`, `/init`,
+  `/blueprint` and `/moa` rewrite it into the agent's input, `/retry` re-sends
+  the last message and `/goal` queues a kickoff turn. A pinned test derives
+  that set from the gateway's dispatch. Other commands still answer during a
+  drain. A drain can begin after admission but before Hermes checks: the
+  adapter re-checks just before handoff, and releases ordinary work, or a
+  command Hermes rewrote into the turn's input, that Hermes answered without
+  binding a run to the turn's session guard; a redelivery then waits out the
+  drain. A turn that ran and finished during a restart drain is still acked.
+  A message handed over as the drain begins can show Hermes's refusal reply
+  and still run after the restart. A `/retry` or `/goal` handed over in that
+  window is acked: `/retry` has already rewound the transcript and `/goal`
+  has saved the goal; only the turn each starts is refused, visibly. A message Hermes
+  queues behind a reserved or busy session slot, or a `/queue` it copies
+  there, is settled by the turn that runs it. The adapter
   also holds every non-internal event, commands included, while Hermes's
   startup-restore gate is closed: the gate queues events in memory and
   reports them handled, which would ack them before they run. The inbox is
@@ -169,8 +178,9 @@ its own.
   stream never leases for a client that has disconnected, and it releases a
   batch it could not send. A user
   `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held
-  queued admissions; earlier undelivered entries are acked when delivered in that
-  process. A lease older than the TTL (config, generous default) is swept back
+  queued admissions, before any drain or stop rule, even when the turn
+  finishes before Hermes marks it cancelled; earlier undelivered entries are
+  acked when delivered in that process. A lease older than the TTL (config, generous default) is swept back
   to `Pending`, so a crashed turn cannot strand
   an entry. The sidecar keeps a bounded recently-acked ring, so a post-restart
   duplicate ack is a no-op and an already-acked entry is never redelivered —
@@ -186,7 +196,19 @@ its own.
   These in-memory holders grow with the delivered backlog; the Rust inbox
   remains the only durable queue. Gateway commands, pending approval responses, and pending
   clarification replies still reach the active turn immediately, and one busy
-  session does not pause another. Text, photos, audio, video, and files each
+  session does not pause another. The exceptions are `/queue` and a `/steer`
+  the running agent cannot take: Hermes would keep either as a new in-memory
+  event, acked before it ran and dropped by a stop or drain. They wait with
+  ordinary text and run as their own turn, without Hermes's "Queued" reply; a
+  media-only `/queue` caption gets Hermes's idle usage reply instead. A
+  `/steer` the running agent takes settles with the turn it steered, so a
+  stop that interrupts that turn redelivers both. A steer that arrives after
+  the agent's last tool call becomes Hermes's in-memory follow-up, which a
+  drain still drops. Commands Hermes rejects mid-turn, such as `/plan`, keep
+  its visible "can't run mid-turn" reply. During a drain Hermes also refuses
+  clarification and approval text sent to a busy session; that refusal is
+  shown and acked, because replaying it later would start a turn without its
+  prompt. Text, photos, audio, video, and files each
   enter their own background turn and retain their lease until its completion
   hook settles it. Separate media messages are not merged into Hermes's pending
   slot; multiple attachments on one message still travel together. Graceful

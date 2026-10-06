@@ -24,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import weakref
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -73,21 +74,39 @@ _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] 
 )
 
 
-class _FiniteTurn(NamedTuple):
+@dataclass(eq=False)
+class _FiniteTurn:
     """One background turn, as its completion hook needs to settle it."""
 
     event: MessageEvent
     session_key: str
-    # A gateway command or a reply to a pending prompt, which Hermes answers
-    # itself; anything else is ordinary work.
-    control: bool
-    # The run generation the pinned gateway had bound to the session guard
-    # when the turn began. It binds a fresh one before each agent run.
+    # Neither a gateway command nor a reply to a pending prompt.
+    ordinary: bool
+    # The event text as handed over. The pinned gateway rewrites a command
+    # it turns into this message's model turn (/queue, /plan, ...).
+    text: str
+    # The session guard the base adapter runs this turn under, and the run
+    # generation bound to it when the turn began. The gateway binds a fresh
+    # generation to that guard before each agent run.
+    guard: Any
     run_generation: Any
+    # Busy-session /steer entries the turn's running agent accepted. They
+    # are settled with the turn, so a stopped turn's steer is redelivered.
+    riders: list[tuple[str, Any, str]] = field(default_factory=list)
+    settled: bool = False
 
 
 _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVar(
     "finitechat_turn", default=None
+)
+# Pinned gateway commands that make their message a model turn in an idle
+# session: /blueprint (when a blueprint matches), /init, /learn, /moa, /plan,
+# /queue and /steer rewrite it into the agent's input, /retry re-sends the
+# last message, and /goal queues a kickoff turn. A draining gateway refuses
+# that turn, so they wait out a drain like ordinary work. A pinned test
+# derives this set from the gateway's dispatch.
+_HERMES_TURN_COMMANDS = frozenset(
+    {"blueprint", "goal", "init", "learn", "moa", "plan", "queue", "retry", "steer"}
 )
 APPROVAL_CONTROL_TEXT = frozenset(
     {
@@ -585,6 +604,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._user_interrupting_sessions: dict[str, list[MessageEvent]] = {}
         self._user_cancelled_tasks: weakref.WeakSet[asyncio.Task] = weakref.WeakSet()
         self._user_interrupt_boundaries: dict[str, tuple[str, int]] = {}
+        # The background turn each session is running, which an accepted
+        # /steer is settled with.
+        self._running_turns: dict[str, _FiniteTurn] = {}
+        # Events a draining gateway refused after handoff. A redelivery waits
+        # out the drain even if it is a command the adapter would hand over.
+        # The drain ends in stop(), so this lives no longer than the process.
+        self._drain_refused: set[str] = set()
 
     async def _process_message_background(
         self,
@@ -602,22 +628,33 @@ class FiniteChatAdapter(BasePlatformAdapter):
         token = _AUTHENTICATED_FINITE_TURN_USER.set(requester)
         requester_context = _authenticated_requester_context_for_event(event)
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
-        turn_token = _FINITE_TURN.set(
-            _FiniteTurn(
-                event=event,
-                session_key=session_key,
-                control=self._is_gateway_control(event, session_key),
-                run_generation=getattr(
-                    self._active_sessions.get(session_key), "_hermes_run_generation", None
-                ),
-            )
+        # The pinned base turn runs under the guard handle_message installed.
+        guard = self._active_sessions.get(session_key)
+        turn = _FiniteTurn(
+            event=event,
+            session_key=session_key,
+            ordinary=_gateway_command(event) is None
+            and not self._is_immediate_text_control(event, session_key),
+            text=event.text or "",
+            guard=guard,
+            run_generation=getattr(guard, "_hermes_run_generation", None),
         )
+        turn_token = _FINITE_TURN.set(turn)
+        self._running_turns[session_key] = turn
         try:
             await super()._process_message_background(event, session_key)
         finally:
+            if self._running_turns.get(session_key) is turn:
+                del self._running_turns[session_key]
             _FINITE_TURN.reset(turn_token)
             _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
             _AUTHENTICATED_FINITE_TURN_USER.reset(token)
+            if not turn.settled:
+                # Hermes queued the event for a later turn, which settles it.
+                # Steers its agent took are released to run as their own turn.
+                turn.settled = True
+                for room_id, seq, message_id in turn.riders:
+                    await self._release_finitechat_event(room_id, seq, message_id)
 
     async def handle_message(self, event: MessageEvent) -> None:
         """Decline Hermes's synthetic auto-resume turn for Finite sessions.
@@ -1231,11 +1268,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             ),
             internal=bool(raw_event.get("internal") or False),
         )
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        session_key = self._event_session_key(event)
         if event_key in self._inflight_admissions:
             if self._session_is_active(session_key):
                 return
@@ -1257,7 +1290,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # The queue can be waiting on its next handoff with no active turn.
             # Hermes's busy-command path alone cannot cover this idle window.
             await self._interrupt_admissions(session_key, event)
-        if not self._should_defer_admission(event, session_key) and (
+        if not self._should_defer_admission(event, session_key, event_key or "") and (
             await self._admit_finitechat_event(
                 event,
                 room_id,
@@ -1288,15 +1321,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         raw_event = event.raw_message if isinstance(event.raw_message, dict) else {}
         conversation_id = _string_or_none(raw_event.get("conversation_id"))
         segment_id = _string_or_none(raw_event.get("segment_id"))
-        session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
-            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
-        )
+        session_key = self._event_session_key(event)
         activity_metadata = self._route_metadata(conversation_id, segment_id)
         activity_set = False
         session_active = False
         held = False
+        steered_turn: _FiniteTurn | None = None
         # The sidecar leased this entry on delivery. Its lease is settled only
         # by the turn: the completion hook acks on success, failure, or a user
         # /stop, and a shutdown-cancelled turn releases it. A turn that fails
@@ -1305,13 +1335,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
         try:
             await self._hydrate_hermes_home_channel_if_needed()
             activity_set = await self._set_processing_activity(room_id, activity_metadata)
-            # A drain can begin during the awaits above. Nothing awaits
-            # between this check and handle_message handing the event over;
-            # a drain that begins after the handoff is settled by the hook.
-            # (The startup gate only ever opens once the adapter connects.)
-            held = self._gateway_draining() and not self._is_gateway_control(event, session_key)
+            # A drain, or another turn in this session, can begin during the
+            # awaits above. Nothing awaits between this check and
+            # handle_message handing the event over; a drain that begins
+            # after the handoff is settled by the hook.
+            held = self._must_wait(event, session_key, event_key)
             if not held:
                 session_active = self._session_is_active(session_key)
+                if session_active and _gateway_command(event) == "steer":
+                    steered_turn = self._running_turns.get(session_key)
                 if event_key:
                     self._inflight_admissions.add(event_key)
                 await self.handle_message(event)
@@ -1332,19 +1364,20 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if activity_set:
                 await self._clear_processing_activity(room_id, activity_metadata)
             return False
-        queued_for_later = getattr(self, "_pending_messages", {}).get(session_key) is event
         if (
             event_key
             and event_key in self._inflight_admissions
             and session_active
-            and not queued_for_later
+            and not self._hermes_queued(session_key, event)
         ):
             # Events consumed inline by a busy session (slash-command bypass,
             # busy-session handlers) never pass through the background turn that
             # fires the completion hook, so ack here — exactly once. Every other
-            # event is acked (or released) by the completion hook.
+            # event is acked (or released) by the completion hook. A /steer
+            # the running agent took is part of that turn and settles with it.
             self._inflight_admissions.discard(event_key)
-            await self._ack_finitechat_event(room_id, seq, message_id)
+            if not self._ride_with_turn(steered_turn, room_id, seq, message_id):
+                await self._ack_finitechat_event(room_id, seq, message_id)
         return True
 
     async def _hydrate_hermes_home_channel_if_needed(self) -> None:
@@ -1379,32 +1412,67 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         self._home_channel_hydrated = True
 
-    def _should_defer_admission(self, event: MessageEvent, session_key: str) -> bool:
+    def _should_defer_admission(
+        self, event: MessageEvent, session_key: str, event_key: str
+    ) -> bool:
         # Media needs the same durable admission as text. Hermes can merge
         # busy-session media into one pending event and run it recursively
         # inside the current turn, without a completion hook for each lease.
         # Admit each event as its own turn so its hook alone settles it.
         if event.internal:
             return False
+        return self._must_wait(
+            event, session_key, event_key, behind=session_key in self._deferred_admissions
+        )
+
+    def _must_wait(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        event_key: str,
+        *,
+        behind: bool = False,
+    ) -> bool:
+        """The event waits in the session's ordered queue instead of reaching Hermes.
+
+        Ordinary work waits behind a busy turn (or the queue, when ``behind``)
+        and runs as its own turn. So do /queue, and a /steer the running
+        agent cannot take: Hermes would keep either as a new in-memory event,
+        which a stop or drain drops. Other gateway commands and replies to a
+        pending clarify or approval prompt stay live. While the gateway drains
+        it refuses any new model turn, so ordinary work and every command in
+        ``_HERMES_TURN_COMMANDS`` wait for the restart; a /steer into a
+        running turn still reaches it.
+        """
         if self._gateway_startup_restoring():
             # Commands included: the gate queues every non-internal event.
             return True
-        if self._is_gateway_control(event, session_key):
+        if self._is_immediate_text_control(event, session_key):
             return False
-        return (
-            session_key in self._deferred_admissions
-            or self._session_is_active(session_key)
-            or self._gateway_draining()
-        )
+        command = _gateway_command(event)
+        steers_running_turn = command == "steer" and self._running_agent_takes_steer(session_key)
+        if self._gateway_draining():
+            return not steers_running_turn and (
+                command is None
+                or command in _HERMES_TURN_COMMANDS
+                or event_key in self._drain_refused
+            )
+        next_turn = command in (None, "queue") or (command == "steer" and not steers_running_turn)
+        return next_turn and (behind or self._session_is_active(session_key))
 
-    def _is_gateway_control(self, event: MessageEvent, session_key: str) -> bool:
-        """Hermes answers this event itself instead of starting new work.
+    def _running_agent_takes_steer(self, session_key: str) -> bool:
+        """The session's running agent can take a /steer into its current turn.
 
-        Gateway commands and replies to a pending clarify or approval prompt
-        stay live while a turn runs or the gateway drains. Everything else is
-        ordinary work: it waits its turn, and a draining gateway refuses it.
+        Otherwise (no turn, the agent still starting, or no steer support) the
+        pinned gateway would queue the steer for the next turn in memory.
         """
-        return _is_gateway_command(event) or self._is_immediate_text_control(event, session_key)
+        if not self._session_is_active(session_key):
+            return False
+        runner = getattr(self, "gateway_runner", None)
+        peek = getattr(runner, "_peek_session_state", None)
+        state = peek(session_key) if callable(peek) else None
+        agent = getattr(getattr(state, "turn", None), "agent", None)
+        return callable(getattr(agent, "steer", None))
 
     def _gateway_draining(self) -> bool:
         """The pinned gateway refuses new turns while it drains to stop or restart.
@@ -1467,6 +1535,34 @@ class FiniteChatAdapter(BasePlatformAdapter):
             return False
         self._heal_stale_session_lock(session_key)
         return session_key in self._active_sessions
+
+    def _event_session_key(self, event: MessageEvent) -> str:
+        return build_session_key(
+            event.source,
+            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
+        )
+
+    def _hermes_queued(self, session_key: str, event: MessageEvent) -> bool:
+        """Hermes queued this inbox entry for a later turn, which settles it.
+
+        The gateway queues a busy or reserved session's event as is, or, for
+        /queue, as a new event that carries the same inbox record.
+        """
+        pending = getattr(self, "_pending_messages", {}).get(session_key)
+        if pending is None:
+            return False
+        return pending is event or (
+            isinstance(event.raw_message, dict) and pending.raw_message is event.raw_message
+        )
+
+    @staticmethod
+    def _ride_with_turn(turn: _FiniteTurn | None, room_id: str, seq: Any, message_id: str) -> bool:
+        """Settle an accepted /steer with the inbox turn it steered, if still running."""
+        if turn is None or turn.settled or not isinstance(turn.event.raw_message, dict):
+            return False
+        turn.riders.append((room_id, seq, message_id))
+        return True
 
     def _defer_admission(
         self,
@@ -1644,11 +1740,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
         The completion hook fires exactly once per background turn. A turn
         cancelled by shutdown or recovery releases the lease so the sidecar
-        redelivers the entry whole; a turn the user cancelled with /stop, /new
-        or /reset is acked, because redelivering it would restart the very work
-        the user stopped. Success or failure acks too (a failed turn still ran
-        to completion and answered the user, so re-running it on redelivery
-        would be wrong). Ack and release are both idempotent on the sidecar.
+        redelivers the entry whole; a turn the user ended with /stop, /new or
+        /reset is acked first, before any other rule, because redelivering it
+        would restart the very work the user stopped. The base adapter can
+        finish a stopped turn before it marks the task cancelled, so the
+        session's interrupt boundary decides too. Success or failure acks
+        (a failed turn still ran to completion and answered the user, so
+        re-running it on redelivery would be wrong). Ack and release are both
+        idempotent on the sidecar. Steers the turn's agent took settle with it.
 
         Once ``stop()`` begins, the pinned gateway interrupts running turns
         cooperatively (``restart_drain_timeout`` defaults to 0s). It reports
@@ -1658,7 +1757,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         interrupted ones.
 
         A turn can also return without running. A draining gateway refuses
-        ordinary work with a reply, which reports SUCCESS; that turn is
+        a new model turn with a reply, which reports SUCCESS; that turn is
         released so the message runs after the restart. A gateway that queues
         the event behind a reserved or busy session slot returns at once, and
         the queued turn settles it.
@@ -1675,7 +1774,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if (
             turn is not None
             and outcome_name != "cancelled"
-            and getattr(self, "_pending_messages", {}).get(turn.session_key) is event
+            and self._hermes_queued(turn.session_key, event)
         ):
             return
         # Claim the in-flight marker so the inline-admission path does not also
@@ -1683,26 +1782,46 @@ class FiniteChatAdapter(BasePlatformAdapter):
         event_key = _adapter_event_key(room_id, seq, message_id)
         if event_key:
             self._inflight_admissions.discard(event_key)
-        user_cancelled = asyncio.current_task() in self._user_cancelled_tasks
-        if not user_cancelled and (
-            outcome_name == "cancelled" or self._gateway_stopping() or self._refused_by_drain(turn)
-        ):
-            await self._release_finitechat_event(room_id, seq, message_id)
-            return
-        await self._ack_finitechat_event(room_id, seq, message_id)
+        user_ended = asyncio.current_task() in self._user_cancelled_tasks or (
+            bool(self._user_interrupt_boundaries)
+            and self._precedes_user_interrupt(
+                turn.session_key if turn is not None else self._event_session_key(event),
+                room_id,
+                seq,
+            )
+        )
+        refused = not user_ended and self._refused_by_drain(turn)
+        if refused and event_key:
+            self._drain_refused.add(event_key)
+        release = not user_ended and (
+            outcome_name == "cancelled" or self._gateway_stopping() or refused
+        )
+        riders: list[tuple[str, Any, str]] = []
+        if turn is not None:
+            turn.settled = True
+            riders = turn.riders
+        settle = self._release_finitechat_event if release else self._ack_finitechat_event
+        for entry_room_id, entry_seq, entry_message_id in [(room_id, seq, message_id), *riders]:
+            await settle(entry_room_id, entry_seq, entry_message_id)
 
     def _refused_by_drain(self, turn: _FiniteTurn | None) -> bool:
-        """The draining gateway answered this ordinary turn without running it.
+        """The draining gateway answered this turn's work without running it.
 
-        The pinned gateway refuses new work only while ``_draining`` is set,
-        which stays set until the process stops. Before each agent run it
-        binds a fresh run generation to the adapter's session guard, so a
-        refused turn leaves the guard as the turn found it. A turn that ran
-        and finished during the drain is not refused.
+        The pinned gateway refuses a new model turn only while ``_draining``
+        is set, which stays set until the process stops. Before each agent run
+        it binds a fresh run generation to the turn's session guard, so a
+        refused turn leaves that guard as the turn found it. A turn that ran
+        and finished during the drain is not refused. Gateway commands are
+        work only once Hermes has rewritten them into this turn's input
+        (/queue, /plan, ...); one it answered itself is not refused.
         """
-        if turn is None or turn.control or not self._gateway_draining():
+        if turn is None or not self._gateway_draining():
             return False
-        guard = self._active_sessions.get(turn.session_key)
+        if not turn.ordinary and (turn.event.text or "") == turn.text:
+            return False
+        guard = (
+            turn.guard if turn.guard is not None else self._active_sessions.get(turn.session_key)
+        )
         return getattr(guard, "_hermes_run_generation", None) == turn.run_generation
 
     @staticmethod
@@ -2313,25 +2432,28 @@ def _adapter_event_key(room_id: str, seq: Any, message_id: str) -> str | None:
     return f"{room_id}\x1f{seq}\x1f{message_id}"
 
 
-def _is_gateway_command(event: MessageEvent) -> bool:
-    """Hermes dispatches ``event`` as a gateway command rather than a turn.
+def _gateway_command(event: MessageEvent) -> str | None:
+    """The pinned gateway command ``event`` dispatches as; None for ordinary work.
 
     This is the pinned base adapter's own rule for what bypasses a busy
-    session: a registry command, after it rewrites a DM ``restart the
-    gateway`` to ``/restart``. Unknown slash words and path-like text such as
-    ``/usr/bin/x`` are ordinary work. The probe is a copy, so the base adapter
-    still rewrites the event itself.
+    session: a registry command, named canonically (``/q`` is ``queue``,
+    ``/reset`` is ``new``), after it rewrites a DM ``restart the gateway`` to
+    ``/restart``. Unknown slash words and path-like text such as ``/usr/bin/x``
+    are ordinary work. The probe is a copy, so the base adapter still
+    rewrites the event itself.
     """
     try:
         from gateway.platforms.base import coerce_plaintext_gateway_command
-        from hermes_cli.commands import should_bypass_active_session
+        from hermes_cli.commands import resolve_command
     except ImportError:
         # Gateway test doubles only; the pinned runtime ships both.
-        return (event.text or "").lstrip().startswith("/")
+        return event.get_command()
     probe = copy.copy(event)
     if getattr(probe, "allow_gateway_control", True):
         coerce_plaintext_gateway_command(probe)
-    return bool(should_bypass_active_session(probe.get_command()))
+    command = probe.get_command()
+    definition = resolve_command(command) if command else None
+    return definition.name if definition is not None else None
 
 
 def _is_hermes_resume_event(event: MessageEvent) -> bool:

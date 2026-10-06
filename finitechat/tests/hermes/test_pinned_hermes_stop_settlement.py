@@ -16,12 +16,15 @@ sidecar are simulated; the sidecar model is the documented lease contract
 (ack settles, release returns the entry to pending for the next tick).
 """
 
+import ast
 import asyncio
 import contextlib
 import importlib.util
+import inspect
 import os
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from typing import Any
@@ -259,11 +262,17 @@ class GatewayHarness(StopHarness):
 
         self.adapter.set_message_handler(handle_message)
         self.runner._run_agent = self._run_agent
+        # The /new banner resolves the model and can probe a provider.
+        self.runner._format_session_info = lambda: ""
         # start() sets this before adapters connect; only stop() clears it.
         self.runner._running = True
         # Model turns held open by message text, as active work that keeps a
         # restart drain open until the test finishes them.
         self.held_turns: dict[str, asyncio.Event] = {}
+        # Model turns, by message text, whose agent cannot take a /steer.
+        self.steerless: set[str] = set()
+        # How long a reply send takes, as a real transport would.
+        self.reply_delay = 0.0
         # The next admission await at which a restart drain begins:
         # "home-channel-show" or "activity" (the adapter's RPCs before
         # handoff), or "dispatch" (the base background turn, before the
@@ -284,6 +293,10 @@ class GatewayHarness(StopHarness):
         if action == self.drain_window and payload.get("action", "set") == "set":
             self.begin_restart_drain()
         return await super()._sidecar(action, payload, timeout=timeout)
+
+    async def _send(self, chat_id, content, **kwargs):
+        await asyncio.sleep(self.reply_delay)
+        return await super()._send(chat_id, content, **kwargs)
 
     def begin_restart_drain(self) -> None:
         """What an in-band ``/restart`` does: refuse new work at once, keep
@@ -342,8 +355,14 @@ class GatewayHarness(StopHarness):
             def hard_interrupt(self, *_args, **_kwargs):
                 self.interrupt()
 
+        class SteerableAgent(Agent):
+            def steer(self, text):
+                harness.timeline.append(("steer", text))
+                return True
+
         assert session_key is not None, "the gateway must bind the model turn to a session"
-        self.runner._session_state(session_key).turn.agent = Agent()
+        agent = Agent() if message in self.steerless else SteerableAgent()
+        self.runner._session_state(session_key).turn.agent = agent
         if gate is not None:
             if gate is self.turn_gate:
                 self.started.set()
@@ -755,17 +774,7 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
         self.run_scenario(scenario)
 
 
-class PinnedHermesRestartDrainAdmissionTests(unittest.TestCase):
-    """Review 5426200391: a restart drain that wins the admission race.
-
-    ``request_restart`` refuses new work at once and keeps ``_running`` set
-    while running turns finish (up to the pinned 1800s after-turn cap). The
-    gateway refuses a message handed to it after that point with a reply,
-    which the base adapter reports as a successful turn, so the entry was
-    acked with no model call. Path-like text starting with ``/`` skipped the
-    adapter's drain hold the same way.
-    """
-
+class DrainScenario(unittest.TestCase):
     def run_scenario(self, scenario):
         with (
             tempfile.TemporaryDirectory(prefix="finite-drain-") as home,
@@ -802,35 +811,88 @@ class PinnedHermesRestartDrainAdmissionTests(unittest.TestCase):
             await restarted.close()
         return timeline
 
-    def test_only_gateway_commands_skip_the_drain_hold(self):
+    def assert_ran_once_then_acked(
+        self,
+        timeline: list[tuple[str, str]],
+        message_id: str,
+        task: str = "synthetic task",
+    ) -> None:
+        """``task`` reached the model once, and its entry was acked once after."""
+        runs = [i for i, (kind, text) in enumerate(timeline) if kind == "model" and task in text]
+        self.assertEqual(len(runs), 1, timeline)
+        self.assertEqual(timeline.count(("ack", message_id)), 1, timeline)
+        self.assertNotIn(("release", message_id), timeline)
+        self.assertLess(runs[0], timeline.index(("ack", message_id)), timeline)
+
+
+class PinnedHermesRestartDrainAdmissionTests(DrainScenario):
+    """Review 5426200391: a restart drain that wins the admission race.
+
+    ``request_restart`` refuses new work at once and keeps ``_running`` set
+    while running turns finish (up to the pinned 1800s after-turn cap). The
+    gateway refuses a message handed to it after that point with a reply,
+    which the base adapter reports as a successful turn, so the entry was
+    acked with no model call. Path-like text starting with ``/`` skipped the
+    adapter's drain hold the same way.
+    """
+
+    def test_drain_holds_ordinary_work_and_model_launching_commands(self):
         async def scenario(home: str):
             h = GatewayHarness(home, timeline=[], stall=False)
             try:
+                # (pinned command, held while the gateway drains)
                 cases = {
-                    ("/usr/bin/python3 crashes", "group"): False,
-                    ("/etc/hosts looks wrong", "group"): False,
-                    ("/not-a-command please", "group"): False,
-                    ("/status", "group"): True,
-                    ("/restart", "group"): True,
-                    ("/stop", "group"): True,
-                    ("/new", "group"): True,
-                    ("/reset", "group"): True,
+                    ("/usr/bin/python3 crashes", "group"): (None, True),
+                    ("/etc/hosts looks wrong", "group"): (None, True),
+                    ("/not-a-command please", "group"): (None, True),
+                    ("plain text", "group"): (None, True),
+                    # Answered by the gateway itself, without a model turn.
+                    ("/status", "group"): ("status", False),
+                    ("/restart", "group"): ("restart", False),
+                    ("/stop", "group"): ("stop", False),
+                    ("/new", "group"): ("new", False),
+                    ("/reset", "group"): ("new", False),
+                    ("/approve", "group"): ("approve", False),
+                    ("/title renamed", "group"): ("title", False),
+                    ("/bg synthetic task", "group"): ("bg", False),
+                    ("/btw synthetic task", "group"): ("btw", False),
                     # The pinned base adapter rewrites this DM phrase to
                     # /restart; replaying it after the restart would restart
                     # again.
-                    ("restart the gateway", "dm"): True,
-                    ("restart the gateway", "group"): False,
+                    ("restart the gateway", "dm"): ("restart", False),
+                    ("restart the gateway", "group"): (None, True),
+                    # Hermes turns these into a model turn for this message,
+                    # which a draining gateway refuses.
+                    ("/queue synthetic task", "group"): ("queue", True),
+                    ("/q synthetic task", "group"): ("queue", True),
+                    ("/steer synthetic task", "group"): ("steer", True),
+                    ("/plan synthetic task", "group"): ("plan", True),
+                    ("/learn synthetic task", "group"): ("learn", True),
+                    ("/init", "group"): ("init", True),
+                    ("/blueprint synthetic", "group"): ("blueprint", True),
+                    ("/moa synthetic task", "group"): ("moa", True),
+                    ("/retry", "group"): ("retry", True),
+                    ("/goal synthetic task", "group"): ("goal", True),
                 }
+                h.runner._draining = True
                 for (text, chat_type), expected in cases.items():
                     raw = raw_event(1, text, chat_type=chat_type)
                     source = h.adapter.build_source(
                         chat_id=ROOM_ID, chat_type=chat_type, user_id="alice"
                     )
                     event = MessageEvent(text=text, source=source, raw_message=raw)
+                    session_key = h.adapter._event_session_key(event)
                     with self.subTest(text=text, chat_type=chat_type):
-                        self.assertEqual(h.module._is_gateway_command(event), expected)
+                        self.assertEqual(
+                            (
+                                h.module._gateway_command(event),
+                                h.adapter._must_wait(event, session_key, ""),
+                            ),
+                            expected,
+                        )
                         self.assertEqual(event.text, text, "classification must not rewrite")
             finally:
+                h.runner._draining = False
                 await h.close()
 
         self.run_scenario(scenario)
@@ -995,6 +1057,483 @@ class PinnedHermesRestartDrainAdmissionTests(unittest.TestCase):
             self.assertEqual(after, [])
 
         self.run_scenario(scenario)
+
+
+def pinned_turn_commands() -> set[str]:
+    """Commands the pinned idle dispatch turns into this message's model turn.
+
+    ``GatewayRunner._handle_message`` rewrites ``event.text`` and falls
+    through to the agent for some commands; for others it hands off to a
+    handler that re-enters the gateway or queues the turn itself.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(GatewayRunner._handle_message)))
+    commands: set[str] = set()
+    handlers: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        test = node.test if isinstance(node, ast.If) else None
+        if not (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "canonical"
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.comparators[0], ast.Constant)
+        ):
+            continue
+        name = str(test.comparators[0].value)
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Assign) and any(
+                isinstance(target, ast.Attribute)
+                and target.attr == "text"
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "event"
+                for target in sub.targets
+            ):
+                commands.add(name)
+            if (
+                isinstance(sub, ast.Call)
+                and isinstance(sub.func, ast.Attribute)
+                and isinstance(sub.func.value, ast.Name)
+                and sub.func.value.id == "self"
+                and sub.func.attr.startswith("_handle_")
+            ):
+                handlers.setdefault(name, set()).add(sub.func.attr)
+    plain = GatewayRunner._gateway_plain_command_handlers(GatewayRunner.__new__(GatewayRunner))
+    for name, handler in plain.items():
+        handlers.setdefault(name, set()).add(handler.__name__)
+    for name, handler_names in handlers.items():
+        for handler_name in handler_names:
+            source = inspect.getsource(getattr(GatewayRunner, handler_name))
+            if "self._handle_message(" in source or "_enqueue_fifo(" in source:
+                commands.add(name)
+    return commands
+
+
+class PinnedHermesModelCommandTests(DrainScenario):
+    """Review r4193904833 and round 06: commands that become a model turn.
+
+    In an idle session the pinned gateway rewrites /queue, /steer, /plan and
+    /learn (and /init, /blueprint and /moa) into this message's agent turn;
+    /retry and /goal start one. A draining gateway refuses that turn after the
+    rewrite, and the entry was acked as a finished command. In a busy session
+    Hermes keeps /queue, and a /steer the running agent cannot take, as a new
+    in-memory event, so the entry was acked before its model call and a stop
+    or drain dropped the work.
+    """
+
+    MODEL_COMMANDS = (
+        "/queue synthetic task",
+        "/q synthetic task",
+        "/steer synthetic task",
+        "/plan synthetic task",
+        "/learn synthetic task",
+    )
+
+    def test_drain_hold_covers_every_pinned_command_that_starts_a_turn(self):
+        # Pin-bump tripwire: a new command that becomes a model turn must
+        # wait out a drain too.
+        self.assertEqual(pinned_turn_commands(), load_adapter_module()._HERMES_TURN_COMMANDS)
+
+    def test_model_commands_run_once_without_a_drain(self):
+        for text in self.MODEL_COMMANDS:
+            with self.subTest(text=text):
+
+                async def scenario(home: str, text: str = text):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    try:
+                        await h.deliver(raw_event(1, text))
+                        await h.wait_settled("msg-1")
+                        await h.settle_loop()
+                        self.assert_ran_once_then_acked(timeline, "msg-1")
+                    finally:
+                        await h.close()
+
+                self.run_scenario(scenario)
+
+    def test_model_commands_wait_out_a_restart_drain(self):
+        for text in self.MODEL_COMMANDS:
+            with self.subTest(text=text):
+
+                async def scenario(home: str, text: str = text):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.redeliver_on_release = True
+                    try:
+                        # Another chat's running turn keeps the drain open.
+                        other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                        h.begin_restart_drain()
+                        await h.deliver(raw_event(2, text))
+                        self.assertNotIn("msg-2", h.handed)
+                        self.assertEqual(h.state("msg-2"), "leased")
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertEqual(h.models(), ["other work"])
+                        self.assertNotIn(("ack", "msg-2"), timeline)
+                        self.assertEqual(h.state("msg-2"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-2")
+                    self.assert_ran_once_then_acked(after, "msg-2")
+
+                self.run_scenario(scenario)
+
+    def test_drain_beginning_during_a_command_handoff_keeps_it(self):
+        for window in ("home-channel-show", "activity", "dispatch"):
+            for text in ("/queue synthetic task", "/plan synthetic task"):
+                with self.subTest(window=window, text=text):
+
+                    async def scenario(home: str, window: str = window, text: str = text):
+                        timeline: list[tuple[str, str]] = []
+                        h = GatewayHarness(home, timeline=timeline, stall=False)
+                        h.redeliver_on_release = True
+                        h.adapter._home_channel_hydrated = False
+                        try:
+                            other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                            h.drain_window = window
+                            await h.deliver(raw_event(2, text))
+                            self.assertNotIn(("ack", "msg-2"), timeline)
+                            # Refused once at most: the redelivery is held.
+                            self.assertEqual(h.handed.count("msg-2"), int(window == "dispatch"))
+
+                            other.set()
+                            await h.finish_restart()
+                            self.assertEqual(h.models(), ["other work"])
+                            self.assertNotIn(("ack", "msg-2"), timeline)
+                            self.assertEqual(h.state("msg-2"), "pending")
+                        finally:
+                            await h.close()
+
+                        after = await self.run_after_restart(home, h.inbox, "msg-2")
+                        self.assert_ran_once_then_acked(after, "msg-2")
+
+                    self.run_scenario(scenario)
+
+    def test_drain_beginning_during_a_deferred_queue_handoff_keeps_it(self):
+        for window in ("home-channel-show", "activity", "dispatch"):
+            with self.subTest(window=window):
+
+                async def scenario(home: str, window: str = window):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    h.redeliver_on_release = True
+                    h.adapter._home_channel_hydrated = False
+                    try:
+                        other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                        await h.deliver(raw_event(2, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        await h.deliver(raw_event(3, "/queue synthetic task"))
+                        self.assertNotIn("msg-3", h.handed)
+                        self.assertEqual(h.state("msg-3"), "leased")
+                        # The drain begins inside msg-3's handoff, once msg-2
+                        # has finished and the session is idle.
+                        h.drain_window = window
+                        h.turn_gate.set()
+                        await h.wait_settled("msg-2")
+                        for _ in range(500):
+                            if h.drain_window is None:
+                                break
+                            await asyncio.sleep(0.01)
+                        await h.settle_loop()
+                        self.assertEqual(h.handed.count("msg-3"), int(window == "dispatch"))
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertEqual(h.models(), ["other work", "long running work"])
+                        self.assertNotIn(("ack", "msg-3"), timeline)
+                        self.assertEqual(h.state("msg-3"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-3")
+                    self.assert_ran_once_then_acked(after, "msg-3")
+
+                self.run_scenario(scenario)
+
+    def test_busy_queue_waits_for_the_running_turn(self):
+        for text in ("/queue synthetic task", "/q synthetic task"):
+            with self.subTest(text=text):
+
+                async def scenario(home: str, text: str = text):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    try:
+                        await h.deliver(raw_event(1, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        await h.deliver(raw_event(2, text))
+                        # Never handed to Hermes's in-memory queue while busy.
+                        self.assertEqual(h.handed, ["msg-1"])
+                        self.assertEqual(h.adapter._pending_messages, {})
+                        self.assertEqual(h.state("msg-2"), "leased")
+
+                        h.turn_gate.set()
+                        await h.wait_settled("msg-1")
+                        await h.wait_settled("msg-2")
+                        await h.settle_loop()
+                        self.assertEqual(h.models(), ["long running work", "synthetic task"])
+                        self.assert_ran_once_then_acked(timeline, "msg-2")
+                        self.assertLess(
+                            timeline.index(("ack", "msg-1")),
+                            timeline.index(("model", "synthetic task")),
+                        )
+                    finally:
+                        await h.close()
+
+                self.run_scenario(scenario)
+
+    def test_busy_queue_survives_a_graceful_stop(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                await h.deliver(raw_event(2, "/queue synthetic task"))
+                await h.stop_gracefully()
+                self.assertEqual(h.state("msg-1"), "pending")
+                self.assertEqual(h.state("msg-2"), "pending")
+                self.assertNotIn(("ack", "msg-2"), timeline)
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox, "msg-1", "msg-2")
+            self.assert_ran_once_then_acked(after, "msg-1", task="long running work")
+            self.assert_ran_once_then_acked(after, "msg-2")
+
+        self.run_scenario(scenario)
+
+    def test_busy_queue_survives_a_restart_drain(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            h.redeliver_on_release = True
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                h.begin_restart_drain()
+                await h.deliver(raw_event(2, "/queue synthetic task"))
+                self.assertEqual(h.handed, ["msg-1"])
+                h.turn_gate.set()
+                await h.finish_restart()
+                self.assertEqual(h.models(), ["long running work"])
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertEqual(h.state("msg-2"), "pending")
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox, "msg-2")
+            self.assert_ran_once_then_acked(after, "msg-2")
+
+        self.run_scenario(scenario)
+
+    def test_busy_steer_settles_with_the_turn_it_steered(self):
+        for draining in (False, True):
+            with self.subTest(draining=draining):
+
+                async def scenario(home: str, draining: bool = draining):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    h.redeliver_on_release = True
+                    try:
+                        await h.deliver(raw_event(1, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        if draining:
+                            # A restart drain lets the running turn finish, so
+                            # a steer still reaches it.
+                            h.begin_restart_drain()
+                        await h.deliver(raw_event(2, "/steer change course"))
+                        self.assertIn(("steer", "change course"), timeline)
+                        # Accepted into the running turn, so it settles with it.
+                        self.assertEqual(h.state("msg-2"), "leased")
+
+                        h.turn_gate.set()
+                        if draining:
+                            await h.finish_restart()
+                        await h.wait_settled("msg-1")
+                        await h.wait_settled("msg-2")
+                        await h.settle_loop()
+                        self.assertEqual(h.models(), ["long running work"])
+                        self.assertEqual(h.state("msg-1"), "acked")
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        self.assertNotIn(("release", "msg-2"), timeline)
+                        self.assertLess(
+                            timeline.index(("steer", "change course")),
+                            timeline.index(("ack", "msg-2")),
+                        )
+                    finally:
+                        await h.close()
+
+                self.run_scenario(scenario)
+
+    def test_queue_behind_a_reserved_resume_slot_is_acked_after_it_runs(self):
+        """Hermes copies a /queue behind a reserved slot into its pending slot.
+
+        The copy carries the entry's inbox record, so the turn that runs the
+        copy settles the entry, not the /queue turn Hermes answered at once.
+        """
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            stopped = GatewayHarness(home, timeline=timeline)
+            try:
+                await stopped.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(stopped.started.wait(), 2)
+                await stopped.stop_gracefully()
+                self.assertTrue(stopped.resume_pending())
+            finally:
+                await stopped.close()
+
+            timeline.clear()
+            reconnected = GatewayHarness(home, timeline=timeline, inbox=stopped.inbox, stall=False)
+            try:
+                self.assertEqual(reconnected.runner._schedule_resume_pending_sessions(), 1)
+                await reconnected.deliver(raw_event(2, "/queue synthetic task"))
+                await reconnected.wait_settled("msg-2")
+                await reconnected.settle_loop()
+                self.assertTrue(
+                    any("Queued for the next turn" in reply for reply in reconnected.replies),
+                    "the gateway took the busy /queue path",
+                )
+                self.assert_ran_once_then_acked(timeline, "msg-2")
+            finally:
+                await reconnected.close()
+
+        self.run_scenario(scenario)
+
+    def test_a_refused_command_missing_from_the_set_waits_after_one_refusal(self):
+        """A pin bump could add a command that becomes a model turn.
+
+        Until the set names it, a drain refuses it once after the rewrite; the
+        entry is released, and its redelivery waits for the restart instead
+        of being handed over and refused again.
+        """
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            h.redeliver_on_release = True
+            h.module._HERMES_TURN_COMMANDS = frozenset()
+            try:
+                other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                h.begin_restart_drain()
+                await h.deliver(raw_event(2, "/plan synthetic task"))
+                for _ in range(500):
+                    if h.redeliveries:
+                        break
+                    await asyncio.sleep(0.01)
+                await h.settle_loop()
+                self.assertEqual(h.handed.count("msg-2"), 1)
+                self.assertEqual(h.redeliveries, ["msg-2"])
+                self.assertNotIn(("ack", "msg-2"), timeline)
+
+                other.set()
+                await h.finish_restart()
+                self.assertEqual(h.handed.count("msg-2"), 1)
+                self.assertEqual(h.state("msg-2"), "pending")
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox, "msg-2")
+            self.assert_ran_once_then_acked(after, "msg-2")
+
+        self.run_scenario(scenario)
+
+    def test_busy_steer_follows_its_turn_through_a_graceful_stop(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                await h.deliver(raw_event(2, "/steer change course"))
+                self.assertIn(("steer", "change course"), timeline)
+                await h.stop_gracefully()
+                # The interrupted turn reruns after restart; so does its steer.
+                self.assertEqual(h.state("msg-1"), "pending")
+                self.assertEqual(h.state("msg-2"), "pending")
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox, "msg-1", "msg-2")
+            self.assert_ran_once_then_acked(after, "msg-1", task="long running work")
+            self.assert_ran_once_then_acked(after, "msg-2", task="change course")
+
+        self.run_scenario(scenario)
+
+    def test_steer_the_running_agent_cannot_take_waits_for_its_turn(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            h.steerless.add("long running work")
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                await h.deliver(raw_event(2, "/steer synthetic task"))
+                self.assertEqual(h.handed, ["msg-1"])
+                self.assertEqual(h.adapter._pending_messages, {})
+                self.assertEqual(h.state("msg-2"), "leased")
+
+                h.turn_gate.set()
+                await h.wait_settled("msg-1")
+                await h.wait_settled("msg-2")
+                await h.settle_loop()
+                self.assertNotIn("steer", [kind for kind, _text in timeline])
+                self.assert_ran_once_then_acked(timeline, "msg-2")
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_busy_reject_policy_commands_keep_the_pinned_reply(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                await h.deliver(raw_event(2, "/plan synthetic task"))
+                # Hermes answers it at once ("can't run mid-turn"), unchanged.
+                self.assertEqual(h.handed, ["msg-1", "msg-2"])
+                self.assertEqual(h.state("msg-2"), "acked")
+                self.assertTrue(any("/plan" in reply for reply in h.replies), h.replies)
+                h.turn_gate.set()
+                await h.wait_settled("msg-1")
+                self.assertEqual(h.models(), ["long running work"])
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_user_stop_or_new_during_a_restart_drain_is_final(self):
+        for command in ("/stop", "/new"):
+            with self.subTest(command=command):
+
+                async def scenario(home: str, command: str = command):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    # The stopped turn unwinds while the command's reply is
+                    # still being sent, before the base adapter marks the
+                    # turn's task cancelled. Nothing is redelivered in this
+                    # process, so only the settlement itself is final.
+                    h.reply_delay = 0.05
+                    try:
+                        await h.deliver(raw_event(1, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        h.begin_restart_drain()
+                        await h.deliver(raw_event(2, command))
+                        await h.finish_restart()
+                        self.assertNotIn(("release", "msg-1"), timeline)
+                        self.assertEqual(h.state("msg-1"), "acked")
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        self.assertEqual(h.models(), ["long running work"])
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-1", "msg-2")
+                    self.assertEqual(after, [])
+
+                self.run_scenario(scenario)
 
 
 if __name__ == "__main__":
