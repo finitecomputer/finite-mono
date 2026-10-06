@@ -14,18 +14,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 from gateway.finite_child_work import capture_adapter, journal, schedule_recovery
-from test_pinned_hermes_stop_settlement import (
-    DrainScenario,
-    GatewayHarness,
-    PinnedHermesCommandFinalityTests,
-    chat_source,
-    eventually,
-    raw_event,
-    seed_exchanges,
-)
+
+if __package__:
+    from . import test_pinned_hermes_stop_settlement as pinned
+else:
+    import test_pinned_hermes_stop_settlement as pinned
 
 
-class ChildWorkTests(DrainScenario):
+class ChildWorkTests(pinned.DrainScenario):
     async def shutdown(self, harness):
         for task in list(harness.runner._background_tasks):
             task.cancel()
@@ -33,14 +29,14 @@ class ChildWorkTests(DrainScenario):
         await harness.close()
 
     async def boot(self, home, inbox):
-        h = GatewayHarness(home, timeline=[], inbox=inbox, stall=False)
+        h = pinned.GatewayHarness(home, timeline=[], inbox=inbox, stall=False)
         await h.boot_with_gate_closed()
         await h.open_gate()
         return h
 
     def test_background_stop_retains_interrupted_outcome_without_reexecution(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             ran = []
             started = asyncio.Event()
 
@@ -51,7 +47,7 @@ class ChildWorkTests(DrainScenario):
 
             h.runner._run_background_task = background
             try:
-                await h.deliver(raw_event(1, "/bg synthetic task"))
+                await h.deliver(pinned.raw_event(1, "/bg synthetic task"))
                 await h.wait_settled("msg-1")
                 await asyncio.wait_for(started.wait(), 2)
                 self.assertGreater(h.runner._active_work_count(), 0)
@@ -60,7 +56,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertTrue(any("was interrupted" in reply for reply in restarted.replies))
                 self.assertEqual(ran, [True])
                 self.assertEqual(restarted.runs, [])
@@ -78,7 +74,7 @@ class ChildWorkTests(DrainScenario):
 
     def test_completed_background_outbox_survives_cancelled_delivery(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             sent = asyncio.Event()
             ran = []
             send = h.adapter.send
@@ -100,7 +96,7 @@ class ChildWorkTests(DrainScenario):
             h.runner._run_background_task = background
             h.adapter.send = blocked_send
             try:
-                await h.deliver(raw_event(1, "/bg synthetic task"))
+                await h.deliver(pinned.raw_event(1, "/bg synthetic task"))
                 await h.wait_settled("msg-1")
                 await asyncio.wait_for(sent.wait(), 2)
                 self.assertEqual(journal(h.runner).pending()[0]["state"], "outcome")
@@ -109,7 +105,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(restarted.replies.count("durable answer"), 1)
                 self.assertEqual(ran, ["synthetic task"])
                 # Even an unconfirmed inbox ack must not launch the child again.
@@ -125,7 +121,7 @@ class ChildWorkTests(DrainScenario):
 
     def test_btw_acceptance_is_durable_while_auxiliary_thread_runs(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             started, release = threading.Event(), threading.Event()
             calls = []
 
@@ -136,15 +132,15 @@ class ChildWorkTests(DrainScenario):
                 return "side answer"
 
             try:
-                await seed_exchanges(h)
+                await pinned.seed_exchanges(h)
                 h.runner._resolve_session_agent_runtime = lambda **_kwargs: (
                     "synthetic",
                     {"api_key": "synthetic"},
                 )
                 with patch("agent.side_question.answer_side_question", answer):
-                    await h.deliver(raw_event(4, "/btw synthetic question"))
+                    await h.deliver(pinned.raw_event(4, "/btw synthetic question"))
                     await h.wait_settled("msg-4")
-                    await eventually(started.is_set)
+                    await pinned.eventually(started.is_set)
                     self.assertGreater(h.runner._active_work_count(), 0)
                     await h.stop_gracefully()
             finally:
@@ -152,7 +148,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertTrue(
                     any(
                         "side question work was interrupted" in reply for reply in restarted.replies
@@ -169,20 +165,20 @@ class ChildWorkTests(DrainScenario):
             with self.subTest(command=command):
 
                 async def scenario(home, command=command):
-                    h = GatewayHarness(home, timeline=[], stall=False)
+                    h = pinned.GatewayHarness(home, timeline=[], stall=False)
                     if command.endswith("resume"):
                         from hermes_cli.goals import GoalManager
 
                         entry = await h.runner.async_session_store.get_or_create_session(
-                            chat_source(h)
+                            pinned.chat_source(h)
                         )
                         manager = GoalManager(session_id=entry.session_id)
                         manager.set("synthetic task")
                         manager.pause()
-                    stops = PinnedHermesCommandFinalityTests.stop_before_reply(h)
+                    stops = pinned.PinnedHermesCommandFinalityTests.stop_before_reply(h)
                     try:
-                        await h.deliver(raw_event(1, command))
-                        await eventually(lambda: bool(stops))
+                        await h.deliver(pinned.raw_event(1, command))
+                        await pinned.eventually(lambda: bool(stops))
                         await stops[0]
                         self.assertEqual(h.state("msg-1"), "acked")
                         self.assertTrue(
@@ -192,7 +188,7 @@ class ChildWorkTests(DrainScenario):
                         await self.shutdown(h)
                     restarted = await self.boot(home, h.inbox)
                     try:
-                        await eventually(lambda: len(restarted.runs) > 0)
+                        await pinned.eventually(lambda: len(restarted.runs) > 0)
                         await restarted.wait_turns_finished()
                         self.assertEqual(len(restarted.runs), 1)
                         self.assertIn("synthetic task", restarted.runs[0])
@@ -204,8 +200,8 @@ class ChildWorkTests(DrainScenario):
 
     def test_process_death_after_acceptance_reports_interruption(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
-            source = chat_source(h).to_dict()
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
+            source = pinned.chat_source(h).to_dict()
             code = (
                 "import os,sys,json; from gateway.finite_child_work import Journal; "
                 'j=Journal(sys.argv[1]); j.accept("crash", "background", '
@@ -217,7 +213,7 @@ class ChildWorkTests(DrainScenario):
             self.assertEqual(proc.returncode, 23)
             try:
                 schedule_recovery(h.runner)
-                await eventually(lambda: journal(h.runner).count() == 0)
+                await pinned.eventually(lambda: journal(h.runner).count() == 0)
                 self.assertEqual(h.runs, [])
                 self.assertTrue(any("was interrupted" in reply for reply in h.replies))
             finally:
@@ -232,11 +228,11 @@ class ChildWorkTests(DrainScenario):
                 async def scenario(home, control=control):
                     from hermes_cli.goals import GoalManager
 
-                    h = GatewayHarness(home, timeline=[], stall=False)
-                    stops = PinnedHermesCommandFinalityTests.stop_before_reply(h)
+                    h = pinned.GatewayHarness(home, timeline=[], stall=False)
+                    stops = pinned.PinnedHermesCommandFinalityTests.stop_before_reply(h)
                     try:
-                        await h.deliver(raw_event(1, "/goal synthetic task"))
-                        await eventually(lambda: bool(stops))
+                        await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
+                        await pinned.eventually(lambda: bool(stops))
                         await stops[0]
                         row = journal(h.runner).pending()[0]
                         manager = GoalManager(session_id=json.loads(row["payload"])["session_id"])
@@ -245,7 +241,7 @@ class ChildWorkTests(DrainScenario):
                         await self.shutdown(h)
                     restarted = await self.boot(home, h.inbox)
                     try:
-                        await eventually(lambda: journal(restarted.runner).count() == 0)
+                        await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                         self.assertEqual(restarted.runs, [])
                     finally:
                         await self.shutdown(restarted)
@@ -254,7 +250,7 @@ class ChildWorkTests(DrainScenario):
 
     def test_goal_final_text_is_retained_before_delivery(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             sending = asyncio.Event()
             send = h.adapter.send
 
@@ -266,7 +262,7 @@ class ChildWorkTests(DrainScenario):
 
             h.adapter.send = blocked
             try:
-                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
                 await asyncio.wait_for(sending.wait(), 2)
                 self.assertTrue(
                     any(row["state"] == "outcome" for row in journal(h.runner).pending())
@@ -276,7 +272,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertIn("done", restarted.replies)
                 self.assertEqual(restarted.runs, [])
             finally:
@@ -288,7 +284,7 @@ class ChildWorkTests(DrainScenario):
         async def scenario(home):
             from gateway.platforms.base import SendResult
 
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             original = Path(home, "goal-result.pdf")
             original.write_bytes(b"synthetic PDF bytes")
             sending = asyncio.Event()
@@ -306,14 +302,14 @@ class ChildWorkTests(DrainScenario):
             h.runner._run_agent = result
             h.adapter.send_document = blocked
             try:
-                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
                 await asyncio.wait_for(sending.wait(), 3)
                 self.assertIn("Synthetic goal result", h.replies)
                 await h.stop_gracefully()
             finally:
                 await self.shutdown(h)
             original.unlink()
-            restarted = GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
+            restarted = pinned.GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
             seen = []
 
             async def delivered(**kwargs):
@@ -324,7 +320,7 @@ class ChildWorkTests(DrainScenario):
             try:
                 await restarted.boot_with_gate_closed()
                 await restarted.open_gate()
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(seen, [b"synthetic PDF bytes"])
                 self.assertNotIn("Synthetic goal result", restarted.replies)
                 self.assertEqual(restarted.runs, [])
@@ -345,7 +341,7 @@ class ChildWorkTests(DrainScenario):
         async def scenario(home):
             from gateway.platforms.base import SendResult
 
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             original = Path(home, "goal-result.pdf")
             original.write_bytes(b"retry PDF bytes")
             attempted = asyncio.Event()
@@ -363,7 +359,7 @@ class ChildWorkTests(DrainScenario):
             h.runner._run_agent = result
             h.adapter.send_document = failed
             try:
-                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
                 await asyncio.wait_for(attempted.wait(), 3)
                 await h.wait_turns_finished()
                 pending = journal(h.runner).pending()
@@ -375,7 +371,7 @@ class ChildWorkTests(DrainScenario):
                 original.unlink()
             finally:
                 await self.shutdown(h)
-            restarted = GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
+            restarted = pinned.GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
             seen = []
 
             async def delivered(**kwargs):
@@ -386,7 +382,7 @@ class ChildWorkTests(DrainScenario):
             try:
                 await restarted.boot_with_gate_closed()
                 await restarted.open_gate()
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(seen, [b"retry PDF bytes"])
                 self.assertNotIn("Goal result", restarted.replies)
                 self.assertEqual(restarted.runs, [])
@@ -397,7 +393,7 @@ class ChildWorkTests(DrainScenario):
 
     def test_background_attachment_survives_worker_temporary_files(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             sending = asyncio.Event()
             original = Path(home, "temporary-result.txt")
             original.write_text("durable bytes")
@@ -418,7 +414,7 @@ class ChildWorkTests(DrainScenario):
             h.runner._run_background_task = background
             h.adapter.send_document = blocked
             try:
-                await h.deliver(raw_event(1, "/bg attachment"))
+                await h.deliver(pinned.raw_event(1, "/bg attachment"))
                 await asyncio.wait_for(sending.wait(), 2)
                 original.unlink()
                 row = journal(h.runner).pending()[0]
@@ -427,7 +423,7 @@ class ChildWorkTests(DrainScenario):
                 await h.stop_gracefully()
             finally:
                 await self.shutdown(h)
-            restarted = GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
+            restarted = pinned.GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
             seen = []
 
             async def delivered(**kwargs):
@@ -440,7 +436,7 @@ class ChildWorkTests(DrainScenario):
             try:
                 await restarted.boot_with_gate_closed()
                 await restarted.open_gate()
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(seen, ["durable bytes"])
             finally:
                 await self.shutdown(restarted)
@@ -449,20 +445,20 @@ class ChildWorkTests(DrainScenario):
 
     def test_foreground_inbox_recovery_does_not_duplicate_goal_work(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
-            stops = PinnedHermesCommandFinalityTests.stop_before_reply(h)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
+            stops = pinned.PinnedHermesCommandFinalityTests.stop_before_reply(h)
             try:
-                await h.deliver(raw_event(1, "/goal synthetic task"))
-                await eventually(lambda: bool(stops))
+                await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
+                await pinned.eventually(lambda: bool(stops))
                 await stops[0]
-                h.inbox["msg-2"] = (raw_event(2, "foreground follow-up"), "pending")
+                h.inbox["msg-2"] = (pinned.raw_event(2, "foreground follow-up"), "pending")
             finally:
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
                 await restarted.wait_settled("msg-2")
                 await restarted.wait_turns_finished()
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(restarted.runs, ["foreground follow-up"])
                 self.assertEqual(restarted.handed, ["msg-2"])
             finally:
@@ -472,11 +468,11 @@ class ChildWorkTests(DrainScenario):
 
     def test_started_goal_is_interrupted_and_not_automatically_reexecuted(self):
         async def scenario(home):
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             h.held_turns["synthetic task"] = asyncio.Event()
             try:
-                await h.deliver(raw_event(1, "/goal synthetic task"))
-                await eventually(lambda: "synthetic task" in h.runs)
+                await h.deliver(pinned.raw_event(1, "/goal synthetic task"))
+                await pinned.eventually(lambda: "synthetic task" in h.runs)
                 await h.stop_gracefully()
                 self.assertTrue(
                     any(row["state"] == "outcome" for row in journal(h.runner).pending())
@@ -485,7 +481,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, h.inbox)
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertEqual(restarted.runs, [])
                 self.assertTrue(
                     any("goal work was interrupted" in reply for reply in restarted.replies)
@@ -502,8 +498,8 @@ class ChildWorkTests(DrainScenario):
                 async def scenario(home, control=control):
                     from gateway.platforms.base import MessageEvent
 
-                    h = GatewayHarness(home, timeline=[], stall=False)
-                    source = chat_source(h)
+                    h = pinned.GatewayHarness(home, timeline=[], stall=False)
+                    source = pinned.chat_source(h)
                     try:
                         await h.runner._handle_goal_command(
                             MessageEvent(
@@ -528,7 +524,7 @@ class ChildWorkTests(DrainScenario):
         async def scenario(home):
             from gateway.platforms.base import MessageEvent
 
-            h = GatewayHarness(home, timeline=[], stall=False)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
             ran = []
 
             async def background(*_args, **_kwargs):
@@ -538,7 +534,7 @@ class ChildWorkTests(DrainScenario):
             try:
                 reply = await h.runner._handle_background_command(
                     MessageEvent(
-                        text="/bg synthetic task", source=chat_source(h), message_id="msg-1"
+                        text="/bg synthetic task", source=pinned.chat_source(h), message_id="msg-1"
                     )
                 )
                 self.assertTrue(reply)
@@ -551,7 +547,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, {})
             try:
-                await eventually(lambda: journal(restarted.runner).count() == 0)
+                await pinned.eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertTrue(any("was interrupted" in reply for reply in restarted.replies))
                 self.assertEqual(restarted.runs, [])
             finally:
@@ -563,8 +559,8 @@ class ChildWorkTests(DrainScenario):
         async def scenario(home):
             from gateway.platforms.base import MessageEvent
 
-            h = GatewayHarness(home, timeline=[], stall=False)
-            source = chat_source(h)
+            h = pinned.GatewayHarness(home, timeline=[], stall=False)
+            source = pinned.chat_source(h)
             try:
                 await h.runner._handle_goal_command(
                     MessageEvent(text="/goal synthetic task", source=source, message_id="msg-1")
@@ -581,7 +577,7 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(h)
             restarted = await self.boot(home, {})
             try:
-                await eventually(lambda: len(restarted.runs) == 1)
+                await pinned.eventually(lambda: len(restarted.runs) == 1)
                 await restarted.wait_turns_finished()
                 self.assertEqual(restarted.runs, ["synthetic task"])
             finally:
