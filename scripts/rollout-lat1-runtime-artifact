@@ -36,8 +36,8 @@ usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3
 
 --roll-require-runtime-idle REMOTE_STATUS_COMMAND (one project only) names the
   absolute path of finite-status on the Runner host. Execution then enqueues
-  only after its --runtime-idle read, the last Runner call before Core, reports
-  exactly idle; anything else, including an unavailable lifecycle probe, is a
+  only with a supported admission/drain fence. No such fence is currently
+  supported, so even an exactly-idle observation is a
   deliberate skip. It requires exactly one --roll-project-id and refuses
   --roll-all and --probe-override.
 EOF
@@ -623,9 +623,20 @@ build_reviewed_plan() {
     --arg artifact "$ROLLOUT_ARTIFACT_ID" \
     --arg host "$SOURCE_HOST_ID" \
     --arg repo_revision "$repo_revision" \
-    --arg remote_system_closure "$remote_system_closure" '
+    --arg remote_system_closure "$remote_system_closure" \
+    --arg idle_status_command "$RUNTIME_IDLE_STATUS_COMMAND" \
+    --argjson probe_override "$PROBE_OVERRIDE" '
       {
-        schema_version: 3,
+        schema_version: 4,
+        safety: {
+          mode: (if $idle_status_command == "" then "disruptive" else "idle_fenced" end),
+          idle_status_command: (if $idle_status_command == "" then null else $idle_status_command end),
+          idle_report_schema: "finite.status.v1",
+          child_work_contract: "finite-child-work-v1",
+          admission_fence: (if $idle_status_command == "" then "not_required_disruptive" else "required_unavailable" end),
+          lifecycle_probe_schema: "finite.lifecycle-probe.v1",
+          probe_override: $probe_override
+        },
         repo_revision: $repo_revision,
         remote_system_closure: $remote_system_closure,
         source_host_id: $host,
@@ -791,7 +802,7 @@ plan_progress_compatible() {
   local saved="$1" current="$2"
   jq -en --argjson saved "$saved" --argjson current "$current" '
     def core_fields: {schema_version, repo_revision, remote_system_closure, source_host_id,
-      target_artifact_id, target_reference, scope, excluded, canary};
+      target_artifact_id, target_reference, scope, excluded, canary, safety};
     def ident: {project_id, agent_runtime_id, source_machine_id};
     ([$current.skipped[] | select(. as $entry | ($saved.skipped | index($entry)) == null)]) as $progress
     | ($saved | core_fields) == ($current | core_fields)
@@ -1085,6 +1096,7 @@ runtime_idle_report_is_exact_idle() {
           and .lifecycle.verdict == "operable"
           and .gateway.state == "running"
           and .gateway.active_agents == 0
+          and .gateway.child_work_contract == "finite-child-work-v1"
           and .hermes_inbox.pending == 0
           and .hermes_inbox.leased == 0
           and .agentd_inbox.events == 0
@@ -1195,7 +1207,12 @@ execute_exact_plan() {
         echo "==> runtime idle gate did not read exactly idle for $project_id ($runtime_id) (exit $idle_status); deliberately skipping it, which keeps serving its current artifact"
         continue
       fi
-      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_idle_gate", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", verdict:"idle"}')"
+      # A successful observation cannot reserve idleness through Core enqueue
+      # and Runner pickup. There is no supported admission/drain token in this
+      # protocol, so fail closed instead of treating another poll as a fence.
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_idle_gate", project_id:$project, agent_runtime_id:$runtime, status:"skipped", reason:"admission_fence_unavailable", verdict:"idle"}')"
+      echo "==> runtime reads idle for $project_id ($runtime_id), but no admission/drain fence is supported; deliberately skipping automatic upgrade"
+      continue
     fi
 
     local -a exact_args=(
@@ -1318,6 +1335,7 @@ main() {
     plan_path="$ROLLOUT_STATE_ROOT/$PLAN_HASH/plan.json"
     if [[ -f $plan_path ]] \
       && saved_plan="$(jq -cS . <"$plan_path")" \
+      && [[ $(sha256_text "$saved_plan") == "$EXECUTE_PLAN_HASH" ]] \
       && plan_progress_compatible "$saved_plan" "$canonical_plan"; then
       resume_with_progress=true
       PLAN_PLANNED_KEYS="$(jq -c '[.planned[] | .project_id + "/" + .agent_runtime_id]' <<<"$saved_plan")"

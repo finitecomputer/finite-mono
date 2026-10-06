@@ -47,6 +47,8 @@ class AgentRoot:
     def gateway(self, state: object = "running", active: object = 0, **extra: object) -> None:
         self.write("hermes-home/gateway_state.json",
                    {"pid": 7, "gateway_state": state, "active_agents": active,
+                    "start_time": 123,
+                    "child_work_contract": {"version": "finite-child-work-v1", "pid": 7, "start_time": 123},
                     "updated_at": datetime.fromtimestamp(NOW_MS / 1000 - 600, timezone.utc).isoformat(), "platforms": {SECRET: {}}, **extra})
 
 
@@ -66,11 +68,25 @@ class ObserveTests(unittest.TestCase):
     def test_running_gateway_with_absent_agentd_and_marker_files_is_idle(self) -> None:
         result = self.observe()
         self.assertEqual((result["verdict"], result["reasons"]), ("idle", []))
-        self.assertEqual(result["gateway"], {"state": "running", "active_agents": 0, "updated_age_s": 600})
+        self.assertEqual(result["gateway"], {"state": "running", "active_agents": 0, "child_work_contract": "finite-child-work-v1", "updated_age_s": 600})
         self.assertEqual(result["agentd_inbox"], {"present": False, "events": 0})
         self.assertEqual(result["running_markers"], {"present": False, "messages": 0})
         (self.home.agent / "hermes-inbox.json").unlink()
         self.assertEqual(self.observe()["verdict"], "idle")
+
+    def test_old_runtime_zero_counts_are_unknown(self) -> None:
+        for contract in (None, "", "other-version", 1):
+            with self.subTest(contract=contract):
+                self.home.gateway(child_work_contract=contract)
+                result = self.observe()
+                self.assertEqual(result["verdict"], "unknown")
+                self.assertIn("child_work_visibility_unknown", result["reasons"])
+
+    def test_contract_left_by_previous_process_is_unknown(self) -> None:
+        for changed in ({"pid": 8}, {"start_time": 124}):
+            with self.subTest(changed=changed):
+                self.home.gateway(**changed)
+                self.assertEqual(self.observe()["verdict"], "unknown")
 
     def test_each_turn_signal_is_busy_with_counts_and_ages_only(self) -> None:
         cases = {
