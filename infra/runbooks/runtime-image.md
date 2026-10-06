@@ -399,12 +399,34 @@ scripts/finite-status --runtime-idle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_
 ```
 
 It first requires an `operable` lifecycle probe for that exact assignment. It
-then reads only counts and ages from the Agent's durable root. `verdict` is
-`idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit 2).
-Execute only on `idle`; defer the others and re-check later. `unfinished_markers`
-means an earlier interrupted turn left a running marker; the restart will post
-one notice per marker to the user. The check is a point-in-time read, not a stop
-fence. A message that arrives between the check and the stop can still strand.
+then reads the Agent's durable root and reports only counts and ages. `verdict`
+is `idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit
+2). Execute only on `idle`; defer the others and re-check later.
+`unfinished_markers` means an earlier interrupted turn left a running marker;
+the restart will post one notice per marker to the user. The check is a
+point-in-time read, not a stop fence. A message that arrives between the check
+and the stop can still strand.
+
+A /bg or /btw child is acked when it launches, so neither `active_agents` nor
+the inbox shows it. The check therefore also reads:
+
+- `recent_ack`: busy for 30 minutes after the inbox last acked an entry or was
+  last written. Every Agent that chatted in the last 30 minutes defers, so a
+  cohort pass skips recently active Agents; run another pass later.
+- `background_sessions`: busy while a `bg_*` session of the current gateway
+  process is open, and for 5 minutes after one ends. The check counts them in
+  a private copy of `hermes-home/state.db` and `state.db-wal` in the Runner
+  host's temp dir (`TMPDIR`, else `/tmp`) and never opens the live database.
+  Each read removes its copy; a read killed mid-copy leaves it until a later
+  read removes it after 10 minutes. The copy needs Python's `sqlite3` module
+  (else `background_sqlite_unavailable`) and refuses either file over 4 GiB
+  (`background_oversize`). Such an Agent reads `unknown` on every pass and
+  never rolls this way.
+- Clocks: guest timestamps are compared on the guest clock, using the offset
+  between `gateway_state.json`'s `updated_at` (guest) and its mtime (host).
+  Without a usable `updated_at` (`clock_unavailable`) or with an offset over
+  60 seconds (`clock_skew`), the read is `unknown`. `gateway.clock_offset_ms`
+  reports the measured offset.
 
 To make that read part of execution, pass
 `--roll-require-runtime-idle /absolute/path/to/finite-status` (the path on the
