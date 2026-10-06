@@ -1145,8 +1145,8 @@ class PinnedHermesPluginRediscoveryTests(GoalScenario):
 class PinnedHermesAutoResumeTests(GoalScenario):
     """Hermes's own auto-resume runs only for interrupted turns the inbox does not own.
 
-    The adapter declined every resume (6439252c), which dropped interrupted
-    goal continuations that the 458a baseline resumed: they have no inbox
+    The adapter declined every resume, which dropped interrupted goal
+    continuations that the previous release resumed: they have no inbox
     entry to redeliver. Each turn start now records durably whether the inbox
     owns that chat's latest turn, and only such a chat's resume is declined.
     """
@@ -1201,7 +1201,7 @@ class PinnedHermesAutoResumeTests(GoalScenario):
             try:
                 await eventually(lambda: bool(restarted.models()))
                 await restarted.wait_turns_finished()
-                # Hermes resumed the continuation itself, once, as on 458a; no
+                # Hermes resumed the continuation itself, once, as before; no
                 # inbox entry ran.
                 self.assertEqual(len(restarted.models()), 1, restarted.timeline)
                 self.assertEqual([m for m in restarted.handed if m is not None], [])
@@ -1212,8 +1212,8 @@ class PinnedHermesAutoResumeTests(GoalScenario):
         self.run_scenario(scenario)
 
     def test_an_interrupted_inbox_turn_runs_once_after_restart(self):
-        """By the inbox redelivery here; after an upgrade from 458a, by Hermes's resume."""
-        for runtime in ("this", "458a"):
+        """By the inbox redelivery here; after an upgrade, by Hermes's resume."""
+        for runtime in ("this", "previous release"):
             with self.subTest(runtime=runtime):
 
                 async def scenario(home: str, runtime: str = runtime):
@@ -1233,8 +1233,8 @@ class PinnedHermesAutoResumeTests(GoalScenario):
                         self.assertTrue(h.resume_pending())
                         # Still there after the release, and survives the restart.
                         self.assertTrue(self.owner_marker(h).exists())
-                        if runtime == "458a":
-                            # The 458a runtime keeps no owner records, and its
+                        if runtime == "previous release":
+                            # The previous release keeps no owner records, and its
                             # stop acks the turn it interrupted.
                             shutil.rmtree(self.owner_marker(h).parent)
                             raw, _state = h.inbox["msg-2"]
@@ -1254,7 +1254,7 @@ class PinnedHermesAutoResumeTests(GoalScenario):
                             self.assertEqual(restarted.handed, ["msg-2"])
                             self.assertEqual(restarted.models(), ["long work"])
                         else:
-                            # Hermes resumed it, once, as 458a's own restart would.
+                            # Hermes resumed it, once, as that release's restart would.
                             self.assertEqual([m for m in restarted.handed if m is not None], [])
                             self.assertEqual(len(restarted.models()), 1, restarted.timeline)
                     finally:
