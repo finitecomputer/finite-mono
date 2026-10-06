@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
+import os
 import re
 import subprocess
-import threading
+import tarfile
+import tempfile
+import time
 import unittest
 import urllib.request
 from pathlib import Path
@@ -71,8 +75,6 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
     def test_http_barrier_distinguishes_history_requests_from_the_open_stream(self) -> None:
         state = smoke.FakeModelState()
         server = smoke.start_fake_model(state, 0)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
         url = f"http://127.0.0.1:{server.server_address[1]}/v1/chat/completions"
 
         def request(stream: bool) -> urllib.request.Request:
@@ -107,7 +109,6 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
             state.release("sigkill")
             server.shutdown()
             server.server_close()
-            thread.join(timeout=2)
 
     def test_fake_provider_returns_the_requested_fresh_reply(self) -> None:
         self.assertEqual(
@@ -453,6 +454,152 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
             mutate(changed)
             with self.assertRaises(smoke.SmokeFailure):
                 smoke.require_only_leases_backdated(original, changed, records)
+
+    def test_turn_lease_ttl_matches_pinned_hermes(self) -> None:
+        spec = importlib.util.find_spec("run_agent")
+        assert spec is not None and spec.origin is not None
+        source = Path(spec.origin).read_text(encoding="utf-8")
+        ttls = re.findall(r"^\s+_lease_ttl = (\d+(?:\.\d+)?)$", source, re.MULTILINE)
+        self.assertEqual([float(ttl) for ttl in ttls], [smoke.HERMES_TURN_LEASE_TTL_SECS])
+        refresh = re.findall(r'"_session_turn_lease_refresh_interval", (\d+(?:\.\d+)?)\)', source)
+        self.assertEqual(len(refresh), 1)
+        self.assertLess(float(refresh[0]), smoke.HERMES_TURN_LEASE_TTL_SECS)
+
+    def test_pinned_turn_lease_of_a_killed_recycled_pid_holds_until_the_smoke_deadline(
+        self,
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.dict(os.environ, {"HERMES_HOME": home}),
+        ):
+            import hermes_state
+
+            db = hermes_state.SessionDB(Path(home) / "state.db")
+            try:
+                db.create_session("room", "finitechat")
+                exited_at = time.time()
+                # This process's own PID stands in for the killed gateway's
+                # PID recycled in the new container, so Hermes counts it alive.
+                killed = f"pid={os.getpid()}:turn=killed:platform=finitechat"
+                self.assertTrue(
+                    db.try_acquire_session_turn_lease(
+                        "room", killed, ttl_seconds=smoke.HERMES_TURN_LEASE_TTL_SECS
+                    )
+                )
+                restarted = f"pid={os.getpid()}:turn=restarted:platform=finitechat"
+                deadline = (
+                    exited_at
+                    + smoke.HERMES_TURN_LEASE_TTL_SECS
+                    + smoke.HERMES_TURN_LEASE_MARGIN_SECS
+                )
+                for at, acquired in (
+                    (exited_at + 90, False),  # the old queued-reply timeout
+                    (exited_at + smoke.HERMES_TURN_LEASE_TTL_SECS - 1, False),
+                    (deadline, True),
+                ):
+                    with (
+                        self.subTest(after_exit=at - exited_at),
+                        mock.patch.object(hermes_state.time, "time", return_value=at),
+                    ):
+                        self.assertIs(
+                            db.try_acquire_session_turn_lease("room", restarted), acquired
+                        )
+            finally:
+                db.close()
+
+    def test_stopped_turn_leases_are_read_from_a_copy_including_the_wal(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.dict(os.environ, {"HERMES_HOME": home}),
+        ):
+            import hermes_state
+
+            db = hermes_state.SessionDB(Path(home) / "state.db")
+            try:
+                db.create_session("room", "finitechat")
+                holder = "pid=27:turn=killed:platform=finitechat"
+                self.assertTrue(db.try_acquire_session_turn_lease("room", holder))
+                self.assertTrue((Path(home) / "state.db-wal").stat().st_size > 0)
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode="w") as tar:
+                    for name in ("state.db", "state.db-wal"):
+                        tar.add(Path(home) / name, arcname=name)
+                ok = subprocess.CompletedProcess([], 0, "", "")
+                copied = subprocess.CompletedProcess([], 0, archive.getvalue(), b"")
+                with (
+                    mock.patch.object(smoke.smoke, "run", return_value=ok),
+                    mock.patch.object(smoke.subprocess, "run", return_value=copied) as run,
+                ):
+                    rows = smoke.read_stopped_turn_leases(image="image", home_volume="home")
+            finally:
+                db.close()
+        self.assertEqual([row["holder"] for row in rows], [holder])
+        command = run.call_args.args[0]
+        self.assertIn("type=volume,src=home,dst=/home/node,readonly", command)
+        self.assertIn("--network", command)
+        self.assertIn("state.db-wal", command[-1])
+        self.assertNotIn("state.db-shm", command[-1])
+
+    def test_turn_lease_wait_runs_on_monotonic_time_from_the_proven_exit(self) -> None:
+        class Clock:
+            def __init__(self, now: float) -> None:
+                self.now = now
+                self.slept: list[float] = []
+
+            def monotonic(self) -> float:
+                return self.now
+
+            def sleep(self, seconds: float) -> None:
+                self.slept.append(seconds)
+                self.now += seconds
+
+        for now, sleeps in ((108.0, [307.0]), (500.0, [])):
+            with self.subTest(now=now):
+                clock = Clock(now)
+                waited = smoke.wait_turn_lease_expiry(
+                    100.0, monotonic=clock.monotonic, sleep=clock.sleep
+                )
+                self.assertEqual(clock.slept, sleeps)
+                self.assertGreaterEqual(
+                    waited["since_exit_secs"],
+                    smoke.HERMES_TURN_LEASE_TTL_SECS + smoke.HERMES_TURN_LEASE_MARGIN_SECS,
+                )
+
+    def test_turn_lease_check_rejects_missing_changed_extended_and_live_leases(self) -> None:
+        exited = 1_000.0
+        lease = {
+            "conversation_id": "room",
+            "holder": "pid=27:turn=killed:platform=finitechat",
+            "acquired_at": exited - 10,
+            "expires_at": exited + smoke.HERMES_TURN_LEASE_TTL_SECS - 5,
+        }
+        restart = exited + smoke.HERMES_TURN_LEASE_TTL_SECS + smoke.HERMES_TURN_LEASE_MARGIN_SECS
+        records = smoke.require_turn_leases_lapsed(
+            [lease], [dict(lease)], exited_at=exited, now=restart
+        )
+        self.assertEqual(records[0]["expired_secs_before_restart"], 20.0)
+        refreshed = {**lease, "expires_at": exited + smoke.HERMES_TURN_LEASE_TTL_SECS + 1}
+        for name, before, after, now in (
+            ("missing", [], [], restart),
+            ("changed", [lease], [refreshed], restart),
+            ("refreshed_after_exit", [refreshed], [refreshed], restart),
+            ("still_live", [lease], [lease], lease["expires_at"]),
+        ):
+            with self.subTest(name), self.assertRaises(smoke.SmokeFailure):
+                smoke.require_turn_leases_lapsed(before, after, exited_at=exited, now=now)
+
+    def test_sigkill_waits_out_the_turn_lease_before_restart(self) -> None:
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        order = [
+            "exited_monotonic, exited_at = time.monotonic(), time.time()",
+            'set_stage("remove_container", case)',
+            'set_stage("simulate_lease_expiry", case)',
+            'set_stage("wait_hermes_turn_lease_expiry", case)',
+            'set_stage("restart_agent", case)',
+        ]
+        positions = [source.index(step) for step in order]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(source.count("wait_stopped_turn_lease_expiry("), 2)
 
     def test_production_lease_ttl_matches_the_sidecar(self) -> None:
         source = SIDECAR_INBOX_PATH.read_text(encoding="utf-8")
