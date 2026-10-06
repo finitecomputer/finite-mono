@@ -18,7 +18,8 @@ Reads only `<state_root>/agent` (the guest's `/data/agent`):
   `ended_at IS NULL` until the child finishes, then is ended just before the
   result is delivered. Open rows started before the current gateway process
   are dead children of an earlier process and only reported. A read killed
-  mid-copy leaves its copy behind; the next read removes it.
+  mid-copy leaves its copy behind; a later read removes it once it is stale
+  and no live read holds its lock.
 
 The finitechat loaders default the three inbox/marker files to empty on
 NotFound, so absence reads as empty only beneath a valid root with a running
@@ -65,7 +66,7 @@ MAX_SESSION_DB_BYTES = 4 * 1024 * 1024 * 1024
 QUIET_AFTER_ACK_S = 30 * 60
 # A /bg row is ended before its result is sent (30 s per send).
 BACKGROUND_DELIVERY_S = 5 * 60
-# Kata guests run no NTP; beyond this the guest clock is not trusted at all.
+# Guest time sync on our hosts is unverified; past this offset the guest clock is not trusted.
 MAX_CLOCK_OFFSET_MS = 60 * 1000
 GATEWAY_STATES = frozenset({"starting", "running", "degraded", "draining", "stopping",
                             "stopped", "startup_failed"})
@@ -166,7 +167,8 @@ def _age_s(now_ms: int, then_ms: int) -> int:
 
 def _clock_offset_ms(updated_at: Any, written_ns: int) -> int | None:
     """Host minus guest clock at the file's last write. The write's own latency
-    adds to it, which moves guest times later: toward busy."""
+    only makes it larger, so the estimated guest now is earlier and guest
+    stamps look more recent: toward busy."""
     try:
         updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
     except (AttributeError, ValueError, TypeError):
