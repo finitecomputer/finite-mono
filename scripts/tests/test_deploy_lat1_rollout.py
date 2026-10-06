@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ROLLOUT = ROOT / "scripts" / "rollout-lat1-runtime-artifact"
 TARGET_IMAGE = "ghcr.io/finitecomputer/agent-runtime:v2@sha256:" + "b" * 64
 OLD_IMAGE = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:" + "a" * 64
+STATUS_COMMAND = "/root/finite-status-release/finite-status"
 
 
 def plan_entry(
@@ -279,6 +280,24 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                         checks: [{name: "containerd_task", status: (if $verdict == "operable" then "pass" else "fail" end), finding: $reason, detail: "fixture", evidence: {}}]
                       }'
                   exit "${FAKE_PROBE_STATUS:-0}"
+                fi
+                if [[ $command == *"provider-runtime-idle-v1"* ]]; then
+                  suffix="${command##*provider-runtime-idle-v1}"
+                  read -r status_command project runtime machine host <<<"$suffix"
+                  if [[ -n ${FAKE_IDLE_REPORT:-} ]]; then
+                    printf '%s\n' "$FAKE_IDLE_REPORT"
+                    exit "${FAKE_IDLE_STATUS:-0}"
+                  fi
+                  jq -cn --arg project "$project" --arg runtime "$runtime" --arg machine "$machine" --arg host "$host" '
+                    {schema_version:"finite.status.v1", generated_at:"2026-10-06T00:00:00Z", overall_status:"green", exit_code:0,
+                     sections:{runtime_idle:{status:"green", project_id:$project, agent_runtime_id:$runtime,
+                       source_machine_id:$machine, source_host_id:$host,
+                       lifecycle:{verdict:"operable", reason:null},
+                       gateway:{state:"running", active_agents:0, updated_age_s:5},
+                       hermes_inbox:{present:true, pending:0, leased:0, oldest_pending_age_s:null, oldest_lease_age_s:null, newest_lease_age_s:null},
+                       agentd_inbox:{present:true, events:0}, running_markers:{present:false, messages:0},
+                       verdict:"idle", reasons:[]}}}'
+                  exit "${FAKE_IDLE_STATUS:-0}"
                 fi
                 if [[ -n ${FAKE_EXEC_RESULT:-} ]]; then
                   printf '%s\\n' "$FAKE_EXEC_RESULT"
@@ -928,6 +947,8 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(executed.returncode, 0, executed.stderr)
             self.assertIn("lifecycle probe unavailable", executed.stdout)
             calls = log.read_text(encoding="utf-8").splitlines()
+            # Without --roll-require-runtime-idle no idle read happens.
+            self.assertFalse(any("provider-runtime-idle-v1" in call for call in calls))
             self.assertTrue(
                 any(
                     "--expected-agent-runtime-id" in call and "--plan-only" not in call
@@ -1204,6 +1225,428 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(len(probe_events), 1, events)
             self.assertEqual(probe_events[0]["status"], "skipped")
             self.assertEqual(probe_events[0]["reason"], "probe_invalid_report")
+
+    def runtime_idle_report(self) -> dict[str, object]:
+        return {
+            "schema_version": "finite.status.v1",
+            "generated_at": "2026-10-06T00:00:00Z",
+            "overall_status": "green",
+            "exit_code": 0,
+            "sections": {
+                "runtime_idle": {
+                    "status": "green",
+                    "project_id": "project-a",
+                    "agent_runtime_id": "runtime-a",
+                    "source_machine_id": "kata-a",
+                    "source_host_id": "finite-lat-1",
+                    "lifecycle": {"verdict": "operable", "reason": None},
+                    "gateway": {
+                        "state": "running",
+                        "active_agents": 0,
+                        "updated_age_s": 5,
+                    },
+                    "hermes_inbox": {
+                        "present": True,
+                        "pending": 0,
+                        "leased": 0,
+                        "oldest_pending_age_s": None,
+                        "oldest_lease_age_s": None,
+                        "newest_lease_age_s": None,
+                    },
+                    "agentd_inbox": {"present": True, "events": 0},
+                    "running_markers": {"present": False, "messages": 0},
+                    "verdict": "idle",
+                    "reasons": [],
+                }
+            },
+        }
+
+    def execute_with_idle_gate(
+        self, env: dict[str, str], plan_hash: str
+    ) -> subprocess.CompletedProcess[str]:
+        return self.run_rollout(
+            "--execute-plan-hash",
+            plan_hash,
+            *self.actor_args(),
+            "--roll-project-id",
+            "project-a",
+            "--roll-require-runtime-idle",
+            STATUS_COMMAND,
+            env=env,
+        )
+
+    def test_runtime_idle_gate_is_the_last_runner_read_before_enqueue(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            entry = plan_entry("project-a", "runtime-a", "kata-a")
+            facts = [provider_fact("project-a", "runtime-a", "kata-a")]
+            env, log, state_root = self.fake_ssh_environment(
+                temp, rollout_report([entry]), facts
+            )
+            prepared, plan_hash = self.prepare(
+                env,
+                "--roll-project-id",
+                "project-a",
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            # The copy-paste execute command keeps the gate.
+            self.assertIn(
+                f"--roll-require-runtime-idle {STATUS_COMMAND}", prepared.stdout
+            )
+            self.assertFalse(
+                any(
+                    "provider-runtime-idle-v1" in call
+                    for call in log.read_text(encoding="utf-8").splitlines()
+                )
+            )
+            log.write_text("", encoding="utf-8")
+
+            executed = self.execute_with_idle_gate(env, plan_hash)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            idle = [
+                i for i, call in enumerate(calls) if "provider-runtime-idle-v1" in call
+            ]
+            enqueue = [
+                i
+                for i, call in enumerate(calls)
+                if "--expected-agent-runtime-id" in call and "--plan-only" not in call
+            ]
+            self.assertEqual(len(idle), 1, calls)
+            self.assertEqual(len(enqueue), 1, calls)
+            self.assertEqual(idle[0], enqueue[0] - 1, calls)
+            self.assertTrue(
+                calls[idle[0]].startswith("root@test-lat1\t"), calls[idle[0]]
+            )
+            self.assertTrue(
+                calls[idle[0]].endswith(
+                    f"provider-runtime-idle-v1 {STATUS_COMMAND} project-a runtime-a kata-a finite-lat-1"
+                ),
+                calls[idle[0]],
+            )
+            drift_reads = [
+                i
+                for i, call in enumerate(calls)
+                if "provider-snapshot-v1" in call and i < enqueue[0]
+            ]
+            self.assertTrue(drift_reads)
+            self.assertLess(max(drift_reads), idle[0])
+
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            names = [event["event"] for event in events]
+            gate = names.index("entry_idle_gate")
+            self.assertEqual(events[gate]["status"], "succeeded")
+            self.assertEqual(
+                names[gate - 1 : gate + 2],
+                ["entry_preflight", "entry_idle_gate", "core"],
+            )
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["passed_count"], 1)
+            self.assertEqual(events[-1]["idle_skipped"], 0)
+
+    def test_runtime_idle_gate_never_enqueues_unless_exactly_idle(self) -> None:
+        exact = self.runtime_idle_report()
+
+        def variant(mutate) -> str:
+            report = json.loads(json.dumps(exact))
+            mutate(report, report["sections"]["runtime_idle"])
+            return json.dumps(report)
+
+        def busy(report, section) -> None:
+            report.update(overall_status="red", exit_code=1)
+            section.update(status="red", verdict="busy", reasons=["inbox_leased"])
+            section["hermes_inbox"].update(leased=1, oldest_lease_age_s=4)
+
+        def unknown(report, section) -> None:
+            report.update(overall_status="unknown", exit_code=2)
+            section.update(
+                status="unknown", verdict="unknown", reasons=["lifecycle_not_operable"]
+            )
+            section["lifecycle"]["verdict"] = "degraded"
+
+        cases = {
+            "busy": (variant(busy), "1"),
+            "unknown": (variant(unknown), "2"),
+            "idle_but_nonzero_exit": (json.dumps(exact), "1"),
+            "other_runtime": (
+                variant(lambda r, s: s.update(agent_runtime_id="runtime-b")),
+                "0",
+            ),
+            "other_host": (
+                variant(lambda r, s: s.update(source_host_id="finite-lat-3")),
+                "0",
+            ),
+            "idle_with_active_agent": (
+                variant(lambda r, s: s["gateway"].update(active_agents=1)),
+                "0",
+            ),
+            "idle_with_queued_event": (
+                variant(lambda r, s: s["hermes_inbox"].update(pending=1)),
+                "0",
+            ),
+            "idle_with_running_marker": (
+                variant(lambda r, s: s["running_markers"].update(messages=1)),
+                "0",
+            ),
+            "idle_but_lifecycle_degraded": (
+                variant(lambda r, s: s["lifecycle"].update(verdict="degraded")),
+                "0",
+            ),
+            "string_count": (
+                variant(lambda r, s: s["agentd_inbox"].update(events="0")),
+                "0",
+            ),
+            "extra_section_key": (variant(lambda r, s: s.update(note="x")), "0"),
+            "malformed": ("not json", "0"),
+            "two_documents": (json.dumps(exact) + json.dumps(exact), "0"),
+            "transport": ("", "255"),
+        }
+        for name, (report, status) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
+                temp = Path(directory)
+                env, log, state_root, plan_hash = self.single_entry_environment(temp)
+                env["FAKE_IDLE_REPORT"] = report
+                env["FAKE_IDLE_STATUS"] = status
+
+                executed = self.execute_with_idle_gate(env, plan_hash)
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                self.assertIn("deliberately skipping", executed.stdout)
+                calls = log.read_text(encoding="utf-8").splitlines()
+                self.assertEqual(
+                    sum("provider-runtime-idle-v1" in call for call in calls), 1, calls
+                )
+                self.assertFalse(
+                    any(
+                        "--expected-agent-runtime-id" in call
+                        and "--plan-only" not in call
+                        for call in calls
+                    ),
+                    calls,
+                )
+                events = [
+                    event
+                    for event in self.read_events(state_root, plan_hash)
+                    if event["phase"] == "execute"
+                ]
+                gates = [
+                    event for event in events if event["event"] == "entry_idle_gate"
+                ]
+                self.assertEqual(len(gates), 1, events)
+                self.assertEqual(gates[0]["status"], "skipped")
+                self.assertEqual(gates[0]["exit_code"], int(status))
+                self.assertFalse(any(event["event"] == "core" for event in events))
+                self.assertEqual(events[-1]["status"], "success")
+                self.assertEqual(events[-1]["idle_skipped"], 1)
+                self.assertEqual(events[-1]["passed_count"], 0)
+                self.assertEqual(events[-1]["absent_count"], 0)
+                summarized = self.run_rollout(
+                    "--summarize", env={"ROLLOUT_STATE_ROOT": str(state_root)}
+                )
+                self.assertIn("idle_skipped=1 resume=-", summarized.stdout)
+
+                if name == "busy":
+                    # Retry protocol: the same approved hash runs normally
+                    # once the Agent reads exactly idle.
+                    del env["FAKE_IDLE_REPORT"]
+                    del env["FAKE_IDLE_STATUS"]
+                    retried = self.execute_with_idle_gate(env, plan_hash)
+                    self.assertEqual(retried.returncode, 0, retried.stderr)
+                    final = self.read_events(state_root, plan_hash)[-1]
+                    self.assertEqual(final["status"], "success")
+                    self.assertEqual(final["passed_count"], 1)
+                    self.assertEqual(final["idle_skipped"], 0)
+
+    def test_probe_unavailable_with_runtime_idle_gate_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_STATUS"] = "1"
+
+            executed = self.execute_with_idle_gate(env, plan_hash)
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("fails closed", executed.stdout)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertFalse(any("provider-runtime-idle-v1" in call for call in calls))
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probes = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probes), 1, events)
+            self.assertEqual(probes[0]["status"], "skipped")
+            self.assertEqual(probes[0]["reason"], "probe_unavailable")
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["probe_skipped"], 1)
+            self.assertEqual(events[-1]["absent_count"], 0)
+
+    def test_runtime_idle_gate_argument_refusals(self) -> None:
+        single = ("--roll-project-id", "project-a")
+        refused = {
+            "roll_all": (
+                "--roll-all",
+                "--roll-canary-project-id",
+                "project-canary",
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+            ),
+            "probe_override": (
+                *single,
+                "--probe-override",
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+            ),
+            "two_projects": (
+                *single,
+                "--roll-project-id",
+                "project-b",
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+            ),
+            "repeated": (
+                *single,
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+                "--roll-require-runtime-idle",
+                STATUS_COMMAND,
+            ),
+            "missing_value": (*single, "--roll-require-runtime-idle"),
+        }
+        for path in (
+            "",
+            "finite-status",
+            "/",
+            "/root/finite-status --json",
+            "/root/../tmp/finite-status",
+            "/root/./finite-status",
+            "/root//finite-status",
+            "/root/.hidden/finite-status",
+            "/root/-x",
+            "/root/$(id)",
+            "/root/finite-status;id",
+        ):
+            refused[f"path {path!r}"] = (*single, "--roll-require-runtime-idle", path)
+        for name, scope in refused.items():
+            with self.subTest(case=name):
+                result = self.run_rollout(
+                    "--validate-only", "--prepare", *self.actor_args(), *scope
+                )
+                self.assertEqual(result.returncode, 64, result.stderr)
+
+        with tempfile.TemporaryDirectory() as directory:
+            env, log, _ = self.fake_ssh_environment(
+                Path(directory), rollout_report([]), []
+            )
+            result = self.run_rollout(
+                "--prepare",
+                *self.actor_args(),
+                *single,
+                "--roll-require-runtime-idle",
+                "/root/../finite-status",
+                env=env,
+            )
+            self.assertEqual(result.returncode, 64)
+            self.assertFalse(log.exists())
+
+        accepted = self.run_rollout(
+            "--validate-only",
+            "--execute-plan-hash",
+            "0" * 64,
+            *self.actor_args(),
+            *single,
+            "--roll-require-runtime-idle",
+            STATUS_COMMAND,
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+
+    def test_runtime_idle_read_uses_probe_runner_environment_and_binary(self) -> None:
+        text = ROLLOUT.read_text()
+        probe = text.split("read -r -d '' probe_script <<'REMOTE' || true\n", 1)[
+            1
+        ].split("\nREMOTE", 1)[0]
+        script = text.split("read -r -d '' idle_script <<'REMOTE' || true\n", 1)[
+            1
+        ].split("\nREMOTE", 1)[0]
+        shared_block = probe[
+            probe.index("set -a\n") : probe.index('exec "$runner_bin"')
+        ]
+        self.assertIn(shared_block, script)
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            shared = temp / "runner-shared.env"
+            operator = temp / "runner.env"
+            runner = temp / "finite-saas-runner"
+            runner.write_text("#!/bin/sh\nexit 0\n")
+            runner.chmod(0o755)
+            status = temp / "finite-status"
+            status.write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$FINITE_STATUS_LIFECYCLE_PROBE_BIN" "$FC_RUNNER_ID" "$@"\nexit 1\n'
+            )
+            status.chmod(0o755)
+            script = script.replace("/etc/finite/runner-shared.env", str(shared))
+            script = script.replace("/etc/finite/runner.env", str(operator))
+            script = script.replace(
+                "/run/current-system/sw/bin/finite-saas-runner", str(runner)
+            )
+            shared.write_text("FC_RUNNER_ID=shared-runner\n")
+            operator.write_text("FC_RUNNER_ID=operator-runner\n")
+            env = {
+                k: v
+                for k, v in os.environ.items()
+                if not k.startswith(("FC_RUNNER_", "FINITE_STATUS_"))
+            }
+            args = [
+                "provider-runtime-idle-v1",
+                str(status),
+                "project-a",
+                "runtime-a",
+                "kata-a",
+                "finite-lat-3",
+            ]
+            result = subprocess.run(
+                ["bash", "-s", "--", *args],
+                input=script,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            # The canonical status exit code is returned unchanged.
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [
+                    str(runner),
+                    "operator-runner",
+                    "--runtime-idle",
+                    "project-a",
+                    "runtime-a",
+                    "kata-a",
+                    "finite-lat-3",
+                ],
+            )
+            short = subprocess.run(
+                ["bash", "-s", "--", *args[:-1]],
+                input=script,
+                text=True,
+                capture_output=True,
+                env=env,
+            )
+            self.assertEqual(short.returncode, 64)
 
     def test_hash_drift_refuses_before_first_enqueue(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

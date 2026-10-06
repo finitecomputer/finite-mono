@@ -406,6 +406,19 @@ means an earlier interrupted turn left a running marker; the restart will post
 one notice per marker to the user. The check is a point-in-time read, not a stop
 fence. A message that arrives between the check and the stop can still strand.
 
+To make that read part of execution, pass
+`--roll-require-runtime-idle /absolute/path/to/finite-status` (the path on the
+Runner host) to both `--prepare` and `--execute-plan-hash`. It requires exactly
+one `--roll-project-id` and refuses `--roll-all` and `--probe-override`. After
+the final provider-fact drift check, the wrapper runs `--runtime-idle` for the
+exact assignment under the Runner's environment and binary, as its last Runner
+call before Core enqueues. Only exit 0 with an exact green, `idle`, operable,
+all-zero report enqueues. Anything else, and an unavailable lifecycle probe,
+records an `entry_idle_gate` or `entry_lifecycle_probe` skip; the run still ends
+`success`, with `idle_skipped` or `probe_skipped` counted. Re-execute the same
+approved hash later to retry. This narrows the window to the gate read, Core's
+enqueue and the Runner's pickup; it is still not atomic with the stop.
+
 #### Lifecycle probe gate, skips, and the override
 
 Before enqueueing each entry, the wrapper consults the runner's read-only
