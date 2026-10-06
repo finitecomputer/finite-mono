@@ -1,0 +1,178 @@
+--- a/hermes_cli/goals.py
++++ b/hermes_cli/goals.py
+@@ -846,22 +846,55 @@
+     except Exception as exc:
+         logger.warning("GoalManager: could not parse stored goal for %s: %s", session_id, exc)
+         return None
++
++
++# Finite: the gateway judges a goal off the event loop while /goal controls
++# stay live on it. The judge's writes are held per thread and committed once,
++# under the lock every goal write takes, only if the stored goal is unchanged.
++_GOAL_WRITE_LOCK = threading.Lock()
++_DEFERRED_GOAL_WRITES = threading.local()
+ 
+ 
++def _goal_json(state: Optional[GoalState]) -> Optional[str]:
++    """``state`` as stored, normalized so loaded and stored forms compare."""
++    return GoalState.from_json(state.to_json()).to_json() if state is not None else None
++
++
+ def save_goal(session_id: str, state: GoalState) -> None:
+     """Persist a goal to SessionDB. No-op if DB unavailable."""
+     if not session_id:
+         return
++    deferred = getattr(_DEFERRED_GOAL_WRITES, "writes", None)
++    if deferred is not None and session_id in deferred:
++        deferred[session_id] = state.to_json()
++        return
+     db = _get_session_db()
+     if db is None:
+         _warn_dropped_write("GoalManager", "goal", session_id)
+         return
+     try:
+-        db.set_meta(_meta_key(session_id), state.to_json())
++        with _GOAL_WRITE_LOCK:
++            db.set_meta(_meta_key(session_id), state.to_json())
+     except Exception as exc:
+         logger.debug("GoalManager: set_meta failed: %s", exc)
+ 
+ 
++def _commit_goal_if_unchanged(session_id: str, expected: Optional[str], latest: str) -> bool:
++    """Write ``latest`` only while the stored goal is still ``expected``."""
++    db = _get_session_db()
++    if db is None:
++        _warn_dropped_write("GoalManager", "goal", session_id)
++        return False
++    with _GOAL_WRITE_LOCK:
++        if _goal_json(load_goal(session_id)) != expected:
++            return False
++        try:
++            db.set_meta(_meta_key(session_id), latest)
++        except Exception as exc:
++            logger.debug("GoalManager: set_meta failed: %s", exc)
++    return True
++
++
+ def clear_goal(session_id: str) -> None:
+     """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
+     state = load_goal(session_id)
+@@ -1860,6 +1893,24 @@
+ 
+     # --- the main entry point called after every turn -----------------
+ 
++    def matches_stored(self) -> bool:
++        """Finite: whether the stored goal is still this manager's state."""
++        return _goal_json(self._state) == _goal_json(load_goal(self.session_id))
++
++    def still_reports(self, decision: Dict[str, Any]) -> bool:
++        """Finite: whether the stored goal is still this one, in ``decision``'s status.
++
++        Later turns of the same goal may have moved it on; a control that
++        paused, cleared or replaced it makes the decision's notice stale.
++        """
++        stored, state = load_goal(self.session_id), self._state
++        return (
++            stored is not None
++            and state is not None
++            and (stored.goal, stored.created_at) == (state.goal, state.created_at)
++            and stored.status == decision.get("status")
++        )
++
+     def evaluate_after_turn(
+         self,
+         last_response: str,
+@@ -1867,6 +1918,48 @@
+         user_initiated: bool = True,
+         background_processes: Optional[List[Dict[str, Any]]] = None,
+     ) -> Dict[str, Any]:
++        """Finite: judge the turn, and apply the decision only if still current.
++
++        The gateway runs this off the event loop, while /goal pause, clear,
++        wait and gate stay live on it. This manager loaded the goal before
++        any gate command or judge ran; writing that state back after such a
++        control would revive a paused or cleared goal and queue another turn.
++        The decision's writes are held and committed once, only while the
++        stored goal is still the one judged. Otherwise the decision is
++        superseded: no write, no message and no continuation.
++        """
++        expected = _goal_json(self._state)
++        writes: Dict[str, Optional[str]] = {self.session_id: None}
++        outer = getattr(_DEFERRED_GOAL_WRITES, "writes", None)
++        _DEFERRED_GOAL_WRITES.writes = writes
++        try:
++            decision = self._judge_after_turn(
++                last_response,
++                user_initiated=user_initiated,
++                background_processes=background_processes,
++            )
++        finally:
++            _DEFERRED_GOAL_WRITES.writes = outer
++        latest = writes[self.session_id]
++        if latest is None or _commit_goal_if_unchanged(self.session_id, expected, latest):
++            return decision
++        self._state = load_goal(self.session_id)
++        return {
++            "status": self._state.status if self._state else None,
++            "should_continue": False,
++            "continuation_prompt": None,
++            "verdict": "superseded",
++            "reason": "goal changed while the turn was judged",
++            "message": "",
++        }
++
++    def _judge_after_turn(
++        self,
++        last_response: str,
++        *,
++        user_initiated: bool = True,
++        background_processes: Optional[List[Dict[str, Any]]] = None,
++    ) -> Dict[str, Any]:
+         """Run the judge and update state. Return a decision dict.
+ 
+         ``user_initiated`` distinguishes a real user prompt (True) from a
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -23434,7 +23434,9 @@
+                 getattr(result, "error", "unknown error"),
+             )
+ 
+-    async def _defer_goal_status_notice_after_delivery(self, source: Any, message: str) -> None:
++    async def _defer_goal_status_notice_after_delivery(
++        self, source: Any, message: str, still_current: Any = None
++    ) -> None:
+         """Send a /goal status line after the main response is delivered.
+ 
+         The gateway message handler returns the agent response to the platform
+@@ -23450,6 +23452,9 @@
+             return
+ 
+         async def _deliver() -> None:
++            # Finite: a /goal control can land before the reply is delivered.
++            if still_current is not None and not still_current():
++                return
+             try:
+                 await self._send_goal_status_notice(source, message)
+             except Exception as exc:
+@@ -23538,6 +23543,10 @@
+                 background_processes=_bg_procs,
+             ),
+         )
++        # Finite: a /goal control can land after the judge's commit and
++        # before this resumes. Its reply is sent; this decision is stale.
++        if not mgr.matches_stored():
++            return
+         msg = decision.get("message") or ""
+ 
+         # Defer the status line until after the adapter has delivered the
+@@ -23547,7 +23556,9 @@
+         # an awaited post-delivery callback preserves delivery reliability
+         # without reversing the user-visible ordering.
+         if msg and source is not None:
+-            await self._defer_goal_status_notice_after_delivery(source, msg)
++            await self._defer_goal_status_notice_after_delivery(
++                source, msg, still_current=lambda: mgr.still_reports(decision)
++            )
+ 
+         if not decision.get("should_continue"):
+             return

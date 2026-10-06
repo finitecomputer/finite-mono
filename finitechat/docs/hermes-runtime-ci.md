@@ -78,6 +78,37 @@ gh workflow run hermes-runtime-smoke.yml \
   -f chat_interruption_smoke=true
 ```
 
+The chat interruption smoke uses a real Hermes and the production inbox lease
+TTL of 45 minutes. It fails if the Agent sets
+`FINITECHAT_HERMES_LEASE_TTL_MILLIS`. It runs these cases:
+
+- **Three graceful stops** (`docker stop --time 15`), each with its own
+  markers. Before restart, the stopped inbox must have no entry in the Leased
+  state. Both the queued follow-up and interrupted turn must be Pending: the
+  fake provider is stalled, so neither turn can have completed. Repeating the
+  stop exercises the race where a lease is
+  released and then re-leased onto the adapter's closing stream.
+- **SIGKILL.** A crash strands both leases until the TTL expires. The smoke
+  does not wait 45 minutes. After it proves exit 137 and removes the
+  container, it backdates exactly the two known `leased_at_ms` values past the
+  TTL on the synthetic volume. The write is a compare-and-swap on the inbox
+  digest. The report records the original times and digests. The sidecar's
+  own expiry rule then redelivers both entries.
+
+  The killed gateway also leaves Hermes's own per-session turn lease in
+  `state.db`. Hermes reclaims it early only when the holder's PID is gone, and
+  the new container can reuse that PID, so the lease can last its full
+  5-minute TTL. A real crash is redelivered only after the 45-minute inbox
+  TTL, so this lease has lapsed by then. The smoke matches that by waiting out
+  the pinned TTL plus a margin, timed from the proven exit, before restart. It
+  never edits `state.db`. It reads a copy and requires that a lease existed,
+  that nothing changed it while the Agent was stopped, and that it had lapsed.
+- **Empty-target restore** after a graceful stop.
+
+After every restart, the queued follow-up must reach the model exactly once.
+If the interrupted turn reruns, it must run before the follow-up. The fresh
+turns must reply, and both entries must end acked and out of the inbox.
+
 ## Current Caveat
 
 The Tinfoil backup/restore Docker smoke is no longer the default `main` gate.
