@@ -7,12 +7,15 @@ import argparse
 import copy
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -48,6 +51,16 @@ SIMULATED_EXPIRY_MARGIN_MS = 60_000
 # Tolerated host/daemon clock skew when checking a fresh lease's age.
 LEASE_CLOCK_SKEW_MS = 60_000
 FINAL_ACK_TIMEOUT_SECS = 60
+# Mirrors pinned Hermes `run_agent` `_lease_ttl`; a contract test pins the two.
+# Every turn on an existing session holds this cross-process lease in
+# state.db, refreshed while the turn runs. A SIGKILLed gateway cannot release
+# it, and a recycled PID in the new container can stop Hermes reclaiming it
+# early, so it lasts until its own TTL. A real crash is redelivered only after
+# the 45-minute inbox TTL, long after this lease lapses. The SIGKILL case
+# waits it out in real time and never edits Hermes state.
+HERMES_TURN_LEASE_TTL_SECS = 300
+HERMES_TURN_LEASE_MARGIN_SECS = 15
+HERMES_STATE_DIR = f"{AGENT_HOME_MOUNT}/.hermes"
 
 spec = importlib.util.spec_from_file_location("hermes_durable_smoke", DURABLE_SMOKE_PATH)
 assert spec is not None and spec.loader is not None
@@ -689,6 +702,116 @@ def write_stopped_inbox(
     )
 
 
+def read_stopped_turn_leases(*, image: str, home_volume: str) -> list[dict[str, Any]]:
+    """List Hermes turn leases from a copy of the stopped Agent's state.db.
+
+    The volume is mounted read-only; only a host-side copy is opened, so
+    SQLite replays the killed gateway's WAL without touching the volume.
+    """
+    inspected = smoke.run(["docker", "volume", "inspect", home_volume], check=False, timeout=30)
+    if inspected.returncode != 0:
+        raise SmokeFailure(f"home volume {home_volume} does not exist")
+    script = (
+        f'cd "{HERMES_STATE_DIR}"\n'
+        "set -- state.db\n"
+        'if [ -e state.db-wal ]; then set -- "$@" state.db-wal; fi\n'
+        'exec tar -cf - "$@"\n'
+    )
+    result = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "/bin/sh",
+            "--mount",
+            f"type=volume,src={home_volume},dst={AGENT_HOME_MOUNT},readonly",
+            image,
+            "-c",
+            script,
+        ],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SmokeFailure(f"state.db read exited {result.returncode}: {result.stderr[-500:]!r}")
+    with tempfile.TemporaryDirectory(prefix="finite-hermes-state-") as scratch:
+        with tarfile.open(fileobj=io.BytesIO(result.stdout)) as archive:
+            archive.extractall(scratch, filter="data")
+        conn = sqlite3.connect(Path(scratch) / "state.db")
+        try:
+            rows = conn.execute(
+                "SELECT conversation_id, holder, acquired_at, expires_at "
+                "FROM session_turn_leases ORDER BY conversation_id"
+            ).fetchall()
+        finally:
+            conn.close()
+    return [
+        {"conversation_id": row[0], "holder": row[1], "acquired_at": row[2], "expires_at": row[3]}
+        for row in rows
+    ]
+
+
+def wait_turn_lease_expiry(
+    exited_monotonic: float,
+    *,
+    ttl_secs: float = HERMES_TURN_LEASE_TTL_SECS,
+    margin_secs: float = HERMES_TURN_LEASE_MARGIN_SECS,
+    monotonic: Any = time.monotonic,
+    sleep: Any = time.sleep,
+) -> dict[str, Any]:
+    """Sleep until a lease last refreshed at the proven exit has lapsed."""
+    deadline = exited_monotonic + ttl_secs + margin_secs
+    started = monotonic()
+    while (remaining := deadline - monotonic()) > 0:
+        sleep(remaining)
+    finished = monotonic()
+    return {
+        "pinned_ttl_secs": ttl_secs,
+        "margin_secs": margin_secs,
+        "waited_secs": round(finished - started, 3),
+        "since_exit_secs": round(finished - exited_monotonic, 3),
+    }
+
+
+def require_turn_leases_lapsed(
+    before: list[dict[str, Any]],
+    after: list[dict[str, Any]],
+    *,
+    exited_at: float,
+    now: float,
+    ttl_secs: float = HERMES_TURN_LEASE_TTL_SECS,
+) -> list[dict[str, Any]]:
+    """The killed gateway's turn leases lapse on their own clock before restart.
+
+    `exited_at` is taken once exit 137 is proven, so no refresh can be later:
+    every lease must expire by `exited_at + ttl_secs`, be unchanged while the
+    Agent is stopped, and have expired by `now`.
+    """
+    if not before:
+        raise SmokeFailure("SIGKILL left no Hermes turn lease; the case no longer covers it")
+    if after != before:
+        raise SmokeFailure(f"Hermes turn leases changed while stopped: {before} -> {after}")
+    records = []
+    for row in before:
+        expires_at = float(row["expires_at"])
+        if expires_at > exited_at + ttl_secs:
+            raise SmokeFailure(f"turn lease outlives its TTL after the exit: {row}")
+        if expires_at >= now:
+            raise SmokeFailure(f"turn lease has not lapsed before restart: {row}")
+        records.append(
+            {
+                "holder": row["holder"],
+                "expired_secs_before_restart": round(now - expires_at, 3),
+                "expires_secs_after_exit": round(expires_at - exited_at, 3),
+            }
+        )
+    return records
+
+
 def require_settled_out_of_inbox(
     inbox: dict[str, Any], *, message_ids: dict[str, str]
 ) -> dict[str, Any]:
@@ -933,6 +1056,10 @@ def main() -> int:
                 "simulated: the two known leases are backdated past the production TTL "
                 "on the stopped synthetic volume after a proven SIGKILL"
             ),
+            "sigkill_hermes_turn_lease": (
+                "waited in real time: the pinned Hermes turn lease TTL plus a margin "
+                "after the proven SIGKILL, read-only state.db check before restart"
+            ),
             "production_kata_task_and_stable_manifest_gate": False,
         },
     }
@@ -1077,6 +1204,7 @@ def main() -> int:
                 ["docker", "inspect", "--format", "{{.State.ExitCode}}", name], timeout=30
             ).stdout.strip()
         )
+        exited_monotonic, exited_at = time.monotonic(), time.time()
         if kill and exit_code != 137:
             raise SmokeFailure(f"{case_name} exited {exit_code}, expected SIGKILL exit 137")
         if not kill and exit_code == 137:
@@ -1098,6 +1226,10 @@ def main() -> int:
         if kill:
             set_stage("simulate_lease_expiry", case)
             case["simulated_lease_expiry"] = simulate_stopped_lease_expiry(case_name, message_ids)
+            set_stage("wait_hermes_turn_lease_expiry", case)
+            case["hermes_turn_lease_expiry"] = wait_stopped_turn_lease_expiry(
+                exited_monotonic, exited_at
+            )
         if restore:
             set_stage("archive_and_restore", case)
             case["archive_sha256"] = volume_archive(
@@ -1221,6 +1353,13 @@ def main() -> int:
             "simulated_sha256": sha256_text(fixture_text),
             "original_copy": str(original_copy),
         }
+
+    def wait_stopped_turn_lease_expiry(exited_monotonic: float, exited_at: float) -> dict[str, Any]:
+        before = read_stopped_turn_leases(image=image, home_volume=home_volume)
+        waited = wait_turn_lease_expiry(exited_monotonic)
+        after = read_stopped_turn_leases(image=image, home_volume=home_volume)
+        leases = require_turn_leases_lapsed(before, after, exited_at=exited_at, now=time.time())
+        return {**waited, "leases": leases}
 
     def wait_inbox_settled(message_ids: dict[str, str]) -> dict[str, Any]:
         deadline = time.monotonic() + FINAL_ACK_TIMEOUT_SECS

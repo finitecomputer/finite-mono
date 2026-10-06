@@ -94,6 +94,15 @@ TTL of 45 minutes. It fails if the Agent sets
   TTL on the synthetic volume. The write is a compare-and-swap on the inbox
   digest. The report records the original times and digests. The sidecar's
   own expiry rule then redelivers both entries.
+
+  The killed gateway also leaves Hermes's own per-session turn lease in
+  `state.db`. Hermes reclaims it early only when the holder's PID is gone, and
+  the new container can reuse that PID, so the lease can last its full
+  5-minute TTL. A real crash is redelivered only after the 45-minute inbox
+  TTL, so this lease has lapsed by then. The smoke matches that by waiting out
+  the pinned TTL plus a margin, timed from the proven exit, before restart. It
+  never edits `state.db`. It reads a copy and requires that a lease existed,
+  that nothing changed it while the Agent was stopped, and that it had lapsed.
 - **Empty-target restore** after a graceful stop.
 
 After every restart, the queued follow-up must reach the model exactly once.
