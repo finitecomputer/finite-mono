@@ -1,10 +1,12 @@
 import asyncio
+import contextlib
 import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -2405,6 +2407,82 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(adapter.handled_messages[0].text, "hello from stream")
         message_acks = [call for call in ack_calls if call[0] == "ack"]
         self.assertEqual(message_acks[0][1]["message_id"], "msg-12")
+
+    def test_cancelled_stream_releases_an_event_it_never_consumed(self):
+        """Disconnect cancels the loop while the worker can still read a record.
+
+        Hermes cancels background turns before ``disconnect()``. A lease such a
+        turn releases can be re-leased onto the stream and read by the worker
+        after the loop stopped consuming; it must not stay leased until the TTL.
+        """
+        adapter = self.module.FiniteChatAdapter(
+            PlatformConfig(
+                extra={
+                    "home": self.state_home,
+                    "room_id": "room-agent-1",
+                    "service_url": "http://127.0.0.1:9999",
+                    "finitechat_bin": "/bin/false",
+                    "inbound_stream": True,
+                }
+            )
+        )
+        adapter._mark_connected()
+        module = cast(Any, self.module)
+        original_worker = module._finitechat_service_stream_worker
+        worker_started = threading.Event()
+        calls = []
+
+        def fake_worker(service_url, payload, timeout, loop, queue, stop_event):
+            del service_url, payload, timeout
+            worker_started.set()
+            stop_event.wait(5)
+            self.module._put_stream_result(
+                loop,
+                queue,
+                self.module._FiniteChatResult(
+                    True,
+                    {
+                        "records": [
+                            {
+                                "type": "event",
+                                "event": {
+                                    "room_id": "room-agent-1",
+                                    "seq": 21,
+                                    "message_id": "msg-21",
+                                    "text": "re-leased during teardown",
+                                },
+                            }
+                        ]
+                    },
+                    None,
+                    False,
+                ),
+            )
+
+        async def fake_json(action, payload, *, timeout):
+            del timeout
+            calls.append((action, payload))
+            return self.module._FiniteChatResult(True, {}, None, False)
+
+        async def scenario():
+            task = asyncio.create_task(adapter._stream_loop())
+            await asyncio.to_thread(worker_started.wait, 5)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        try:
+            module._finitechat_service_stream_worker = fake_worker
+            adapter._finitechat_json = fake_json
+            asyncio.run(scenario())
+        finally:
+            module._finitechat_service_stream_worker = original_worker
+
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertEqual(
+            calls,
+            [("release", {"room_id": "room-agent-1", "seq": 21, "message_id": "msg-21"})],
+        )
 
     def test_stream_loop_skips_typed_receipt_records_without_dispatch_or_ack(self):
         adapter = self.module.FiniteChatAdapter(
