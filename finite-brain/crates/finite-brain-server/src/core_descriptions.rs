@@ -11,7 +11,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const DESCRIPTIONS_VERSION: &str = "finite-core-brain-identity-descriptions-v1";
+/// v1: Core also requires the account's sharing scope for this Brain.
+pub(crate) const DESCRIPTIONS_VERSION_V1: &str = "finite-core-brain-identity-descriptions-v1";
+/// v2 (FIN-166): Core describes the keys Brain asks about, which are only keys
+/// with recorded participation in this Brain. Brain asks v2 first.
+pub(crate) const DESCRIPTIONS_VERSION_V2: &str = "finite-core-brain-identity-descriptions-v2";
+/// Core's exact refusal of a version it does not serve. Only this answer
+/// downgrades to v1; any other failure stays a failure.
+const UNSUPPORTED_VERSION_ERROR: &str = "unsupported descriptions version";
+const MAX_ERROR_BYTES: u64 = 4 * 1024;
 const DESCRIPTIONS_PATH: &str = "/api/core/internal/v1/brain-identity-descriptions";
 const DESCRIPTION_CREDENTIAL_HEADER: &str = "x-finite-brain-description-credential";
 /// Keys per Core request; matches Core's batch ceiling.
@@ -166,44 +174,101 @@ pub(crate) fn http_core_description_lookup(
             .timeout(CORE_TOTAL_TIMEOUT)
             .redirects(0)
             .build();
-        let body = serde_json::json!({
-            "version": DESCRIPTIONS_VERSION,
-            "brainServer": request.brain_server,
-            "brainId": request.brain_id,
-            "requestedByPublicKeyHex": request.requested_by_hex,
-            "publicKeysHex": request.keys,
-        })
-        .to_string();
-        let response = match agent
-            .post(&url)
-            .set("content-type", "application/json")
-            .set(DESCRIPTION_CREDENTIAL_HEADER, &credential)
-            .send_string(&body)
-        {
-            Ok(response) => response,
-            Err(ureq::Error::Status(404 | 405, _)) => return Err(CoreLookupFailure::Unsupported),
-            Err(ureq::Error::Status(401 | 403, _)) => return Err(CoreLookupFailure::Unauthorized),
-            Err(ureq::Error::Status(status, _)) => {
-                return Err(CoreLookupFailure::Unavailable(format!("status {status}")));
+        match post_descriptions(&agent, &url, &credential, DESCRIPTIONS_VERSION_V2, request) {
+            // An older Core keeps its v1 policy; it never discloses more.
+            Err(Attempt::VersionUnsupported) => {
+                post_descriptions(&agent, &url, &credential, DESCRIPTIONS_VERSION_V1, request)
+                    .map_err(|attempt| match attempt {
+                        Attempt::VersionUnsupported => CoreLookupFailure::Unsupported,
+                        Attempt::Failed(failure) => failure,
+                    })
             }
-            Err(ureq::Error::Transport(_)) => {
-                return Err(CoreLookupFailure::Unavailable("transport".to_owned()));
-            }
-        };
-        let mut bytes = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_RESPONSE_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| CoreLookupFailure::Unavailable("read failed".to_owned()))?;
-        if bytes.len() as u64 > MAX_RESPONSE_BYTES {
-            return Err(CoreLookupFailure::Unavailable(
-                "response too large".to_owned(),
-            ));
+            Err(Attempt::Failed(failure)) => Err(failure),
+            Ok(response) => Ok(response),
         }
-        serde_json::from_slice(&bytes)
-            .map_err(|_| CoreLookupFailure::Unavailable("malformed response".to_owned()))
     }))
+}
+
+enum Attempt {
+    VersionUnsupported,
+    Failed(CoreLookupFailure),
+}
+
+fn post_descriptions(
+    agent: &ureq::Agent,
+    url: &str,
+    credential: &str,
+    version: &str,
+    request: &CoreLookupRequest,
+) -> Result<CoreDescriptionsResponse, Attempt> {
+    let failed = |failure| Err(Attempt::Failed(failure));
+    let body = serde_json::json!({
+        "version": version,
+        "brainServer": request.brain_server,
+        "brainId": request.brain_id,
+        "requestedByPublicKeyHex": request.requested_by_hex,
+        "publicKeysHex": request.keys,
+    })
+    .to_string();
+    let response = match agent
+        .post(url)
+        .set("content-type", "application/json")
+        .set(DESCRIPTION_CREDENTIAL_HEADER, credential)
+        .send_string(&body)
+    {
+        Ok(response) => response,
+        Err(ureq::Error::Status(400, response)) => {
+            return if refuses_version(response) {
+                Err(Attempt::VersionUnsupported)
+            } else {
+                failed(CoreLookupFailure::Unavailable("status 400".to_owned()))
+            };
+        }
+        Err(ureq::Error::Status(404 | 405, _)) => return failed(CoreLookupFailure::Unsupported),
+        Err(ureq::Error::Status(401 | 403, _)) => return failed(CoreLookupFailure::Unauthorized),
+        Err(ureq::Error::Status(status, _)) => {
+            return failed(CoreLookupFailure::Unavailable(format!("status {status}")));
+        }
+        Err(ureq::Error::Transport(_)) => {
+            return failed(CoreLookupFailure::Unavailable("transport".to_owned()));
+        }
+    };
+    let mut bytes = Vec::new();
+    if response
+        .into_reader()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return failed(CoreLookupFailure::Unavailable("read failed".to_owned()));
+    }
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return failed(CoreLookupFailure::Unavailable(
+            "response too large".to_owned(),
+        ));
+    }
+    serde_json::from_slice(&bytes).or_else(|_| {
+        failed(CoreLookupFailure::Unavailable(
+            "malformed response".to_owned(),
+        ))
+    })
+}
+
+/// True only for Core's exact `{"error": "unsupported descriptions version"}`.
+fn refuses_version(response: ureq::Response) -> bool {
+    let mut bytes = Vec::new();
+    if response
+        .into_reader()
+        .take(MAX_ERROR_BYTES)
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return false;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|body| body.get("error")?.as_str().map(ToOwned::to_owned))
+        .is_some_and(|error| error == UNSUPPORTED_VERSION_ERROR)
 }
 
 /// Accept a batch only when it is this protocol, for this Brain, answers
@@ -214,7 +279,7 @@ pub(crate) fn validate_core_response(
     response: CoreDescriptionsResponse,
 ) -> Result<CoreDescriptionsResponse, CoreLookupFailure> {
     let invalid = |reason: &str| Err(CoreLookupFailure::Unavailable(reason.to_owned()));
-    if response.version != DESCRIPTIONS_VERSION {
+    if response.version != DESCRIPTIONS_VERSION_V2 && response.version != DESCRIPTIONS_VERSION_V1 {
         return invalid("unsupported response version");
     }
     if response.brain_id != request.brain_id {
@@ -377,7 +442,7 @@ mod tests {
         });
         cases.push(extra);
         let mut version = base.clone();
-        version.version = "finite-core-brain-identity-descriptions-v2".to_owned();
+        version.version = "finite-core-brain-identity-descriptions-v3".to_owned();
         cases.push(version);
         let mut other_brain = base.clone();
         other_brain.brain_id = "brain_other".to_owned();
@@ -403,6 +468,101 @@ mod tests {
             1,
         );
         assert!(serde_json::from_str::<CoreDescriptionsResponse>(&unknown_field).is_err());
+    }
+
+    /// A local Core stub. `mode` is "current" (answers the asked version),
+    /// "old" (serves only v1), "invalid" (any 400) or "unauthorized".
+    fn stub_core(mode: &'static str) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        let (address_tx, address_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                address_tx
+                    .send(format!("http://{}", listener.local_addr().unwrap()))
+                    .unwrap();
+                let handler = move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let recorded = recorded.clone();
+                    async move {
+                        let version = body["version"].as_str().unwrap_or_default().to_owned();
+                        recorded.lock().unwrap().push(version.clone());
+                        let error = |status, error: &str| {
+                            (status, axum::Json(serde_json::json!({ "error": error })))
+                        };
+                        let bad = axum::http::StatusCode::BAD_REQUEST;
+                        match mode {
+                            "unauthorized" => {
+                                return error(axum::http::StatusCode::UNAUTHORIZED, "credential");
+                            }
+                            "invalid" => return error(bad, "invalid descriptions request body"),
+                            "old" if version != DESCRIPTIONS_VERSION_V1 => {
+                                return error(bad, UNSUPPORTED_VERSION_ERROR);
+                            }
+                            _ => {}
+                        }
+                        let results = body["publicKeysHex"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|key| serde_json::json!({"publicKeyHex": key, "state": "notShared"}))
+                            .collect::<Vec<_>>();
+                        (
+                            axum::http::StatusCode::OK,
+                            axum::Json(serde_json::json!({
+                                "version": version,
+                                "brainId": body["brainId"],
+                                "checkedAt": "2026-05-02T00:00:00Z",
+                                "results": results,
+                            })),
+                        )
+                    }
+                };
+                let app =
+                    axum::Router::new().route(DESCRIPTIONS_PATH, axum::routing::post(handler));
+                axum::serve(listener, app).await.unwrap();
+            });
+        });
+        (address_rx.recv().unwrap(), seen)
+    }
+
+    #[test]
+    fn lookup_asks_v2_and_falls_back_to_v1_only_when_core_refuses_the_version() {
+        let request = CoreLookupRequest {
+            brain_server: "https://brain.test".to_owned(),
+            brain_id: "brain_alpha".to_owned(),
+            requested_by_hex: "e".repeat(64),
+            keys: vec!["a".repeat(64)],
+        };
+        let lookup = |mode| {
+            let (url, seen) = stub_core(mode);
+            let lookup = http_core_description_lookup(&url, "credential".to_owned()).unwrap();
+            let result = lookup(&request);
+            let seen = seen.lock().unwrap().clone();
+            (result, seen)
+        };
+        let (current, seen) = lookup("current");
+        assert_eq!(current.unwrap().version, DESCRIPTIONS_VERSION_V2);
+        assert_eq!(seen, [DESCRIPTIONS_VERSION_V2]);
+        let (old, seen) = lookup("old");
+        let old = validate_core_response(&request, old.unwrap()).unwrap();
+        assert_eq!(old.version, DESCRIPTIONS_VERSION_V1);
+        assert_eq!(seen, [DESCRIPTIONS_VERSION_V2, DESCRIPTIONS_VERSION_V1]);
+        for (mode, expected) in [
+            (
+                "invalid",
+                CoreLookupFailure::Unavailable("status 400".to_owned()),
+            ),
+            ("unauthorized", CoreLookupFailure::Unauthorized),
+        ] {
+            let (result, seen) = lookup(mode);
+            assert_eq!(result.unwrap_err(), expected);
+            assert_eq!(seen, [DESCRIPTIONS_VERSION_V2], "{mode} must not downgrade");
+        }
     }
 
     #[test]

@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 // environment or used against an external service.
 pub(super) const CORE_TOKEN: &str = "synthetic-core-description-credential";
 const DESCRIPTIONS_PATH: &str = "/api/core/internal/v1/brain-identity-descriptions";
-const DESCRIPTIONS_VERSION: &str = "finite-core-brain-identity-descriptions-v1";
 
 /// Exact-key descriptions the Core stub returns as `resolved`; everything
 /// else is `notShared`. `calls` records each request's requested keys.
@@ -138,7 +137,8 @@ pub(super) fn core_stub(fixture: CoreFixture) -> Server {
                             })
                             .collect::<Vec<_>>();
                         Ok(axum::Json(json!({
-                            "version": DESCRIPTIONS_VERSION,
+                            // A current Core answers in the version it was asked.
+                            "version": request["version"],
                             "brainId": request["brainId"],
                             "checkedAt": "2026-05-02T00:00:00Z",
                             "results": results,

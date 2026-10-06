@@ -117,6 +117,29 @@ optional setting unset, then switch each part on separately.
 ([release-cli.md](release-cli.md)) after the closure is live. Do not upgrade
 Agent Runtimes for this feature.
 
+## Descriptions v2 (FIN-166)
+
+A closure with descriptions v2 changes no setting. New Core serves v1 and v2;
+new Brain asks v2 and falls back to v1 only on Core's exact unsupported-version
+answer. Either half alone keeps the v1 policy, so the order inside one closure
+does not matter. After activation, participating keys whose Account never
+shared with that Brain are described: an Agent's name and owner email, or a
+hosted human's email. This disclosure cannot be recalled by a rollback; see the
+accepted risk in the Core contract.
+
+1. Run `scripts/finite-status` and `scripts/finite-status --brain-identity`
+   and keep the output.
+2. Deploy the closure as in "Rollout order" step 2 and verify health.
+3. From an ordinary admin session on a designated Brain, run
+   `fbrain access list --brain <exact-id> --json`. Expect `resolved` rows for
+   participating keys without a sharing scope, `noParticipation` for keys that
+   never acted, and owner `humanPublicKeysHex` limited to keys on that page.
+4. Run both `scripts/finite-status` commands again.
+
+To return to the v1 policy, roll back the closure (Core or Brain alone is
+enough). To stop all descriptions, remove `/etc/finite/brain-identity.env` as
+in Rollback.
+
 ## Reading the agent counters
 
 `scripts/finite-status --brain-identity` reports counts only.
@@ -150,11 +173,14 @@ Brain SQLite Recovery Set; restoring them restores descriptions, not keys.
   managed FiniteBrain skill tells them to check the report `version` and say
   a newer CLI is needed rather than claim a complete report.
 - Only hosted human actions (Join, applied Approve) record sharing. No current
-  flow emits an owned-agent observation, so an agent whose owner never acted
-  as a hosted human in that Brain stays `notShared` there.
+  flow emits an owned-agent observation. Under v1 an agent whose owner never
+  acted as a hosted human in that Brain stays `notShared` there; v2 needs no
+  sharing.
 - Scope revocation and project owner transfer have no product writer. The
   tests change those rows, and account emails, directly in synthetic state to
-  prove the reader. No email-update or owner-transfer flow is added.
+  prove the reader. No email-update or owner-transfer flow is added. Under v2
+  an owner-transfer writer must not ship until it stops pre-transfer
+  participation from releasing the new owner; a Core test enforces this.
 - Core returns no NIP-05: a reserved agent name is not publication evidence.
   Brain shows its own stored aliases separately, dated and not rechecked.
 - Keys that never acted in a Brain are never sent to Core, so admin-added keys

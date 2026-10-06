@@ -4,8 +4,9 @@
 use super::*;
 use crate::brain_identity::{
     BrainAccountObservationRequest, BrainIdentityDescriptionsRequest, DESCRIPTIONS_VERSION,
-    DescribedKind, DescriptionState, IdentityDescription, OBSERVATION_ISSUER, OBSERVATION_VERSION,
-    ObservationActionKind, ObservationOutcome, npub_for_hex,
+    DESCRIPTIONS_VERSION_V2, DescribedKind, DescriptionState, IdentityDescription,
+    OBSERVATION_ISSUER, OBSERVATION_VERSION, ObservationActionKind, ObservationOutcome,
+    npub_for_hex,
 };
 use crate::store::BrainObservationError;
 
@@ -81,9 +82,18 @@ async fn observe_as(
 }
 
 async fn describe(store: &CoreStore, brain: &str, keys: &[&str]) -> Vec<IdentityDescription> {
+    describe_as(store, DESCRIPTIONS_VERSION, brain, keys).await
+}
+
+async fn describe_as(
+    store: &CoreStore,
+    version: &str,
+    brain: &str,
+    keys: &[&str],
+) -> Vec<IdentityDescription> {
     store
         .describe_brain_identities(&BrainIdentityDescriptionsRequest {
-            version: DESCRIPTIONS_VERSION.to_string(),
+            version: version.to_string(),
             brain_server: SERVER.to_string(),
             brain_id: brain.to_string(),
             requested_by_public_key_hex: key(0xee),
@@ -518,6 +528,90 @@ async fn same_project_legacy_rows_resolve_as_the_actively_linked_agent() {
         assert_eq!(
             row.lifecycle.map(|value| format!("{value:?}")).as_deref(),
             Some("Active")
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn v2_describes_without_a_sharing_scope_but_only_linked_accounts_and_requested_hints() {
+    with_isolated_postgres(|db| async move {
+        // Sam's human key is associated, but Sam shared only with another Brain.
+        let sam = account(&db.store, "sam@example.org").await;
+        observe(
+            &db.store,
+            &sam,
+            &human_observation("sam", &key(1), "brain_other"),
+        )
+        .await
+        .unwrap();
+        db.store
+            .exec(&format!(
+                "INSERT INTO account_brain_principals (id, user_id, public_key_hex, source, issuer,
+                   status, first_observed_at, last_observed_at, revision)
+                 VALUES ('sam_second', '{sam}', '{}', 'hosted_device_observation',
+                   'finite-dashboard', 'active', NOW(), NOW(), 1)",
+                key(7)
+            ))
+            .await;
+        project(&db, "project_ada", &sam, "Ada").await;
+        runtime(&db, "runtime_ada", "project_ada", &key(2), true, None).await;
+        // Lee never shared anywhere.
+        let lee = account(&db.store, "lee@example.net").await;
+        project(&db, "project_lee", &lee, "Lee Agent").await;
+        runtime(&db, "runtime_lee", "project_lee", &key(4), true, None).await;
+        // A pending (never linked) owner is never described.
+        db.store
+            .exec(
+                "INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
+                 VALUES ('user_pending', 'pending@example.org', 'pending', NULL, NOW(), NOW());
+                 INSERT INTO customer_orgs (id, owner_user_id, name, billing_class, created_at, updated_at)
+                 VALUES ('org_pending', 'user_pending', 'Pending', 'standard', NOW(), NOW())",
+            )
+            .await;
+        project(&db, "project_pending", "user_pending", "Pending Agent").await;
+        runtime(&db, "runtime_pending", "project_pending", &key(6), true, None).await;
+
+        let owned = [key(1), key(2), key(4), key(6), key(9)];
+        let keys = owned.iter().map(String::as_str).collect::<Vec<_>>();
+        // v1 is unchanged: nobody shared with this Brain.
+        for row in describe(&db.store, BRAIN, &keys).await {
+            assert_eq!(row.state, DescriptionState::NotShared);
+        }
+
+        let [human, ada, lee_agent, pending, unknown] = <[IdentityDescription; 5]>::try_from(
+            describe_as(&db.store, DESCRIPTIONS_VERSION_V2, BRAIN, &keys).await,
+        )
+        .unwrap();
+        assert_eq!(human.state, DescriptionState::Resolved);
+        assert_eq!(human.account_email.as_deref(), Some("sam@example.org"));
+        assert_eq!(ada.state, DescriptionState::Resolved);
+        assert_eq!(ada.display_name.as_deref(), Some("Ada"));
+        let responsible = ada.responsible_account.as_ref().unwrap();
+        assert_eq!(responsible.email, "sam@example.org");
+        // Only Sam's key that is in this request; key(7) stays private.
+        assert_eq!(responsible.human_public_keys_hex, vec![key(1)]);
+        assert_eq!(lee_agent.state, DescriptionState::Resolved);
+        assert_eq!(
+            lee_agent.responsible_account.as_ref().unwrap().email,
+            "lee@example.net"
+        );
+        // Unlinked and unknown keys keep the identical bare shape.
+        let shape = |row: &IdentityDescription, key_hex: &str| {
+            serde_json::to_string(row).unwrap().replace(key_hex, "KEY")
+        };
+        assert_eq!(unknown.state, DescriptionState::NotShared);
+        assert_eq!(shape(&pending, &key(6)), shape(&unknown, &key(9)));
+
+        // An Agent alone names no human key outside the request.
+        let alone = &describe_as(&db.store, DESCRIPTIONS_VERSION_V2, BRAIN, &[&key(2)]).await[0];
+        assert!(
+            alone
+                .responsible_account
+                .as_ref()
+                .unwrap()
+                .human_public_keys_hex
+                .is_empty()
         );
     })
     .await;

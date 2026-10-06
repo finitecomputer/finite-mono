@@ -81,6 +81,21 @@ fn description_requests_are_bounded_exact_and_canonical() {
         public_keys_hex: vec![key.clone()],
     };
     assert_eq!(request.validate("https://brain.test"), Ok(()));
+    assert!(request.requires_sharing_scope());
+    request.version = DESCRIPTIONS_VERSION_V2.to_string();
+    assert_eq!(request.validate("https://brain.test"), Ok(()));
+    assert!(!request.requires_sharing_scope());
+    // Brain falls back to v1 only on exactly this error's message.
+    request.version = "finite-core-brain-identity-descriptions-v3".to_string();
+    assert_eq!(
+        request.validate("https://brain.test"),
+        Err(DescriptionsInputError::Version)
+    );
+    assert_eq!(
+        DescriptionsInputError::Version.to_string(),
+        "unsupported descriptions version"
+    );
+    request.version = DESCRIPTIONS_VERSION.to_string();
     assert_eq!(
         request.validate("https://other.test"),
         Err(DescriptionsInputError::BrainServer)
@@ -113,6 +128,46 @@ fn description_requests_are_bounded_exact_and_canonical() {
         "email": "x@example.org"
     });
     assert!(serde_json::from_value::<BrainIdentityDescriptionsRequest>(unknown_field).is_err());
+}
+
+/// v2 releases a current owner on the strength of an Agent key's past Brain
+/// participation. That is sound only while a project's owner never changes:
+/// a transfer writer must first stop pre-transfer participation releasing the
+/// new owner (see "Ownership transfer" in brain-identity-descriptions-v1.md).
+#[test]
+fn no_core_writer_transfers_project_ownership() {
+    fn sources(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name != "tests") {
+                    sources(&path, found);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "rs")
+                && path.file_name().is_some_and(|name| name != "tests.rs")
+            {
+                let text = std::fs::read_to_string(&path).unwrap();
+                found.push((path.display().to_string(), text));
+            }
+        }
+    }
+    let mut found = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut found,
+    );
+    assert!(found.len() > 20, "source scan found too few files");
+    for (path, text) in found {
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        for statement in flat.split("UPDATE projects").skip(1) {
+            let statement = statement.split(';').next().unwrap_or_default();
+            let set_clause = statement.split(" WHERE ").next().unwrap_or_default();
+            assert!(
+                !set_clause.contains("owner_user_id"),
+                "{path} changes projects.owner_user_id; handle ownership transfer for v2 Brain descriptions first"
+            );
+        }
+    }
 }
 
 #[test]
