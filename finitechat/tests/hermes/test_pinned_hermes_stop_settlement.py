@@ -22,10 +22,13 @@ import contextlib
 import importlib.util
 import inspect
 import os
+import socket
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -77,6 +80,41 @@ def raw_event(
         "attachments": [],
         "internal": False,
     }
+
+
+_LOOPBACK_HOSTS = frozenset({None, "localhost", "127.0.0.1", "::1"})
+
+
+@contextlib.contextmanager
+def offline_gateway(home: str) -> Iterator[None]:
+    """Keep the pinned gateway off the network and out of the real Hermes home.
+
+    Provider resolution reads ambient credentials and walks a fallback chain,
+    the gateway constructor downloads the tirith scanner, and /restart
+    launches a detached ``hermes gateway restart``. ``gateway.run`` fixes its
+    home at import, before a test points ``HERMES_HOME`` at a scratch dir.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def loopback_only(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host not in _LOOPBACK_HOSTS:
+            raise socket.gaierror(socket.EAI_NONAME, "network is disabled in these tests")
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def no_provider() -> dict[str, Any]:
+        raise RuntimeError("model providers are disabled in these tests")
+
+    async def no_detached_restart(_runner: Any) -> None:
+        return None
+
+    with (
+        patch("socket.getaddrinfo", loopback_only),
+        patch("gateway.run._hermes_home", Path(home)),
+        patch("gateway.run._resolve_runtime_agent_kwargs", no_provider),
+        patch("tools.tirith_security.ensure_installed", lambda **_kwargs: None),
+        patch.object(GatewayRunner, "_launch_detached_restart_command", no_detached_restart),
+    ):
+        yield
 
 
 def raw_photo(seq: int) -> dict[str, Any]:
@@ -273,6 +311,8 @@ class GatewayHarness(StopHarness):
         self.steerless: set[str] = set()
         # How long a reply send takes, as a real transport would.
         self.reply_delay = 0.0
+        # Awaited before each reply is sent, once a test sets it.
+        self.before_reply: Callable[[str], Awaitable[None]] | None = None
         # The next admission await at which a restart drain begins:
         # "home-channel-show" or "activity" (the adapter's RPCs before
         # handoff), or "dispatch" (the base background turn, before the
@@ -295,6 +335,8 @@ class GatewayHarness(StopHarness):
         return await super()._sidecar(action, payload, timeout=timeout)
 
     async def _send(self, chat_id, content, **kwargs):
+        if self.before_reply is not None:
+            await self.before_reply(content)
         await asyncio.sleep(self.reply_delay)
         return await super()._send(chat_id, content, **kwargs)
 
@@ -400,6 +442,7 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
             # turns at once (pinned default 0s); a developer config must not
             # change that here.
             patch.dict(os.environ, {"HERMES_HOME": home, "HERMES_RESTART_DRAIN_TIMEOUT": "0"}),
+            offline_gateway(home),
         ):
 
             async def main():
@@ -616,6 +659,7 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
                     "GATEWAY_ALLOW_ALL_USERS": "true",
                 },
             ),
+            offline_gateway(home),
         ):
             asyncio.run(scenario(home))
 
@@ -789,6 +833,7 @@ class DrainScenario(unittest.TestCase):
                     "PYTEST_CURRENT_TEST": "finite-restart-drain",
                 },
             ),
+            offline_gateway(home),
         ):
             os.environ.pop("FINITECHAT_HOME_CHANNEL", None)
             asyncio.run(scenario(home))
@@ -846,6 +891,8 @@ class PinnedHermesRestartDrainAdmissionTests(DrainScenario):
                     ("/etc/hosts looks wrong", "group"): (None, True),
                     ("/not-a-command please", "group"): (None, True),
                     ("plain text", "group"): (None, True),
+                    # A registry command the gateway hands the model as text.
+                    ("/curator status", "group"): (None, True),
                     # Answered by the gateway itself, without a model turn.
                     ("/status", "group"): ("status", False),
                     ("/restart", "group"): ("restart", False),
@@ -1108,6 +1155,51 @@ def pinned_turn_commands() -> set[str]:
     return commands
 
 
+def pinned_model_text_commands() -> set[str]:
+    """Gateway commands the pinned dispatch has no branch for before the drain check.
+
+    ``GatewayRunner._handle_message`` answers every other registry command
+    in its own branch, before it refuses new work while draining; these fall
+    through to the model as ordinary text.
+    """
+    from hermes_cli.commands import COMMAND_REGISTRY, is_gateway_known_command
+
+    source = textwrap.dedent(inspect.getsource(GatewayRunner._handle_message))
+    tree = ast.parse(source)
+    drain_checks = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Attribute)
+        and node.test.attr == "_draining"
+        and "not accepting new work" in (ast.get_source_segment(source, node) or "")
+    ]
+    assert len(drain_checks) == 1, drain_checks
+    dispatched: set[str] = set()
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "canonical"
+            and node.lineno < drain_checks[0]
+        ):
+            continue
+        for comparator in node.comparators:
+            elements = (
+                comparator.elts if isinstance(comparator, ast.Tuple | ast.Set) else [comparator]
+            )
+            dispatched.update(
+                str(e.value)
+                for e in elements
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)
+            )
+    dispatched.update(
+        GatewayRunner._gateway_plain_command_handlers(GatewayRunner.__new__(GatewayRunner))
+    )
+    known = {command.name for command in COMMAND_REGISTRY if is_gateway_known_command(command.name)}
+    return known - dispatched
+
+
 class PinnedHermesModelCommandTests(DrainScenario):
     """Review r4193904833 and round 06: commands that become a model turn.
 
@@ -1132,6 +1224,11 @@ class PinnedHermesModelCommandTests(DrainScenario):
         # Pin-bump tripwire: a new command that becomes a model turn must
         # wait out a drain too.
         self.assertEqual(pinned_turn_commands(), load_adapter_module()._HERMES_TURN_COMMANDS)
+        # Every other command is answered before the drain check, so the
+        # adapter acks it once; these few reach the model as text instead.
+        self.assertEqual(
+            pinned_model_text_commands(), load_adapter_module()._HERMES_MODEL_TEXT_COMMANDS
+        )
 
     def test_model_commands_run_once_without_a_drain(self):
         for text in self.MODEL_COMMANDS:
@@ -1534,6 +1631,416 @@ class PinnedHermesModelCommandTests(DrainScenario):
                     self.assertEqual(after, [])
 
                 self.run_scenario(scenario)
+
+
+SEEDED_EXCHANGES = [
+    ("user", "first question"),
+    ("assistant", "done"),
+    ("user", "second question"),
+    ("assistant", "done"),
+    ("user", "third question"),
+    ("assistant", "done"),
+]
+
+
+def chat_source(h: StopHarness) -> Any:
+    return h.adapter.build_source(
+        chat_id=ROOM_ID, chat_type="group", user_id="alice", thread_id="segment-1"
+    )
+
+
+def chat_session_id(h: StopHarness) -> str:
+    return h.runner.session_store.get_or_create_session(chat_source(h)).session_id
+
+
+def chat_transcript(h: StopHarness) -> list[tuple[str, str]]:
+    """The model transcript of the chat ``raw_event`` writes to, as (role, text)."""
+    rows = h.runner.session_store.load_transcript(chat_session_id(h))
+    return [
+        (row["role"], str(row.get("content")))
+        for row in rows
+        if row.get("role") in ("user", "assistant")
+    ]
+
+
+async def seed_exchanges(h: GatewayHarness) -> None:
+    """Three finished exchanges in the chat, then a clear timeline."""
+    for seq, text in enumerate(("first question", "second question", "third question"), 1):
+        await h.deliver(raw_event(seq, text))
+        await h.wait_settled(f"msg-{seq}")
+    await h.settle_loop()
+    assert chat_transcript(h) == SEEDED_EXCHANGES, chat_transcript(h)
+    h.timeline.clear()
+
+
+async def eventually(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
+    async def poll() -> None:
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(poll(), timeout)
+
+
+class PinnedHermesRetryRewindTests(DrainScenario):
+    """Review 5427227655: /retry when a drain or stop begins after it rewinds.
+
+    The pinned ``_handle_retry_command`` runs before the drain check. It
+    rewinds the transcript, then re-sends the last message as a new event,
+    which a draining gateway refuses. The original /retry text is unchanged,
+    so the entry was acked with the last message gone from the transcript.
+    A graceful stop at the same point released it instead; after restart it
+    rewound again and retried the message before.
+    """
+
+    @staticmethod
+    def begin_after(h: GatewayHarness, method: str, begin: Callable[[], Awaitable[None]]) -> None:
+        """Run ``begin`` once, as the gateway's next ``method`` store call returns."""
+        facade = h.runner.async_session_store
+        fired: list[str] = []
+
+        async def call(*args: Any, **kwargs: Any) -> Any:
+            result = await type(facade).__getattr__(facade, method)(*args, **kwargs)
+            if not fired:
+                fired.append(method)
+                await begin()
+            return result
+
+        setattr(facade, method, call)
+
+    async def assert_retried_once_after_restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
+    ) -> None:
+        timeline: list[tuple[str, str]] = []
+        restarted = GatewayHarness(home, timeline=timeline, inbox=inbox, stall=False)
+        try:
+            await restarted.boot_with_gate_closed()
+            await restarted.open_gate()
+            await restarted.wait_settled("msg-4")
+            await restarted.settle_loop()
+            # The last question, once, then the ack; nothing older is retried.
+            self.assertEqual(timeline, [("model", "third question"), ("ack", "msg-4")])
+            self.assertEqual(chat_transcript(restarted), SEEDED_EXCHANGES)
+        finally:
+            await restarted.close()
+
+    def test_retry_runs_the_last_message_once_without_a_drain(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            try:
+                await seed_exchanges(h)
+                await h.deliver(raw_event(4, "/retry"))
+                await h.wait_settled("msg-4")
+                await h.settle_loop()
+                self.assertEqual(timeline, [("model", "third question"), ("ack", "msg-4")])
+                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_retry_keeps_the_last_message_when_a_restart_drain_begins(self):
+        for window in ("dispatch", "load_transcript", "rewrite_transcript"):
+            with self.subTest(window=window):
+
+                async def scenario(home: str, window: str = window):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.redeliver_on_release = True
+                    try:
+                        await seed_exchanges(h)
+                        # Another chat's running turn keeps the drain open.
+                        other = await h.hold_turn_open(raw_event(9, "other work", segment="s2"))
+
+                        async def begin_drain() -> None:
+                            h.begin_restart_drain()
+
+                        if window == "dispatch":
+                            h.drain_window = window
+                        else:
+                            self.begin_after(h, window, begin_drain)
+                        await h.deliver(raw_event(4, "/retry"))
+                        await eventually(
+                            lambda: bool({("ack", "msg-4"), ("release", "msg-4")} & set(timeline))
+                        )
+                        await h.settle_loop()
+                        self.assertNotIn(("ack", "msg-4"), timeline)
+                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertEqual(h.models(), ["other work"])
+                        self.assertEqual(h.state("msg-4"), "pending")
+                    finally:
+                        await h.close()
+
+                    await self.assert_retried_once_after_restart(home, h.inbox)
+
+                self.run_scenario(scenario)
+
+    def test_retry_keeps_the_last_message_when_a_graceful_stop_begins(self):
+        for window in ("dispatch", "load_transcript", "rewrite_transcript"):
+            with self.subTest(window=window):
+
+                async def scenario(home: str, window: str = window):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    stops: list[asyncio.Task] = []
+                    try:
+                        await seed_exchanges(h)
+
+                        async def begin_stop() -> None:
+                            stops.append(asyncio.create_task(h.stop_gracefully()))
+                            await eventually(lambda: h.runner._draining)
+
+                        if window == "dispatch":
+                            processing_start = h.adapter.on_processing_start
+
+                            async def stop_at_dispatch(event):
+                                if event.message_id == "msg-4" and not stops:
+                                    await begin_stop()
+                                await processing_start(event)
+
+                            h.adapter.on_processing_start = stop_at_dispatch
+                        else:
+                            self.begin_after(h, window, begin_stop)
+                        await h.deliver(raw_event(4, "/retry"))
+                        await eventually(lambda: bool(stops))
+                        await stops[0]
+                        await h.settle_loop()
+                        self.assertNotIn(("ack", "msg-4"), timeline)
+                        self.assertEqual(h.state("msg-4"), "pending")
+                        self.assertEqual(h.models(), [])
+                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+                    finally:
+                        await h.close()
+
+                    await self.assert_retried_once_after_restart(home, h.inbox)
+
+                self.run_scenario(scenario)
+
+    def test_retry_interrupted_by_a_graceful_stop_runs_once_more(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            try:
+                await seed_exchanges(h)
+                gate = h.held_turns["third question"] = asyncio.Event()
+                await h.deliver(raw_event(4, "/retry"))
+                await eventually(lambda: ("model", "third question") in timeline)
+                await h.stop_gracefully()
+                self.assertTrue(gate.is_set(), "the stop interrupted the retried turn")
+                self.assertEqual(h.state("msg-4"), "pending")
+            finally:
+                await h.close()
+
+            await self.assert_retried_once_after_restart(home, h.inbox)
+
+        self.run_scenario(scenario)
+
+    def test_rewind_still_on_its_way_when_a_stop_cancels_the_retry_never_lands(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            proceed = threading.Event()
+            writing: list[str] = []
+            written: list[Any] = []
+            try:
+                await seed_exchanges(h)
+
+                async def hold_the_rewrite() -> None:
+                    # The /retry rewrite starts in a worker thread and waits
+                    # there until the stop has cancelled and settled the turn.
+                    store = h.runner.session_store
+                    rewrite = store.rewrite_transcript
+
+                    def held(*args: Any, **kwargs: Any) -> Any:
+                        writing.append("rewrite")
+                        proceed.wait(10)
+                        written.append(rewrite(*args, **kwargs))
+                        return written[-1]
+
+                    store.rewrite_transcript = held
+
+                self.begin_after(h, "load_transcript", hold_the_rewrite)
+                await h.deliver(raw_event(4, "/retry"))
+                await eventually(lambda: bool(writing))
+                await h.stop_gracefully()
+                self.assertEqual(h.state("msg-4"), "pending")
+                proceed.set()
+                await eventually(lambda: bool(written))
+                self.assertEqual(written, [False], "the late rewind is refused")
+                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+            finally:
+                proceed.set()
+                await h.close()
+
+            await self.assert_retried_once_after_restart(home, h.inbox)
+
+        self.run_scenario(scenario)
+
+    def test_retry_never_overwrites_a_later_transcript_write(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            h.redeliver_on_release = True
+            try:
+                await seed_exchanges(h)
+                other = await h.hold_turn_open(raw_event(9, "other work", segment="s2"))
+
+                async def write_then_drain() -> None:
+                    h.runner.session_store.append_to_transcript(
+                        chat_session_id(h), {"role": "user", "content": "written elsewhere"}
+                    )
+                    h.begin_restart_drain()
+
+                self.begin_after(h, "rewrite_transcript", write_then_drain)
+                await h.deliver(raw_event(4, "/retry"))
+                await h.wait_settled("msg-4")
+                await h.settle_loop()
+                # The rewind cannot be undone without losing the later write,
+                # so the entry is acked rather than rewound again on redelivery.
+                expected = [*SEEDED_EXCHANGES[:4], ("user", "written elsewhere")]
+                self.assertEqual(h.state("msg-4"), "acked")
+                self.assertEqual(chat_transcript(h), expected)
+                other.set()
+                await h.finish_restart()
+            finally:
+                await h.close()
+
+            timeline.clear()
+            restarted = GatewayHarness(home, timeline=timeline, inbox=h.inbox, stall=False)
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await restarted.settle_loop()
+                self.assertNotIn("msg-4", restarted.handed)
+                self.assertEqual(chat_transcript(restarted), expected)
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+
+class PinnedHermesCommandFinalityTests(DrainScenario):
+    """A command Hermes answers itself is settled once, even across a stop.
+
+    The release-on-stop rule this release added for interrupted model work
+    also released commands that had already taken effect, and a stop that
+    cancelled a command's turn while its reply was sending released it too
+    (as in 458a). The redelivery after restart ran the command again: a
+    second /undo, /yolo turning the approval bypass back on, or /restart
+    restarting the gateway again.
+    """
+
+    @staticmethod
+    def stop_before_reply(h: GatewayHarness) -> list[asyncio.Task]:
+        """Begin a graceful stop as the next reply is sent, and send it once stopping."""
+        stops: list[asyncio.Task] = []
+
+        async def before_reply(_content: str) -> None:
+            if not stops:
+                stops.append(asyncio.create_task(h.stop_gracefully()))
+                await eventually(h.adapter._gateway_stopping)
+
+        h.before_reply = before_reply
+        return stops
+
+    async def boot_after_restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
+    ) -> GatewayHarness:
+        restarted = GatewayHarness(home, timeline=[], inbox=inbox, stall=False)
+        await restarted.boot_with_gate_closed()
+        await restarted.open_gate()
+        for _ in range(50):
+            await restarted.settle_loop()
+        return restarted
+
+    def test_restart_whose_reply_a_stop_cuts_off_does_not_restart_again(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            # The restart stops the gateway while its reply is still sending.
+            h.reply_delay = 0.2
+            try:
+                await h.deliver(raw_event(1, "/restart"))
+                await h.finish_restart()
+                await h.settle_loop()
+                self.assertTrue(h.runner._restart_requested)
+                self.assertEqual(h.replies, [], "the stop cancelled the reply send")
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertNotIn(("release", "msg-1"), timeline)
+            finally:
+                await h.close()
+
+            restarted = await self.boot_after_restart(home, h.inbox)
+            try:
+                self.assertEqual(restarted.handed, [])
+                self.assertFalse(restarted.runner._restart_requested)
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_yolo_finished_during_a_stop_is_not_replayed(self):
+        from tools import approval
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            session_key = h.runner._session_key_for_source(chat_source(h))
+            stops = self.stop_before_reply(h)
+            try:
+                await h.deliver(raw_event(1, "/yolo"))
+                await eventually(lambda: bool(stops))
+                await stops[0]
+                self.assertTrue(approval.is_session_yolo_enabled(session_key))
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertNotIn(("release", "msg-1"), timeline)
+            finally:
+                await h.close()
+
+            # A restarted process starts with no session in yolo mode.
+            with patch.object(approval, "_session_yolo", set()):
+                restarted = await self.boot_after_restart(home, h.inbox)
+                try:
+                    self.assertEqual(restarted.handed, [])
+                    self.assertFalse(approval.is_session_yolo_enabled(session_key))
+                finally:
+                    await restarted.close()
+
+        with patch.object(approval, "_session_yolo", set()):
+            self.run_scenario(scenario)
+
+    def test_undo_finished_during_a_stop_is_not_replayed(self):
+        async def scenario(home: str):
+            # Synthetic config: Finite keeps the pinned default, which asks
+            # for confirmation before /undo rewinds anything.
+            Path(home, "config.yaml").write_text(
+                "approvals:\n  destructive_slash_confirm: false\n", encoding="utf-8"
+            )
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, stall=False)
+            try:
+                await seed_exchanges(h)
+                stops = self.stop_before_reply(h)
+                await h.deliver(raw_event(4, "/undo"))
+                await eventually(lambda: bool(stops))
+                await stops[0]
+                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES[:4])
+                self.assertEqual(h.state("msg-4"), "acked")
+                self.assertNotIn(("release", "msg-4"), timeline)
+            finally:
+                await h.close()
+
+            restarted = await self.boot_after_restart(home, h.inbox)
+            try:
+                self.assertEqual(restarted.handed, [])
+                self.assertEqual(chat_transcript(restarted), SEEDED_EXCHANGES[:4])
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
 
 
 if __name__ == "__main__":
