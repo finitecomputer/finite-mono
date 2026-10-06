@@ -5092,7 +5092,9 @@ mod tests {
     fn packaged_invite_guidance_matches_the_supported_invite_surface() {
         // The skill routes invitations to its sharing reference.
         let skill = concat!(
-            include_str!("../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"),
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+            ),
             include_str!(
                 "../../../../finite-skills/skills/software-development/finitebrain/references/sharing.md"
             ),
