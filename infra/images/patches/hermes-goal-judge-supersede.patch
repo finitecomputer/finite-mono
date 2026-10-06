@@ -1,6 +1,6 @@
 --- a/hermes_cli/goals.py
 +++ b/hermes_cli/goals.py
-@@ -848,20 +848,53 @@
+@@ -848,20 +848,58 @@
          return None
  
  
@@ -37,13 +37,18 @@
  
  
 +def _commit_goal_if_unchanged(session_id: str, expected: Optional[str], latest: str) -> bool:
-+    """Write ``latest`` only while the stored goal is still ``expected``."""
++    """Write ``latest`` unless the stored goal has moved on from ``expected``.
++
++    A goal row is never deleted, so reading none back means the store could
++    not be read; the decision then stands, as before this patch.
++    """
 +    db = _get_session_db()
 +    if db is None:
 +        _warn_dropped_write("GoalManager", "goal", session_id)
-+        return False
++        return True
 +    with _GOAL_WRITE_LOCK:
-+        if _goal_json(load_goal(session_id)) != expected:
++        stored = load_goal(session_id)
++        if stored is not None and _goal_json(stored) != expected:
 +            return False
 +        try:
 +            db.set_meta(_meta_key(session_id), latest)
@@ -55,7 +60,7 @@
  def clear_goal(session_id: str) -> None:
      """Mark a goal cleared in the DB (preserved for audit, status=cleared)."""
      state = load_goal(session_id)
-@@ -1860,12 +1893,104 @@
+@@ -1860,12 +1898,105 @@
  
      # --- the main entry point called after every turn -----------------
  
@@ -77,10 +82,10 @@
 +
 +        A pause, clear, wait or new goal makes it stale. A gate or subgoal
 +        change keeps a continuing decision, as it does once the continuation
-+        is queued.
++        is queued. An unreadable store keeps it, as before this patch.
 +        """
 +        stored = load_goal(self.session_id)
-+        if _goal_json(stored) == _goal_json(self._state):
++        if stored is None or _goal_json(stored) == _goal_json(self._state):
 +            return True
 +        return bool(decision.get("should_continue")) and self._still_running(stored)
 +
@@ -91,9 +96,10 @@
 +        paused, cleared or replaced it makes the decision's notice stale.
 +        """
 +        stored, state = load_goal(self.session_id), self._state
++        if stored is None:
++            return True
 +        return (
-+            stored is not None
-+            and state is not None
++            state is not None
 +            and (stored.goal, stored.created_at) == (state.goal, state.created_at)
 +            and stored.status == decision.get("status")
 +        )

@@ -68,12 +68,13 @@ Notes:
   between turns, it parks after the turn already queued). A control that lands
   after the commit drops the continuation and its notice, except a gate or
   subgoal change, which keeps them as it would once the continuation is
-  queued. Not covered: a second change during the re-judge (the loop then
-  waits for the next message or `/goal resume`), a control that loads the goal
-  just before the commit and saves just after it (it resets that turn's count,
-  and after a `done` verdict leaves the goal active and idle), and goal writes
-  from another process. The stored goal JSON is unchanged.
-  `PinnedHermesGoalJudgeTests` in
+  queued. If the goal store cannot be read or written while the judge runs,
+  the decision stands, as it did before the patch. Not covered: a second
+  change during the re-judge (the loop then waits for the next message or
+  `/goal resume`), a control that loads the goal just before the commit and
+  saves just after it (it resets that turn's count, and after a `done` verdict
+  leaves the goal active and idle), and goal writes from another process. The
+  stored goal JSON is unchanged. `PinnedHermesGoalJudgeTests` in
   `finitechat/tests/hermes/test_pinned_hermes_stop_settlement.py` runs the
   real runner's judge path against the packaged Python. Remove the patch when
   the pinned upstream gateway passes them.
