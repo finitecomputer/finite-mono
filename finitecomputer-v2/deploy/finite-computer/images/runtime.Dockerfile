@@ -174,6 +174,9 @@ ENV FINITE_PRIVATE_CONTROL_URL=https://finite.computer/api/core/v1/finite-privat
 ENV FINITE_PRIVATE_MODEL=glm-5-3-flash
 ENV FINITE_PRIVATE_CONTEXT_LENGTH=393216
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
+# Temporary diagnostic image for the explicitly scoped requester-lease canary.
+# Remove this flag and DEBUG-fbrain-requester probes after the cause is proven.
+ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1
 ENV FINITE_AGENTD_REQUIRED=1
 
 EXPOSE 8080

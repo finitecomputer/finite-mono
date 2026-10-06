@@ -231,6 +231,7 @@ jobs:
           report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
           PY
       - name: Upload build report
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: runtime-image-report
