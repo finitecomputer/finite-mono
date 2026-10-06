@@ -467,6 +467,61 @@ class PinnedHermesChildWorkTests(ChildWorkScenario):
 
         self.run_scenario(scenario)
 
+    def test_a_refused_attachment_after_the_text_does_not_run_the_bg_again(self):
+        """Round 13 Opus S3: the text reached the chat, so the agent run is finished work.
+
+        Whether the child then ends or a stop cuts it off sending a later
+        attachment, the entry is acked and nothing runs after the restart.
+        """
+        for ending in ("child ends", "stop"):
+            with self.subTest(ending=ending):
+
+                async def scenario(home: str, ending: str = ending):
+                    h = ChildHarness(home, timeline=[])
+                    stops: list[asyncio.Task] = []
+                    attachments: list[int] = []
+                    paths = [Path(home) / f"report-{n}.txt" for n in (1, 2)]
+                    for path in paths:
+                        path.write_text("synthetic report", encoding="utf-8")
+                    media = "".join(f"\nMEDIA:{path}" for path in paths)
+                    self.children.bg_response = f"{BG_RESULT}{media}"
+
+                    async def stop_at_the_second_attachment(text: str) -> None:
+                        if text:
+                            return
+                        attachments.append(1)
+                        if ending == "stop" and len(attachments) == 2:
+                            stops.append(asyncio.create_task(h.stop_gracefully()))
+                            await asyncio.Event().wait()
+
+                    try:
+                        await h.seed()
+                        await self.launch(h, "bg")
+                        # Attachments follow the text with no caption; the
+                        # sidecar refuses the first one retryably.
+                        h.refuse = lambda text: True if not text and len(attachments) == 1 else None
+                        h.before_reply = stop_at_the_second_attachment
+                        self.children.gate.set()
+                        if ending == "stop":
+                            await eventually(lambda: bool(stops))
+                            await stops[0]
+                        else:
+                            await h.wait_settled("msg-2")
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        self.assertIn(("refused", ""), h.timeline)
+                        self.assert_delivered_once(h, "bg")
+                    finally:
+                        await h.close()
+
+                    restarted = await self.boot_after_restart(home, h.inbox)
+                    try:
+                        self.assertEqual(restarted.handed, [])
+                        self.assertEqual(self.children.runs("bg"), 1)
+                    finally:
+                        await restarted.close()
+
+                self.run_scenario(scenario)
+
     def test_a_lease_expiry_redelivery_joins_the_running_child(self):
         for command in COMMANDS:
             with self.subTest(command=command):
