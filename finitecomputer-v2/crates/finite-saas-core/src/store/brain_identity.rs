@@ -495,7 +495,7 @@ impl CoreStore {
         // v1: only accounts that shared with this exact Brain. v2: every
         // implicated account, because Brain asks only about keys that acted
         // in this Brain themselves.
-        let shared = if request.requires_sharing_scope() {
+        let releasable = if request.requires_sharing_scope() {
             tx.query(
                 "SELECT user_id FROM account_brain_sharing_scopes
                  WHERE revoked_at IS NULL AND brain_server = $1 AND brain_id = $2
@@ -510,7 +510,7 @@ impl CoreStore {
         } else {
             implicated.iter().cloned().collect::<BTreeSet<_>>()
         };
-        let shared_ids = shared.iter().cloned().collect::<Vec<_>>();
+        let releasable_ids = releasable.iter().cloned().collect::<Vec<_>>();
         // v2 names only an owner's human keys that are in this same request,
         // never keys outside it; without a sharing scope those would link the
         // owner across Brains.
@@ -522,7 +522,7 @@ impl CoreStore {
                           AS normalized_email,
                         link_status, core_rfc3339(updated_at) AS updated_at
                  FROM users WHERE id = ANY($1)",
-                &[&shared_ids, &(MAX_CONTACT_BYTES as i32)],
+                &[&releasable_ids, &(MAX_CONTACT_BYTES as i32)],
             )
             .await
             .map_err(store_error)?
@@ -538,7 +538,7 @@ impl CoreStore {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        // Bounded in SQL: at most MAX_RESPONSIBLE_HUMAN_KEYS rows per shared
+        // Bounded in SQL: at most MAX_RESPONSIBLE_HUMAN_KEYS rows per releasable
         // account, read through the (user_id, public_key_hex) partial index.
         let mut human_keys_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for row in tx
@@ -554,7 +554,7 @@ impl CoreStore {
                  ) AS account_key
                  ORDER BY account.id, account_key.public_key_hex",
                 &[
-                    &shared_ids,
+                    &releasable_ids,
                     &(MAX_RESPONSIBLE_HUMAN_KEYS as i64),
                     &hint_scope,
                 ],
@@ -594,7 +594,8 @@ impl CoreStore {
         // An account may disclose only when it is a linked (WorkOS-verified)
         // account and, under v1, has shared with this exact Brain.
         let disclosable = |user_id: &str| {
-            shared.contains(user_id) && accounts.get(user_id).is_some_and(|account| account.linked)
+            releasable.contains(user_id)
+                && accounts.get(user_id).is_some_and(|account| account.linked)
         };
         let empty = Vec::new();
         Ok(keys

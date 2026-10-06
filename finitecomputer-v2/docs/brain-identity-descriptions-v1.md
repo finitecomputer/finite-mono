@@ -89,6 +89,12 @@ reverse discovery of private account information. Under v1, autonomous agent
 participation also does not authorize publishing its account holder's contact;
 v2 accepts that risk (see "Disclosure without a sharing scope").
 
+The disclosure scope, its revocation and the successor-scope rule below apply to
+v1 requests only. A v2 request applies no scope, so revoking one does not
+withhold contact from a v2 answer, and v2 has no per-account opt-out. Under v2
+the description credential describes any linked key Brain sends for any Brain
+ID; Brain's participation rule is the only gate.
+
 Core owns one disclosure scope per stable account, exact Brain server identity
 and exact Brain ID. A trusted account-authenticated hosted action establishes it
 automatically after the backend verifies actual success against that Brain.

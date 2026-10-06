@@ -4,9 +4,8 @@
 use super::*;
 use crate::brain_identity::{
     BrainIdentityConfig, BrainIdentityConfigError, DESCRIPTION_CREDENTIAL_HEADER,
-    DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION, DESCRIPTIONS_VERSION_V2, OBSERVATION_CREDENTIAL_HEADER,
-    OBSERVATION_PATH,
-    OBSERVATION_VERSION,
+    DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION, DESCRIPTIONS_VERSION_V2,
+    OBSERVATION_CREDENTIAL_HEADER, OBSERVATION_PATH, OBSERVATION_VERSION,
 };
 
 const SERVER: &str = "https://brain.test";
@@ -265,14 +264,24 @@ async fn account_observation_then_scoped_description_over_http() {
         // treats as "fall back to v1"; nothing else downgrades.
         let mut v2 = description_body(&[key(1)]);
         v2["version"] = serde_json::json!(DESCRIPTIONS_VERSION_V2);
-        let (status, response) =
-            post(&app, DESCRIPTIONS_PATH, &describe, serde_json::to_vec(&v2).unwrap()).await;
+        let (status, response) = post(
+            &app,
+            DESCRIPTIONS_PATH,
+            &describe,
+            serde_json::to_vec(&v2).unwrap(),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK, "{response}");
         assert_eq!(response["version"], DESCRIPTIONS_VERSION_V2);
         assert_eq!(response["results"][0]["accountEmail"], "dana@acme.example");
         v2["version"] = serde_json::json!("finite-core-brain-identity-descriptions-v3");
-        let (status, response) =
-            post(&app, DESCRIPTIONS_PATH, &describe, serde_json::to_vec(&v2).unwrap()).await;
+        let (status, response) = post(
+            &app,
+            DESCRIPTIONS_PATH,
+            &describe,
+            serde_json::to_vec(&v2).unwrap(),
+        )
+        .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(
             response,

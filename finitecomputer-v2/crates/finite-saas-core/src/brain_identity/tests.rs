@@ -130,43 +130,104 @@ fn description_requests_are_bounded_exact_and_canonical() {
     assert!(serde_json::from_value::<BrainIdentityDescriptionsRequest>(unknown_field).is_err());
 }
 
+/// True when `sql` assigns `projects.owner_user_id` in an UPDATE or in an
+/// INSERT's `ON CONFLICT ... DO UPDATE SET`. A tripwire for ordinary SQL
+/// spellings, not a parser.
+fn transfers_project_owner(sql: &str) -> bool {
+    let flat = sql
+        .to_ascii_lowercase()
+        .replace('"', "")
+        .replace('=', " = ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let projects = |text: &str| {
+        let text = text.strip_prefix("only ").unwrap_or(text);
+        let text = text.strip_prefix("public.").unwrap_or(text);
+        text.starts_with("projects ") || text.starts_with("projects(")
+    };
+    let assigns_owner = |set_list: &str| {
+        let set_list = set_list.split(';').next().unwrap_or_default();
+        let set_list = set_list.split(" where ").next().unwrap_or_default();
+        let set_list = set_list.split(" from ").next().unwrap_or_default();
+        set_list.contains("owner_user_id =")
+    };
+    let updates = flat
+        .split("update ")
+        .skip(1)
+        .any(|statement| projects(statement) && assigns_owner(statement));
+    let upserts = flat.split("insert into ").skip(1).any(|statement| {
+        projects(statement)
+            && statement
+                .split(';')
+                .next()
+                .unwrap_or_default()
+                .split("do update set ")
+                .nth(1)
+                .is_some_and(assigns_owner)
+    });
+    updates || upserts
+}
+
+#[test]
+fn transfer_detector_recognizes_ordinary_spellings() {
+    for transfer in [
+        "UPDATE projects SET owner_user_id = $1 WHERE id = $2",
+        "update public.projects\n  set display_name = $1, owner_user_id=$2 where id = $3",
+        "UPDATE ONLY \"projects\" AS p SET owner_user_id = $1",
+        "INSERT INTO projects (id, owner_user_id) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id",
+    ] {
+        assert!(transfers_project_owner(transfer), "{transfer}");
+    }
+    for other in [
+        "UPDATE projects SET display_name = $1 WHERE owner_user_id = $2",
+        "UPDATE projects_archive SET owner_user_id = $1",
+        "UPDATE project_runtime_links SET active = false",
+        "UPDATE projects AS p SET hosting_tier = r.tier FROM requests r WHERE r.owner_user_id = p.owner_user_id",
+        // Today's upsert: the owner is inserted, never reassigned.
+        "INSERT INTO projects (id, owner_user_id) VALUES ($1, $2)
+         ON CONFLICT (id) DO UPDATE SET display_name = EXCLUDED.display_name\", &[&id, &owner_user_id]);",
+    ] {
+        assert!(!transfers_project_owner(other), "{other}");
+    }
+}
+
 /// v2 releases a current owner on the strength of an Agent key's past Brain
 /// participation. That is sound only while a project's owner never changes:
 /// a transfer writer must first stop pre-transfer participation releasing the
 /// new owner (see "Ownership transfer" in brain-identity-descriptions-v1.md).
+/// Scans non-test Core sources and migrations.
 #[test]
 fn no_core_writer_transfers_project_ownership() {
-    fn sources(dir: &std::path::Path, found: &mut Vec<(String, String)>) {
+    fn sources(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
+            let name = path.file_name().unwrap_or_default();
             if path.is_dir() {
-                if path.file_name().is_some_and(|name| name != "tests") {
+                if name != "tests" {
                     sources(&path, found);
                 }
-            } else if path.extension().is_some_and(|ext| ext == "rs")
-                && path.file_name().is_some_and(|name| name != "tests.rs")
+            } else if path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "sql")
+                && name != "tests.rs"
             {
-                let text = std::fs::read_to_string(&path).unwrap();
-                found.push((path.display().to_string(), text));
+                found.push(path);
             }
         }
     }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut found = Vec::new();
-    sources(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-        &mut found,
-    );
-    assert!(found.len() > 20, "source scan found too few files");
-    for (path, text) in found {
-        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-        for statement in flat.split("UPDATE projects").skip(1) {
-            let statement = statement.split(';').next().unwrap_or_default();
-            let set_clause = statement.split(" WHERE ").next().unwrap_or_default();
-            assert!(
-                !set_clause.contains("owner_user_id"),
-                "{path} changes projects.owner_user_id; handle ownership transfer for v2 Brain descriptions first"
-            );
-        }
+    sources(&root.join("src"), &mut found);
+    sources(&root.join("migrations"), &mut found);
+    assert!(found.len() > 40, "source scan found too few files");
+    for path in found {
+        assert!(
+            !transfers_project_owner(&std::fs::read_to_string(&path).unwrap()),
+            "{} changes projects.owner_user_id; handle ownership transfer for v2 Brain descriptions first",
+            path.display()
+        );
     }
 }
 

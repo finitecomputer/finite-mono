@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -174,14 +174,18 @@ pub(crate) fn http_core_description_lookup(
             .timeout(CORE_TOTAL_TIMEOUT)
             .redirects(0)
             .build();
-        match post_descriptions(&agent, &url, &credential, DESCRIPTIONS_VERSION_V2, request) {
+        // Both attempts share one deadline, so a fallback never outlasts the
+        // caller's wait while it holds the shared lookup permit.
+        let deadline = Instant::now() + CORE_TOTAL_TIMEOUT;
+        let post =
+            |version| post_descriptions(&agent, &url, &credential, version, request, deadline);
+        match post(DESCRIPTIONS_VERSION_V2) {
             // An older Core keeps its v1 policy; it never discloses more.
             Err(Attempt::VersionUnsupported) => {
-                post_descriptions(&agent, &url, &credential, DESCRIPTIONS_VERSION_V1, request)
-                    .map_err(|attempt| match attempt {
-                        Attempt::VersionUnsupported => CoreLookupFailure::Unsupported,
-                        Attempt::Failed(failure) => failure,
-                    })
+                post(DESCRIPTIONS_VERSION_V1).map_err(|attempt| match attempt {
+                    Attempt::VersionUnsupported => CoreLookupFailure::Unsupported,
+                    Attempt::Failed(failure) => failure,
+                })
             }
             Err(Attempt::Failed(failure)) => Err(failure),
             Ok(response) => Ok(response),
@@ -200,8 +204,15 @@ fn post_descriptions(
     credential: &str,
     version: &str,
     request: &CoreLookupRequest,
+    deadline: Instant,
 ) -> Result<CoreDescriptionsResponse, Attempt> {
     let failed = |failure| Err(Attempt::Failed(failure));
+    let Some(remaining) = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+    else {
+        return failed(CoreLookupFailure::Unavailable("timeout".to_owned()));
+    };
     let body = serde_json::json!({
         "version": version,
         "brainServer": request.brain_server,
@@ -212,6 +223,7 @@ fn post_descriptions(
     .to_string();
     let response = match agent
         .post(url)
+        .timeout(remaining)
         .set("content-type", "application/json")
         .set(DESCRIPTION_CREDENTIAL_HEADER, credential)
         .send_string(&body)
@@ -247,11 +259,18 @@ fn post_descriptions(
             "response too large".to_owned(),
         ));
     }
-    serde_json::from_slice(&bytes).or_else(|_| {
-        failed(CoreLookupFailure::Unavailable(
+    let Ok(response) = serde_json::from_slice::<CoreDescriptionsResponse>(&bytes) else {
+        return failed(CoreLookupFailure::Unavailable(
             "malformed response".to_owned(),
-        ))
-    })
+        ));
+    };
+    // Core's echoed version names the policy it applied.
+    if response.version != version {
+        return failed(CoreLookupFailure::Unavailable(
+            "response version differs from the request".to_owned(),
+        ));
+    }
+    Ok(response)
 }
 
 /// True only for Core's exact `{"error": "unsupported descriptions version"}`.
@@ -471,7 +490,8 @@ mod tests {
     }
 
     /// A local Core stub. `mode` is "current" (answers the asked version),
-    /// "old" (serves only v1), "invalid" (any 400) or "unauthorized".
+    /// "old" (serves only v1), "slow-old" (old, two seconds per answer),
+    /// "invalid" (any 400) or "unauthorized".
     fn stub_core(mode: &'static str) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let recorded = seen.clone();
@@ -495,12 +515,15 @@ mod tests {
                             (status, axum::Json(serde_json::json!({ "error": error })))
                         };
                         let bad = axum::http::StatusCode::BAD_REQUEST;
+                        if mode == "slow-old" {
+                            tokio::time::sleep(Duration::from_millis(2_000)).await;
+                        }
                         match mode {
                             "unauthorized" => {
                                 return error(axum::http::StatusCode::UNAUTHORIZED, "credential");
                             }
                             "invalid" => return error(bad, "invalid descriptions request body"),
-                            "old" if version != DESCRIPTIONS_VERSION_V1 => {
+                            "old" | "slow-old" if version != DESCRIPTIONS_VERSION_V1 => {
                                 return error(bad, UNSUPPORTED_VERSION_ERROR);
                             }
                             _ => {}
@@ -563,6 +586,12 @@ mod tests {
             assert_eq!(result.unwrap_err(), expected);
             assert_eq!(seen, [DESCRIPTIONS_VERSION_V2], "{mode} must not downgrade");
         }
+        // A slow refusal leaves the v1 retry only the remaining budget.
+        let started = Instant::now();
+        let (slow, seen) = lookup("slow-old");
+        assert!(matches!(slow, Err(CoreLookupFailure::Unavailable(_))));
+        assert_eq!(seen, [DESCRIPTIONS_VERSION_V2, DESCRIPTIONS_VERSION_V1]);
+        assert!(started.elapsed() < CORE_TOTAL_TIMEOUT + Duration::from_millis(500));
     }
 
     #[test]
