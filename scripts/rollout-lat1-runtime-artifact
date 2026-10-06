@@ -26,12 +26,20 @@ usage: scripts/rollout-lat1-runtime-artifact [--validate-only] [--host lat1|lat3
   --roll-admin-email EMAIL \
   --roll-admin-workos-user-id ID \
   (--roll-project-id PROJECT_ID... | --roll-all --roll-canary-project-id PROJECT_ID) \
-  [--roll-wait-timeout-seconds SECS] [--probe-override]
+  [--roll-wait-timeout-seconds SECS] [--probe-override] \
+  [--roll-require-runtime-idle REMOTE_STATUS_COMMAND]
 
 --probe-override (exactly-one-agent emergencies only) requires exactly one
   --roll-project-id, refuses --roll-all, and converts a non-operable lifecycle
   probe verdict from a deliberate skip into a loudly logged proceed; every
   other check (provider-fact drift, preflight, postflight) still applies.
+
+--roll-require-runtime-idle REMOTE_STATUS_COMMAND (one project only) names the
+  absolute path of finite-status on the Runner host. Execution then enqueues
+  only after its --runtime-idle read, the last Runner call before Core, reports
+  exactly idle; anything else, including an unavailable lifecycle probe, is a
+  deliberate skip. It requires exactly one --roll-project-id and refuses
+  --roll-all and --probe-override.
 EOF
 }
 
@@ -55,6 +63,11 @@ validate_local_inputs() {
   validate_id "runtime artifact id" "$ROLLOUT_ARTIFACT_ID" || return
   [[ $ROLLOUT_ADMIN_EMAIL =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$ ]] || { invalid_value "admin email"; return; }
   validate_id "admin WorkOS user id" "$ROLLOUT_ADMIN_WORKOS_USER_ID" || return
+  # One absolute executable path: no arguments, no relative or dot components.
+  if [[ -n $RUNTIME_IDLE_STATUS_COMMAND && ! $RUNTIME_IDLE_STATUS_COMMAND =~ ^(/[A-Za-z0-9_+][A-Za-z0-9._+-]{0,254}){1,32}$ ]]; then
+    invalid_value "--roll-require-runtime-idle: expected one absolute executable path"
+    return
+  fi
   local project_id
   if [[ ${#ROLLOUT_PROJECT_IDS[@]} -gt 0 ]]; then
     for project_id in "${ROLLOUT_PROJECT_IDS[@]}"; do
@@ -80,6 +93,7 @@ parse_args() {
   ROLLOUT_PROJECT_IDS=()
   ROLLOUT_HOST=lat1
   PROBE_OVERRIDE=false
+  RUNTIME_IDLE_STATUS_COMMAND=""
 
   while (($#)); do
     case "$1" in
@@ -152,6 +166,11 @@ parse_args() {
         PROBE_OVERRIDE=true
         shift
         ;;
+      --roll-require-runtime-idle)
+        [[ -z $RUNTIME_IDLE_STATUS_COMMAND && $# -ge 2 && -n $2 ]] || { usage; return 64; }
+        RUNTIME_IDLE_STATUS_COMMAND="$2"
+        shift 2
+        ;;
       *)
         echo "unknown runtime rollout option: $1" >&2
         usage
@@ -220,6 +239,11 @@ parse_args() {
       echo "--probe-override requires exactly one --roll-project-id" >&2
       return 64
     fi
+  fi
+  if [[ -n $RUNTIME_IDLE_STATUS_COMMAND ]] \
+    && [[ $ROLLOUT_ALL == true || $PROBE_OVERRIDE == true || ${#ROLLOUT_PROJECT_IDS[@]} -ne 1 ]]; then
+    echo "--roll-require-runtime-idle requires exactly one --roll-project-id and cannot be combined with --roll-all or --probe-override" >&2
+    return 64
   fi
   validate_local_inputs
 }
@@ -689,7 +713,8 @@ record_final() {
 # interrupted (the first absent entry is the resume point), and a plan with
 # zero planned entries is a noop, never a success. An entry the lifecycle
 # probe deliberately skipped is neither passed nor absent: it is recorded
-# progress and does not interrupt the run.
+# progress and does not interrupt the run. So is an entry the runtime idle
+# gate skipped before enqueue.
 derive_run_terminal() {
   jq -cs --argjson planned "$PLAN_PLANNED_KEYS" --arg run_id "$RUN_ID" '
     [.[] | select(.run_id == $run_id)] as $run
@@ -697,13 +722,14 @@ derive_run_terminal() {
     | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
     | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
     | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "override") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_overridden
+    | ([$run[] | select(.event == "entry_idle_gate" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $idle_skipped
     | ([$run[] | select(.event != "final" and .status == "failed")] | length > 0) as $any_failed
-    | ($planned - $passed - $failed - $probe_skipped) as $absent
+    | ($planned - $passed - $failed - $probe_skipped - $idle_skipped) as $absent
     | (if $any_failed then {status:"failure", failed_entries:$failed}
        elif ($planned | length) == 0 then {status:"noop"}
        elif ($absent | length) > 0 then {status:"interrupted", resume_point:$absent[0]}
        else {status:"success"} end)
-    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length), probe_skipped:($probe_skipped | length), probe_overridden:($probe_overridden | length)}
+    | . + {planned_count:($planned | length), passed_count:($passed | length), failed_count:($failed | length), absent_count:($absent | length), probe_skipped:($probe_skipped | length), probe_overridden:($probe_overridden | length), idle_skipped:($idle_skipped | length)}
   ' "$EVENTS_FILE"
 }
 
@@ -821,14 +847,15 @@ summarize_one_plan() {
         | ([$run[] | select((.event == "entry_preflight" or .event == "core" or .event == "entry_postflight") and .status == "failed") | .project_id + "/" + .agent_runtime_id] | unique) as $failed
         | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_skipped
         | ([$run[] | select(.event == "entry_lifecycle_probe" and .status == "override") | .project_id + "/" + .agent_runtime_id] | unique) as $probe_overridden
-        | ($planned - $passed - $failed - $probe_skipped) as $absent
+        | ([$run[] | select(.event == "entry_idle_gate" and .status == "skipped") | .project_id + "/" + .agent_runtime_id] | unique) as $idle_skipped
+        | ($planned - $passed - $failed - $probe_skipped - $idle_skipped) as $absent
         | (if $final == null then "unknown/incomplete"
            elif $phase != "execute" then $final.status
            elif ($failed | length) > 0 or ([$run[] | select(.event != "final" and .status == "failed")] | length) > 0 then "failure"
            elif ($planned | length) == 0 then "noop"
            elif ($absent | length) > 0 then "interrupted"
            else "success" end) as $terminal
-        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) probe_skipped=\($probe_skipped | length) probe_overridden=\($probe_overridden | length) resume=\($absent[0] // "-")"
+        | "plan \($plan_hash) run \($run_id) phase=\($phase) terminal=\($terminal) recorded=\($final.status // "none") planned=\($planned | length) passed=\($passed | length) failed=\($failed | length) absent=\($absent | length) probe_skipped=\($probe_skipped | length) probe_overridden=\($probe_overridden | length) idle_skipped=\($idle_skipped | length) resume=\($absent[0] // "-")"
       end
   '
 }
@@ -842,6 +869,9 @@ copy_paste_execute_command() {
   command+=(--roll-wait-timeout-seconds "$ROLLOUT_WAIT_TIMEOUT_SECONDS")
   if [[ $PROBE_OVERRIDE == true ]]; then
     command+=(--probe-override)
+  fi
+  if [[ -n $RUNTIME_IDLE_STATUS_COMMAND ]]; then
+    command+=(--roll-require-runtime-idle "$RUNTIME_IDLE_STATUS_COMMAND")
   fi
   local project_id
   if [[ $ROLLOUT_ALL == true ]]; then
@@ -987,6 +1017,81 @@ REMOTE
   printf '%s' "$report"
 }
 
+# With --roll-require-runtime-idle, read the canonical finite-status
+# --runtime-idle for one planned entry on its Runner host, under the same
+# Runner environment and resolved binary as the lifecycle probe. Print the
+# raw report and return the remote exit status; the caller decides.
+entry_runtime_idle_read() {
+  local entry="$1"
+  local project_id runtime_id machine_id idle_script
+  project_id="$(jq -r '.project_id' <<<"$entry")"
+  runtime_id="$(jq -r '.agent_runtime_id' <<<"$entry")"
+  machine_id="$(jq -r '.source_machine_id' <<<"$entry")"
+  read -r -d '' idle_script <<'REMOTE' || true
+set -euo pipefail
+[[ ${1:-} == provider-runtime-idle-v1 && $# -eq 6 ]] || exit 64
+status_command="$2"
+project_id="$3"
+runtime_id="$4"
+machine_id="$5"
+source_host_id="$6"
+set -a
+# Match the runner service's defaults-then-operator EnvironmentFile order.
+if [[ -r /etc/finite/runner-shared.env ]]; then
+  . /etc/finite/runner-shared.env
+fi
+. /etc/finite/runner.env
+set +a
+# The runner package is not in systemPackages on every host; resolve the
+# binary from the service unit that runs it, falling back to the profile.
+# systemd 260 prints ExecStart as a structured record: "{ path=/nix/store/... ; ... }"
+runner_bin="/run/current-system/sw/bin/finite-saas-runner"
+if [[ ! -x $runner_bin ]]; then
+  runner_bin="$(systemctl show finite-saas-runner.service -p ExecStart --value | sed -n 's/^{ path=\([^ ;]*\).*/\1/p')"
+fi
+[[ -n $runner_bin && -x $runner_bin ]] || exit 69
+export FINITE_STATUS_LIFECYCLE_PROBE_BIN="$runner_bin"
+exec "$status_command" --runtime-idle "$project_id" "$runtime_id" "$machine_id" "$source_host_id"
+REMOTE
+  run_remote_bash "$RUNNER_DEST" "$idle_script" provider-runtime-idle-v1 \
+    "$RUNTIME_IDLE_STATUS_COMMAND" "$project_id" "$runtime_id" "$machine_id" "$SOURCE_HOST_ID"
+}
+
+# Only exit 0 with an exact finite.status.v1 report for this assignment that is
+# green, idle, lifecycle-operable and has every turn and inbox count at zero
+# passes. Busy, unfinished markers, unknown and malformed reports never do.
+runtime_idle_report_is_exact_idle() {
+  local report="$1" project_id="$2" runtime_id="$3" machine_id="$4"
+  jq -se \
+    --arg project "$project_id" \
+    --arg runtime "$runtime_id" \
+    --arg machine "$machine_id" \
+    --arg host "$SOURCE_HOST_ID" '
+      length == 1 and (.[0]
+      | (keys == ["exit_code", "generated_at", "overall_status", "schema_version", "sections"])
+      and .schema_version == "finite.status.v1"
+      and .overall_status == "green"
+      and .exit_code == 0
+      and (.sections | keys) == ["runtime_idle"]
+      and (.sections.runtime_idle
+        | (keys == (["agent_runtime_id", "agentd_inbox", "gateway", "hermes_inbox", "lifecycle", "project_id", "reasons", "running_markers", "source_host_id", "source_machine_id", "status", "verdict"]))
+          and .status == "green"
+          and .verdict == "idle"
+          and .reasons == []
+          and .project_id == $project
+          and .agent_runtime_id == $runtime
+          and .source_machine_id == $machine
+          and .source_host_id == $host
+          and .lifecycle.verdict == "operable"
+          and .gateway.state == "running"
+          and .gateway.active_agents == 0
+          and .hermes_inbox.pending == 0
+          and .hermes_inbox.leased == 0
+          and .agentd_inbox.events == 0
+          and .running_markers.messages == 0))
+    ' <<<"$report" >/dev/null 2>&1
+}
+
 execute_exact_plan() {
   local reviewed_plan="$1"
   local entry project_id runtime_id source_host_id machine_id target_artifact_id approved signal observed result result_status post
@@ -1057,6 +1162,10 @@ execute_exact_plan() {
       append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"skipped", verdict:"unknown", reason:"probe_invalid_report", detail:"probe exited 0 with a malformed report; failing closed for upgrade eligibility"}')"
       echo "==> lifecycle probe returned a malformed report for $project_id ($runtime_id); deliberately skipping it, which keeps serving its current artifact"
       continue
+    elif [[ -n $RUNTIME_IDLE_STATUS_COMMAND ]]; then
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"skipped", verdict:"unknown", reason:"probe_unavailable", detail:"lifecycle probe unreachable; --roll-require-runtime-idle fails closed"}')"
+      echo "==> lifecycle probe unavailable for $project_id ($runtime_id); --roll-require-runtime-idle fails closed, deliberately skipping it, which keeps serving its current artifact"
+      continue
     else
       append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_lifecycle_probe", project_id:$project, agent_runtime_id:$runtime, status:"unavailable", detail:"lifecycle probe unreachable; keeping Core-state behavior"}')"
       echo "==> lifecycle probe unavailable for $project_id ($runtime_id); proceeding on Core-state evidence alone"
@@ -1069,6 +1178,25 @@ execute_exact_plan() {
       return 65
     fi
     append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson provider_facts "$observed" '{event:"entry_preflight", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", provider_facts:$provider_facts}')"
+
+    # The idle read is the last Runner call before Core enqueues. It narrows,
+    # but cannot close, the window in which a new message can arrive before
+    # Core stops the guest.
+    if [[ -n $RUNTIME_IDLE_STATUS_COMMAND ]]; then
+      local idle_report idle_status idle_observation
+      set +e
+      idle_report="$(entry_runtime_idle_read "$entry")"
+      idle_status=$?
+      set -e
+      if ((idle_status != 0)) || ! runtime_idle_report_is_exact_idle "$idle_report" "$project_id" "$runtime_id" "$machine_id"; then
+        idle_observation="$(jq -cs 'try (if length == 1 then .[0].sections.runtime_idle | {status, verdict, reasons, lifecycle_verdict: .lifecycle.verdict} else null end) catch null' <<<"$idle_report" 2>/dev/null)" || idle_observation=null
+        [[ -n $idle_observation ]] || idle_observation=null
+        append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" --argjson exit_code "$idle_status" --argjson observation "$idle_observation" '{event:"entry_idle_gate", project_id:$project, agent_runtime_id:$runtime, status:"skipped", reason:"not_exactly_idle", exit_code:$exit_code, observation:$observation}')"
+        echo "==> runtime idle gate did not read exactly idle for $project_id ($runtime_id) (exit $idle_status); deliberately skipping it, which keeps serving its current artifact"
+        continue
+      fi
+      append_event "$(jq -cn --arg project "$project_id" --arg runtime "$runtime_id" '{event:"entry_idle_gate", project_id:$project, agent_runtime_id:$runtime, status:"succeeded", verdict:"idle"}')"
+    fi
 
     local -a exact_args=(
       runtime-artifact-rollout
