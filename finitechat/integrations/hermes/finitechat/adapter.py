@@ -75,11 +75,23 @@ _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] 
 
 
 @dataclass(eq=False)
+class _RetryRewind:
+    """The live transcript a /retry rewound, just before and just after."""
+
+    store: Any
+    session_id: str
+    before: list[Any]
+    after: list[Any]
+
+
+@dataclass(eq=False)
 class _FiniteTurn:
     """One background turn, as its completion hook needs to settle it."""
 
     event: MessageEvent
     session_key: str
+    # The pinned gateway command the event dispatches as, or None.
+    command: str | None
     # Neither a gateway command nor a reply to a pending prompt.
     ordinary: bool
     # The event text as handed over. The pinned gateway rewrites a command
@@ -94,6 +106,23 @@ class _FiniteTurn:
     # are settled with the turn, so a stopped turn's steer is redelivered.
     riders: list[tuple[str, Any, str]] = field(default_factory=list)
     settled: bool = False
+    # The transcript this turn's /retry rewound before it re-sent the message,
+    # and whether settlement has closed it to a rewind still on its way.
+    retry_rewind: _RetryRewind | None = None
+    retry_closed: bool = False
+
+    def answered_by_gateway(self) -> bool:
+        """Hermes answered this turn itself instead of running model work.
+
+        Each pinned gateway command but /retry is answered by its dispatch
+        branch, before the drain refusal, unless Hermes rewrote the event
+        into the model's input (/queue, /plan, ...). /retry re-sends the last
+        message as a new event. A reply to a pending clarify or approval
+        prompt is answered by that prompt.
+        """
+        return (
+            not self.ordinary and self.command != "retry" and (self.event.text or "") == self.text
+        )
 
 
 _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVar(
@@ -108,6 +137,10 @@ _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVa
 _HERMES_TURN_COMMANDS = frozenset(
     {"blueprint", "goal", "init", "learn", "moa", "plan", "queue", "retry", "steer"}
 )
+# Pinned registry commands the gateway has no dispatch branch for. It hands
+# them to the model as an ordinary turn, so the adapter treats them as
+# ordinary text. A pinned test derives this set too.
+_HERMES_MODEL_TEXT_COMMANDS = frozenset({"curator"})
 APPROVAL_CONTROL_TEXT = frozenset(
     {
         "approve",
@@ -611,6 +644,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # out the drain even if it is a command the adapter would hand over.
         # The drain ends in stop(), so this lives no longer than the process.
         self._drain_refused: set[str] = set()
+        # The rewind of a /retry entry whose re-sent message Hermes queued
+        # behind a reserved slot, for the queued turn that settles the entry.
+        self._retry_rewinds: dict[str, _RetryRewind] = {}
 
     async def _process_message_background(
         self,
@@ -630,11 +666,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
         # The pinned base turn runs under the guard handle_message installed.
         guard = self._active_sessions.get(session_key)
+        command = _gateway_command(event)
+        if command == "retry":
+            _watch_retry_rewinds(self._gateway_session_store())
         turn = _FiniteTurn(
             event=event,
             session_key=session_key,
-            ordinary=_gateway_command(event) is None
-            and not self._is_immediate_text_control(event, session_key),
+            command=command,
+            ordinary=command is None and not self._is_immediate_text_control(event, session_key),
             text=event.text or "",
             guard=guard,
             run_generation=getattr(guard, "_hermes_run_generation", None),
@@ -1738,29 +1777,32 @@ class FiniteChatAdapter(BasePlatformAdapter):
     async def _settle_event_ack(self, event: MessageEvent, outcome_name: str) -> None:
         """Settle the sidecar's inbox lease once the event's turn has run.
 
-        The completion hook fires exactly once per background turn. A turn
-        cancelled by shutdown or recovery releases the lease so the sidecar
-        redelivers the entry whole; a turn the user ended with /stop, /new or
-        /reset is acked first, before any other rule, because redelivering it
-        would restart the very work the user stopped. The base adapter can
+        The completion hook fires exactly once per background turn. Ack and
+        release are both idempotent on the sidecar, and steers the turn's
+        agent took settle with it. A gateway that queues the event behind a
+        reserved or busy session slot returns at once; the queued turn
+        settles it.
+
+        Two kinds of turn are acked whatever happens around them. A turn the
+        user ended with /stop, /new or /reset is acked, because redelivering
+        it would restart the very work the user stopped. The base adapter can
         finish a stopped turn before it marks the task cancelled, so the
-        session's interrupt boundary decides too. Success or failure acks
-        (a failed turn still ran to completion and answered the user, so
-        re-running it on redelivery would be wrong). Ack and release are both
-        idempotent on the sidecar. Steers the turn's agent took settle with it.
+        session's interrupt boundary decides too. A command Hermes answered
+        itself (``/restart``, ``/undo``, ``/yolo``, ``/goal``, a reply to a
+        pending prompt) is acked too, even when a stop cancels it: running it
+        again after the restart would repeat its effect, and a stop that came
+        before it executed leaves a command the user can resend.
 
-        Once ``stop()`` begins, the pinned gateway interrupts running turns
-        cooperatively (``restart_drain_timeout`` defaults to 0s). It reports
-        the interrupted turn as SUCCESS or FAILURE, never CANCELLED, so any
-        turn finishing during the stop is released. A turn that completed in
-        that window may run once more after restart; acking would lose the
-        interrupted ones.
-
-        A turn can also return without running. A draining gateway refuses
-        a new model turn with a reply, which reports SUCCESS; that turn is
-        released so the message runs after the restart. A gateway that queues
-        the event behind a reserved or busy session slot returns at once, and
-        the queued turn settles it.
+        Model work (ordinary text, a command Hermes rewrote into the model's
+        input, and /retry) is released when a shutdown cancels it, when it
+        finishes after ``stop()`` begins, or when a draining gateway refused
+        it, so it runs after the restart. ``stop()`` interrupts running turns
+        cooperatively (``restart_drain_timeout`` defaults to 0s) and reports
+        them as SUCCESS or FAILURE, never CANCELLED; a turn that completed in
+        that window may run once more. Any other success or failure acks: a
+        failed turn still ran and answered the user. A /retry rewinds the
+        transcript before it re-sends, so its rewind is undone first unless
+        the re-sent message took effect.
         """
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         room_id = str(raw_message.get("room_id") or self.room_id)
@@ -1768,6 +1810,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         message_id = str(raw_message.get("message_id") or "")
         if not message_id:
             return
+        event_key = _adapter_event_key(room_id, seq, message_id)
         turn = _FINITE_TURN.get()
         if turn is not None and turn.event is not event:
             turn = None
@@ -1776,12 +1819,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
             and outcome_name != "cancelled"
             and self._hermes_queued(turn.session_key, event)
         ):
+            if turn.retry_rewind is not None and event_key:
+                self._retry_rewinds[event_key] = turn.retry_rewind
             return
         # Claim the in-flight marker so the inline-admission path does not also
         # ack this event once its background turn's completion hook has fired.
-        event_key = _adapter_event_key(room_id, seq, message_id)
         if event_key:
             self._inflight_admissions.discard(event_key)
+        rewind = self._retry_rewinds.pop(event_key, None) if event_key else None
+        if turn is not None and turn.retry_rewind is not None:
+            rewind = turn.retry_rewind
         user_ended = asyncio.current_task() in self._user_cancelled_tasks or (
             bool(self._user_interrupt_boundaries)
             and self._precedes_user_interrupt(
@@ -1790,12 +1837,16 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 seq,
             )
         )
-        refused = not user_ended and self._refused_by_drain(turn)
+        final = user_ended or (turn is not None and turn.answered_by_gateway())
+        model_started = turn is not None and self._model_run_started(turn)
+        refused = not final and turn is not None and self._gateway_draining() and not model_started
         if refused and event_key:
             self._drain_refused.add(event_key)
-        release = not user_ended and (
-            outcome_name == "cancelled" or self._gateway_stopping() or refused
-        )
+        release = not final and (outcome_name == "cancelled" or self._gateway_stopping() or refused)
+        if rewind is not None or (turn is not None and turn.command == "retry"):
+            release = await self._settle_retry_rewind(
+                turn, rewind, release=release, model_started=model_started
+            )
         riders: list[tuple[str, Any, str]] = []
         if turn is not None:
             turn.settled = True
@@ -1804,25 +1855,75 @@ class FiniteChatAdapter(BasePlatformAdapter):
         for entry_room_id, entry_seq, entry_message_id in [(room_id, seq, message_id), *riders]:
             await settle(entry_room_id, entry_seq, entry_message_id)
 
-    def _refused_by_drain(self, turn: _FiniteTurn | None) -> bool:
-        """The draining gateway answered this turn's work without running it.
+    def _model_run_started(self, turn: _FiniteTurn) -> bool:
+        """The gateway started an agent run for this turn's work.
 
-        The pinned gateway refuses a new model turn only while ``_draining``
-        is set, which stays set until the process stops. Before each agent run
-        it binds a fresh run generation to the turn's session guard, so a
-        refused turn leaves that guard as the turn found it. A turn that ran
-        and finished during the drain is not refused. Gateway commands are
-        work only once Hermes has rewritten them into this turn's input
-        (/queue, /plan, ...); one it answered itself is not refused.
+        Before each agent run the pinned gateway binds a fresh run generation
+        to the turn's session guard, so a turn it refused or answered leaves
+        that guard as the turn found it. The pinned gateway refuses a new
+        model turn only while ``_draining`` is set, which stays set until the
+        process stops; a turn that ran and finished during the drain was not
+        refused.
         """
-        if turn is None or not self._gateway_draining():
-            return False
-        if not turn.ordinary and (turn.event.text or "") == turn.text:
-            return False
         guard = (
             turn.guard if turn.guard is not None else self._active_sessions.get(turn.session_key)
         )
-        return getattr(guard, "_hermes_run_generation", None) == turn.run_generation
+        return getattr(guard, "_hermes_run_generation", None) != turn.run_generation
+
+    async def _settle_retry_rewind(
+        self,
+        turn: _FiniteTurn | None,
+        rewind: _RetryRewind | None,
+        *,
+        release: bool,
+        model_started: bool,
+    ) -> bool:
+        """Undo a /retry's rewind that its re-sent message never used; True to release.
+
+        The pinned /retry rewinds the transcript, then re-sends the last
+        message as a new turn, which a draining gateway refuses and a stop
+        can cancel. A redelivered /retry would then rewind once more and
+        retry an older message. So the entry is released only once the
+        transcript is as it was before the rewind, or the re-sent message's
+        own agent run has written to it since (that run is the redelivery's
+        to retry). The rewind is undone only while the transcript is exactly
+        what it left. If it cannot be undone, the entry is acked: the user
+        sees the refusal and nothing is rewound twice.
+
+        A stop can cancel the turn while its rewind is still running in a
+        worker thread. Settlement closes the turn under the store's
+        transcript lock, so that rewind is either recorded first or refused.
+        """
+        store = rewind.store if rewind is not None else self._gateway_session_store()
+        if not _watching_retry_rewinds(store):
+            # A rewind could have gone unrecorded.
+            return False
+
+        def settle() -> str:
+            with store._get_transcript_drain_lock():
+                recorded = rewind
+                if turn is not None:
+                    turn.retry_closed = True
+                    recorded = turn.retry_rewind or recorded
+                if recorded is None:
+                    return "unchanged"
+                if model_started and not release:
+                    return "kept"
+                return _restore_retry_rewind(recorded)
+
+        outcome = await asyncio.to_thread(settle)
+        if outcome in ("unchanged", "restored") or (outcome == "changed" and model_started):
+            return release
+        if release:
+            logger.warning(
+                "[finitechat] /retry rewind could not be undone (%s); acking it "
+                "so a redelivery does not rewind again",
+                outcome,
+            )
+        return False
+
+    def _gateway_session_store(self) -> Any:
+        return getattr(getattr(self, "gateway_runner", None), "session_store", None)
 
     @staticmethod
     def _route_metadata(
@@ -2439,7 +2540,8 @@ def _gateway_command(event: MessageEvent) -> str | None:
     session: a registry command, named canonically (``/q`` is ``queue``,
     ``/reset`` is ``new``), after it rewrites a DM ``restart the gateway`` to
     ``/restart``. Unknown slash words and path-like text such as ``/usr/bin/x``
-    are ordinary work. The probe is a copy, so the base adapter still
+    are ordinary work, and so are the registry commands the gateway hands to
+    the model as text. The probe is a copy, so the base adapter still
     rewrites the event itself.
     """
     try:
@@ -2453,7 +2555,85 @@ def _gateway_command(event: MessageEvent) -> str | None:
         coerce_plaintext_gateway_command(probe)
     command = probe.get_command()
     definition = resolve_command(command) if command else None
-    return definition.name if definition is not None else None
+    if definition is None or definition.name in _HERMES_MODEL_TEXT_COMMANDS:
+        return None
+    return definition.name
+
+
+def _watch_retry_rewinds(store: Any) -> None:
+    """Record the transcript each Finite /retry rewinds, to undo it if unused.
+
+    Integration hook: the pinned ``_handle_retry_command`` rewinds the live
+    transcript (``rewrite_transcript``, or ``rewind_session`` for a
+    compaction carrier) and only then re-sends the last message through the
+    drain check, so a drain or stop between the two loses that message.
+    This wraps the two methods on the gateway's session store; outside a
+    Finite /retry turn they run unchanged. Inside one, the first successful
+    call records the live transcript just before and just after it, under
+    the store's transcript lock that both methods take.
+    """
+    if store is None or getattr(store, "_finitechat_watches_retry", False):
+        return
+    names = (
+        "rewrite_transcript",
+        "rewind_session",
+        "load_transcript",
+        "_get_transcript_drain_lock",
+    )
+    if not all(callable(getattr(store, name, None)) for name in names):
+        # Settlement then acks a /retry it cannot prove left the transcript whole.
+        logger.warning("[finitechat] session store lacks the /retry hooks; /retry is unwatched")
+        return
+    for name, refused in (("rewrite_transcript", False), ("rewind_session", None)):
+        setattr(store, name, _recording_retry_rewind(store, getattr(store, name), refused))
+    store._finitechat_watches_retry = True
+
+
+def _watching_retry_rewinds(store: Any) -> bool:
+    return bool(getattr(store, "_finitechat_watches_retry", False))
+
+
+def _recording_retry_rewind(store: Any, rewind: Any, refused: Any) -> Any:
+    def call(session_id: str, *args: Any, **kwargs: Any) -> Any:
+        # The store runs in a worker thread that carries the turn's context.
+        turn = _FINITE_TURN.get()
+        if turn is None or turn.command != "retry" or turn.retry_rewind is not None:
+            return rewind(session_id, *args, **kwargs)
+        with store._get_transcript_drain_lock():
+            if turn.retry_closed:
+                # The turn has settled; /retry reports the transcript unchanged.
+                return refused
+            before = store.load_transcript(session_id)
+            result = rewind(session_id, *args, **kwargs)
+            if result:
+                turn.retry_rewind = _RetryRewind(
+                    store, session_id, before, store.load_transcript(session_id)
+                )
+            return result
+
+    return call
+
+
+def _restore_retry_rewind(rewind: _RetryRewind) -> str:
+    """Put back the transcript a /retry rewound, if nothing has written to it since.
+
+    The check and the write share the store's transcript lock, which its
+    transcript writers take, and the write rejects a turn lease held by
+    another process. No agent run of the session is active while the
+    /retry's turn settles. "changed" leaves the transcript alone.
+    """
+    store = rewind.store
+    with store._get_transcript_drain_lock():
+        if store.load_transcript(rewind.session_id) != rewind.after:
+            return "changed"
+        restored = type(store).rewrite_transcript(
+            store,
+            rewind.session_id,
+            rewind.before,
+            active_only=True,
+            reject_active_turn_lease=True,
+        )
+    return "restored" if restored else "failed"
 
 
 def _is_hermes_resume_event(event: MessageEvent) -> bool:

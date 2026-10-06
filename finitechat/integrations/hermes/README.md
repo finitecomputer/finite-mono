@@ -142,13 +142,18 @@ its own.
   success or failure, and a turn cancelled by shutdown or recovery calls
   `release`, which returns the entry to `Pending` for redelivery. Hermes
   `stop()` interrupts running turns cooperatively and reports them as
-  success, so every turn that finishes after `stop()` begins is released; a
-  turn that completed in that window can run once more after restart. While
+  success, so every model turn that finishes after `stop()` begins is
+  released; a turn that completed in that window can run once more after
+  restart. A command Hermes answers itself, such as `/restart`, `/undo`,
+  `/yolo` or `/goal`, or a reply to a pending prompt, is acked once even when
+  a stop follows or cancels it, so a restart never repeats its effect. A stop
+  that cancels it before it runs leaves a command the user resends. While
   Hermes drains to stop or restart it refuses any new model turn with a reply
   that reports success, so the adapter holds delivered work instead and
   releases it on disconnect. Work is anything Hermes would not dispatch as a
   gateway command, by the pinned base adapter's own rule, so path-like text
-  such as `/usr/bin/x` waits too. So do the commands Hermes turns into a model
+  such as `/usr/bin/x` waits too, as does `/curator`, which the pinned gateway
+  passes to the model as text. So do the commands Hermes turns into a model
   turn for their message: `/queue`, `/steer`, `/plan`, `/learn`, `/init`,
   `/blueprint` and `/moa` rewrite it into the agent's input, `/retry` re-sends
   the last message and `/goal` queues a kickoff turn. A pinned test derives
@@ -159,9 +164,18 @@ its own.
   binding a run to the turn's session guard; a redelivery then waits out the
   drain. A turn that ran and finished during a restart drain is still acked.
   A message handed over as the drain begins can show Hermes's refusal reply
-  and still run after the restart. A `/retry` or `/goal` handed over in that
-  window is acked: `/retry` has already rewound the transcript and `/goal`
-  has saved the goal; only the turn each starts is refused, visibly. A message Hermes
+  and still run after the restart. A `/goal` handed over in that window is
+  acked: it has saved the goal, and only its kickoff turn is refused,
+  visibly. A stop that interrupts the kickoff loses that turn too; the saved
+  goal continues after the user's next turn or `/goal resume`. `/retry`
+  rewinds the transcript before it re-sends the last message. If a drain
+  refuses the re-sent turn or a stop cuts it off first, the adapter puts the
+  rewound transcript back and releases the entry, so the same message is
+  retried once after the restart. It undoes the rewind only while the
+  transcript is exactly what the rewind left, under the store's transcript
+  lock; otherwise it acks rather than rewind twice. To see the rewind, the
+  adapter wraps the gateway session store's `rewrite_transcript` and
+  `rewind_session`, which run unchanged outside a Finite `/retry` turn. A message Hermes
   queues behind a reserved or busy session slot, or a `/queue` it copies
   there, is settled by the turn that runs it. The adapter
   also holds every non-internal event, commands included, while Hermes's
