@@ -5090,8 +5090,12 @@ mod tests {
 
     #[test]
     fn packaged_invite_guidance_matches_the_supported_invite_surface() {
-        let skill = include_str!(
-            "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+        // The skill routes invitations to its sharing reference.
+        let skill = concat!(
+            include_str!("../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"),
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/references/sharing.md"
+            ),
         );
         let reference = include_str!(
             "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
@@ -5117,7 +5121,7 @@ mod tests {
         for (source, text) in [
             ("help", help.as_str()),
             ("--skill", guide.as_str()),
-            ("SKILL.md", skill),
+            ("finitebrain skill", skill),
             ("fbrain-cli.md", reference),
             ("generated AGENTS.md template", generated.as_str()),
         ] {
@@ -5131,7 +5135,7 @@ mod tests {
 
         // Syntax and terminology guards supplement source review; they cannot
         // prove that arbitrary natural-language guidance describes the contract.
-        for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+        for (source, text) in [("--skill", guide.as_str()), ("finitebrain skill", skill)] {
             let normalized = normalized_invite_examples(text);
             for contract in [
                 "--target <npub|hex|NIP-05>",
