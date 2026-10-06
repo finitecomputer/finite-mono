@@ -383,3 +383,67 @@ class ChildWorkTests(DrainScenario):
                 await self.shutdown(restarted)
 
         self.run_scenario(scenario)
+
+    def test_pause_or_clear_supersedes_a_kickoff_already_in_memory(self):
+        for control in ("pause", "clear"):
+            with self.subTest(control=control):
+
+                async def scenario(home, control=control):
+                    from gateway.platforms.base import MessageEvent
+
+                    h = GatewayHarness(home, timeline=[], stall=False)
+                    source = chat_source(h)
+                    try:
+                        await h.runner._handle_goal_command(
+                            MessageEvent(
+                                text="/goal synthetic task", source=source, message_id="msg-1"
+                            )
+                        )
+                        key = h.runner._session_key_for_source(source)
+                        kickoff = h.adapter._pending_messages.pop(key)
+                        await h.runner._handle_goal_command(
+                            MessageEvent(text="/goal " + control, source=source, message_id="msg-2")
+                        )
+                        await h.adapter.handle_message(kickoff)
+                        await h.wait_turns_finished()
+                        self.assertEqual(h.runs, [])
+                        self.assertEqual(journal(h.runner).count(), 0)
+                    finally:
+                        await self.shutdown(h)
+
+                self.run_scenario(scenario)
+
+    def test_stop_before_child_coroutine_starts_keeps_a_durable_outcome(self):
+        async def scenario(home):
+            from gateway.platforms.base import MessageEvent
+
+            h = GatewayHarness(home, timeline=[], stall=False)
+            ran = []
+
+            async def background(*_args, **_kwargs):
+                ran.append(True)
+
+            h.runner._run_background_task = background
+            try:
+                reply = await h.runner._handle_background_command(
+                    MessageEvent(
+                        text="/bg synthetic task", source=chat_source(h), message_id="msg-1"
+                    )
+                )
+                self.assertTrue(reply)
+                self.assertEqual(journal(h.runner).pending()[0]["state"], "accepted")
+                # No event-loop yield occurred after acceptance: cancel the
+                # newly created worker before its first instruction.
+                await self.shutdown(h)
+                self.assertEqual(ran, [])
+            finally:
+                await self.shutdown(h)
+            restarted = await self.boot(home, {})
+            try:
+                await eventually(lambda: journal(restarted.runner).count() == 0)
+                self.assertTrue(any("was interrupted" in reply for reply in restarted.replies))
+                self.assertEqual(restarted.runs, [])
+            finally:
+                await self.shutdown(restarted)
+
+        self.run_scenario(scenario)
