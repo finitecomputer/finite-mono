@@ -78,6 +78,27 @@ gh workflow run hermes-runtime-smoke.yml \
   -f chat_interruption_smoke=true
 ```
 
+The chat interruption smoke uses a real Hermes and the production inbox lease
+TTL of 45 minutes. It fails if the Agent sets
+`FINITECHAT_HERMES_LEASE_TTL_MILLIS`. It runs these cases:
+
+- **Three graceful stops** (`docker stop --time 15`), each with its own
+  markers. Before restart, the stopped inbox must have no entry in the Leased
+  state. The queued follow-up must be Pending. The interrupted turn can be
+  Pending or Acked. Repeating the stop exercises the race where a lease is
+  released and then re-leased onto the adapter's closing stream.
+- **SIGKILL.** A crash strands both leases until the TTL expires. The smoke
+  does not wait 45 minutes. After it proves exit 137 and removes the
+  container, it backdates exactly the two known `leased_at_ms` values past the
+  TTL on the synthetic volume. The write is a compare-and-swap on the inbox
+  digest. The report records the original times and digests. The sidecar's
+  own expiry rule then redelivers both entries.
+- **Empty-target restore** after a graceful stop.
+
+After every restart, the queued follow-up must reach the model exactly once.
+If the interrupted turn reruns, it must run before the follow-up. The fresh
+turns must reply, and both entries must end acked and out of the inbox.
+
 ## Current Caveat
 
 The Tinfoil backup/restore Docker smoke is no longer the default `main` gate.
