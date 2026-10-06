@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -222,6 +226,158 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
                 agent_container="agent-container",
             )
         self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
+
+    def run_reply_poll(self, responses: list, retries: dict[str, int]) -> dict:
+        return smoke.run_model_smoke(
+            image="finite-agent-runtime:test",
+            user_volume="user-vol",
+            server_url="https://chat.example",
+            room_id="room-x",
+            expected="hello",
+            env={},
+            agent_container="agent-container",
+            phase="before_restart",
+            state_read_retries=retries,
+        )
+
+    def test_reply_poll_retries_sse_disconnect_without_resending(self) -> None:
+        retries: dict[str, int] = {}
+        responses = [
+            {"messages": []},
+            smoke.SmokeFailure("delivery error: SSE hint stream read failed: body error"),
+            {"messages": [{"is_mine": False, "text": "hello", "message_id": "reply"}]},
+        ]
+        with (
+            mock.patch.object(smoke, "docker_user_app", side_effect=responses) as app,
+            mock.patch.object(smoke, "ensure_container_running") as alive,
+            mock.patch.object(smoke.time, "sleep"),
+        ):
+            result = self.run_reply_poll(responses, retries)
+        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["state_read_retries"], 1)
+        self.assertEqual(retries, {"before_restart": 1})
+        self.assertEqual(
+            [call.kwargs["args"][0] for call in app.call_args_list], ["send", "state", "state"]
+        )
+        alive.assert_called_once_with("agent-container")
+
+    def test_reply_timeout_first_line_counts_messages_without_their_text(self) -> None:
+        responses = [
+            {"messages": []},
+            {"messages": [{"text": "SYNTHETIC-PRIVATE-CONTENT", "is_mine": False}]},
+        ]
+        with (
+            mock.patch.object(smoke, "docker_user_app", side_effect=responses),
+            mock.patch.object(smoke.time, "monotonic", side_effect=[0, 0, 1, 181]),
+            mock.patch.object(smoke.time, "sleep"),
+            mock.patch.object(smoke, "agent_log_tail", return_value="SYNTHETIC-LOG-TAIL"),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            self.run_reply_poll(responses, {})
+        first_line = smoke.artifact_failure_text(raised.exception)
+        self.assertEqual(first_line, "expected Hermes reply 'hello' not found; 1 messages observed")
+        # The job log keeps the full detail.
+        self.assertIn("SYNTHETIC-PRIVATE-CONTENT", str(raised.exception))
+        self.assertIn("SYNTHETIC-LOG-TAIL", str(raised.exception))
+
+    def test_reply_poll_fails_above_the_sse_retry_cap(self) -> None:
+        cap = smoke.MAX_STATE_READ_RETRIES_PER_PHASE
+        retries: dict[str, int] = {}
+        sse = smoke.SmokeFailure("delivery error: SSE hint stream read failed: body error")
+        responses = [{"messages": []}, *([sse] * (cap + 1))]
+        with (
+            mock.patch.object(smoke, "docker_user_app", side_effect=responses) as app,
+            mock.patch.object(smoke, "ensure_container_running"),
+            mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
+            mock.patch.object(smoke.time, "sleep"),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            self.run_reply_poll(responses, retries)
+        message = str(raised.exception)
+        self.assertIn(f"SSE hint stream read failed {cap + 1} times", message)
+        self.assertIn(f"cap is {cap}", message)
+        self.assertIn("AGENT-LOG-TAIL", message)
+        self.assertEqual(retries, {"before_restart": cap + 1})
+        self.assertEqual(
+            [call.kwargs["args"][0] for call in app.call_args_list],
+            ["send", *(["state"] * (cap + 1))],
+        )
+
+    def test_reply_poll_does_not_retry_other_state_failures(self) -> None:
+        retries: dict[str, int] = {}
+        responses = [{"messages": []}, smoke.SmokeFailure("app state exited 2")]
+        with (
+            mock.patch.object(smoke, "docker_user_app", side_effect=responses),
+            mock.patch.object(smoke, "ensure_container_running") as alive,
+            mock.patch.object(smoke.time, "sleep"),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            self.run_reply_poll(responses, retries)
+        self.assertEqual(str(raised.exception), "app state exited 2")
+        self.assertEqual(retries, {"before_restart": 0})
+        alive.assert_not_called()
+
+    def run_main_until_failure(self, failure: Exception, summary: Path, report: Path) -> None:
+        args = argparse.Namespace(
+            image="finite-agent-runtime:test",
+            server_url="https://chat.example",
+            report=str(report),
+            container="agent-container",
+            keep_running=False,
+        )
+        with (
+            mock.patch.object(smoke, "parse_args", return_value=args),
+            mock.patch.object(smoke, "docker_image_metadata", side_effect=failure),
+            mock.patch.object(smoke, "agent_log_tail", return_value="SECRET-AGENT-LOG-TAIL"),
+            mock.patch.object(smoke, "docker_container_rm"),
+            mock.patch.object(smoke, "docker_volume_rm"),
+            mock.patch.dict(
+                os.environ,
+                {"FINITE_PRIVATE_API_KEY": "smoke-key", "GITHUB_STEP_SUMMARY": str(summary)},
+            ),
+            self.assertRaises(smoke.SmokeFailure),
+        ):
+            smoke.main()
+
+    def test_failure_report_excludes_the_agent_log_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            report = Path(scratch) / "report.json"
+            summary = Path(scratch) / "summary.md"
+            failure = smoke.SmokeFailure(
+                "expected Hermes reply 'x' not found\n"
+                "agent container logs (tail):\nSECRET-AGENT-LOG-TAIL"
+            )
+            self.run_main_until_failure(failure, summary, report)
+            text = report.read_text(encoding="utf-8")
+            payload = json.loads(text)
+        self.assertEqual(payload["status"], "failed")
+        self.assertEqual(payload["failure"], "expected Hermes reply 'x' not found")
+        self.assertNotIn("agent_log_tail", payload)
+        self.assertNotIn("SECRET-AGENT-LOG-TAIL", text)
+
+    def test_step_summary_reports_state_read_retries_on_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            report = Path(scratch) / "report.json"
+            summary = Path(scratch) / "summary.md"
+            self.run_main_until_failure(smoke.SmokeFailure("boom"), summary, report)
+            text = summary.read_text(encoding="utf-8")
+            payload = json.loads(report.read_text(encoding="utf-8"))
+        cap = smoke.MAX_STATE_READ_RETRIES_PER_PHASE
+        self.assertEqual(payload["facts"]["state_read_retries"], {})
+        self.assertIn("SSE state read retries", text)
+        self.assertIn(f"before restart: not run (cap {cap})", text)
+        self.assertIn(f"after restart: not run (cap {cap})", text)
+        self.assertNotIn("SECRET-AGENT-LOG-TAIL", text)
+
+    def test_step_summary_prints_each_phase_retry_count(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch:
+            summary = Path(scratch) / "summary.md"
+            with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+                smoke.write_step_summary({"before_restart": 2, "after_restart": 0})
+            text = summary.read_text(encoding="utf-8")
+        cap = smoke.MAX_STATE_READ_RETRIES_PER_PHASE
+        self.assertIn(f"before restart: 2 (cap {cap})", text)
+        self.assertIn(f"after restart: 0 (cap {cap})", text)
 
 
 if __name__ == "__main__":

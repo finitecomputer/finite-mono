@@ -12,6 +12,11 @@ on:
         required: true
         default: false
         type: boolean
+      requester_diagnostics:
+        description: Non-production canary with the Brain requester-lease diagnostic on; the version must contain "diagnostic"
+        required: true
+        default: false
+        type: boolean
 concurrency:
   group: agent-runtime-image-${{ inputs.version }}
 env:
@@ -25,6 +30,27 @@ jobs:
       id-token: write
       packages: write
     steps:
+      - name: Keep a diagnostic image a non-production canary
+        # First, before checkout, OIDC and Nix setup: it reads only inputs.
+        env:
+          REQUESTER_DIAGNOSTICS: ${{ inputs.requester_diagnostics }}
+          PUBLISH_PRODUCTION: ${{ inputs.publish_production }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$REQUESTER_DIAGNOSTICS" != "true" ]; then
+            exit 0
+          fi
+          if [ "$PUBLISH_PRODUCTION" = "true" ]; then
+            echo "::error::requester_diagnostics builds a non-production canary; set publish_production=false"
+            exit 1
+          fi
+          case "$VERSION" in
+            *diagnostic*) ;;
+            *)
+              echo "::error::requester_diagnostics needs a version that contains 'diagnostic'"
+              exit 1
+              ;;
+          esac
       - uses: actions/checkout@v4
       - uses: depot/setup-action@v1
         with:
@@ -59,9 +85,22 @@ jobs:
           FINITE_PRIVATE_API_KEY: ${{ secrets.FINITE_PRIVATE_SMOKE_API_KEY }}
           FINITECHAT_HERMES_MODEL: ${{ vars.FINITECHAT_HERMES_MODEL || 'anthropic/claude-sonnet-4.6' }}
           FINITECHAT_HERMES_PROVIDER: ${{ vars.FINITECHAT_HERMES_PROVIDER || 'openrouter' }}
+          REQUESTER_DIAGNOSTICS: ${{ inputs.requester_diagnostics }}
+          PUBLISH_PRODUCTION: ${{ inputs.publish_production }}
         run: |
           version_ref="$IMAGE:$VERSION"
           test -z "$(git status --porcelain)"
+          build_flags=()
+          expected_requester_diagnostics=absent
+          expected_diagnostic_label=
+          if [ "$REQUESTER_DIAGNOSTICS" = "true" ]; then
+            build_flags+=(--requester-diagnostics)
+            expected_requester_diagnostics=1
+            expected_diagnostic_label=brain-requester-lease
+          fi
+          if [ "$PUBLISH_PRODUCTION" = "true" ]; then
+            build_flags+=(--publish-production)
+          fi
           if [ -z "$DEPOT_PROJECT_ID" ]; then
             echo "::error::set DEPOT_RUNTIME_IMAGE_PROJECT_ID or DEPOT_PROJECT_ID for this GitHub Actions workflow"
             exit 1
@@ -71,11 +110,13 @@ jobs:
             --platform linux/amd64 \
             --save \
             --metadata-file finitecomputer-v2/runtime-image-depot.json \
-            --report finitecomputer-v2/runtime-image-report.json
+            --report finitecomputer-v2/runtime-image-report.json \
+            "${build_flags[@]}"
 
           local_image_id="$(docker image inspect "$version_ref" --format '{{.Id}}')"
           test -n "$local_image_id"
           test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$version_ref" --format '{{index .Config.Labels "computer.finite.runtime.diagnostic"}}')" = "$expected_diagnostic_label"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["mono_sha"])')" = "$GITHUB_SHA"
           test "$(python3 -c 'import json; print(json.load(open("finitecomputer-v2/runtime-image-report.json"))["image_metadata"]["id"])')" = "$local_image_id"
           # The label is the lock-derived stamp; the running Hermes must equal it.
@@ -85,7 +126,8 @@ jobs:
           docker run --rm --entrypoint /bin/sh \
             --mount "type=bind,source=$RUNNER_TEMP/runtime-pdf-probes,target=/tmp/pdf-probes" \
             --mount "type=bind,source=$GITHUB_WORKSPACE/finite-skills/scripts/check-sites-cli.py,target=/tmp/check-sites-cli.py,readonly" \
-            -e "HERMES_AGENT_VERSION=$hermes_label" "$version_ref" -ec '
+            -e "HERMES_AGENT_VERSION=$hermes_label" \
+            -e "EXPECTED_REQUESTER_DIAGNOSTICS=$expected_requester_diagnostics" "$version_ref" -ec '
             test -n "$HERMES_AGENT_STORE_PATH"
             test -n "$HERMES_AGENT_PYTHON_PATH"
             test "$(python3 -c '\''import importlib.metadata; print(importlib.metadata.version("hermes-agent"))'\'')" = "$HERMES_AGENT_VERSION"
@@ -121,6 +163,7 @@ jobs:
             find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
             test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
             test "$FINITECHAT_HERMES_INBOUND_STREAM" = "1"
+            test "${FINITECHAT_REQUESTER_DIAGNOSTICS-absent}" = "$EXPECTED_REQUESTER_DIAGNOSTICS"
           '
           # Validate actual text, including Chromium font discovery in the slim image.
           # The inspection tool comes from the same pin and runs outside the image.
@@ -158,6 +201,15 @@ jobs:
           echo "project_id=$project_id" >> "$GITHUB_OUTPUT"
           echo "source_digest=$source_digest" >> "$GITHUB_OUTPUT"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+      - name: Upload durable smoke failure report
+        # The smoke keeps Agent logs out of this report: artifacts of a public
+        # repository are not masked the way job logs are.
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-image-durable-smoke-failure
+          path: finitechat/target/runtime-image-durable-smoke/report.json
+          if-no-files-found: ignore
       - name: Log in to GHCR for canary publication
         env:
           GHCR_TOKEN: ${{ github.token }}
@@ -192,7 +244,7 @@ jobs:
           docker pull "$PINNED" >/dev/null
       - name: Promote the same saved build to production tags
         id: production
-        if: inputs.publish_production == true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
+        if: inputs.publish_production == true && inputs.requester_diagnostics != true && vars.FINITE_GHCR_PRODUCTION_PUBLISH_ENABLED == 'true'
         env:
           IMAGE: ${{ steps.build.outputs.image }}
           VERSION: ${{ inputs.version }}
@@ -244,8 +296,12 @@ jobs:
         env:
           CANARY: ${{ steps.canary.outputs.pinned }}
           PRODUCTION: ${{ steps.production.outputs.pinned }}
+          REQUESTER_DIAGNOSTICS: ${{ inputs.requester_diagnostics }}
         run: |
           echo "Verified anonymous canary: \`$CANARY\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$REQUESTER_DIAGNOSTICS" = "true" ]; then
+            echo "Diagnostic canary (brain-requester-lease): register unpromoted with canary_runtime_id; never promote" >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -n "$PRODUCTION" ]; then
             echo "Production promotion: \`$PRODUCTION\`" >> "$GITHUB_STEP_SUMMARY"
           else
