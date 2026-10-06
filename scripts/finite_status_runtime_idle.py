@@ -7,11 +7,22 @@ Reads only `<state_root>/agent` (the guest's `/data/agent`):
 - `hermes-inbox.json` events: `lease.state` `pending` (queued; an absent lease
   loads as pending) or `leased` (in flight).
 - `agentd-inbox.json` events and `hermes-running.json` messages.
+- `hermes-inbox.json` `acked` ring: the newest `acked_at_ms`. A /bg or /btw
+  command entry is acked when its child is launched, so the child is visible
+  to neither `active_agents` nor the inbox; a recent ack reads busy.
+- `hermes-home/gateway.pid` mtime (created O_EXCL once per gateway process)
+  and a private scratch copy of `hermes-home/state.db` (+ `-wal`, never
+  `-shm`): /bg children run an AIAgent with session id `bg_*` whose row stays
+  `ended_at IS NULL` until the child finishes, then is ended just before the
+  result is delivered. Open rows started before the current gateway process
+  are dead children of an earlier process and only reported.
 
 The finitechat loaders default the three inbox/marker files to empty on
 NotFound, so absence reads as empty only beneath a valid root with a running
 gateway record. Idle requires `gateway_state == "running"`, `active_agents == 0`,
-both inboxes empty and no running markers. Anything malformed, oversized,
+both inboxes empty, no running markers, no inbox entry acked within
+QUIET_AFTER_ACK_S, no open `bg_*` session of the current gateway process and
+none ended within BACKGROUND_DELIVERY_S. Anything malformed, oversized,
 symlinked, unreadable or not a regular file is unknown, never idle.
 
 Only counts and ages are emitted: never Chat text, room, message or entry
@@ -23,15 +34,24 @@ from __future__ import annotations
 import errno
 import json
 import os
+import shutil
 import stat
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 MAX_STATE_BYTES = 32 * 1024 * 1024
+MAX_SESSION_DB_BYTES = 4 * 1024 * 1024 * 1024
+# A /btw one-shot answer is bounded at 180 s and one Finite Private request at
+# ~720 s by the limiter; a /bg child is covered by its session row instead.
+QUIET_AFTER_ACK_S = 30 * 60
+# A /bg row is ended before its result is sent (30 s per send).
+BACKGROUND_DELIVERY_S = 5 * 60
 GATEWAY_STATES = frozenset({"starting", "running", "degraded", "draining", "stopping",
                             "stopped", "startup_failed"})
-BUSY_REASONS = ("active_agents", "inbox_pending", "inbox_leased", "agentd_inbox")
+BUSY_REASONS = ("active_agents", "inbox_pending", "inbox_leased", "agentd_inbox",
+                "recent_ack", "background_sessions")
 MISSING = object()  # an absent file; distinct from a parsed JSON null
 
 
@@ -146,10 +166,95 @@ def _hermes_inbox(document: Any, now_ms: int) -> dict[str, Any]:
             leased.append(_age_s(now_ms, _count(lease.get("leased_at_ms"))))
         else:
             raise Unreadable("unknown_lease")
+    acked = [_age_s(now_ms, item["acked_at_ms"])
+             for item in ([] if document is MISSING else document.get("acked", []))]
     return {"present": document is not MISSING, "pending": len(pending), "leased": len(leased),
             "oldest_pending_age_s": max(pending, default=None),
             "oldest_lease_age_s": max(leased, default=None),
-            "newest_lease_age_s": min(leased, default=None)}
+            "newest_lease_age_s": min(leased, default=None),
+            "newest_ack_age_s": min(acked, default=None)}
+
+
+BACKGROUND_SQL = """
+SELECT COALESCE(SUM(ended_at IS NULL AND started_at >= ?1), 0),
+       COALESCE(SUM(ended_at IS NULL AND started_at < ?1), 0),
+       COALESCE(SUM(ended_at IS NOT NULL AND ended_at >= ?2), 0)
+FROM sessions WHERE id GLOB 'bg_*'
+"""
+
+
+def _copy_stable(directory: int, name: str, target: Path, required: bool) -> bool:
+    """Copy one file beneath `directory`; False when an optional file is absent."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+    except FileNotFoundError:
+        if required:
+            raise Unreadable("missing") from None
+        return False
+    except OSError as error:
+        raise Unreadable("symlink" if error.errno == errno.ELOOP else "unreadable") from None
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise Unreadable("not_regular")
+        if before.st_size > MAX_SESSION_DB_BYTES:
+            raise Unreadable("oversize")
+        out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            while chunk := os.read(fd, 1024 * 1024):
+                os.write(out, chunk)
+        finally:
+            os.close(out)
+        after = os.fstat(fd)
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        raise Unreadable("unstable") from None  # replaced or checkpointed away mid-copy
+    except OSError:
+        raise Unreadable("unreadable") from None
+    finally:
+        os.close(fd)
+    if {(s.st_ino, s.st_size, s.st_mtime_ns) for s in (before, after, current)} != {
+            (before.st_ino, before.st_size, before.st_mtime_ns)}:
+        raise Unreadable("unstable")
+    return True
+
+
+def _background(home: int, now_ms: int) -> dict[str, Any]:
+    """Count /bg sessions from a scratch copy; never opens the live database."""
+    try:
+        pid = os.stat("gateway.pid", dir_fd=home, follow_symlinks=False)
+    except FileNotFoundError:
+        raise Unreadable("pid_missing") from None
+    except OSError:
+        raise Unreadable("unreadable") from None
+    if not stat.S_ISREG(pid.st_mode):
+        raise Unreadable("not_regular")
+    try:
+        import sqlite3
+    except ImportError:
+        raise Unreadable("sqlite_unavailable") from None
+    started_s = pid.st_mtime_ns / 1e9
+    for _attempt in range(3):
+        scratch = Path(tempfile.mkdtemp(prefix="finite-status-idle."))
+        try:
+            _copy_stable(home, "state.db", scratch / "state.db", required=True)
+            _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
+            connection = sqlite3.connect(scratch / "state.db")  # the copy, so WAL recovery stays private
+            try:
+                live, stale, ended = connection.execute(
+                    BACKGROUND_SQL, (started_s, now_ms / 1000 - BACKGROUND_DELIVERY_S)).fetchone()
+            finally:
+                connection.close()
+            return {"gateway_started_age_s": _age_s(now_ms, pid.st_mtime_ns // 1_000_000),
+                    "open": live, "stale_open": stale, "recently_ended": ended}
+        except Unreadable as error:
+            if str(error) != "unstable":  # only a file changed mid-copy is retried
+                raise
+        except sqlite3.Error:
+            raise Unreadable("malformed") from None
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+    raise Unreadable("unstable")
 
 
 def observe(state_root: Path, now_ms: int) -> dict[str, Any]:
@@ -178,6 +283,13 @@ def observe(state_root: Path, now_ms: int) -> dict[str, Any]:
                 result[key] = parse(_read_json(directory, Path(relative).name), now_ms)
             except Unreadable as error:
                 reasons.append(f"{key}_{error}")
+        try:
+            background = _background(home, now_ms)
+        except Unreadable as error:
+            reasons.append(f"background_{error}")
+        else:
+            if result["gateway"] is not None:
+                result["gateway"]["background"] = background
     finally:
         for fd in (home, agent, root):
             if fd is not None:
@@ -189,12 +301,17 @@ def classify(result: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
     gateway = result["gateway"]
     if gateway is not None and gateway["state"] != "running":
         reasons.append("gateway_not_running")
+    inbox = result["hermes_inbox"]
+    background = gateway and gateway.get("background")
     signals = {
         "active_agents": gateway and gateway["active_agents"],
-        "inbox_pending": result["hermes_inbox"] and result["hermes_inbox"]["pending"],
-        "inbox_leased": result["hermes_inbox"] and result["hermes_inbox"]["leased"],
+        "inbox_pending": inbox and inbox["pending"],
+        "inbox_leased": inbox and inbox["leased"],
         "agentd_inbox": result["agentd_inbox"] and result["agentd_inbox"]["events"],
         "running_markers": result["running_markers"] and result["running_markers"]["messages"],
+        "recent_ack": inbox and inbox["newest_ack_age_s"] is not None
+                      and inbox["newest_ack_age_s"] < QUIET_AFTER_ACK_S,
+        "background_sessions": background and background["open"] + background["recently_ended"],
     }
     reasons += [name for name, value in signals.items() if value]
     if any(reason not in signals for reason in reasons):
