@@ -117,6 +117,7 @@ jobs:
             python3 -m py_compile /runtime/hermes-plugin/finitechat/adapter.py
             python3 -c '\''from hermes_cli.plugins import discover_plugins; discover_plugins(); from agent.web_search_registry import list_providers; names = [p.name for p in list_providers()]; assert "firecrawl" in names, names'\''
             python3 -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); assert adapter["FINITE_PLATFORM_NAME"] == "finitechat"'\''
+            python3 -c '\''import runpy; adapter = runpy.run_path("/runtime/hermes-plugin/finitechat/adapter.py"); policy = adapter["_SLASH_POLICY"]; assert policy is not None, "slash policy did not load"; print(policy.self_check())'\''
             test -f /runtime/hermes-plugin/finitechat/plugin.yaml
             find /runtime/finite-skills -name SKILL.md -type f -print -quit | grep -q .
             test -f /runtime/finite-skills/software-development/finitebrain/SKILL.md
