@@ -2231,9 +2231,10 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
     Linux CI job 112252876639 and review 5427930434. The pinned base adapter
     runs the completion hook a second time, as CANCELLED, when a shutdown
     cancels the turn's task after the hook began: in the usage-notice tail
-    after the ack, or while a settlement is still on its way. That second run released an acked turn, released the steer the
-    turn had taken, and acked a /retry the first run had just released, which
-    removes the entry. Settling a model-launching command by its unchanged
+    after the ack, or while a settlement is still on its way. That second run
+    released an acked turn, released the steer the turn had taken, and acked
+    a /retry the first run had just released, which removes the entry.
+    Settling a model-launching command by its unchanged
     text acked one a stop cancelled before Hermes ran it. A command sent while
     the previous turn finished after its ack ran inline, outside any
     background turn, where a drain after a /retry rewind lost the last
@@ -2442,9 +2443,9 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 self.run_scenario(scenario)
 
     def test_turn_that_finished_before_the_stop_is_acked_when_its_reply_lands_after(self):
-        # Round 08 finding 4: a turn that finished during a restart drain, or
-        # just before a graceful stop, was released and ran again when its
-        # completion hook came after stop() began.
+        # A turn that finished during a restart drain, or just before a
+        # graceful stop, was released and ran again when its completion hook
+        # came after stop() began.
         for how in ("restart", "graceful"):
             with self.subTest(how=how):
 
@@ -3228,6 +3229,160 @@ class PinnedHermesGoalJudgeTests(DrainScenario):
                     self.assertEqual(getattr(load_goal(sid), "status", None), "paused")
 
                 self.run_scenario(scenario)
+
+    def test_change_while_the_turn_is_judged_again_is_not_written_over(self):
+        """A subgoal sent while the judge runs has the turn judged once more, and only once.
+
+        A pause, clear or wait sent during that second judgement stays in
+        force, with no further turn. So does a second subgoal; the goal then
+        waits for the next message, and the turn is not judged a third time.
+        """
+        pid = os.getpid()
+        controls: dict[str, Callable[[Any], Any]] = {
+            "pause": lambda mgr: mgr.pause(),
+            "clear": lambda mgr: mgr.clear(),
+            "wait": lambda mgr: mgr.wait_on(pid),
+            "subgoal": lambda mgr: mgr.add_subgoal("another criterion"),
+        }
+        stored = {
+            "pause": ("paused", None, ["extra criterion"]),
+            "clear": ("cleared", None, ["extra criterion"]),
+            "wait": ("active", pid, ["extra criterion"]),
+            "subgoal": ("active", None, ["extra criterion", "another criterion"]),
+        }
+        for name, control in controls.items():
+            with self.subTest(control=name):
+
+                async def scenario(home: str, name: str = name, control: Any = control) -> None:
+                    from hermes_cli import goals
+
+                    sid = "finite-judged-goal"
+                    goals.GoalManager(session_id=sid).set("synthetic task")
+                    changes = [lambda mgr: mgr.add_subgoal("extra criterion"), control]
+                    judged: list[list[str]] = []
+
+                    def judge(
+                        _goal: str, _response: str, *, subgoals: Any = None, **_kwargs: Any
+                    ) -> tuple[str, str, bool, None, bool]:
+                        judged.append(list(subgoals or []))
+                        if len(judged) <= len(changes):
+                            change = changes[len(judged) - 1]
+                            on_another_thread(lambda: change(goals.GoalManager(session_id=sid)))
+                        return "continue", "synthetic judge", False, None, False
+
+                    with patch("hermes_cli.goals.judge_goal", judge):
+                        mgr = goals.GoalManager(session_id=sid)
+                        decision = mgr.evaluate_after_turn("done")
+                        acted = mgr.standing_decision(decision) or {}
+                    self.assertEqual(judged, [[], ["extra criterion"]])
+                    self.assertEqual(decision["verdict"], "superseded")
+                    self.assertFalse(acted.get("should_continue"))
+                    self.assertFalse(acted.get("message"))
+                    goal = goals.load_goal(sid)
+                    assert goal is not None
+                    self.assertEqual(goal.turns_used, 0)
+                    self.assertEqual(
+                        (goal.status, goal.waiting_on_pid, goal.subgoals), stored[name]
+                    )
+
+                self.run_scenario(scenario)
+
+    def test_gate_added_while_the_judge_runs_is_checked_before_the_goal_completes(self):
+        """A failing gate added while the judge says "done" keeps the goal going on its failure."""
+
+        async def scenario(home: str) -> None:
+            from hermes_cli import goals
+
+            sid = "finite-judged-goal"
+            goals.GoalManager(session_id=sid).set("synthetic task")
+            judged: list[str] = []
+
+            def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                judged.append("done")
+                if len(judged) == 1:
+                    on_another_thread(lambda: goals.GoalManager(session_id=sid).add_gate("false"))
+                return "done", "synthetic judge", False, None, False
+
+            with (
+                patch("hermes_cli.goals.judge_goal", judge),
+                # Outside a git checkout every gate runs; keep git out of it.
+                patch("hermes_cli.goals.workspace_fingerprint", lambda *_args: ""),
+            ):
+                mgr = goals.GoalManager(session_id=sid)
+                decision = mgr.evaluate_after_turn("done")
+                self.assertIs(mgr.standing_decision(decision), decision)
+            # Judged again, the new gate ran first and failed; the judge was not asked again.
+            self.assertEqual(judged, ["done"])
+            self.assertEqual(
+                (decision["verdict"], decision["should_continue"]), ("gate_failed", True)
+            )
+            goal = goals.load_goal(sid)
+            assert goal is not None
+            self.assertEqual((goal.status, goal.turns_used), ("active", 1))
+            self.assertEqual([(gate.command, gate.attempts) for gate in goal.gates], [("false", 1)])
+
+        self.run_scenario(scenario)
+
+    def test_goal_write_during_the_judges_commit_waits_for_it(self):
+        """A pause saved while the judge commits lands after the commit, so it is not written over.
+
+        The judge reads the stored goal back and writes its own state under
+        the lock every goal write takes. A pause saved between that read and
+        that write would otherwise be lost under the judge's state.
+        """
+
+        class WatchedLock:
+            """The goal write lock, noting when a writer has to wait for it."""
+
+            def __init__(self) -> None:
+                self.lock = threading.Lock()
+                self.waited = threading.Event()
+
+            def __enter__(self) -> None:
+                if not self.lock.acquire(blocking=False):
+                    self.waited.set()
+                    self.lock.acquire()
+
+            def __exit__(self, *_exc: Any) -> None:
+                self.lock.release()
+
+        async def scenario(home: str) -> None:
+            from hermes_cli import goals
+
+            sid = "finite-judged-goal"
+            goals.GoalManager(session_id=sid).set("synthetic task")
+            lock, load = WatchedLock(), goals.load_goal
+            judging, judged = threading.current_thread(), threading.Event()
+            pause = threading.Thread(target=lambda: goals.GoalManager(session_id=sid).pause())
+
+            def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                judged.set()
+                return "continue", "synthetic judge", False, None, False
+
+            def read_back_while_a_pause_saves(session_id: str) -> Any:
+                state = load(session_id)
+                if judged.is_set() and threading.current_thread() is judging and not pause.ident:
+                    pause.start()
+                    # The pause saves at once unless the commit's lock holds it back.
+                    for _ in range(500):
+                        if not pause.is_alive() or lock.waited.is_set():
+                            break
+                        pause.join(0.01)
+                return state
+
+            with (
+                patch("hermes_cli.goals.judge_goal", judge),
+                patch.object(goals, "_GOAL_WRITE_LOCK", lock),
+                patch.object(goals, "load_goal", read_back_while_a_pause_saves),
+            ):
+                mgr = goals.GoalManager(session_id=sid)
+                decision = mgr.evaluate_after_turn("done")
+                pause.join(5)
+                self.assertTrue(lock.waited.is_set())
+                self.assertIsNone(mgr.standing_decision(decision))
+            self.assertEqual(getattr(goals.load_goal(sid), "status", None), "paused")
+
+        self.run_scenario(scenario)
 
     def test_subgoal_sent_after_the_goals_wait_ran_out_is_judged(self):
         """A subgoal sent while the judge runs, once the goal's wait is over, keeps the loop going.
