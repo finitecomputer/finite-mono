@@ -294,6 +294,25 @@ def _is_launch_child(
     return qualname.endswith(_LAUNCH_CHILD_QUALNAMES)
 
 
+def _write_turn_owner_file(path: Path, entry: tuple[str, Any, str] | None) -> None:
+    try:
+        if entry is None:
+            path.unlink(missing_ok=True)
+            return
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        room_id, seq, message_id = entry
+        temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            os.chmod(temp_path, 0o600)
+            record = {"version": 1, "room_id": room_id, "seq": seq, "message_id": message_id}
+            json.dump(record, handle, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp_path.replace(path)
+    except OSError as exc:
+        logger.warning("[finitechat] could not record a chat's turn owner: %s", exc)
+
+
 # Pinned gateway commands that make their message a model turn in an idle
 # session: /blueprint (when a blueprint matches), /init, /learn, /moa, /plan,
 # /queue and /steer rewrite it into the agent's input, /retry re-sends the
@@ -1008,6 +1027,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # turn's outcome so a restart cannot set the goal again.
         self._goal_entries: dict[str, str] = {}
         self._final_entries: set[str] = set()
+        # Pending owner-file writes, the latest per chat (see _record_turn_owner).
+        self._owner_writes: dict[str, asyncio.Future[None]] = {}
 
     async def _process_message_background(
         self,
@@ -1046,10 +1067,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
             turn.entry = launch.entry
             self._inflight_admissions.add(launch.key)
         room_id, seq, message_id = turn.entry or _inbox_entry(event, self.room_id)
-        self._record_turn_owner(
-            session_key,
-            (room_id, seq, message_id) if message_id and isinstance(seq, int) else None,
-        )
+        owner = (room_id, seq, message_id) if message_id and isinstance(seq, int) else None
+        if owner is not None or not self._gateway_draining():
+            # A turn the draining gateway refuses never runs, so it cannot
+            # take the chat's recovery from the inbox turn the stop released.
+            self._record_turn_owner(session_key, owner)
         turn_token = _FINITE_TURN.set(turn)
         self._running_turns[session_key] = turn
         try:
@@ -1065,6 +1087,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 # Steers its agent took are released to run as their own turn.
                 turn.settled = True
                 for room_id, seq, message_id in turn.riders:
+                    self._inflight_admissions.discard(
+                        _adapter_event_key(room_id, seq, message_id) or ""
+                    )
                     await self._release_finitechat_event(room_id, seq, message_id)
 
     def set_message_handler(self, handler: Any) -> None:
@@ -1124,7 +1149,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         Hermes's recovery note. A turn with no inbox entry, such as a goal
         continuation, has no other owner, so Hermes resumes it.
         """
-        if _is_hermes_resume_event(event) and self._inbox_owns_latest_turn(
+        if _is_hermes_resume_event(event) and await self._inbox_owns_latest_turn(
             self._event_session_key(event)
         ):
             logger.info(
@@ -2365,6 +2390,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if turn is not None:
             turn.settled = True
             entries.extend(turn.riders)
+            for rider in turn.riders:
+                self._inflight_admissions.discard(_adapter_event_key(*rider) or "")
         settlement = asyncio.ensure_future(
             self._settle_turn(
                 turn, entries, rewind, release=release, model_started=model_started, retry=retry
@@ -2386,7 +2413,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         model_started: bool,
         retry: bool,
     ) -> None:
-        """Settle ``entries`` one way, once any /retry rewind is settled."""
+        """Settle ``entries`` one way, once any /retry rewind is settled.
+
+        A released entry runs again from the inbox, so the chat's recovery is
+        the inbox's whichever turn starts next; that is recorded first.
+        """
         try:
             if retry:
                 release = await self._settle_retry_rewind(
@@ -2395,6 +2426,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if turn is not None:
                 turn.release = release
                 turn.undelivered = entries
+                redelivered = [
+                    entry
+                    for entry in entries
+                    if _adapter_event_key(*entry) not in self._final_entries
+                ]
+                if release and redelivered:
+                    await self._record_turn_owner(turn.session_key, redelivered[0])
             await self._deliver_settlement(entries, release=release)
         except Exception:
             logger.exception("[finitechat] could not settle %s", entries[0])
@@ -2521,46 +2559,60 @@ class FiniteChatAdapter(BasePlatformAdapter):
             )
         return False
 
-    def _record_turn_owner(self, session_key: str, entry: tuple[str, Any, str] | None) -> None:
-        """Record durably whether the inbox owns the turn now starting in this chat.
-
-        A turn that settles an inbox entry writes the chat's marker; any other
-        turn (a goal continuation, a background notice, Hermes's own resume)
-        removes it. The marker survives the turn's ack: Hermes's crash
-        recovery marks every recently active chat for resume, and one whose
-        latest turn the inbox settled has nothing for Hermes to resume.
-        """
+    def _turn_owner_path(self, session_key: str) -> Path | None:
         if not self.home:
-            return
-        root = Path(self.home) / TURN_OWNERS_DIR
-        path = root / f"{hashlib.sha256(session_key.encode('utf-8')).hexdigest()}.json"
-        try:
-            root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            if entry is None:
-                path.unlink(missing_ok=True)
-                return
-            room_id, seq, message_id = entry
-            record = {"version": 1, "room_id": room_id, "seq": seq, "message_id": message_id}
-            tmp_path = path.with_suffix(".tmp")
-            tmp_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
-            os.replace(tmp_path, path)
-        except OSError as exc:
-            logger.warning("[finitechat] could not record a chat's turn owner: %s", exc)
+            return None
+        digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+        return Path(self.home) / TURN_OWNERS_DIR / f"{digest}.json"
 
-    def _inbox_owns_latest_turn(self, session_key: str) -> bool:
+    def _record_turn_owner(
+        self, session_key: str, entry: tuple[str, Any, str] | None
+    ) -> asyncio.Future[None]:
+        """Record durably whether the inbox owns this chat's latest turn.
+
+        A turn with an inbox entry writes the chat's file and any other turn
+        removes it. The file outlives the ack: Hermes's crash recovery marks
+        every recently active chat for resume, and one whose last turn the
+        inbox settled has nothing to resume. Writes run in order per chat, off
+        the event loop.
+        """
+        write = asyncio.ensure_future(
+            self._write_turn_owner(
+                self._owner_writes.get(session_key), self._turn_owner_path(session_key), entry
+            )
+        )
+        self._owner_writes[session_key] = write
+        write.add_done_callback(lambda done: self._forget_owner_write(session_key, done))
+        return write
+
+    def _forget_owner_write(self, session_key: str, write: asyncio.Future[None]) -> None:
+        if self._owner_writes.get(session_key) is write:
+            del self._owner_writes[session_key]
+
+    @staticmethod
+    async def _write_turn_owner(
+        previous: asyncio.Future[None] | None,
+        path: Path | None,
+        entry: tuple[str, Any, str] | None,
+    ) -> None:
+        if previous is not None:
+            await asyncio.wait({previous})
+        if path is not None:
+            await asyncio.to_thread(_write_turn_owner_file, path, entry)
+
+    async def _inbox_owns_latest_turn(self, session_key: str) -> bool:
         """The inbox owned this chat's latest turn, as ``_record_turn_owner`` left it.
 
-        A home without owner records was last run by a runtime that kept
-        none: the 458a baseline, whose stop acks the turns it interrupts and
-        leaves them to Hermes's resume. So Hermes resumes them on the first
-        boot after the upgrade, as 458a's own restart would.
+        A chat with no file was last served by a runtime that let Hermes
+        resume its interrupted turns, so Hermes resumes it here too.
         """
-        if not self.home:
+        path = self._turn_owner_path(session_key)
+        if path is None:
             return True
-        root = Path(self.home) / TURN_OWNERS_DIR
-        if not root.is_dir():
-            return False
-        return (root / f"{hashlib.sha256(session_key.encode('utf-8')).hexdigest()}.json").exists()
+        pending = self._owner_writes.get(session_key)
+        if pending is not None:
+            await asyncio.wait({pending})
+        return await asyncio.to_thread(path.exists)
 
     def _begin_launch(self, event: MessageEvent, command: str | None) -> _Launch | None:
         """A launch record for a /bg, /btw or /goal set or resume inbox event."""
@@ -2667,6 +2719,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             self._settle_launch(launch, release=True)
             return
         turn.riders.append(launch.entry)
+        self._inflight_admissions.add(launch.key)
 
     def _end_goal_launches(self, session_key: str) -> None:
         """A /goal pause, clear, stop or done ended this chat's goal loop.
