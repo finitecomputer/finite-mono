@@ -23,6 +23,7 @@ import importlib.util
 import inspect
 import os
 import socket
+import sqlite3
 import sys
 import tempfile
 import textwrap
@@ -1811,6 +1812,22 @@ def chat_transcript(h: StopHarness) -> list[tuple[str, str]]:
     ]
 
 
+def durable_chat_transcript(db_path: Path, session_id: str) -> list[tuple[str, str]]:
+    """``chat_transcript`` read from state.db itself, through a fresh read-only connection.
+
+    A stopped gateway has closed its session store, so a read through it
+    races the close.
+    """
+    with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as db:
+        rows = db.execute(
+            "SELECT role, content FROM messages"
+            " WHERE session_id = ? AND active = 1 AND role IN ('user', 'assistant')"
+            " ORDER BY id",
+            (session_id,),
+        ).fetchall()
+    return [(role, str(content)) for role, content in rows]
+
+
 async def seed_exchanges(h: GatewayHarness) -> None:
     """Three finished exchanges in an idle chat, then a clear timeline."""
     for seq, text in enumerate(("first question", "second question", "third question"), 1):
@@ -1921,6 +1938,8 @@ class PinnedHermesRetryRewindTests(DrainScenario):
                     stops: list[asyncio.Task] = []
                     try:
                         await seed_exchanges(h)
+                        db_path = Path(home) / "state.db"
+                        session_id = chat_session_id(h)
 
                         async def begin_stop() -> None:
                             stops.append(asyncio.create_task(h.stop_gracefully()))
@@ -1944,7 +1963,9 @@ class PinnedHermesRetryRewindTests(DrainScenario):
                         self.assertNotIn(("ack", "msg-4"), timeline)
                         self.assertEqual(h.state("msg-4"), "pending")
                         self.assertEqual(h.models(), [])
-                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+                        self.assertEqual(
+                            durable_chat_transcript(db_path, session_id), SEEDED_EXCHANGES
+                        )
                     finally:
                         await h.close()
 
