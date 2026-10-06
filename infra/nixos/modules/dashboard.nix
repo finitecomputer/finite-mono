@@ -4,11 +4,11 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # PR1054: Free trials admin tab and guarded campaign capacity increases.
+    # PR1060: Persistent editable trial codes and account/agent identities.
     # Roll out Core from this source before enabling the new dashboard actions.
-    # Source 6ea4cd859013fc395d4eda31d923d147588704f1; excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/37360936330
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:9b7ff2689473407ded8ff78f21c7f4fd5f53408ba4f5a9d82609049489d89e15";
+    # Source b3fd86b6eca34370bf1a593759f8379312c9760c; excludes PR1055.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37386098344
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:79bda4c3060cf4aa66a623c72b61bcd8b097666fd4e5a3929e737d8afa245066";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
