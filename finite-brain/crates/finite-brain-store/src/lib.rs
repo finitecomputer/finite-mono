@@ -7127,6 +7127,54 @@ mod tests {
     }
 
     #[test]
+    fn sync_delivered_folder_key_grants_are_not_participation() {
+        let mut store = store_with_strategy_folder();
+        let brain = BrainId::new("acme").unwrap();
+        let agent = UserId::new("npub-delivering-agent").unwrap();
+        store
+            .grant_admin_with_provenance(&brain, &agent, &MemberProvenance::direct())
+            .unwrap();
+
+        // Any key-holding client delivers pending wraps while it syncs, with no
+        // request from its owner, so these records never prove the key acted.
+        let mut delivered = grant(
+            "grant-delivered",
+            "strategy",
+            1,
+            agent.as_str(),
+            "npub-other",
+        );
+        delivered.created_at = "2026-06-24T00:00:00.000Z".to_owned();
+        store
+            .submit_sync_record(
+                &brain,
+                &folder_key_grant_control_record(&delivered, "event-delivered-wrap"),
+            )
+            .unwrap();
+        let after_wrap = store.access_report_snapshot(&brain, None, 100).unwrap();
+        assert!(!after_wrap.verified_participation.contains_key(&agent));
+
+        let mut note = revision_record_struct(
+            "event-agent-note",
+            "strategy",
+            "obj_000000000001",
+            1,
+            None,
+            "note",
+        );
+        note.actor_npub = agent.clone();
+        store
+            .submit_sync_record(&brain, &SyncRecordInput::FolderObjectRevision(note))
+            .unwrap();
+        let after_note = store.access_report_snapshot(&brain, None, 100).unwrap();
+        let evidence = after_note
+            .verified_participation
+            .get(&agent)
+            .expect("a record the Agent wrote is participation");
+        assert_eq!(evidence.kind.as_str(), "authenticatedBrainAction");
+    }
+
+    #[test]
     fn mount_offer_acceptance_supports_every_brain_kind_pair() {
         for source_personal in [false, true] {
             for destination_personal in [false, true] {

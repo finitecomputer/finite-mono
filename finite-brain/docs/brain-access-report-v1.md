@@ -157,7 +157,9 @@ coupling the two product features.
   Invite Token redemption, npub Brain Invitation acceptance, Folder Invitation
   acceptance, addressed Mount Offer acceptance, an accepted authenticated
   Brain record, or an applied Approval by its exact signer
-  (`brain_approval_nonces`). Approval targets do not inherit it.
+  (`brain_approval_nonces`). Approval targets do not inherit it. Folder Key
+  Grant records do not count: any key-holding client delivers pending wraps
+  during sync without a request from its owner.
 - SCHEMA_V30 adds only indexes for those reads. Grant evidence is the stored
   issuer, time and provenance; signed-audit re-verification, the Identity
   Directory lookup and outbound NIP-05 rechecks are not part of this report.
