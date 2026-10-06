@@ -568,6 +568,48 @@ in `infra/tinfoil/README.md`.
 
 ## ROLLBACK
 
+### Hold for Runtime child-work recovery candidates
+
+**NO-GO: do not downgrade a Runtime that has run the child-work recovery
+candidate to an older Runtime, including the October 1 source `59870e7f`.**
+Native mixed-version rehearsal found that the older CLI/sidecar/Hermes could
+leave the new journal unchanged while repeating interrupted foreground output
+and advancing a goal outside that journal. Preserved bytes and matching state
+schema therefore do not prove safe rollback. Rolling forward can recover the
+retained obligations but cannot undo effects produced by the older Runtime.
+This evidence does not qualify a sealed image or Kata upgrade/rollback.
+
+Refuse the downgrade if any accepted execution, result delivery, inbox turn or
+goal continuation is unresolved or unknown, or if admission is not held by a
+supported fence through the transition. The current protocol has no such
+fence, so a zero count, paused goal, successful idle poll, same-schema artifact,
+or operator-reviewed disruptive plan cannot clear this hold. Keep using the
+existing idle lane's refusal; do not omit its gate, use `--probe-override`, or
+call Core directly to work around it. The disruptive lane is not a rollback
+compatibility check and must not be used for this candidate-to-old transition.
+
+The hold also covers Runner's automatic old-image restart on an upgrade
+failure or interrupted-upgrade recovery. That path bypasses the wrapper; the
+current Runner does not mechanically enforce this child-work hold. Do not
+start a live upgrade whose failure path could reattach an old binary to a
+candidate-written home. Adding enforcement at every old-image restart boundary
+requires a separately reviewed fail-stopped recovery policy and qualification;
+another preflight poll cannot supply it.
+
+Preserve the entire current Recovery Set, including accepted writes, inbox and
+transcript state, goal state, `hermes-home/finite-child-work.sqlite3`, and
+`hermes-home/finite-child-results/`. Do not delete or mark obligations complete
+to enable rollback, and never restore an older snapshot over newer accepted
+writes. Recovery must retain those writes and use a separately qualified
+compatible Runtime; this hold authorizes no production intervention.
+
+### Previously qualified compatible artifacts
+
+The steps below apply only when the current-to-target pair has separately
+passed recovery qualification and the child-work hold above does not apply.
+Changing a launch default does not authorize attaching existing candidate
+state to an older binary.
+
 1. Point `FC_RUNNER_RUNTIME_ARTIFACT_ID` (and the Core artifact record)
    back at the previous version; the 20s timer picks it up.
 2. Existing Runtimes are unaffected either way (launch-time pin). For a Kata
