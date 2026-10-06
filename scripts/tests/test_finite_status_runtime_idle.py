@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 from datetime import datetime, timezone
+import errno
 import io
 import json
 import os
@@ -77,13 +78,21 @@ class ObserveTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.home = AgentRoot(Path(self.temporary.name).resolve())
+        # The scratch copies of state.db go to the default temp dir; keep them in view.
+        self.scratch = Path(self.temporary.name).resolve() / "tmp"
+        self.scratch.mkdir()
+        self.tempdir = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        self.tempdir.start()
 
     def tearDown(self) -> None:
+        self.tempdir.stop()
         self.temporary.cleanup()
 
     def observe(self) -> dict:
         result = idle.observe(self.home.root, NOW_MS)
         self.assertNotIn(SECRET, json.dumps(result))
+        # Every read, including one that fails, removes its copy of the user's chat database.
+        self.assertEqual(sorted(path.name for path in self.scratch.iterdir()), [])
         return result
 
     def test_running_gateway_with_absent_agentd_and_marker_files_is_idle(self) -> None:
@@ -236,9 +245,8 @@ class ObserveTests(unittest.TestCase):
     def test_an_entry_acked_within_the_quiet_window_is_busy(self) -> None:
         # A /bg or /btw command entry is acked when its child launches; the
         # old Runtime keeps no other trace of a /btw child.
-        quiet_ms = idle.QUIET_AFTER_ACK_S * 1000
-        for acked_ms, verdict in ((NOW_MS - 60_000, "busy"), (NOW_MS - quiet_ms + 1000, "busy"),
-                                  (NOW_MS - quiet_ms, "idle"), (NOW_MS + 5_000, "busy")):
+        for acked_ms, verdict in ((NOW_MS - 60_000, "busy"), (NOW_MS - 1_799_000, "busy"),  # 29 min 59 s
+                                  (NOW_MS - 1_800_000, "idle"), (NOW_MS + 5_000, "busy")):
             with self.subTest(age_ms=NOW_MS - acked_ms):
                 self.home.write("hermes-inbox.json", {"events": [], "acked": [
                     {"key": SECRET, "acked_at_ms": 1}, {"key": SECRET + "2", "acked_at_ms": acked_ms}]})
@@ -264,14 +272,16 @@ class ObserveTests(unittest.TestCase):
         self.assertEqual((result["verdict"], result["gateway"]["background"]["stale_open"]), ("idle", 1))
         self.home.pid(GATEWAY_START_S - 10)  # the same row under the process that ran it
         self.assertEqual(self.observe()["reasons"], ["background_sessions"])
+        self.tearDown(); self.setUp()
+        self.home.session(GATEWAY_START_S)  # launched in the same instant the process started
+        self.assertEqual(self.observe()["gateway"]["background"]["open"], 1)
 
     def test_bg_session_ended_within_the_delivery_window_is_busy(self) -> None:
-        # The row is ended before the result is sent to the chat.
-        window = idle.BACKGROUND_DELIVERY_S
-        for ended_s, verdict in ((NOW_MS / 1000 - 10, "busy"), (NOW_MS / 1000 - window - 1, "idle")):
-            with self.subTest(ended_s=ended_s):
+        # The row is ended before the result is sent to the chat; the window is 5 minutes.
+        for ended_ago_s, verdict in ((10, "busy"), (299, "busy"), (300, "busy"), (301, "idle")):
+            with self.subTest(ended_ago_s=ended_ago_s):
                 self.tearDown(); self.setUp()
-                self.home.session(GATEWAY_START_S + 1, ended_s)
+                self.home.session(GATEWAY_START_S + 1, NOW_MS / 1000 - ended_ago_s)
                 self.assertEqual(self.observe()["verdict"], verdict)
 
     def test_rows_still_in_the_wal_are_read_from_a_scratch_copy_without_touching_live_files(self) -> None:
@@ -348,6 +358,133 @@ class ObserveTests(unittest.TestCase):
 
         with mock.patch.object(idle.os, "read", read_while_writer_commits):
             self.assertEqual(self.observe()["reasons"], ["background_unstable"])
+
+    def test_a_checkpoint_between_the_db_and_wal_copies_is_unstable_never_idle(self) -> None:
+        # Hermes checkpoints PASSIVE every 50 writes; the next write then resets
+        # the WAL in place (same size), so a db copied before the checkpoint and a
+        # WAL copied after it no longer carry the open /bg row between them.
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db", isolation_level=None)
+        real = idle._copy_stable
+        copies = []
+
+        def checkpoint_after_db_copy(directory, name, target, required):
+            signature = real(directory, name, target, required)
+            copies.append(name)
+            if name == "state.db" and len(copies) == 1:
+                writer.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                writer.execute("INSERT INTO messages VALUES (1, 'a later turn on another page')")
+            return signature
+
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body TEXT)")
+            writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+            with mock.patch.object(idle, "_copy_stable", checkpoint_after_db_copy):
+                result = self.observe()
+            self.assertEqual((result["verdict"], result["reasons"]), ("busy", ["background_sessions"]))
+            self.assertEqual(copies, ["state.db", "state.db-wal", "state.db", "state.db-wal"])
+        finally:
+            writer.close()
+
+    def test_a_db_closed_or_replaced_between_the_copies_is_retried(self) -> None:
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db", isolation_level=None)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+        real = idle._copy_stable
+        events = iter(["close", "replace"])
+        copies = []
+
+        def change_after_db_copy(directory, name, target, required):
+            signature = real(directory, name, target, required)
+            copies.append(name)
+            event = next(events, None) if name == "state.db" else None
+            if event == "close":  # the last connection checkpoints and removes the WAL
+                writer.close()
+            elif event == "replace":  # a new inode under the same name, same size and mtime
+                replacement = home / "replacement.db"
+                replacement.write_bytes((home / "state.db").read_bytes())
+                info = (home / "state.db").stat()
+                os.utime(replacement, ns=(info.st_atime_ns, info.st_mtime_ns))
+                os.replace(replacement, home / "state.db")
+            return signature
+
+        with mock.patch.object(idle, "_copy_stable", change_after_db_copy):
+            result = self.observe()
+        self.assertEqual((result["verdict"], result["reasons"]), ("busy", ["background_sessions"]))
+        self.assertEqual(copies, ["state.db", "state.db-wal"] * 3)  # each change was retried
+
+    def test_a_file_renamed_over_the_source_mid_copy_is_unstable(self) -> None:
+        # The open descriptor still reads the old inode, so only a by-name check sees it.
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db")
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+            writer.commit()
+            wal = (home / "state.db-wal").read_bytes()
+            real_read = os.read
+
+            def rename_during_wal_copy(fd, size):
+                data = real_read(fd, size)
+                if os.fstat(fd).st_size == len(wal) and data:
+                    (home / "next.db-wal").write_bytes(wal)
+                    os.replace(home / "next.db-wal", home / "state.db-wal")
+                return data
+
+            with mock.patch.object(idle.os, "read", rename_during_wal_copy):
+                self.assertEqual(self.observe()["reasons"], ["background_unstable"])
+        finally:
+            writer.close()
+
+    def test_a_wal_larger_than_one_copy_chunk_is_read_to_its_last_frame(self) -> None:
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db", isolation_level=None)
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body BLOB)")
+            for _ in range(40):
+                writer.execute("INSERT INTO messages (body) VALUES (?)", (os.urandom(60_000),))
+            writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+            self.assertGreater((home / "state.db-wal").stat().st_size, 2 * 1024 * 1024)
+            self.assertEqual(self.observe()["reasons"], ["background_sessions"])
+        finally:
+            writer.close()
+
+    def test_short_or_failed_writes_never_read_as_an_older_state(self) -> None:
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db", isolation_level=None)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, body BLOB)")
+        for _ in range(40):
+            writer.execute("INSERT INTO messages (body) VALUES (?)", (os.urandom(60_000),))
+        writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+        self.addCleanup(writer.close)
+        real_write = os.write
+
+        def half(fd, data):  # a filling filesystem writes what fits and returns that count
+            return real_write(fd, bytes(data)[: max(1, len(data) // 2)])
+
+        def drops_tail(fd, data):  # a write that loses bytes yet reports them all
+            real_write(fd, bytes(data)[:-1])
+            return len(data)
+
+        def full(fd, data):
+            raise OSError(errno.ENOSPC, "no space")
+
+        for write, expected in ((half, ("busy", ["background_sessions"])),
+                                (drops_tail, ("unknown", ["background_unreadable"])),
+                                (full, ("unknown", ["background_unreadable"]))):
+            with self.subTest(write.__name__), mock.patch.object(idle.os, "write", write):
+                result = self.observe()
+                self.assertEqual((result["verdict"], result["reasons"]), expected)
 
     def _drop_sessions_table(self) -> None:
         with contextlib.closing(sqlite3.connect(self.home.agent / "hermes-home" / "state.db")) as db:

@@ -53,6 +53,13 @@ GATEWAY_STATES = frozenset({"starting", "running", "degraded", "draining", "stop
 BUSY_REASONS = ("active_agents", "inbox_pending", "inbox_leased", "agentd_inbox",
                 "recent_ack", "background_sessions")
 MISSING = object()  # an absent file; distinct from a parsed JSON null
+COPY_CHUNK_BYTES = 1024 * 1024
+BACKGROUND_SQL = """
+SELECT COALESCE(SUM(ended_at IS NULL AND started_at >= ?1), 0),
+       COALESCE(SUM(ended_at IS NULL AND started_at < ?1), 0),
+       COALESCE(SUM(ended_at IS NOT NULL AND ended_at >= ?2), 0)
+FROM sessions WHERE id GLOB 'bg_*'
+"""
 
 
 class Unreadable(ValueError):
@@ -175,22 +182,19 @@ def _hermes_inbox(document: Any, now_ms: int) -> dict[str, Any]:
             "newest_ack_age_s": min(acked, default=None)}
 
 
-BACKGROUND_SQL = """
-SELECT COALESCE(SUM(ended_at IS NULL AND started_at >= ?1), 0),
-       COALESCE(SUM(ended_at IS NULL AND started_at < ?1), 0),
-       COALESCE(SUM(ended_at IS NOT NULL AND ended_at >= ?2), 0)
-FROM sessions WHERE id GLOB 'bg_*'
-"""
+def _identity(info: os.stat_result) -> tuple[int, int, int]:
+    return info.st_ino, info.st_size, info.st_mtime_ns
 
 
-def _copy_stable(directory: int, name: str, target: Path, required: bool) -> bool:
-    """Copy one file beneath `directory`; False when an optional file is absent."""
+def _copy_stable(directory: int, name: str, target: Path, required: bool) -> tuple[int, int, int] | None:
+    """Copy one file beneath `directory` and return the (ino, size, mtime_ns)
+    it was stable at; None when an optional file is absent."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     except FileNotFoundError:
         if required:
             raise Unreadable("missing") from None
-        return False
+        return None
     except OSError as error:
         raise Unreadable("symlink" if error.errno == errno.ELOOP else "unreadable") from None
     try:
@@ -201,8 +205,14 @@ def _copy_stable(directory: int, name: str, target: Path, required: bool) -> boo
             raise Unreadable("oversize")
         out = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         try:
-            while chunk := os.read(fd, 1024 * 1024):
-                os.write(out, chunk)
+            while chunk := os.read(fd, COPY_CHUNK_BYTES):
+                pending = memoryview(chunk)
+                while pending:  # a write may be short, e.g. when the temp filesystem fills
+                    written = os.write(out, pending)
+                    if written <= 0:
+                        raise Unreadable("unreadable")
+                    pending = pending[written:]
+            copied = os.fstat(out).st_size
         finally:
             os.close(out)
         after = os.fstat(fd)
@@ -213,10 +223,11 @@ def _copy_stable(directory: int, name: str, target: Path, required: bool) -> boo
         raise Unreadable("unreadable") from None
     finally:
         os.close(fd)
-    if {(s.st_ino, s.st_size, s.st_mtime_ns) for s in (before, after, current)} != {
-            (before.st_ino, before.st_size, before.st_mtime_ns)}:
+    if {_identity(info) for info in (before, after, current)} != {_identity(before)}:
         raise Unreadable("unstable")
-    return True
+    if copied != before.st_size:  # a short copy must never read as an older, valid state
+        raise Unreadable("unreadable")
+    return _identity(before)
 
 
 def _background(home: int, now_ms: int) -> dict[str, Any]:
@@ -237,8 +248,17 @@ def _background(home: int, now_ms: int) -> dict[str, Any]:
     for _attempt in range(3):
         scratch = Path(tempfile.mkdtemp(prefix="finite-status-idle."))
         try:
-            _copy_stable(home, "state.db", scratch / "state.db", required=True)
+            database = _copy_stable(home, "state.db", scratch / "state.db", required=True)
             _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
+            # Only a checkpoint writes state.db. One between the two copies, then a WAL
+            # reset, truncation or close, pairs the old db copy with a WAL that no longer
+            # holds its newest rows, so the db must still be the one that was copied.
+            try:
+                unchanged = _identity(os.stat("state.db", dir_fd=home, follow_symlinks=False)) == database
+            except OSError:
+                unchanged = False
+            if not unchanged:
+                raise Unreadable("unstable")
             connection = sqlite3.connect(scratch / "state.db")  # the copy, so WAL recovery stays private
             try:
                 live, stale, ended = connection.execute(
