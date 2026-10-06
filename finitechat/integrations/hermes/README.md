@@ -436,4 +436,4 @@ or admissions are not fenced; the current protocol has no supported fence.
 The hold includes automatic old-image restart after an upgrade failure, which
 currently bypasses the rollout wrapper. Preserve the whole Recovery Set and
 all newer accepted writes; do not clear journal rows or restore an older
-snapshot to make a downgrade pass. See the [Runtime rollback hold](../../../../infra/runbooks/runtime-image.md#hold-for-runtime-child-work-recovery-candidates).
+snapshot to make a downgrade pass. See the [Runtime rollback hold](../../../infra/runbooks/runtime-image.md#hold-for-runtime-child-work-recovery-candidates).
