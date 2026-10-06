@@ -387,6 +387,25 @@ Do not edit a prepared roster to make it pass; prepare a fresh plan after
 resolving the concrete drift. Do not use this rollout path to reconstruct
 missing compute.
 
+#### Chat turn busy check
+
+The wrapper does not read turn or inbox state. A Runtime whose image stops
+Hermes before a graceful drain strands in-flight and queued Chat leases until
+their TTL expires. Upgrade such Runtimes one project at a time. Immediately
+before executing each single-project plan, run on its Runner host:
+
+```sh
+scripts/finite-status --runtime-idle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_ID SOURCE_HOST_ID
+```
+
+It first requires an `operable` lifecycle probe for that exact assignment. It
+then reads only counts and ages from the Agent's durable root. `verdict` is
+`idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit 2).
+Execute only on `idle`; defer the others and re-check later. `unfinished_markers`
+means an earlier interrupted turn left a running marker; the restart will post
+one notice per marker to the user. The check is a point-in-time read, not a stop
+fence. A message that arrives between the check and the stop can still strand.
+
 #### Lifecycle probe gate, skips, and the override
 
 Before enqueueing each entry, the wrapper consults the runner's read-only
