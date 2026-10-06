@@ -352,15 +352,48 @@ class ObserveTests(unittest.TestCase):
 
     def test_an_inbox_written_within_the_quiet_window_is_busy_whatever_its_ack_stamps(self) -> None:
         # An ack is written no later than the inbox file's host mtime, so this holds
-        # even if the guest clock drifted after gateway_state.json was last written.
-        stale_ack = {"events": [], "acked": [{"key": SECRET, "acked_at_ms": NOW_MS - 2_400_000}]}
-        for written_ago_s, verdict in ((600, "busy"), (1799, "busy"), (1800, "idle")):
-            with self.subTest(written_ago_s=written_ago_s):
-                self.home.write("hermes-inbox.json", stale_ack, NOW_MS / 1000 - written_ago_s)
+        # even if the guest clock drifted after gateway_state.json was last written,
+        # and whatever the ack ring holds.
+        stale_ack = [{"key": SECRET, "acked_at_ms": NOW_MS - 2_400_000}]
+        cases = [  # (host age of the inbox write, guest clock ahead by, ack ring, verdict)
+            (600, 0, stale_ack, "busy"), (1799, 0, stale_ack, "busy"), (1800, 0, stale_ack, "idle"),
+            (1799, 60, stale_ack, "busy"), (1800, 60, stale_ack, "idle"),
+            (1799, -60, stale_ack, "busy"), (1800, -60, stale_ack, "idle"),
+            (600, 0, [], "busy"), (1800, 0, [], "idle"),
+        ]
+        for written_ago_s, guest_ahead_s, acked, verdict in cases:
+            with self.subTest(written_ago_s=written_ago_s, guest_ahead_s=guest_ahead_s, acked=len(acked)):
+                self.home.gateway(guest_ahead_s=guest_ahead_s)
+                self.home.write("hermes-inbox.json", {"events": [], "acked": acked}, NOW_MS / 1000 - written_ago_s)
                 result = self.observe()
                 self.assertEqual((result["verdict"], result["reasons"]),
                                  (verdict, ["recent_ack"] if verdict == "busy" else []))
                 self.assertEqual(result["hermes_inbox"]["written_age_s"], written_ago_s)
+
+    def test_each_reported_age_is_measured_on_its_own_clock(self) -> None:
+        # Event, lease and ack stamps are the guest's; the inbox and gateway_state.json
+        # mtimes are the host's. Every age below is true in host time.
+        now_s = NOW_MS / 1000
+        for guest_ahead_s in (30, -30):
+            with self.subTest(guest_ahead_s=guest_ahead_s):
+                self.tearDown(); self.setUp()
+                self.home.gateway(guest_ahead_s=guest_ahead_s)
+
+                def guest_ms(host_age_s: int) -> int:
+                    return int((now_s - host_age_s + guest_ahead_s) * 1000)
+
+                self.home.write("hermes-inbox.json", {"events": [
+                    event({"state": "pending"}, created_ms=guest_ms(90)),
+                    event({"state": "leased", "lease_id": SECRET, "leased_at_ms": guest_ms(840)}),
+                    event({"state": "leased", "lease_id": SECRET, "leased_at_ms": guest_ms(5)}),
+                ], "acked": [{"key": SECRET, "acked_at_ms": guest_ms(2400)}]}, now_s - 1000)
+                result = self.observe()
+                self.assertEqual(result["gateway"]["clock_offset_ms"], -guest_ahead_s * 1000)
+                self.assertEqual(result["gateway"]["updated_age_s"], 600)
+                self.assertEqual(result["hermes_inbox"], {
+                    "present": True, "pending": 1, "leased": 2, "oldest_pending_age_s": 90,
+                    "oldest_lease_age_s": 840, "newest_lease_age_s": 5, "newest_ack_age_s": 2400,
+                    "written_age_s": 1000})
 
     def test_rows_still_in_the_wal_are_read_from_a_scratch_copy_without_touching_live_files(self) -> None:
         home = self.home.agent / "hermes-home"
