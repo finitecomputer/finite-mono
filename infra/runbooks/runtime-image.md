@@ -412,7 +412,10 @@ and execute. Identity, lifecycle eligibility and provider drift are rechecked
 at execution. **This mode currently refuses every upgrade:** an idle observation
 cannot fence new admissions through Core enqueue and Runner pickup. It records
 `admission_fence_unavailable` for an otherwise idle target. Repeated polling
-cannot remove this hold. The ordinary reviewed, disruptive rollout lane has no
+cannot remove this hold. Plan schema 4 binds the safety mode, idle command,
+probe contracts, and lifecycle override into its hash, including the resume
+comparison. Dropping or changing the gate requires a different reviewed plan;
+older plans must be prepared and reviewed again. The ordinary reviewed, disruptive rollout lane has no
 idle-safety guarantee and must not be used as a substitute for this automation.
 
 #### Lifecycle probe gate, skips, and the override

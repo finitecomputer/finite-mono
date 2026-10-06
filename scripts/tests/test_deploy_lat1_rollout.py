@@ -868,14 +868,14 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         )
 
     def single_entry_environment(
-        self, temp: Path
+        self, temp: Path, *safety: str
     ) -> tuple[dict[str, str], Path, Path, str]:
         entry = plan_entry("project-a", "runtime-a", "kata-a")
         facts = [provider_fact("project-a", "runtime-a", "kata-a")]
         env, log, state_root = self.fake_ssh_environment(
             temp, rollout_report([entry]), facts
         )
-        prepared, plan_hash = self.prepare(env, "--roll-project-id", "project-a")
+        prepared, plan_hash = self.prepare(env, "--roll-project-id", "project-a", *safety)
         self.assertEqual(prepared.returncode, 0, prepared.stderr)
         log.write_text("", encoding="utf-8")
         return env, log, state_root, plan_hash
@@ -1043,7 +1043,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as directory,
             ):
                 temp = Path(directory)
-                env, log, state_root, plan_hash = self.single_entry_environment(temp)
+                env, log, state_root, plan_hash = self.single_entry_environment(temp, "--probe-override")
                 env["FAKE_PROBE_VERDICT"] = verdict
                 env["FAKE_PROBE_REASON"] = reason
 
@@ -1123,7 +1123,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         # anything is enqueued.
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            env, log, _, plan_hash = self.single_entry_environment(temp)
+            env, log, _, plan_hash = self.single_entry_environment(temp, "--probe-override")
             env["FAKE_PROBE_VERDICT"] = "inoperable"
             env["FAKE_PROBE_REASON"] = "orphaned_task"
             drifted = json.loads(env["FAKE_PROVIDER_FACTS"])
@@ -1190,7 +1190,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         # fail-closed deliberate skip is unchanged even under the override.
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp, "--probe-override")
             env["FAKE_PROBE_REPORT"] = (
                 '{"schema":"something-else","verdict":"operable"}'
             )
@@ -1408,7 +1408,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
         for name, (report, status) in cases.items():
             with self.subTest(case=name), tempfile.TemporaryDirectory() as directory:
                 temp = Path(directory)
-                env, log, state_root, plan_hash = self.single_entry_environment(temp)
+                env, log, state_root, plan_hash = self.single_entry_environment(temp, "--roll-require-runtime-idle", STATUS_COMMAND)
                 env["FAKE_IDLE_REPORT"] = report
                 env["FAKE_IDLE_STATUS"] = status
 
@@ -1463,7 +1463,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
     def test_probe_unavailable_with_runtime_idle_gate_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
-            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp, "--roll-require-runtime-idle", STATUS_COMMAND)
             env["FAKE_PROBE_STATUS"] = "1"
 
             executed = self.execute_with_idle_gate(env, plan_hash)
@@ -1492,6 +1492,32 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(events[-1]["status"], "success")
             self.assertEqual(events[-1]["probe_skipped"], 1)
             self.assertEqual(events[-1]["absent_count"], 0)
+
+    def test_reviewed_idle_gate_cannot_be_dropped_or_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, ordinary_hash = self.single_entry_environment(temp)
+            prepared, gated_hash = self.prepare(
+                env, "--roll-project-id", "project-a",
+                "--roll-require-runtime-idle", STATUS_COMMAND,
+            )
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            for args in ([], ["--roll-require-runtime-idle", "/other/finite-status"]):
+                with self.subTest(args=args):
+                    log.write_text("", encoding="utf-8")
+                    result = self.run_rollout(
+                        "--execute-plan-hash", gated_hash, *self.actor_args(),
+                        "--roll-project-id", "project-a", *args, env=env,
+                    )
+                    calls = log.read_text(encoding="utf-8").splitlines()
+                    self.assertEqual(result.returncode, 65, (result.stdout, result.stderr, calls))
+                    self.assertFalse(any("provider-runtime-idle-v1" in call for call in calls))
+                    self.assertFalse(any("--expected-agent-runtime-id" in call for call in calls))
+            self.assertNotEqual(ordinary_hash, gated_hash)
+            saved = json.loads((state_root / gated_hash / "plan.json").read_text())
+            self.assertEqual(saved["safety"]["mode"], "idle_fenced")
+            self.assertEqual(saved["safety"]["idle_status_command"], STATUS_COMMAND)
+            self.assertEqual(saved["safety"]["child_work_contract"], "finite-child-work-v1")
 
     def test_runtime_idle_gate_argument_refusals(self) -> None:
         single = ("--roll-project-id", "project-a")
