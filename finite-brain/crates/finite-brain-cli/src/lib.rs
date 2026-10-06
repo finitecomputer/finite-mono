@@ -2192,13 +2192,14 @@ fn resolve_unique_personal_brain(
     select_unique_personal_brain(response)
 }
 
+// "personal" means this key's own Personal Brain. Anyone can add a key as a
+// member of their own Personal Brain, so a member role never qualifies.
 fn select_unique_personal_brain(response: VisibleBrainsResponse) -> Result<String, CliError> {
     let personal = response
         .brains
         .into_iter()
         .filter(|brain| {
-            brain.kind == "personal"
-                && matches!(brain.role.as_str(), "owner" | "personal_agent" | "member")
+            brain.kind == "personal" && matches!(brain.role.as_str(), "owner" | "personal_agent")
         })
         .collect::<Vec<_>>();
     match personal.as_slice() {
@@ -13407,6 +13408,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, "personal-owned");
+    }
+
+    #[test]
+    fn personal_brain_selection_skips_another_owners_brain_where_this_key_is_a_member() {
+        let selected = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![
+                VisibleBrainSummary {
+                    brain_id: "personal-someone-else".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "member".to_owned(),
+                },
+                VisibleBrainSummary {
+                    brain_id: "personal-own".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "personal_agent".to_owned(),
+                },
+            ],
+        })
+        .unwrap();
+        assert_eq!(selected, "personal-own");
+
+        let error = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![VisibleBrainSummary {
+                brain_id: "personal-someone-else".to_owned(),
+                kind: "personal".to_owned(),
+                role: "member".to_owned(),
+            }],
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no personal Brain is visible"));
     }
 
     #[test]
