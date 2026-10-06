@@ -158,9 +158,10 @@ its own.
   Hermes carries out itself is acked once even when a stop follows or cancels
   it, so a restart never repeats its effect. Controls such as `/restart`,
   `/undo` and `/yolo`, and replies to a pending prompt, count once the
-  gateway's handler has received them; `/goal` (the saved goal) and
-  `/blueprint` (a scheduled job) once the handler has returned without
-  rewriting them. A stop that cancels a control after the handler received it
+  gateway's handler has received them; `/goal` (the saved goal),
+  `/blueprint` (a scheduled job), `/bg` and `/btw` once the handler has
+  returned without rewriting them. A `/bg` or `/btw` that started its child
+  is settled by that child instead (see **Child work**). A stop that cancels a control after the handler received it
   but before it took effect leaves a command the user resends. A command the
   handler never received, or one that starts model work before Hermes ran or
   rewrote it, is released like other model work. While
@@ -263,6 +264,26 @@ its own.
   the idle gap between turns. Events consumed inline by a busy
   session never pass through a background turn, so the adapter acks them
   directly (exactly once; the sidecar's ack is idempotent).
+- **Child work.** `/bg` and `/btw` reply as soon as their handler has started
+  a child task, and the child sends the result to the chat itself. The
+  command's entry stays leased until the child has delivered, whether the
+  command ran as its own turn or inline beside a busy one. The adapter finds
+  the child by the context it was created in and the pinned coroutine name,
+  never by diffing Hermes's task set, so it cannot take over another
+  command's child; this needs Python 3.12's `Task.get_context`. When the
+  adapter disconnects, before Hermes cancels its background tasks, a child
+  already sending its result gets 1.5 seconds to finish. The rest are
+  cancelled and their entries released, so the command runs again after the
+  restart. A child's side effects can repeat then, under the same
+  at-least-once contract as other interrupted model work. An entry whose
+  result reached the chat is acked instead, even if a stop cuts off a later
+  attachment, so finished work never runs twice. A lease-expiry redelivery
+  joins the running child instead of starting another. A result the sidecar
+  refuses retryably keeps the entry leased until its lease expires or the
+  adapter disconnects, and the command then runs again; one it refuses for
+  good is acked. The leased entry is what the rollout idle gate
+  (`scripts/finite_status_runtime_idle.py`) reads as busy while a child runs.
+  A runtime without this adapter still reads idle then.
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar
