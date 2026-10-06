@@ -285,11 +285,12 @@ its own.
   already sending its result gets 1.5 seconds to finish. The rest are
   cancelled and their entries released, so the command runs again after the
   restart. A child's side effects can repeat then, under the same
-  at-least-once contract as other interrupted model work. An entry whose
-  result reached the chat is acked instead, even if a stop cuts off a later
-  attachment, so finished work never runs twice. A lease-expiry redelivery
-  joins the running child instead of starting another. A result the sidecar
-  refuses retryably keeps the entry leased until its lease expires or the
+  at-least-once contract as other interrupted model work. Once any part of
+  the result reached the chat the entry is acked, so finished work never
+  runs twice; an attachment that a stop cuts off or the sidecar refuses after
+  that is logged and lost. A lease-expiry redelivery joins the running child
+  instead of starting another. A result the sidecar refuses retryably before
+  any of it arrived keeps the entry leased until its lease expires or the
   adapter disconnects, and the command then runs again; one it refuses for
   good is acked. The leased entry is what the rollout idle gate
   (`scripts/finite_status_runtime_idle.py`) reads as busy while a child runs.

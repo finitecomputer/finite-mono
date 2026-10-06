@@ -2795,34 +2795,33 @@ class FiniteChatAdapter(BasePlatformAdapter):
     def _child_finished(self, launch: _Launch) -> None:
         """Settle the entry once every child has ended on its own.
 
-        A child whose result reached the chat, or never can (the sidecar
-        refused it for good), is acked. A retryable send failure keeps the
-        entry leased: its lease expiry, or a disconnect, hands the command
-        back to run again. A child cancelled by anyone but this adapter's
-        disconnect is released unless it delivered.
+        Once any of the result reached the chat the entry is acked, so a /bg
+        never runs again over an attachment; so is a result the sidecar
+        refuses for good. Otherwise a child cancelled elsewhere is released,
+        and a retryable failure keeps the entry leased until its lease expires
+        or the adapter disconnects.
         """
         if launch.settled or launch.disconnecting or launch.unfinished():
             return
-        crashed = any(not child.cancelled() and child.exception() for child in launch.children)
-        if any(child.cancelled() for child in launch.children) and not launch.delivered:
+        where = (launch.command, launch.entry[0], launch.entry[1])
+        for child in launch.children:
+            if not child.cancelled() and child.exception() is not None:
+                logger.warning("[finitechat] /%s child for %s/%s failed", *where)
+        if launch.delivered or launch.send_failure == "final":
+            if launch.send_failure is not None:
+                logger.warning(
+                    "[finitechat] /%s result for %s/%s was not fully delivered; acking it",
+                    *where,
+                )
+            self._settle_launch(launch, release=False)
+        elif any(child.cancelled() for child in launch.children):
             self._settle_launch(launch, release=True)
-        elif launch.send_failure == "retryable" or (crashed and not launch.delivered):
+        else:
             logger.warning(
                 "[finitechat] /%s result for %s/%s was not delivered; its entry stays "
                 "leased for redelivery",
-                launch.command,
-                launch.entry[0],
-                launch.entry[1],
+                *where,
             )
-        else:
-            if launch.send_failure == "final":
-                logger.warning(
-                    "[finitechat] /%s result for %s/%s was refused for good; acking it",
-                    launch.command,
-                    launch.entry[0],
-                    launch.entry[1],
-                )
-            self._settle_launch(launch, release=False)
 
     def _settle_launch(self, launch: _Launch, *, release: bool) -> None:
         """Ack or release the launch's entry once, outside any cancellable task."""
@@ -2872,8 +2871,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if not launch.settled and not launch.handed_off:
                 # A queued /goal event never ran: Hermes clears its queue
                 # before the adapter disconnects.
-                delivered = launch.delivered and launch.send_failure is None
-                self._settle_launch(launch, release=not delivered)
+                self._settle_launch(launch, release=not launch.delivered)
 
     async def _finish_settlements(self) -> None:
         """Wait for every ack, release and owner write before the sidecar stops.
