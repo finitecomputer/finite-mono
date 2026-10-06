@@ -1241,6 +1241,48 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
 
         self.run_scenario(scenario)
 
+    def test_every_settlement_reaches_the_sidecar_before_its_service_stops(self):
+        """Round 13 F3: a release slower than the cancel wait was lost with the service.
+
+        The fatal-adapter path calls only disconnect(), so it must also cancel
+        running turns before the service stops.
+        """
+        for work in ("bg child", "inbox turn"):
+            with self.subTest(work=work):
+
+                async def scenario(home: str, work: str = work):
+                    h = ChildHarness(home, timeline=[])
+                    at_service_stop: list[str] = []
+                    stop_service = h.adapter._stop_service
+
+                    async def slow_release(action: str, _message_id: str) -> bool:
+                        if action == "release":
+                            await asyncio.sleep(0.9)
+                        return True
+
+                    async def record_service_stop() -> None:
+                        at_service_stop.append(h.state("msg-2"))
+                        await stop_service()
+
+                    try:
+                        await h.seed()
+                        if work == "bg child":
+                            await self.launch(h, "bg")
+                        else:
+                            h.hold_model = lambda message: message == "long work"
+                            await h.deliver(raw_event(2, "long work"))
+                            await eventually(lambda: ("model", "long work") in h.timeline)
+                        h.before_settle = slow_release
+                        h.adapter._stop_service = record_service_stop
+                        await h.adapter.disconnect()
+                        self.assertEqual(at_service_stop, ["pending"])
+                    finally:
+                        self.children.gate.set()
+                        h.model_gate.set()
+                        await h.close()
+
+                self.run_scenario(scenario)
+
 
 class PinnedHermesStoppedInboxTurnTests(GoalScenario):
     """Round 13 F1: a turn that starts after a stop released an inbox turn must not disown it.
