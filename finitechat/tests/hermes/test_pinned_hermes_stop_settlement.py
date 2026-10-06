@@ -27,7 +27,7 @@ from typing import Any
 from unittest.mock import patch
 
 from gateway.config import GatewayConfig, PlatformConfig
-from gateway.platforms.base import SendResult
+from gateway.platforms.base import MessageEvent, SendResult
 from gateway.run import _INTERRUPT_REASON_GATEWAY_SHUTDOWN, GatewayRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -227,6 +227,69 @@ class StopHarness:
         self.runner._shutdown_executor()
 
 
+class GatewayHarness(StopHarness):
+    """The real pinned ``GatewayRunner._handle_message`` behind the adapter.
+
+    Its startup-restore gate, ``resume_pending`` marking, auto-resume
+    scheduler, gate drain and session bookkeeping all run for real; only the
+    agent run itself (``_run_agent``) is simulated. ``timeline`` interleaves
+    model handoffs with sidecar settlements across both gateway processes.
+    """
+
+    def __init__(self, home: str, *, timeline: list[tuple[str, str]], **kwargs: Any):
+        super().__init__(home, **kwargs)
+        self.timeline = timeline
+        self.adapter.set_message_handler(self.runner._handle_message)
+        self.runner._run_agent = self._run_agent
+
+    async def _sidecar(self, action, payload, *, timeout):
+        if action in ("ack", "release"):
+            self.timeline.append((action, payload["message_id"]))
+        return await super()._sidecar(action, payload, timeout=timeout)
+
+    async def _run_agent(self, message, context_prompt, history, source, session_id, **kwargs):
+        del context_prompt, history, source, session_id
+        self.timeline.append(("model", message))
+        self.runs.append(message)
+        harness = self
+
+        class Agent:
+            def interrupt(self, *_args, **_kwargs):
+                harness.interrupted_by_shutdown = True
+                harness.turn_gate.set()
+
+            def hard_interrupt(self, *_args, **_kwargs):
+                self.interrupt()
+
+        self.runner._session_state(kwargs["session_key"]).turn.agent = Agent()
+        if self.stall and message == "long running work":
+            self.started.set()
+            await self.turn_gate.wait()
+            if self.interrupted_by_shutdown:
+                return {"final_response": "", "interrupted": True, "messages": [], "api_calls": 1}
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+    def resume_pending(self) -> bool:
+        return any(entry.resume_pending for entry in self.runner.session_store._entries.values())
+
+    async def stop_gracefully(self) -> None:
+        # Skip the pinned out-of-loop watchdog, which hard-exits on overrun.
+        with patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "finite-graceful-stop"}):
+            await asyncio.wait_for(self.runner.stop(), 30)
+
+    async def boot_with_gate_closed(self) -> None:
+        """What ``start()`` does before adapters connect, then one stream tick."""
+        self.runner._startup_restore_in_progress = True
+        self.runner._startup_restore_queue = []
+        self.runner._startup_restore_tasks = []
+        await self.tick()
+
+    async def open_gate(self) -> int:
+        scheduled = self.runner._schedule_resume_pending_sessions()
+        await asyncio.wait_for(self.runner._finish_startup_restore(), 10)
+        return scheduled
+
+
 class PinnedHermesStopSettlementTests(unittest.TestCase):
     def run_scenario(self, scenario):
         with (
@@ -424,6 +487,153 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
             await h.adapter.disconnect()
             self.assertEqual(h.state("msg-2"), "pending")
             self.assertEqual(h.runs, ["msg-1"])
+
+        self.run_scenario(scenario)
+
+
+class PinnedHermesRestartRecoveryTests(unittest.TestCase):
+    """Canonical Linux smoke 37428809877: the restart after a graceful stop.
+
+    Both released entries were acked about 2s before any model call, because
+    the pinned startup-restore gate queued them in memory and returned. The
+    interrupted turn then ran twice: once as Hermes's own auto-resume turn
+    for the session ``stop()`` marked, once as the inbox redelivery replayed
+    from the gate.
+    """
+
+    def run_scenario(self, scenario):
+        with (
+            tempfile.TemporaryDirectory(prefix="finite-restart-") as home,
+            patch.dict(
+                os.environ,
+                {
+                    "HERMES_HOME": home,
+                    "HERMES_RESTART_DRAIN_TIMEOUT": "0",
+                    # The real handler authorizes senders; Finite's admission
+                    # policy is enforced upstream of this boundary.
+                    "GATEWAY_ALLOW_ALL_USERS": "true",
+                },
+            ),
+        ):
+            asyncio.run(scenario(home))
+
+    @staticmethod
+    def pending_inbox() -> dict[str, tuple[dict[str, Any], str]]:
+        return {
+            "msg-1": (raw_event(1, "long running work"), "pending"),
+            "msg-2": (raw_event(2, "queued follow-up"), "pending"),
+        }
+
+    def test_graceful_restart_runs_each_released_turn_once_after_the_gate(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            stopped = GatewayHarness(home, timeline=timeline)
+            try:
+                await stopped.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(stopped.started.wait(), 2)
+                await stopped.deliver(raw_event(2, "queued follow-up"))
+                await stopped.stop_gracefully()
+                self.assertTrue(stopped.interrupted_by_shutdown)
+                self.assertEqual(
+                    {"active": stopped.state("msg-1"), "queued": stopped.state("msg-2")},
+                    {"active": "pending", "queued": "pending"},
+                )
+                self.assertTrue(stopped.resume_pending(), "stop() marks the session to resume")
+            finally:
+                await stopped.close()
+
+            timeline.clear()
+            restarted = GatewayHarness(home, timeline=timeline, inbox=stopped.inbox, stall=False)
+            try:
+                await restarted.boot_with_gate_closed()
+                # Held, not acked: a stop or crash before the gate opens
+                # leaves both entries in the durable inbox.
+                self.assertEqual(
+                    {"active": restarted.state("msg-1"), "queued": restarted.state("msg-2")},
+                    {"active": "leased", "queued": "leased"},
+                )
+                self.assertEqual(timeline, [])
+
+                self.assertEqual(await restarted.open_gate(), 1, "Hermes scheduled its resume")
+                await restarted.wait_settled("msg-1")
+                await restarted.wait_settled("msg-2")
+                self.assertEqual(
+                    timeline,
+                    [
+                        ("model", "long running work"),
+                        ("ack", "msg-1"),
+                        ("model", "queued follow-up"),
+                        ("ack", "msg-2"),
+                    ],
+                )
+                self.assertFalse(restarted.resume_pending(), "the redelivered turn resumed it")
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_stop_before_the_startup_gate_opens_releases_held_turns(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, inbox=self.pending_inbox(), stall=False)
+            try:
+                await h.boot_with_gate_closed()
+                await h.adapter.disconnect()
+                self.assertEqual(h.state("msg-1"), "pending")
+                self.assertEqual(h.state("msg-2"), "pending")
+                self.assertEqual(timeline, [("release", "msg-1"), ("release", "msg-2")])
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_user_stop_during_the_startup_gate_stays_final(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline, inbox=self.pending_inbox(), stall=False)
+            try:
+                await h.boot_with_gate_closed()
+                await h.deliver(raw_event(3, "/stop"))
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertEqual(h.state("msg-2"), "acked")
+                # The gate queues commands too; the stop is held until it opens.
+                self.assertEqual(h.state("msg-3"), "leased")
+
+                await h.open_gate()
+                await h.wait_settled("msg-3")
+                await h.tick()
+                self.assertEqual(h.state("msg-3"), "acked")
+                self.assertEqual(h.runs, [], "nothing sent before the stop runs")
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_only_the_hermes_resume_event_is_declined(self):
+        async def scenario(home: str):
+            h = GatewayHarness(home, timeline=[], stall=False)
+            try:
+                source = h.adapter.build_source(
+                    chat_id=ROOM_ID, chat_type="group", user_id="alice", thread_id="segment-1"
+                )
+                await h.adapter.handle_message(MessageEvent(text="", source=source, internal=True))
+                self.assertEqual(h.adapter._session_tasks, {}, "no resume turn starts")
+                await h.settle_loop()
+                self.assertEqual(h.runs, [])
+
+                notice = MessageEvent(text="background job finished", source=source, internal=True)
+                await h.adapter.handle_message(notice)
+                for _ in range(200):
+                    if h.runs:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(h.runs, ["background job finished"])
+                injected = MessageEvent(
+                    text="", source=source, internal=True, metadata={"hermes_plugin_id": "p"}
+                )
+                self.assertFalse(h.module._is_hermes_resume_event(injected))
+            finally:
+                await h.close()
 
         self.run_scenario(scenario)
 

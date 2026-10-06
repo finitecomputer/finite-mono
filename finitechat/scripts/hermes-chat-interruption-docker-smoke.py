@@ -702,6 +702,44 @@ def require_restart_order(
     return {"active_reruns": len(active), "queued_handoffs": len(queued)}
 
 
+def require_acks_after_handoff(
+    requests: list[dict[str, Any]],
+    inbox: dict[str, Any],
+    *,
+    message_ids: dict[str, str],
+    markers: dict[str, str],
+) -> dict[str, int]:
+    """Each entry the stop left durable reaches the model after restart, then is acked.
+
+    Run 37428809877 acked both entries about 2s before any model request: the
+    startup-restore gate had only queued them in memory. Returns how long
+    after its handoff each entry was acked.
+    """
+    after_handoff_ms: dict[str, int] = {}
+    for role, message_id in message_ids.items():
+        acked_at = [
+            entry.get("acked_at_ms")
+            for entry in inbox.get("acked") or []
+            if isinstance(entry, dict)
+            and inbox_key_message_id(entry.get("key")) == message_id
+            and isinstance(entry.get("acked_at_ms"), int)
+        ]
+        if not acked_at:
+            raise SmokeFailure(f"{role} turn has no ack time in the acked ring")
+        handoffs = [
+            int(request.get("received_at_ms") or 0)
+            for request in requests
+            if markers[role] in str(request.get("latest_user_text") or "")
+        ]
+        if not handoffs:
+            raise SmokeFailure(f"{role} turn was acked without reaching the model after restart")
+        lead_ms = min(acked_at) - handoffs[0]
+        if lead_ms < 0:
+            raise SmokeFailure(f"{role} turn was acked {-lead_ms} ms before it reached the model")
+        after_handoff_ms[role] = lead_ms
+    return after_handoff_ms
+
+
 def read_hermes_inbox(*, image: str, container: str, home_volume: str, live: bool) -> str:
     """Read the inbox without mutating it: exec into a live Agent, else mount read-only."""
     if live:
@@ -1094,6 +1132,15 @@ def main() -> int:
         ]
         set_stage("wait_inbox_settled", case)
         case["final_inbox"] = wait_inbox_settled(message_ids)
+        set_stage("check_acks_after_handoff", case)
+        case["acked_after_handoff_ms"] = require_acks_after_handoff(
+            model_state.requests[restart_request_index:],
+            json.loads(
+                read_hermes_inbox(image=image, container=name, home_volume=home_volume, live=True)
+            ),
+            message_ids=message_ids,
+            markers={"active": active_marker, "queued": queued_expected},
+        )
         case["status"] = "passed"
         case.pop("stage", None)
         write_report()
