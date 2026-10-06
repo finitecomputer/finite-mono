@@ -158,10 +158,8 @@ class _FiniteTurn:
     # and whether settlement has closed it to a rewind still on its way.
     retry_rewind: _RetryRewind | None = None
     retry_closed: bool = False
-    # The /bg, /btw or /goal dispatch this turn's event made, if any.
     launch: _Launch | None = None
-    # The inbox entry this turn settles when its event carries none: the
-    # /goal set or resume whose kickoff or continuation the turn runs.
+    # The /goal entry a queued kickoff or continuation's turn settles.
     entry: tuple[str, Any, str] | None = None
 
     def answered_by_gateway(self) -> bool:
@@ -189,81 +187,49 @@ _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVa
     "finitechat_turn", default=None
 )
 
-# Pinned commands whose handler replies once it has started a child task:
-# /bg runs a prompt in a fresh agent, /btw answers a side question. The child
-# sends its result to the chat itself.
+# Pinned commands whose handler replies once it starts a child task, which
+# sends the result itself, and the coroutines those children run.
 _CHILD_COMMANDS = frozenset({"bg", "btw"})
-# /goal arguments that end the goal loop, so an earlier /goal set or resume
-# must never run again: the pinned handler pauses or clears the goal.
-_GOAL_ENDING_ARGS = frozenset({"pause", "clear", "stop", "done"})
-# The coroutines those handlers start, by qualified name. Any other task that
-# a handler happens to create is not a child.
 _LAUNCH_CHILD_QUALNAMES = (
     "._run_background_task",
     "._handle_btw_command.<locals>._run_side_question",
 )
-# A child already sending its result when the adapter disconnects gets this
-# long to finish, so a stop does not cut off a reply it has begun to send.
+_GOAL_ENDING_ARGS = frozenset({"pause", "clear", "stop", "done"})
 LAUNCH_DELIVERY_GRACE_SECS = 1.5
-# How long disconnect waits for the children it cancels to unwind.
 LAUNCH_CANCEL_WAIT_SECS = 0.5
-# Without a gateway to ask, how long disconnect waits for settlements: the
-# pinned adapter teardown default.
+# The pinned adapter teardown default, for an adapter without a gateway.
 SETTLE_TIMEOUT_SECS = 5.0
-# Under FINITECHAT_HOME: one file per chat whose latest turn the inbox owns.
 TURN_OWNERS_DIR = "hermes-turn-owners"
 
 
 @dataclass(eq=False)
 class _Launch:
-    """A /bg, /btw or /goal dispatch, and the work it started that outlives its reply.
+    """A /bg, /btw or /goal set|resume dispatch and the work it started past its reply.
 
-    The pinned handlers reply as soon as they start that work: /bg and /btw
-    start a child task that delivers its own result, and /goal set or resume
-    queues the turn that kicks the goal off. Until that work is done the
-    command's inbox entry stays leased: a stop releases it so the command
-    runs again after the restart, a lease-expiry redelivery joins the work
-    instead of starting it twice, and the rollout's idle gate reads the
-    leased entry as busy. A queued /goal turn takes the entry over when it
-    starts and settles it like any turn's own.
+    Until that work is done the command's inbox entry stays leased, so a stop
+    hands the command back and the rollout's idle check reads the chat busy.
     """
 
     entry: tuple[str, Any, str]
     key: str
     command: str
     session_key: str
-    # The handler is still running.
-    dispatching: bool = True
-    # The work the handler started, once it returned: the child tasks, and
-    # the queued /goal events no turn has taken yet, with the gateway's
-    # session key for them.
     owned: bool = False
     children: list[asyncio.Task[Any]] = field(default_factory=list)
     queued: list[MessageEvent] = field(default_factory=list)
     queue_key: str = ""
-    # A turn took the queued work, and with it the entry.
     handed_off: bool = False
-    # Result sends in flight, whether one reached the chat, and the failure
-    # of the last that did not: "retryable", "final" or None.
     sending: int = 0
     delivered: bool = False
     send_failure: str | None = None
-    # Disconnect is cancelling the children; their settlement is its call.
     disconnecting: bool = False
-    # The command's own turn (or inline dispatch) reached the point where it
-    # would have settled the entry. Until then the launch stays registered,
-    # so the command never settles an entry the launch already has.
+    # Registered until the command's own settlement point has passed.
     command_done: bool = False
-    # How the launch settled the entry: released (True), acked (False), or
-    # not yet (None).
     released: bool | None = None
 
     @property
     def settled(self) -> bool:
         return self.released is not None
-
-    def owns_entry(self) -> bool:
-        return self.owned
 
     def unfinished(self) -> bool:
         return bool(self.queued) or any(not child.done() for child in self.children)
@@ -275,21 +241,14 @@ class _Launch:
         if getattr(result, "success", False):
             self.delivered = True
         elif self.send_failure != "retryable":
-            # The sidecar decides whether resending could ever succeed.
             self.send_failure = "retryable" if getattr(result, "retryable", True) else "final"
 
 
 def _is_launch_child(
     task: asyncio.Task[Any], launch: _Launch, context: contextvars.ContextVar[_Launch | None]
 ) -> bool:
-    """``task`` is a child the pinned handler started under ``launch``.
-
-    A task copies the context it was created in, so only tasks created while
-    the handler ran carry ``launch`` in the adapter's launch ``context``; the
-    coroutine name excludes helper tasks the handler may also create.
-    ``Task.get_context`` is Python 3.12+, as pinned; an older runtime finds
-    no children and acks the command.
-    """
+    """Created while the handler ran (its context carries ``launch``) and a pinned child.
+    Without Python 3.12's ``Task.get_context`` none is found, and the command is acked."""
     get_context = getattr(task, "get_context", None)
     if task.done() or get_context is None or get_context().get(context) is not launch:
         return False
@@ -1014,23 +973,14 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._retry_rewinds: dict[str, tuple[_RetryRewind, tuple[str, Any, str]]] = {}
         # Settlements in flight. Each outlives a cancellation of its turn.
         self._settlements: set[asyncio.Task[None]] = set()
-        # Launches whose unfinished work owns their command's inbox entry, by
-        # entry key. Disconnect settles the rest; none outlives the process.
         self._launches: dict[str, _Launch] = {}
-        # The launch being dispatched, as its handler, its children and the
-        # gateway queue see it. It lives on the adapter, not the module: Hermes
-        # plugin rediscovery can import this module again in-process, and code
-        # from that import would see a module-level variable of its own.
+        # Per adapter: plugin rediscovery can import this module again.
         self._launch_context: contextvars.ContextVar[_Launch | None] = contextvars.ContextVar(
             "finitechat_launch", default=None
         )
-        # /goal set and resume entries whose queued work owns them, by entry
-        # key, with the chat's session key; and those a later /goal pause,
-        # clear, stop or done made final, which are acked whatever their
-        # turn's outcome so a restart cannot set the goal again.
+        # Owned /goal entries (key -> session), and those a later control ended.
         self._goal_entries: dict[str, str] = {}
         self._final_entries: set[str] = set()
-        # Pending owner-file writes, the latest per chat (see _record_turn_owner).
         self._owner_writes: dict[str, asyncio.Future[None]] = {}
 
     async def _process_message_background(
@@ -1065,15 +1015,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
         launch = self._take_queued_launch(event)
         if launch is not None:
-            # A queued /goal kickoff or continuation: its turn settles the
-            # /goal entry, and a redelivery of that entry joins it meanwhile.
             turn.entry = launch.entry
             self._inflight_admissions.add(launch.key)
         room_id, seq, message_id = turn.entry or _inbox_entry(event, self.room_id)
         owner = (room_id, seq, message_id) if message_id and isinstance(seq, int) else None
         if owner is not None or not self._gateway_draining():
-            # A turn the draining gateway refuses never runs, so it cannot
-            # take the chat's recovery from the inbox turn the stop released.
+            # A turn the draining gateway refuses never runs, so it cannot take
+            # the chat's recovery from an inbox turn the stop released.
             self._record_turn_owner(session_key, owner)
         turn_token = _FINITE_TURN.set(turn)
         self._running_turns[session_key] = turn
@@ -1104,9 +1052,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         it interrupts running turns, so a handler that returned before then
         finished its work uninterrupted.
 
-        A /bg, /btw or /goal set or resume dispatch, inline in a busy chat or
-        as its own turn, also records the work its handler started (see
-        ``_Launch``), and a /goal that ends the goal makes earlier ones final.
+        It also records each /bg, /btw and /goal launch (``_Launch``).
         """
 
         async def handle(event: MessageEvent) -> Any:
@@ -1138,19 +1084,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         super().set_message_handler(handle)
 
     async def handle_message(self, event: MessageEvent) -> None:
-        """Decline Hermes's synthetic auto-resume turn where the inbox owns recovery.
+        """Decline Hermes's auto-resume turn where the inbox owns recovery.
 
-        The durable inbox owns recovery of interrupted Finite turns: a stop
-        releases the turn's lease and a crash leaves it to lease expiry, so
-        the message runs again whole. At boot the pinned gateway also starts
-        its own resume turn for every session it marked ``resume_pending``,
-        and the model sees the interrupted message in that turn too, so the
-        same work would run twice. So the resume is declined for a chat whose
-        latest turn the inbox owned (see ``_record_turn_owner``). Hermes frees
-        the session slot it reserved for the resume when no turn starts, and
-        the session stays marked, so the redelivered message runs with
-        Hermes's recovery note. A turn with no inbox entry, such as a goal
-        continuation, has no other owner, so Hermes resumes it.
+        The inbox redelivers a turn it owns whole, so a resume would run it
+        twice; the session stays marked, so the redelivery gets the recovery
+        note. A turn with no inbox entry, like a goal continuation, resumes.
         """
         if _is_hermes_resume_event(event) and await self._inbox_owns_latest_turn(
             self._event_session_key(event)
@@ -1258,8 +1196,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 await self._poll_task
             self._poll_task = None
         await self._cancel_admission_tasks()
-        # Hermes's stop has already done this; its fatal-adapter path has not.
-        # Either way every turn settles before the sidecar service stops.
+        # Hermes's stop has done this already; its fatal-adapter path has not.
         await self.cancel_background_tasks()
         await self._settle_orphaned_retry_rewinds()
         await self._settle_launches_at_disconnect()
@@ -1316,7 +1253,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         launch = self._child_launch()
         if launch is None:
             return await self._send_message(chat_id, content, reply_to, metadata)
-        # A /bg or /btw child delivering its result: its launch settles by it.
         launch.sending += 1
         try:
             result = await self._send_message(chat_id, content, reply_to, metadata)
@@ -2183,11 +2119,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return room_id == boundary_room_id and seq < boundary_seq
 
     async def _settle_user_interrupted_pending(self, session_key: str, event: MessageEvent) -> None:
-        launch = self._take_queued_launch(event)
-        if launch is not None:
-            # A queued /goal event the user's /stop, /new or /reset dropped.
-            self._settle_launch(launch, release=False)
-            return
         raw_message = event.raw_message if isinstance(event.raw_message, dict) else {}
         room_id = str(raw_message.get("room_id") or self.room_id)
         seq = raw_message.get("seq")
@@ -2210,7 +2141,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if isinstance(seq, int):
             room_id = str(raw_message.get("room_id") or self.room_id)
             self._user_interrupt_boundaries[session_key] = (room_id, seq)
-            # The command drops this chat's queued /goal work with the rest.
             for launch in list(self._launches.values()):
                 if (
                     launch.queued
@@ -2334,9 +2264,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         first decision, and the sidecar's ack removes an entry a release has
         just returned to Pending. So the settlement runs as its own task,
         which the cancellation does not reach, and the second run joins it.
-
-        A queued /goal kickoff or continuation settles the /goal entry it runs
-        for, and a turn that ran one inside its own settles that entry with it.
         """
         turn = _FINITE_TURN.get()
         if turn is not None and turn.event is not event:
@@ -2352,7 +2279,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
             await self._join_settlement(turn)
             return
         if turn is not None and self._launch_takes_entry(turn.launch):
-            # The work the command started settles its entry (see ``_Launch``).
             if event_key:
                 self._inflight_admissions.discard(event_key)
             return
@@ -2421,8 +2347,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
     ) -> None:
         """Settle ``entries`` one way, once any /retry rewind is settled.
 
-        A released entry runs again from the inbox, so the chat's recovery is
-        the inbox's whichever turn starts next; that is recorded first.
+        A released entry runs again whichever turn starts next, so the chat's
+        recovery is the inbox's; that is recorded first.
         """
         try:
             if retry:
@@ -2574,14 +2500,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
     def _record_turn_owner(
         self, session_key: str, entry: tuple[str, Any, str] | None
     ) -> asyncio.Future[None]:
-        """Record durably whether the inbox owns this chat's latest turn.
-
-        A turn with an inbox entry writes the chat's file and any other turn
-        removes it. The file outlives the ack: Hermes's crash recovery marks
-        every recently active chat for resume, and one whose last turn the
-        inbox settled has nothing to resume. Writes run in order per chat, off
-        the event loop.
-        """
+        """Record durably, in order per chat, whether the inbox owns its latest turn.
+        It outlives the ack: crash recovery marks every recently active chat for
+        resume, and one whose last turn the inbox settled has nothing to resume."""
         write = asyncio.ensure_future(
             self._write_turn_owner(
                 self._owner_writes.get(session_key), self._turn_owner_path(session_key), entry
@@ -2607,11 +2528,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
             await asyncio.to_thread(_write_turn_owner_file, path, entry)
 
     async def _inbox_owns_latest_turn(self, session_key: str) -> bool:
-        """The inbox owned this chat's latest turn, as ``_record_turn_owner`` left it.
-
-        A chat with no file was last served by a runtime that let Hermes
-        resume its interrupted turns, so Hermes resumes it here too.
-        """
+        """The inbox owned this chat's latest turn; a chat with no record was last
+        served by a release that left its interrupted turns to Hermes's resume."""
         path = self._turn_owner_path(session_key)
         if path is None:
             return True
@@ -2621,7 +2539,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return await asyncio.to_thread(path.exists)
 
     def _begin_launch(self, event: MessageEvent, command: str | None) -> _Launch | None:
-        """A launch record for a /bg, /btw or /goal set or resume inbox event."""
         if command not in _CHILD_COMMANDS and (command != "goal" or _goal_control(event)):
             return None
         room_id, seq, message_id = _inbox_entry(event, self.room_id)
@@ -2638,13 +2555,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         )
 
     def _own_launch_work(self, launch: _Launch) -> None:
-        """Once the handler is done, let the work it started own the entry.
-
-        The pinned handlers start each child last, with no await before they
-        return, so every child is still pending here; /goal queued its event
-        through ``_watch_goal_kickoffs``.
-        """
-        launch.dispatching = False
+        """The pinned handlers start each child last with no await before they
+        return, so every child is still pending here."""
         launch.children = [
             task
             for task in asyncio.all_tasks()
@@ -2660,15 +2572,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
             child.add_done_callback(lambda _child, launch=launch: self._child_finished(launch))
 
     def _watch_goal_kickoffs(self) -> None:
-        """Record the event a /goal handler queues for its kickoff or continuation.
-
-        Integration hook: the pinned ``_handle_goal_command`` queues that
-        event through the gateway's ``_enqueue_fifo``, as a new event with no
-        inbox record (copying the record would change the turn's requester).
-        This wraps the method once; outside a /goal dispatch it runs
-        unchanged. It reads the launch from the adapter the gateway queues
-        for, so it serves an adapter built from a later import of this module.
-        """
+        """Record the event the pinned /goal handler queues through ``_enqueue_fifo``,
+        without the inbox record, which would change the kickoff's requester. The
+        launch is read from the adapter argument, which serves any adapter instance."""
         runner = getattr(self, "gateway_runner", None)
         enqueue = getattr(runner, "_enqueue_fifo", None)
         if (
@@ -2683,12 +2589,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             context = getattr(adapter, "_launch_context", None)
             launch = context.get() if isinstance(context, contextvars.ContextVar) else None
             queued = args[1] if len(args) > 1 else kwargs.get("queued_event")
-            if (
-                launch is not None
-                and launch.dispatching
-                and launch.command == "goal"
-                and isinstance(queued, MessageEvent)
-            ):
+            if launch is not None and launch.command == "goal" and isinstance(queued, MessageEvent):
                 launch.queued.append(queued)
                 launch.queue_key = str(args[0] if args else kwargs.get("session_key") or "")
             return enqueue(*args, **kwargs)
@@ -2697,7 +2598,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         runner._finitechat_watches_goal_queue = True
 
     def _take_queued_launch(self, event: MessageEvent) -> _Launch | None:
-        """The launch whose queued /goal event this is; the caller takes its entry over."""
         for launch in self._launches.values():
             if any(queued is event for queued in launch.queued):
                 launch.queued = [queued for queued in launch.queued if queued is not event]
@@ -2709,12 +2609,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return None
 
     def _hand_queued_launch_to_turn(self, event: MessageEvent, session_key: str) -> None:
-        """The gateway took a queued /goal event to run inside the turn it is finishing.
-
-        That turn settles the /goal entry with its own. A draining gateway
-        discards the event instead, so the entry is released to run after
-        the restart.
-        """
+        """The gateway runs a queued /goal event inside the turn it is finishing,
+        which settles the entry with its own; a draining gateway discards it."""
         launch = self._take_queued_launch(event)
         if launch is None:
             return
@@ -2728,12 +2624,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._inflight_admissions.add(launch.key)
 
     def _end_goal_launches(self, session_key: str) -> None:
-        """A /goal pause, clear, stop or done ended this chat's goal loop.
-
-        Every earlier /goal set or resume in the chat is final now: its
-        queued event may still run, but its entry is acked rather than
-        released, so a restart never sets or resumes the goal again.
-        """
+        """Make earlier /goal entries in the chat final, so a restart cannot revive the goal."""
         for key, goal_session in self._goal_entries.items():
             if goal_session == session_key:
                 self._final_entries.add(key)
@@ -2742,13 +2633,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 self._end_queued_launch(launch)
 
     def _end_queued_launch(self, launch: _Launch) -> None:
-        """Ack a /goal entry whose queued event the user has ended; it runs unowned if at all."""
         launch.queued = []
         launch.handed_off = True
         self._settle_launch(launch, release=False)
 
     def _queued_alive(self, launch: _Launch) -> bool:
-        """A queued /goal event is still in the gateway's queue for its chat."""
         queue: list[Any] = list(getattr(self, "_pending_messages", {}).values())
         runner = getattr(self, "gateway_runner", None)
         peek = getattr(runner, "_peek_session_state", None)
@@ -2757,13 +2646,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return any(queued is event for queued in launch.queued for event in queue)
 
     def _launch_takes_entry(self, launch: _Launch | None) -> bool:
-        """At the command's own settlement point: its launch settles the entry instead.
-
-        Called once the command's turn (or inline dispatch) would settle the
-        entry. A launch that already settled it, or handed it to a turn,
-        leaves the registry then.
-        """
-        if launch is None or not launch.owns_entry():
+        """At the command's own settlement point: its launch settles the entry instead."""
+        if launch is None or not launch.owned:
             return False
         launch.command_done = True
         if (launch.settled or launch.handed_off) and self._launches.get(launch.key) is launch:
@@ -2771,20 +2655,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return True
 
     def _launch_coalesces(self, event_key: str | None) -> bool:
-        """A redelivered entry joins its launch's work instead of running it twice.
-
-        The sidecar redelivers a leased entry once its lease expires, which a
-        long child can outlast. Once the launch released the entry, or its
-        work ended without its result reaching the chat, or a queued /goal
-        event left the gateway's queue unrun, the redelivery runs the command
-        again. Once a turn took the queued event, the turn's own in-flight
-        marker holds the redelivery.
-        """
+        """A lease-expiry redelivery joins its launch's work while that work runs."""
         launch = self._launches.get(event_key) if event_key else None
         if launch is None:
             return False
-        if launch.released is False:
-            return True
         if any(not child.done() for child in launch.children) or (
             launch.queued and self._queued_alive(launch)
         ):
@@ -2793,14 +2667,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return False
 
     def _child_finished(self, launch: _Launch) -> None:
-        """Settle the entry once every child has ended on its own.
-
-        Once any of the result reached the chat the entry is acked, so a /bg
-        never runs again over an attachment; so is a result the sidecar
-        refuses for good. Otherwise a child cancelled elsewhere is released,
-        and a retryable failure keeps the entry leased until its lease expires
-        or the adapter disconnects.
-        """
+        """Once any of the result reached the chat, rerunning would repeat finished
+        work, so the entry is acked; a retryable failure before that keeps it
+        leased until its lease expires or the adapter disconnects."""
         if launch.settled or launch.disconnecting or launch.unfinished():
             return
         where = (launch.command, launch.entry[0], launch.entry[1])
@@ -2824,7 +2693,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
             )
 
     def _settle_launch(self, launch: _Launch, *, release: bool) -> None:
-        """Ack or release the launch's entry once, outside any cancellable task."""
         launch.released = release
         if launch.command_done and self._launches.get(launch.key) is launch:
             del self._launches[launch.key]
@@ -2835,17 +2703,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         settlement.add_done_callback(self._settlements.discard)
 
     async def _settle_launches_at_disconnect(self) -> None:
-        """Settle every launch before the gateway cancels the work it owns.
-
-        The pinned gateway cancels its background tasks only after the
-        adapter disconnects. A child already sending its result gets a short
-        grace to finish; the rest are cancelled first, so none can deliver
-        after its entry was released. An entry is acked once its result
-        reached the chat: running it again would repeat finished work.
-        Otherwise it is released and the command runs again after the
-        restart, which may repeat a child's side effects (the inbox's
-        at-least-once contract for interrupted model work).
-        """
+        """Before the gateway cancels its background tasks. A child already sending
+        gets a short grace; the rest are cancelled before their entries are released."""
         launches = [launch for launch in self._launches.values() if not launch.settled]
         sending = [
             child
@@ -2869,17 +2728,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
             await asyncio.wait(cancelled, timeout=LAUNCH_CANCEL_WAIT_SECS)
         for launch in launches:
             if not launch.settled and not launch.handed_off:
-                # A queued /goal event never ran: Hermes clears its queue
-                # before the adapter disconnects.
                 self._settle_launch(launch, release=not launch.delivered)
 
     async def _finish_settlements(self) -> None:
-        """Wait for every ack, release and owner write before the sidecar stops.
-
-        A release that never reaches the sidecar leaves its entry leased until
-        the lease expires. Hermes bounds the whole disconnect by its adapter
-        teardown timeout, and so is this wait.
-        """
+        """Wait for every ack, release and owner write before the sidecar stops,
+        within Hermes's adapter teardown timeout; a lost release waits out its lease."""
         pending = {*self._settlements, *self._owner_writes.values()}
         if not pending:
             return
@@ -2891,7 +2744,6 @@ class FiniteChatAdapter(BasePlatformAdapter):
         await asyncio.wait(pending, timeout=timeout if timeout > 0 else None)
 
     def _child_launch(self) -> _Launch | None:
-        """The launch whose child is the current task, if any."""
         launch = self._launch_context.get()
         if launch is None or not launch.track(asyncio.current_task()):
             return None
@@ -3553,7 +3405,6 @@ _GOAL_CONTROL_ARGS = frozenset(
 
 
 def _goal_args(event: MessageEvent) -> str:
-    """``event``'s /goal argument as the pinned handler compares it."""
     return (event.get_command_args() or "").strip().lower()
 
 

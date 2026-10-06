@@ -274,41 +274,30 @@ its own.
   the idle gap between turns. Events consumed inline by a busy
   session never pass through a background turn, so the adapter acks them
   directly (exactly once; the sidecar's ack is idempotent).
-- **Child work.** `/bg` and `/btw` reply as soon as their handler has started
-  a child task, and the child sends the result to the chat itself. The
-  command's entry stays leased until the child has delivered, whether the
-  command ran as its own turn or inline beside a busy one. The adapter finds
-  the child by the context it was created in and the pinned coroutine name,
-  never by diffing Hermes's task set, so it cannot take over another
-  command's child; this needs Python 3.12's `Task.get_context`. When the
-  adapter disconnects, before Hermes cancels its background tasks, a child
-  already sending its result gets 1.5 seconds to finish. The rest are
-  cancelled and their entries released, so the command runs again after the
-  restart. A child's side effects can repeat then, under the same
-  at-least-once contract as other interrupted model work. Once any part of
-  the result reached the chat the entry is acked, so finished work never
-  runs twice; an attachment that a stop cuts off or the sidecar refuses after
-  that is logged and lost. A lease-expiry redelivery joins the running child
-  instead of starting another. A result the sidecar refuses retryably before
-  any of it arrived keeps the entry leased until its lease expires or the
-  adapter disconnects, and the command then runs again; one it refuses for
-  good is acked. The leased entry is what the rollout idle gate
-  (`scripts/finite_status_runtime_idle.py`) reads as busy while a child runs.
-  A runtime without this adapter still reads idle then.
-  `/goal <text>` and `/goal resume` reply once their handler has queued the
-  turn that kicks the goal off. A saved goal alone is not that kickoff. The
-  adapter records the queued event by wrapping the gateway's `_enqueue_fifo`
-  during the dispatch; it does not copy the inbox record onto it, which would
-  change the kickoff turn's requester. The `/goal` entry stays leased until
-  that turn has run, and the turn settles it like its own entry. If the
-  gateway runs the event inside a turn it is finishing, that turn settles it
-  with its own. A stop that drops or interrupts the kickoff releases the
-  entry, as does a draining gateway that discards it, so after the restart
-  the goal is set or resumed again and kicks off once. Once `/goal pause`,
-  `clear`, `stop` or `done`, or a user `/stop`, `/new` or `/reset`, ends the
-  loop, earlier `/goal` entries in that chat are final: they are acked, never
-  released, so a restart cannot bring the goal back. The goal judge's later
-  continuations have no inbox entry.
+- **Child work.** `/bg` and `/btw` reply once their handler has started a
+  child that sends the result itself, and `/goal <text>` and `/goal resume`
+  reply once it has queued the turn that kicks the goal off. A reply is not
+  the work, and a saved goal is not its kickoff, so the command's entry stays
+  leased until that work is done: until the child's result reached the chat,
+  or until the queued turn ran and settled the entry as its own (or with the
+  turn that ran it inside itself). A stop hands the entry back and the
+  command runs again after the restart, under the same at-least-once
+  contract as other interrupted model work. A child already sending gets a
+  short grace first. Once any part of a result reached the chat the entry is
+  acked, so finished work never runs twice; an attachment the stop cuts off
+  or the sidecar refuses after that is logged and lost. A result refused
+  retryably before any of it arrived keeps the entry leased until its lease
+  expires or the adapter disconnects; one refused for good is acked. A
+  lease-expiry redelivery joins the running work instead of starting it
+  twice. Children are found by the context they were created in, not by
+  diffing Hermes's tasks, so a command never takes over another's child; on
+  Python before 3.12 none is found and the command is acked at launch, as
+  before. The kickoff event carries no inbox record, which would change its
+  requester. Once `/goal pause`, `clear`, `stop` or `done`, or a user
+  `/stop`, `/new` or `/reset`, ends the loop, earlier `/goal` entries in that
+  chat are final, so a restart cannot bring the goal back. The leased entry
+  is what the rollout's idle check reads as busy while this work runs; a
+  runtime without this adapter reads idle.
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar
