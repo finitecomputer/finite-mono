@@ -427,3 +427,13 @@ and inbox admission queue are free. Generic Hermes resume remains suppressed.
 marker is bound to the writer's PID and process start time; an old-runtime
 writer cannot inherit the marker after rollback. This is observability, not an
 admission/drain fence, and cannot authorize automated upgrades by itself.
+
+An older Runtime can ignore this journal while replaying foreground work or
+advancing a goal outside it. Keeping its bytes unchanged is not safe rollback,
+and rolling forward cannot undo effects already performed by the old binary.
+Candidate-to-old downgrade is held while obligations are pending or unknown,
+or admissions are not fenced; the current protocol has no supported fence.
+The hold includes automatic old-image restart after an upgrade failure, which
+currently bypasses the rollout wrapper. Preserve the whole Recovery Set and
+all newer accepted writes; do not clear journal rows or restore an older
+snapshot to make a downgrade pass. See the [Runtime rollback hold](../../../../infra/runbooks/runtime-image.md#hold-for-runtime-child-work-recovery-candidates).
