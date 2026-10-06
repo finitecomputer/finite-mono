@@ -17,6 +17,7 @@ sidecar are simulated; the sidecar model is the documented lease contract
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import os
 import sys
@@ -47,21 +48,27 @@ def load_adapter_module() -> Any:
     return module
 
 
-def raw_event(seq: int, text: str) -> dict[str, Any]:
+def raw_event(
+    seq: int,
+    text: str,
+    *,
+    segment: str = "segment-1",
+    chat_type: str = "group",
+) -> dict[str, Any]:
     return {
         "room_id": ROOM_ID,
         "seq": seq,
         "message_id": f"msg-{seq}",
         "conversation_id": "home",
-        "segment_id": "segment-1",
+        "segment_id": segment,
         "text": text,
         "message_type": "text",
         "source": {
             "platform": "finitechat",
             "chat_id": ROOM_ID,
-            "chat_type": "group",
+            "chat_type": chat_type,
             "user_id": "alice",
-            "thread_id": "segment-1",
+            "thread_id": segment,
             "is_bot": False,
         },
         "attachments": [],
@@ -170,6 +177,9 @@ class StopHarness:
             )
         self.runs.append(event.message_id)
         generation = self.runner._begin_session_run_generation(session_key)
+        # The pinned _handle_message_with_agent binds the run to the adapter's
+        # active-session guard before the agent starts.
+        self.runner._bind_adapter_run_generation(self.adapter, session_key, generation)
         harness = self
 
         class Agent:
@@ -239,13 +249,69 @@ class GatewayHarness(StopHarness):
     def __init__(self, home: str, *, timeline: list[tuple[str, str]], **kwargs: Any):
         super().__init__(home, **kwargs)
         self.timeline = timeline
-        self.adapter.set_message_handler(self.runner._handle_message)
+        # Message ids the adapter handed to the gateway's handler.
+        self.handed: list[str | None] = []
+        gateway_handler = self.runner._handle_message
+
+        async def handle_message(event):
+            self.handed.append(event.message_id)
+            return await gateway_handler(event)
+
+        self.adapter.set_message_handler(handle_message)
         self.runner._run_agent = self._run_agent
+        # start() sets this before adapters connect; only stop() clears it.
+        self.runner._running = True
+        # Model turns held open by message text, as active work that keeps a
+        # restart drain open until the test finishes them.
+        self.held_turns: dict[str, asyncio.Event] = {}
+        # The next admission await at which a restart drain begins:
+        # "home-channel-show" or "activity" (the adapter's RPCs before
+        # handoff), or "dispatch" (the base background turn, before the
+        # gateway's handler runs).
+        self.drain_window: str | None = None
+        processing_start = self.adapter.on_processing_start
+
+        async def on_processing_start(event):
+            if self.drain_window == "dispatch":
+                self.begin_restart_drain()
+            await processing_start(event)
+
+        self.adapter.on_processing_start = on_processing_start
 
     async def _sidecar(self, action, payload, *, timeout):
         if action in ("ack", "release"):
             self.timeline.append((action, payload["message_id"]))
+        if action == self.drain_window and payload.get("action", "set") == "set":
+            self.begin_restart_drain()
         return await super()._sidecar(action, payload, timeout=timeout)
+
+    def begin_restart_drain(self) -> None:
+        """What an in-band ``/restart`` does: refuse new work at once, keep
+        adapters up while running turns finish, then ``stop()``."""
+        self.drain_window = None
+        self.runner.request_restart()
+
+    async def finish_restart(self) -> None:
+        for _ in range(500):
+            if getattr(self.runner, "_restart_task", None) is not None:
+                break
+            await asyncio.sleep(0.01)
+        restart = getattr(self.runner, "_restart_task", None)
+        assert restart is not None, "the restart drain never began"
+        await asyncio.wait_for(restart, 30)
+
+    def models(self) -> list[str]:
+        return [message for kind, message in self.timeline if kind == "model"]
+
+    async def hold_turn_open(self, raw: dict[str, Any]) -> asyncio.Event:
+        """Start ``raw``'s turn and keep it running until the returned gate is set."""
+        gate = self.held_turns[raw["text"]] = asyncio.Event()
+        await self.deliver(raw)
+        for _ in range(500):
+            if raw["text"] in self.models():
+                return gate
+            await asyncio.sleep(0.01)
+        raise AssertionError(f"{raw['message_id']} never reached the model")
 
     async def _run_agent(
         self,
@@ -262,20 +328,26 @@ class GatewayHarness(StopHarness):
         self.timeline.append(("model", message))
         self.runs.append(message)
         harness = self
+        gate = self.held_turns.get(message)
+        if self.stall and message == "long running work":
+            gate = self.turn_gate
 
         class Agent:
             def interrupt(self, *_args, **_kwargs):
                 harness.interrupted_by_shutdown = True
                 harness.turn_gate.set()
+                if gate is not None:
+                    gate.set()
 
             def hard_interrupt(self, *_args, **_kwargs):
                 self.interrupt()
 
         assert session_key is not None, "the gateway must bind the model turn to a session"
         self.runner._session_state(session_key).turn.agent = Agent()
-        if self.stall and message == "long running work":
-            self.started.set()
-            await self.turn_gate.wait()
+        if gate is not None:
+            if gate is self.turn_gate:
+                self.started.set()
+            await gate.wait()
             if self.interrupted_by_shutdown:
                 return {"final_response": "", "interrupted": True, "messages": [], "api_calls": 1}
         return {"final_response": "done", "messages": [], "api_calls": 1}
@@ -645,6 +717,282 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
                 self.assertFalse(h.module._is_hermes_resume_event(injected))
             finally:
                 await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_message_behind_a_reserved_resume_slot_is_acked_after_it_runs(self):
+        """A reconnect schedules auto-resume with the startup gate already open.
+
+        The scheduler reserves the session's slot before its resume task runs.
+        A message admitted in that window is queued by the gateway behind the
+        reservation and reported as a successful turn; it must not be acked
+        until the queued turn runs it.
+        """
+
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            stopped = GatewayHarness(home, timeline=timeline)
+            try:
+                await stopped.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(stopped.started.wait(), 2)
+                await stopped.stop_gracefully()
+                self.assertEqual(stopped.state("msg-1"), "pending")
+                self.assertTrue(stopped.resume_pending())
+            finally:
+                await stopped.close()
+
+            timeline.clear()
+            reconnected = GatewayHarness(home, timeline=timeline, inbox=stopped.inbox, stall=False)
+            try:
+                self.assertEqual(reconnected.runner._schedule_resume_pending_sessions(), 1)
+                await reconnected.tick()
+                await reconnected.wait_settled("msg-1")
+                await reconnected.settle_loop()
+                self.assertEqual(timeline, [("model", "long running work"), ("ack", "msg-1")])
+            finally:
+                await reconnected.close()
+
+        self.run_scenario(scenario)
+
+
+class PinnedHermesRestartDrainAdmissionTests(unittest.TestCase):
+    """Review 5426200391: a restart drain that wins the admission race.
+
+    ``request_restart`` refuses new work at once and keeps ``_running`` set
+    while running turns finish (up to the pinned 1800s after-turn cap). The
+    gateway refuses a message handed to it after that point with a reply,
+    which the base adapter reports as a successful turn, so the entry was
+    acked with no model call. Path-like text starting with ``/`` skipped the
+    adapter's drain hold the same way.
+    """
+
+    def run_scenario(self, scenario):
+        with (
+            tempfile.TemporaryDirectory(prefix="finite-drain-") as home,
+            patch.dict(
+                os.environ,
+                {
+                    "HERMES_HOME": home,
+                    "HERMES_RESTART_DRAIN_TIMEOUT": "0",
+                    "GATEWAY_ALLOW_ALL_USERS": "true",
+                    # The restart task calls stop() itself; skip the pinned
+                    # out-of-loop watchdog, which hard-exits on overrun.
+                    "PYTEST_CURRENT_TEST": "finite-restart-drain",
+                },
+            ),
+        ):
+            os.environ.pop("FINITECHAT_HOME_CHANNEL", None)
+            asyncio.run(scenario(home))
+
+    @staticmethod
+    async def run_after_restart(
+        home: str,
+        inbox: dict[str, tuple[dict[str, Any], str]],
+        *message_ids: str,
+    ) -> list[tuple[str, str]]:
+        timeline: list[tuple[str, str]] = []
+        restarted = GatewayHarness(home, timeline=timeline, inbox=inbox, stall=False)
+        try:
+            await restarted.boot_with_gate_closed()
+            await restarted.open_gate()
+            for message_id in message_ids:
+                await restarted.wait_settled(message_id)
+            await restarted.settle_loop()
+        finally:
+            await restarted.close()
+        return timeline
+
+    def test_only_gateway_commands_skip_the_drain_hold(self):
+        async def scenario(home: str):
+            h = GatewayHarness(home, timeline=[], stall=False)
+            try:
+                cases = {
+                    ("/usr/bin/python3 crashes", "group"): False,
+                    ("/etc/hosts looks wrong", "group"): False,
+                    ("/not-a-command please", "group"): False,
+                    ("/status", "group"): True,
+                    ("/restart", "group"): True,
+                    ("/stop", "group"): True,
+                    ("/new", "group"): True,
+                    ("/reset", "group"): True,
+                    # The pinned base adapter rewrites this DM phrase to
+                    # /restart; replaying it after the restart would restart
+                    # again.
+                    ("restart the gateway", "dm"): True,
+                    ("restart the gateway", "group"): False,
+                }
+                for (text, chat_type), expected in cases.items():
+                    raw = raw_event(1, text, chat_type=chat_type)
+                    source = h.adapter.build_source(
+                        chat_id=ROOM_ID, chat_type=chat_type, user_id="alice"
+                    )
+                    event = MessageEvent(text=text, source=source, raw_message=raw)
+                    with self.subTest(text=text, chat_type=chat_type):
+                        self.assertEqual(h.module._is_gateway_command(event), expected)
+                        self.assertEqual(event.text, text, "classification must not rewrite")
+            finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_drain_beginning_during_an_immediate_handoff_keeps_the_message(self):
+        for window in ("home-channel-show", "activity", "dispatch"):
+            with self.subTest(window=window):
+
+                async def scenario(home: str, window: str = window):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.redeliver_on_release = True
+                    h.adapter._home_channel_hydrated = False
+                    try:
+                        # Another chat's running turn keeps the drain open.
+                        other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                        h.drain_window = window
+                        await h.deliver(raw_event(2, "hello"))
+                        self.assertNotIn(("ack", "msg-2"), timeline)
+
+                        # Held before handoff; or, once handed over, refused
+                        # by the gateway and released at settlement.
+                        self.assertEqual("msg-2" in h.handed, window == "dispatch")
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertEqual(h.models(), ["other work"])
+                        self.assertEqual(h.state("msg-1"), "acked")
+                        self.assertNotIn(("ack", "msg-2"), timeline)
+                        self.assertEqual(h.state("msg-2"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-2")
+                    self.assertEqual(after, [("model", "hello"), ("ack", "msg-2")])
+
+                self.run_scenario(scenario)
+
+    def test_drain_beginning_during_a_deferred_handoff_keeps_the_message(self):
+        for window in ("home-channel-show", "activity", "dispatch"):
+            with self.subTest(window=window):
+
+                async def scenario(home: str, window: str = window):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline)
+                    h.redeliver_on_release = True
+                    h.adapter._home_channel_hydrated = False
+                    try:
+                        other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                        await h.deliver(raw_event(2, "long running work"))
+                        await asyncio.wait_for(h.started.wait(), 2)
+                        await h.deliver(raw_event(3, "queued follow-up"))
+                        self.assertEqual(h.state("msg-3"), "leased")
+                        # The drain begins inside msg-3's handoff, once msg-2
+                        # has finished and the session is idle.
+                        h.drain_window = window
+                        h.turn_gate.set()
+                        await h.wait_settled("msg-2")
+                        for _ in range(500):
+                            if h.drain_window is None:
+                                break
+                            await asyncio.sleep(0.01)
+                        await h.settle_loop()
+                        self.assertEqual("msg-3" in h.handed, window == "dispatch")
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertEqual(h.models(), ["other work", "long running work"])
+                        self.assertEqual(h.state("msg-1"), "acked")
+                        self.assertEqual(h.state("msg-2"), "acked")
+                        self.assertNotIn(("ack", "msg-3"), timeline)
+                        self.assertEqual(h.state("msg-3"), "pending")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-3")
+                    self.assertEqual(after, [("model", "queued follow-up"), ("ack", "msg-3")])
+
+                self.run_scenario(scenario)
+
+    def test_turn_finishing_during_the_drain_is_acked_and_slash_text_is_held(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            h.redeliver_on_release = True
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                h.begin_restart_drain()
+                # Path-like text is ordinary work, in an idle session and
+                # behind the running turn alike.
+                await h.deliver(raw_event(2, "/usr/bin/python3 crashes", segment="segment-2"))
+                await h.deliver(raw_event(3, "/etc/hosts looks wrong"))
+                # Gateway commands still answer while the gateway drains.
+                await h.deliver(raw_event(4, "/status", segment="segment-4"))
+                await h.deliver(raw_event(5, "/restart", segment="segment-5"))
+                await h.deliver(raw_event(6, "restart the gateway", segment="dm", chat_type="dm"))
+                for message_id in ("msg-4", "msg-5", "msg-6"):
+                    with contextlib.suppress(TimeoutError):
+                        await h.wait_settled(message_id)
+                self.assertEqual(h.state("msg-2"), "leased")
+                self.assertEqual(h.state("msg-3"), "leased")
+                for message_id in ("msg-4", "msg-5", "msg-6"):
+                    self.assertEqual(h.state(message_id), "acked", message_id)
+                self.assertEqual(h.handed, ["msg-1", "msg-4", "msg-5", "msg-6"])
+
+                h.turn_gate.set()
+                await h.finish_restart()
+                # Finished during the drain: it ran, so it is acked.
+                self.assertEqual(h.models(), ["long running work"])
+                self.assertEqual(h.state("msg-1"), "acked")
+                self.assertLess(
+                    timeline.index(("model", "long running work")),
+                    timeline.index(("ack", "msg-1")),
+                )
+                self.assertNotIn(("release", "msg-1"), timeline)
+                for message_id in ("msg-2", "msg-3"):
+                    self.assertNotIn(("ack", message_id), timeline)
+                    self.assertEqual(h.state(message_id), "pending", message_id)
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox, "msg-2", "msg-3")
+            self.assertEqual(
+                sorted(after),
+                sorted(
+                    [
+                        ("model", "/usr/bin/python3 crashes"),
+                        ("ack", "msg-2"),
+                        ("model", "/etc/hosts looks wrong"),
+                        ("ack", "msg-3"),
+                    ]
+                ),
+            )
+            for message_id, text in (
+                ("msg-2", "/usr/bin/python3 crashes"),
+                ("msg-3", "/etc/hosts looks wrong"),
+            ):
+                self.assertLess(after.index(("model", text)), after.index(("ack", message_id)))
+
+        self.run_scenario(scenario)
+
+    def test_user_stop_during_the_drain_stays_final(self):
+        async def scenario(home: str):
+            timeline: list[tuple[str, str]] = []
+            h = GatewayHarness(home, timeline=timeline)
+            h.redeliver_on_release = True
+            try:
+                await h.deliver(raw_event(1, "long running work"))
+                await asyncio.wait_for(h.started.wait(), 2)
+                h.begin_restart_drain()
+                await h.deliver(raw_event(2, "queued follow-up"))
+                await h.deliver(raw_event(3, "/stop"))
+                await h.finish_restart()
+                for message_id in ("msg-1", "msg-2", "msg-3"):
+                    self.assertEqual(h.state(message_id), "acked", message_id)
+                self.assertEqual(h.models(), ["long running work"])
+            finally:
+                await h.close()
+
+            after = await self.run_after_restart(home, h.inbox)
+            self.assertEqual(after, [])
 
         self.run_scenario(scenario)
 
