@@ -97,9 +97,11 @@ FINITE_STATUS_PATHS = {
     "scripts/finite-status",
     "scripts/finite_status.py",
     "scripts/finite_status_brain_roster.py",
+    "scripts/finite_status_runtime_idle.py",
     "scripts/check_finite_status_contract.py",
     "scripts/tests/test_finite_status.py",
     "scripts/tests/test_finite_status_brain_roster.py",
+    "scripts/tests/test_finite_status_runtime_idle.py",
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
