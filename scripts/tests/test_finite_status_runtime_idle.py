@@ -614,6 +614,18 @@ class ObserveTests(unittest.TestCase):
                 result = self.observe()
                 self.assertEqual((result["verdict"], result["reasons"]), expected)
 
+    def test_a_full_or_unusable_temp_dir_is_unknown(self) -> None:
+        cases = {
+            "full": mock.patch.object(idle.tempfile, "mkdtemp", side_effect=OSError(errno.ENOSPC, "full")),
+            "none usable": mock.patch.object(idle.tempfile, "gettempdir", side_effect=FileNotFoundError(
+                errno.ENOENT, "no usable temporary directory")),
+            "removed": mock.patch.object(tempfile, "tempdir", str(self.scratch / "removed")),
+        }
+        for label, unusable in cases.items():
+            with self.subTest(label), unusable:
+                result = self.observe()
+                self.assertEqual((result["verdict"], result["reasons"]), ("unknown", ["background_unreadable"]))
+
     def test_copies_left_by_a_killed_read_are_removed_by_the_next_read(self) -> None:
         # SIGKILL, OOM or a reboot mid-copy skips cleanup and leaves the user's chat database in TMPDIR.
         now = time.time()
@@ -706,7 +718,8 @@ class TargetTests(unittest.TestCase):
                             "source_machine_id": machine, "container_name": machine},
                 "checks": checks}
 
-    def run_idle(self, probe: dict, host: str = "finite-lat-3") -> dict:
+    @contextlib.contextmanager
+    def provider(self, probe: dict):
         with (
             mock.patch.dict(finite_status.os.environ, {"FINITE_STATUS_LIFECYCLE_PROBE_BIN": "/bin/sh"}),
             mock.patch.object(finite_status.socket, "gethostname", return_value="finite-lat-3"),
@@ -714,6 +727,10 @@ class TargetTests(unittest.TestCase):
             mock.patch.object(finite_status, "run_read_only",
                               return_value=subprocess.CompletedProcess([], 0, json.dumps(probe), "")) as run,
         ):
+            yield run
+
+    def run_idle(self, probe: dict, host: str = "finite-lat-3") -> dict:
+        with self.provider(probe) as run:
             report = finite_status.collect_runtime_idle("project-a", "runtime-a", "machine-a", host)
         command = run.call_args.args[0]
         self.assertEqual(command[1:], ["lifecycle-probe", "--project-id", "project-a",
@@ -756,6 +773,19 @@ class TargetTests(unittest.TestCase):
                 section = report["sections"]["runtime_idle"]
                 self.assertEqual((report["exit_code"], section["verdict"], section["reasons"]),
                                  (2, "unknown", [reason]))
+
+    def test_a_full_temp_dir_exits_unknown_with_a_json_report(self) -> None:
+        stdout = io.StringIO()
+        with (
+            self.provider(self.probe()),
+            mock.patch.object(idle.tempfile, "mkdtemp", side_effect=OSError(errno.ENOSPC, "full")),
+            contextlib.redirect_stdout(stdout),
+            self.assertRaises(SystemExit) as exit_,
+        ):
+            finite_status.main(["--runtime-idle", "project-a", "runtime-a", "machine-a", "finite-lat-3"])
+        section = json.loads(stdout.getvalue())["sections"]["runtime_idle"]
+        self.assertEqual((exit_.exception.code, section["verdict"], section["reasons"]),
+                         (2, "unknown", ["background_unreadable", "active_agents"]))
 
     def test_wrong_host_refuses_before_provider_access(self) -> None:
         with (

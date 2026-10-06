@@ -258,11 +258,10 @@ def _copy_stable(directory: int, name: str, target: Path, required: bool) -> tup
     return _identity(before)
 
 
-def _sweep_stale_scratch() -> None:
+def _sweep_stale_scratch(parent: str) -> None:
     """Remove copies of the chat database left by a read that was killed
     mid-copy (SIGTERM, SIGKILL, OOM, reboot): only this tool's directories,
     owned by this user and untouched for STALE_SCRATCH_S. Best effort."""
-    parent = tempfile.gettempdir()
     try:
         names = [name for name in os.listdir(parent) if name.startswith(SCRATCH_PREFIX)]
     except OSError:
@@ -297,9 +296,16 @@ def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
         raise Unreadable("sqlite_unavailable") from None
     # Rows hold guest times: move the host-stamped process start and now to the guest clock.
     cutoffs = (pid.st_mtime_ns / 1e9 - offset_ms / 1000, (now_ms - offset_ms) / 1000 - BACKGROUND_DELIVERY_S)
-    _sweep_stale_scratch()
+    try:
+        parent = tempfile.gettempdir()
+    except OSError:  # no usable temp dir
+        raise Unreadable("unreadable") from None
+    _sweep_stale_scratch(parent)
     for _attempt in range(3):
-        scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX))
+        try:
+            scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=parent))
+        except OSError:  # a full or unusable temp dir
+            raise Unreadable("unreadable") from None
         try:
             database = _copy_stable(home, "state.db", scratch / "state.db", required=True)
             _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
