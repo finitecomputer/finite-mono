@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 from datetime import datetime, timezone
 import errno
+import fcntl
 import io
 import json
 import os
@@ -642,6 +643,8 @@ class ObserveTests(unittest.TestCase):
                 os.utime(path / "state.db", (stamp, stamp))
             elif kind == "file":
                 path.write_text(SECRET)
+            elif kind == "fifo":
+                os.mkfifo(path)
             else:
                 path.symlink_to(outside)
             os.utime(path, (now - age_s, now - age_s), follow_symlinks=kind != "link")
@@ -649,19 +652,55 @@ class ObserveTests(unittest.TestCase):
         entry("finite-status-idle.killed", 11 * 60)
         entry("finite-status-idle.recent", 9 * 60)
         entry("finite-status-idle.copying", 3600, file_age_s=0)  # a concurrent read's large copy
+        entry("finite-status-idle.stalled", 3600)  # a live read stopped for an hour still holds its lock
+        entry("finite-status-idle.future", -3600)  # stamped before the host clock stepped back
         entry("finite-status-sqlite.other", 3600)
         entry("finite-status-idle.file", 3600, kind="file")
+        entry("finite-status-idle.fifo", 3600, kind="fifo")
         entry("finite-status-idle.link", 3600, kind="link")
-        result = idle.observe(self.home.root, NOW_MS)
+        stalled = os.open(self.scratch / "finite-status-idle.stalled", os.O_RDONLY)
+        try:
+            fcntl.flock(stalled, fcntl.LOCK_SH)
+            result = idle.observe(self.home.root, NOW_MS)
+        finally:
+            os.close(stalled)
         self.assertEqual(result["verdict"], "idle")
         self.assertEqual(sorted(path.name for path in self.scratch.iterdir()), [
-            "finite-status-idle.copying", "finite-status-idle.file", "finite-status-idle.link",
-            "finite-status-idle.recent", "finite-status-sqlite.other"])
+            "finite-status-idle.copying", "finite-status-idle.fifo", "finite-status-idle.file",
+            "finite-status-idle.future", "finite-status-idle.link", "finite-status-idle.recent",
+            "finite-status-idle.stalled", "finite-status-sqlite.other"])
         self.assertEqual((outside / "keep").read_text(), SECRET)
+        idle.observe(self.home.root, NOW_MS)  # the stalled read was killed, and its lock with it
+        self.assertFalse((self.scratch / "finite-status-idle.stalled").exists())
         entry("finite-status-idle.another-user", 3600)
         with mock.patch.object(idle.os, "geteuid", return_value=os.geteuid() + 1):
             idle.observe(self.home.root, NOW_MS)
         self.assertTrue((self.scratch / "finite-status-idle.another-user").is_dir())
+
+    def test_a_concurrent_sweep_never_removes_a_live_read_copy(self) -> None:
+        # A read stopped or starved for over 10 minutes looks abandoned by its mtimes; its lock keeps its copy.
+        writer = sqlite3.connect(self.home.agent / "hermes-home" / "state.db", isolation_level=None)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+        real = idle._copy_stable
+        kept = []
+
+        def stall_after_wal_copy(directory, name, target, required):
+            signature = real(directory, name, target, required)
+            if name == "state.db-wal":
+                old = time.time() - 3600
+                for path in (*target.parent.iterdir(), target.parent):
+                    os.utime(path, (old, old))
+                idle._sweep_stale_scratch(str(self.scratch))  # another read's sweep
+                kept.append(sorted(path.name for path in target.parent.iterdir()) if target.parent.exists() else None)
+            return signature
+
+        with mock.patch.object(idle, "_copy_stable", stall_after_wal_copy):
+            result = self.observe()
+        self.assertEqual((result["verdict"], result["reasons"]), ("busy", ["background_sessions"]))
+        self.assertEqual(kept, [["state.db", "state.db-wal"]])
 
     def _drop_sessions_table(self) -> None:
         with contextlib.closing(sqlite3.connect(self.home.agent / "hermes-home" / "state.db")) as db:
