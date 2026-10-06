@@ -1,0 +1,9 @@
+{
+  "description": "Shape left by /model --provider openrouter --global",
+  "fp_base_url": null,
+  "model": {
+    "default": "anthropic/claude-sonnet-4.6",
+    "provider": "openrouter"
+  },
+  "expected": "openrouter"
+}

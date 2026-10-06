@@ -45,7 +45,8 @@ The first command family is deliberately narrow:
 - restart the Hermes process;
 - recover incomplete Finite Chat/Hermes turns;
 - preview, apply, and roll back an allowlisted Hermes configuration offer;
-- select either the Finite Private or OpenRouter inference profile;
+- report the agent's inference routes as stored facts, select Finite Private
+  or OpenRouter as the Saved Default, and disconnect OpenRouter;
 - connect, approve pairing for, select a home chat for, and disconnect
   Telegram through Hermes' supported configuration and pairing flows; and
 - install or revoke the exact product-scoped Google Workspace grant used by
@@ -57,11 +58,12 @@ an arbitrary command, path, YAML field, environment variable, or executable.
 
 ## Configuration ownership
 
-Every Finite-applied field records the pre-image and applied value. An offer
-may apply when the field is unset/`auto`, or when it still matches the last
-Finite-applied value. A user or Hermes edit that differs from that value is a
-conflict and is never overwritten automatically. Rollback is allowed only when
-the current value still matches the recorded Finite-applied value.
+Every field Finite applies through an offer records the pre-image and applied
+value. An offer may apply when the field is unset/`auto`, or when it still
+matches the last Finite-applied value. A user or Hermes edit that differs from
+that value is a conflict and is never overwritten automatically. Rollback is
+allowed only when the current value still matches the recorded Finite-applied
+value.
 
 There is no central desired Hermes configuration and no continuous
 reconciliation loop. Offers are explicit and agents adopt them at their own
@@ -76,7 +78,8 @@ backend settings remain user-owned. This is applied locally on startup of the
 adopted image; it does not add a central desired-config loop or authorize
 rewriting other model settings. Its rollback boundary is the previous runtime
 artifact plus a saved pre-change config, as specified in the runtime-image
-runbook. Explicit profile selection continues to use agentd's offer journal.
+runbook. The v1 inference apply command continues to use agentd's offer
+journal.
 
 The same reconciler also retires one Finite-installed auxiliary backend that
 has been deleted: the exact `auxiliary.vision` block written by the removed
@@ -84,6 +87,20 @@ AEON specialization writer. It matches the AEON host, model names, and known
 keys; any other key or value leaves the block user-owned. Before its first
 rewrite, it keeps the replaced config beside it once as the rollback copy. No
 other auxiliary backend is rewritten.
+
+The reconciler also owns the named `providers.finite-private` route and the
+Finite Private backup entry in `fallback_providers`, seeding the backup only
+when no fallback is configured; see the [Hermes
+integration](../../finitechat/integrations/hermes/README.md#finite-private-route-and-backup).
+
+The inference select and disconnect commands do not use the offer journal. They
+replace the whole Saved Default, which is user-owned after the first seed, only
+on an explicit owner action, and they move forward: validate, write, restart,
+verify. A single-slot, secret-free Inference Intent lets the daemon finish that
+work in the background and after its own restart. Their only rollback is the
+spawn-failure restore, and only while the file still holds exactly the bytes
+the daemon wrote. See the [runtime control
+contract](../../finitecomputer-v2/docs/runtime-control-contract.md#select-and-disconnect).
 
 ## Boundary with lifecycle infrastructure
 
@@ -123,6 +140,8 @@ not widen RMP.
   heals an acknowledgement lost after the result was sent.
 - Configuration writes are atomic and validated before Hermes is restarted.
 - Failed validation restores the exact previous bytes.
+- A disconnect's Hermes-side clears run in the launcher before Hermes
+  starts, not in the daemon, and can never stop Hermes from starting.
 - This daemon boundary does not itself provide a Recovery Snapshot.
 
 ## Rejected shapes

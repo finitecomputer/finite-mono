@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   activityLeaseIsFresh,
@@ -21,6 +23,8 @@ import {
   type AppState,
   type ChatMessage,
 } from "@finite/chat-ui";
+
+import { TranscriptNotice } from "@/components/hosted-web-chat";
 
 test("the shared projection selects one Room Topic Chat and scopes messages and activity", () => {
   const state = appState();
@@ -331,6 +335,104 @@ test("a currency-gate refusal renders the projection's toast for a text send", (
     sendError({ status: "sending paused", toast: null }),
     "Sending is paused until this device's chat state catches up with the server."
   );
+});
+
+const FALLBACK_NOTICE_TEXT =
+  "Finite Private answered this response because OpenRouter is out of credits or quota.";
+
+function noticeMetadata(notice: unknown, extra: Record<string, unknown> = {}) {
+  return JSON.stringify({ ...extra, finite_notice: notice });
+}
+
+function withMetadata(entry: ChatMessage, metadataJson: unknown): ChatMessage {
+  return { ...entry, metadata_json: metadataJson as string };
+}
+
+test("an agent message carrying a known finite_notice becomes a notice item", () => {
+  for (const type of ["inference_fallback", "inference_backup", "inference_fallback_failed"]) {
+    const notice = withMetadata(
+      message({ messageId: `notice-${type}`, seq: 2, displayContent: FALLBACK_NOTICE_TEXT }),
+      noticeMetadata(
+        { v: 1, type, attempted: "openrouter", served_by: "finite_private", reason: "billing" },
+        { notify: false }
+      )
+    );
+
+    assert.deepEqual(transcriptItems([notice], "user-account"), [
+      { type: "notice", id: `notice-${notice.message_id}`, message: notice },
+    ]);
+  }
+});
+
+test("metadata that is not a known finite_notice leaves the message unchanged", () => {
+  const unrecognized: unknown[] = [
+    undefined,
+    "not json",
+    "null",
+    JSON.stringify({ approve: { service: "brain" } }),
+    noticeMetadata({ type: "inference_fallback" }),
+    noticeMetadata({ v: 2, type: "inference_fallback" }),
+    noticeMetadata({ v: 1, type: 1 }),
+    noticeMetadata({ v: 1, type: "inference_restore" }),
+    JSON.stringify({ finite_notice: { v: 1 }, type: "inference_fallback" }),
+  ];
+  for (const metadataJson of unrecognized) {
+    const entry = withMetadata(message({ messageId: "agent", seq: 2 }), metadataJson);
+    assert.deepEqual(
+      transcriptItems([entry], "user-account"),
+      [{ type: "message", message: entry }],
+      `metadata_json ${JSON.stringify(metadataJson)}`
+    );
+  }
+});
+
+test("finite notices apply only to agent prose and settle preceding tool progress", () => {
+  const metadataJson = noticeMetadata({ v: 1, type: "inference_fallback" });
+  const status = withMetadata(message({ messageId: "status", seq: 2, kind: "status" }), metadataJson);
+  const tool = withMetadata(
+    message({ messageId: "tool", seq: 3, kind: "tool", status: "running" }),
+    metadataJson
+  );
+  const media = withMetadata(message({ messageId: "media", seq: 4, kind: "media" }), metadataJson);
+  const own = withMetadata(
+    message({ messageId: "own", seq: 5, isMine: true, senderAccountId: "user-account" }),
+    metadataJson
+  );
+  assert.deepEqual(transcriptItems([status, tool, media, own], "user-account"), [
+    { type: "tools", id: "tools-tool", messages: [{ ...tool, status: "complete" }] },
+    { type: "message", message: media },
+    { type: "message", message: own },
+  ]);
+
+  const notice = withMetadata(
+    message({ messageId: "notice", seq: 4, displayContent: FALLBACK_NOTICE_TEXT }),
+    metadataJson
+  );
+  assert.deepEqual(transcriptItems([tool, notice], "user-account"), [
+    { type: "tools", id: "tools-tool", messages: [{ ...tool, status: "complete" }] },
+    { type: "notice", id: "notice-notice", message: notice },
+  ]);
+});
+
+test("a notice renders as a muted centered note with an info icon and only its text", () => {
+  const hostile = withMetadata(
+    message({
+      messageId: "notice",
+      seq: 2,
+      displayContent: "Finite Private answered <b>this</b> [response](https://example.invalid/x).",
+    }),
+    noticeMetadata({
+      v: 1,
+      type: "inference_fallback",
+      attempted: "<img src=x onerror=alert(1)>",
+      reason: "javascript:alert(1)",
+    })
+  );
+  const html = renderToStaticMarkup(createElement(TranscriptNotice, { message: hostile }));
+
+  assert.match(html, /role="note"/u);
+  assert.match(html, /Finite Private answered &lt;b&gt;this&lt;\/b&gt;/u);
+  assert.doesNotMatch(html, /<a\b|<b>|<img\b|href=|javascript:/u);
 });
 
 function appState(): AppState {

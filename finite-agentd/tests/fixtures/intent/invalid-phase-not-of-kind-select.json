@@ -1,0 +1,17 @@
+{
+  "description": "cleanup belongs to disconnect, not to select.",
+  "valid": false,
+  "record": {
+    "v": 1,
+    "id": "op_0123456789abcdef0123456789abcdef",
+    "kind": "select",
+    "route": "openrouter",
+    "model": null,
+    "phase": "cleanup",
+    "state": "running",
+    "error_code": null,
+    "attempts": 0,
+    "created_at_ms": 1790000000000,
+    "updated_at_ms": 1790000000500
+  }
+}

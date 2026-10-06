@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { createHash } from "node:crypto";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { mkdir, rm } from "node:fs/promises";
@@ -8,6 +9,13 @@ import { test } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import {
+  createInferenceFake,
+  type FakeAgentKind,
+  type FakeInferenceRoute,
+  type InferenceFake,
+  type OperationErrorCode,
+} from "../scripts/web-design-fixture";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
 
 const CORE_TOKEN = "browser-core-token";
@@ -15,6 +23,8 @@ const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
 const SITES_VIEWER_SESSION_TOKEN = "browser-sites-viewer-session-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
 const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
+const INFERENCE_PHASE_MS = 1_000;
+const PASTED_OPENROUTER_KEY = "sk-or-v1-fake-browser-proof-7f3a91c2";
 const PNG_BYTES = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
   "base64"
@@ -214,15 +224,12 @@ type HostedDeviceState = {
     string,
     NonNullable<FakeHostedChatState["hosted_agent_binding"]>
   >;
-  connections: AgentConnectionsStatus;
+  connections: OtherConnectionsStatus;
+  // The design fixture's fake agentd answers inference commands.
+  inference: InferenceFake;
 };
 
-type AgentConnectionsStatus = {
-  inference: {
-    profile: "finite_private" | "openrouter";
-    provider: string;
-    model: string;
-  };
+type OtherConnectionsStatus = {
   telegram: {
     connected: boolean;
     home_channel: string | null;
@@ -232,6 +239,13 @@ type AgentConnectionsStatus = {
   google: {
     connected: boolean;
     email: string | null;
+  };
+};
+
+type InferenceStatusBody = {
+  inference: {
+    routes?: { openrouter?: { key_hash: string | null } };
+    operation?: { id: string; kind: string; state: string; phase: string } | null;
   };
 };
 
@@ -1126,7 +1140,7 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await page.getByRole("link", { name: "Finite.Computer" }).count(), 1);
       await connectionsLink.first().click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/connections$/u);
-      await expectVisibleText(page, "Finite Private · openai/gpt-oss-120b");
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
       await expectVisibleText(page, "Google Workspace");
       const ownerClaimIndex = hostedDevice.state.runtimeCommands.findIndex(
         (command) => command.command === "agent.owner.claim"
@@ -1139,11 +1153,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         connectionsStatusIndex > ownerClaimIndex,
         "Connections status was requested before the owner claim succeeded"
       );
-      await page.getByRole("button", { name: "Use OpenRouter" }).click();
-      await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
-      await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
-      await page.getByRole("button", { name: "Save" }).click();
-      await expectVisibleText(page, "OpenRouter · openai/gpt-5-mini");
+      await page.getByTestId("inference-openrouter-open").click();
+      await page.getByTestId("inference-openrouter-key-input").fill("test-only-invalid-key");
+      await page.getByTestId("inference-openrouter-key-model-input").fill("openai/gpt-5-mini");
+      await page.getByTestId("inference-openrouter-save").click();
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
       assert(
         hostedDevice.state.runtimeCommands.some(
           (command) => command.command === "agent.inference.apply"
@@ -2114,6 +2128,269 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   }
 });
 
+// Connections inference flows against the design fixture's fake agentd. A
+// separate test, so these flows have their own time budget and a fresh dashboard.
+test("Connections inference flows", { timeout: 300_000 }, async () => {
+  await resetDashboardDevDirs();
+  const hostedDevice = await startFakeHostedDevice();
+  const core = await startFakeCore();
+  const sites = await startFakeSites();
+  const dashboardPort = await freePort();
+  const dashboard = startDashboard(dashboardPort, core.url, hostedDevice.url, sites.apiUrl);
+  const dashboardOutput = collectOutput(dashboard);
+  let browser: Browser | null = null;
+
+  try {
+    await waitForDashboard(dashboardPort, dashboardOutput);
+    browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
+    core.reset({
+      projects: [
+        visibleProject("project_connections", "Connections Bot", hostedDevice.runtimeStatusUrl, "connections-bot"),
+      ],
+    });
+    // An agent whose chat is already set up, so Connections opens its binding directly.
+    hostedDevice.state.agentBindings.set("project_connections", {
+      version: 1,
+      project_id: "project_connections",
+      human_account_id: hostedDevice.state.app.identity.account_id,
+      agent_account_id: "agent-account-browser",
+      agent_npub: AGENT_NPUB,
+      canonical_room_id: "room_browser_agent",
+      associated_room_ids: [],
+    });
+
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      const connectionsUrl =
+        `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_connections-bot/connections`;
+      const testId = (id: string) => page.getByTestId(id);
+      const commandCount = (name: string) =>
+        hostedDevice.state.runtimeCommands.filter((command) => command.command === name).length;
+      const statusReads = () => commandCount("agent.connections.status");
+      const expectPolling = async () => {
+        const before = statusReads();
+        await waitFor(() => statusReads() >= before + 2, 20_000, () =>
+          "the page did not poll status while the operation was running");
+      };
+      const expectNoPolling = async () => {
+        const before = statusReads();
+        await page.waitForTimeout(7_000);
+        assert.equal(statusReads(), before, "the page polled status with no operation running");
+      };
+      const operationId = () => hostedDevice.inferenceStatus().inference.operation?.id;
+      const lastCommand = (name: string) => {
+        const found = hostedDevice.state.runtimeCommands.filter((command) => command.command === name).at(-1);
+        return found ? { command: found.command, schema: found.schema, body: found.body } : null;
+      };
+      const pasteKey = async () => {
+        await testId("inference-openrouter-key-input").fill(PASTED_OPENROUTER_KEY);
+        await testId("inference-openrouter-key-model-input").fill("openai/gpt-5-mini");
+        await testId("inference-openrouter-save").click();
+        await waitFor(async () =>
+          (await testId("inference-openrouter-key-input").evaluateAll((inputs) =>
+            inputs.map((input) => (input as HTMLInputElement).value)
+          )).every((value) => value === ""), 5_000, () => "the key input kept the pasted key");
+      };
+
+      // a PR1 agent's stored facts.
+      hostedDevice.setInferenceAgent("pr1");
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
+      await expectTestIdText(page, "inference-backup-line",
+        "Finite Private backup is configured for conversations that use another model.");
+      await expectTestIdText(page, "inference-finite-private-state", "Configured");
+      await expectTestIdText(page, "inference-openrouter-state", "Not connected");
+      // no ChatGPT card while ChatGPT isn't the saved route and the agent lacks codex.login.v1.
+      assert.equal(await testId("inference-codex").count(), 0);
+      assert.equal(await testId("inference-finite-private-use").count(), 0);
+      assert.equal(await testId("inference-operation-line").count(), 0);
+      // A PR1 agent has no connect command, so a key is pasted with the one-call v1 Save.
+      assert.equal(await testId("inference-openrouter-save-and-use").count(), 0);
+      // that Save also makes OpenRouter the default, and the form says so.
+      await expectTestIdText(page, "inference-openrouter-save", "Save and use OpenRouter");
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
+      await expectNoPolling();
+
+      // The pasted key reaches the agent and stays out of the page, the URL, and browser storage.
+      await pasteKey();
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      await expectTestIdText(page, "inference-openrouter-state", "Key saved");
+      await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
+      const noKeyPaste = lastCommand("agent.inference.apply");
+      assert.ok(noKeyPaste, "the pasted key reached the agent");
+      const keyHash = createHash("sha256").update(PASTED_OPENROUTER_KEY).digest("hex");
+      assert.equal(hostedDevice.inferenceStatus().inference.routes?.openrouter?.key_hash, keyHash);
+
+      // Finite Private and OpenRouter through select; the operation line runs while the page polls.
+      await testId("inference-finite-private-use").click();
+      await expectTestIdText(page, "inference-operation-line", "Switching to Finite Private…");
+      assert.equal(await testId("inference-openrouter-use").isEnabled(), false);
+      await expectPolling();
+      await expectTestIdText(page, "inference-operation-line", "Switching to Finite Private…");
+      hostedDevice.advanceInferencePhases(4);
+      await expectTestIdText(page, "inference-operation-line", "Done.");
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
+      await expectNoPolling();
+
+      await testId("inference-openrouter-model-input").fill("openai/gpt-5-mini");
+      await testId("inference-openrouter-use").click();
+      await expectTestIdText(page, "inference-operation-line", "Switching to OpenRouter · openai/gpt-5-mini…");
+      await expectPolling();
+      hostedDevice.advanceInferencePhases(4);
+      await expectTestIdText(page, "inference-operation-line", "Done.");
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      await expectTestIdText(page, "inference-backup-line",
+        "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
+      assert.equal(commandCount("agent.inference.select"), 2);
+
+      // disconnect through the dialog; it fails, and Try again resumes the same operation.
+      const dialog = testId("inference-openrouter-disconnect-dialog");
+      await testId("inference-openrouter-disconnect").click();
+      await dialog.getByRole("heading", { name: "Remove OpenRouter from this agent?" }).waitFor();
+      await dialog.getByText(
+        "Finite deletes the key saved in this agent and the agent's other copies, and restarts the agent's model service. " +
+          "Programs the agent started earlier may keep a copy until they stop. " +
+          "The key keeps working in your OpenRouter account until you revoke it there. " +
+          "This agent will switch to Finite Private. " +
+          "Conversations that picked OpenRouter with /model will use the agent default.",
+        { exact: true }
+      ).waitFor();
+      await testId("inference-openrouter-disconnect-cancel").click();
+      await dialog.waitFor({ state: "hidden" });
+      assert.equal(commandCount("agent.inference.disconnect"), 0, "cancelling the dialog must not disconnect");
+
+      hostedDevice.failNextInferenceOperation("verify_failed");
+      await testId("inference-openrouter-disconnect").click();
+      await testId("inference-openrouter-disconnect-confirm").click();
+      const disconnecting =
+        "Disconnecting OpenRouter… This connection may still be in use until this finishes. " +
+        "The agent's Hermes web dashboard is paused until this finishes.";
+      await expectTestIdText(page, "inference-operation-line", disconnecting);
+      const disconnectId = operationId();
+      await expectPolling();
+      hostedDevice.advanceInferencePhases(6);
+      await expectTestIdText(page, "inference-operation-line",
+        "Disconnecting OpenRouter didn't finish. It may still be in use. " +
+          "The agent's Hermes web dashboard is paused until this finishes.");
+      await testId("inference-operation-retry").waitFor();
+      await expectNoPolling();
+      await testId("inference-operation-retry").click();
+      await expectTestIdText(page, "inference-operation-line", disconnecting);
+      assert.equal(operationId(), disconnectId, "Try again must resume the same operation");
+      assert.equal(commandCount("agent.inference.disconnect"), 2);
+      hostedDevice.advanceInferencePhases(1);
+      await expectTestIdText(page, "inference-operation-line", "Done.");
+      await expectTestIdText(page, "inference-openrouter-removed",
+        "OpenRouter was removed from this agent. Revoke the key in OpenRouter");
+      assert.equal(
+        await testId("inference-openrouter-revoke-link").getAttribute("href"),
+        `https://openrouter.ai/keys/${keyHash}`
+      );
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
+      await expectTestIdText(page, "inference-openrouter-state", "Not connected");
+
+      // A synchronous reconnect leaves the last completed operation in status.
+      // Its old removal notice must not contradict the newly saved key.
+      await pasteKey();
+      await expectTestIdText(page, "inference-openrouter-state", "Key saved");
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      assert.equal(operationId(), disconnectId, "v1 reconnect does not create another operation");
+      await testId("inference-openrouter-removed").waitFor({ state: "hidden" });
+
+      // a PR1 agent that couldn't confirm its facts says so, asks for no repair, and keeps its controls.
+      hostedDevice.setInferenceAgent("pr1", "openrouter", { unconfirmed: true });
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · anthropic/claude-sonnet-4.6.");
+      await expectTestIdText(page, "inference-backup-line", "The agent couldn't confirm the Finite Private backup right now.");
+      await expectTestIdText(page, "inference-finite-private-state", "Not confirmed");
+      await expectTestIdText(page, "inference-finite-private-note",
+        "The agent couldn't confirm its Finite Private setup right now.");
+      assert.equal(await testId("inference-finite-private-state").evaluate((node) => node.classList.contains("is-attention")), false);
+      assert.equal(await testId("inference-finite-private-use").isEnabled(), true);
+      await expectTestIdText(page, "inference-openrouter-state", "Key saved");
+      assert.equal(await testId("inference-openrouter-use").isEnabled(), true);
+      // Once the agent can check again, the page shows the facts it reports.
+      hostedDevice.setInferenceAgent("pr1", "openrouter");
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-finite-private-state", "Configured");
+      await expectTestIdText(page, "inference-backup-line",
+        "Finite Private backup is configured. If OpenRouter returns an error, Finite Private answers.");
+      assert.equal(await testId("inference-finite-private-note").count(), 0);
+
+      // with no saved key and nothing confirmed, OpenRouter offers the key form and no action of a saved key.
+      hostedDevice.setInferenceAgent("pr1", "finite_private", { unconfirmed: true });
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-openrouter-state", "Not confirmed");
+      await expectTestIdText(page, "inference-openrouter-note", "The agent couldn't confirm its OpenRouter setup right now.");
+      assert.equal(await testId("inference-openrouter-state").evaluate((node) => node.classList.contains("is-attention")), false);
+      for (const id of ["inference-openrouter-use", "inference-openrouter-replace-key", "inference-openrouter-disconnect"]) {
+        assert.equal(await testId(id).count(), 0, `${id} needs a saved key`);
+      }
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
+      const appliesBeforeUnknown = commandCount("agent.inference.apply");
+      await pasteKey();
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      assert.equal(commandCount("agent.inference.apply"), appliesBeforeUnknown + 1);
+      assert.deepStrictEqual(lastCommand("agent.inference.apply"), noKeyPaste, "the unknown state sends the no_key command");
+      await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
+
+      // an agent on today's agentd keeps the v1 path, shows no capability-gated control, and never polls.
+      hostedDevice.setInferenceAgent("legacy");
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
+      await expectTestIdText(page, "inference-backup-line", "Backup details aren't available on this agent yet.");
+      await expectTestIdText(page, "inference-finite-private-state", "Agent default");
+      await expectTestIdText(page, "inference-openrouter-state", "Not the agent default");
+      assert.equal(await testId("inference-codex").count(), 0);
+      const gatedControls = [
+        "inference-openrouter-use",
+        "inference-openrouter-model-input",
+        "inference-openrouter-replace-key",
+        "inference-openrouter-disconnect",
+        "inference-openrouter-save-and-use",
+        "inference-openrouter-save-only",
+        "inference-operation-line",
+        "inference-operation-retry",
+      ];
+      const assertNoGatedControls = async () => {
+        for (const id of gatedControls) {
+          assert.equal(await testId(id).count(), 0, `${id} needs a capability this agent lacks`);
+        }
+      };
+      await assertNoGatedControls();
+      const selectsBefore = commandCount("agent.inference.select");
+      const appliesBefore = commandCount("agent.inference.apply");
+      await testId("inference-openrouter-open").click();
+      await expectTestIdText(page, "inference-openrouter-save", "Save and use OpenRouter");
+      await expectTestIdText(page, "inference-openrouter-key-default-line", "This also makes OpenRouter this agent's default.");
+      await pasteKey();
+      await expectTestIdText(page, "inference-summary", "New conversations use OpenRouter · openai/gpt-5-mini.");
+      await expectTestIdText(page, "inference-openrouter-state", "Agent default");
+      await assertSecretAbsent(page, PASTED_OPENROUTER_KEY);
+      await testId("inference-finite-private-use").click();
+      await expectTestIdText(page, "inference-summary", "New conversations use Finite Private · glm-5-3-flash.");
+      assert.equal(commandCount("agent.inference.apply"), appliesBefore + 2);
+      assert.equal(commandCount("agent.inference.select"), selectsBefore);
+      await assertNoGatedControls();
+      await expectNoPolling();
+
+      hostedDevice.setInferenceAgent("legacy", "openai_codex");
+      await page.goto(connectionsUrl);
+      await expectTestIdText(page, "inference-summary", "New conversations use ChatGPT · gpt-5.5.");
+      // the saved ChatGPT route keeps its card, with no update request.
+      await expectTestIdText(page, "inference-codex-state", "Agent default");
+      await expectTestIdText(page, "inference-codex-line", "ChatGPT is this agent's default (set in chat).");
+      await testId("inference-finite-private-use").waitFor();
+    });
+  } finally {
+    await browser?.close().catch(() => {});
+    await stopChildProcess(dashboard);
+    core.server.close();
+    hostedDevice.close();
+    sites.server.close();
+    await resetDashboardDevDirs();
+  }
+});
+
 async function resetDashboardDevDirs() {
   await Promise.all([
     rm(".next-browser-test", { recursive: true, force: true }),
@@ -2283,6 +2560,10 @@ async function startFakeSites() {
 
 async function startFakeHostedDevice() {
   const app = initialHostedChatState();
+  // Operations advance only when a flow moves this clock, so every in-between state can be asserted.
+  let inferenceNowMs = Date.now();
+  const inferenceFake = (agent: FakeAgentKind = "legacy", saved?: FakeInferenceRoute, unconfirmed = false) =>
+    createInferenceFake({ agent, saved, unconfirmed, phaseMs: INFERENCE_PHASE_MS, now: () => inferenceNowMs });
   const state: HostedDeviceState = {
     unavailable: false,
     updatesUnavailable: false,
@@ -2305,12 +2586,8 @@ async function startFakeHostedDevice() {
     ],
     bindingAuthorizationFailuresRemaining: 0,
     agentBindings: new Map(),
+    inference: inferenceFake(),
     connections: {
-      inference: {
-        profile: "finite_private",
-        provider: "finite_private",
-        model: "openai/gpt-oss-120b",
-      },
       telegram: {
         connected: false,
         home_channel: null,
@@ -2390,6 +2667,23 @@ async function startFakeHostedDevice() {
     },
     failNextBindingAuthorization() {
       state.bindingAuthorizationFailuresRemaining += 1;
+    },
+    setInferenceAgent(agent: FakeAgentKind, saved?: FakeInferenceRoute, options: { unconfirmed?: boolean } = {}) {
+      state.inference = inferenceFake(agent, saved, options.unconfirmed);
+    },
+    advanceInferencePhases(phases: number) {
+      inferenceNowMs += phases * INFERENCE_PHASE_MS;
+    },
+    failNextInferenceOperation(code?: OperationErrorCode) {
+      state.inference.failNextOperation(code);
+    },
+    /** Status as the fake agentd reports it now; reading it changes nothing. */
+    inferenceStatus() {
+      return state.inference.runtimeCommand({
+        command: "agent.connections.status",
+        schema: "finite.agent.empty.request.v1",
+        body: {},
+      }).body as InferenceStatusBody;
     },
     close() {
       for (const stream of streams.keys()) {
@@ -2635,25 +2929,7 @@ function applyRuntimeCommand(
   request: Record<string, unknown>
 ) {
   const command = String(request.command ?? "");
-  const body = request.body && typeof request.body === "object"
-    ? request.body as Record<string, unknown>
-    : {};
-  if (command === "agent.inference.apply") {
-    const profile = String(body.profile ?? "");
-    if (profile === "finite_private") {
-      state.connections.inference = {
-        profile,
-        provider: "finite_private",
-        model: "openai/gpt-oss-120b",
-      };
-    } else if (profile === "openrouter") {
-      state.connections.inference = {
-        profile,
-        provider: "openrouter",
-        model: String(body.model ?? "anthropic/claude-sonnet-4.6"),
-      };
-    }
-  } else if (command === "agent.telegram.connect") {
+  if (command === "agent.telegram.connect") {
     state.connections.telegram.connected = true;
   } else if (command === "agent.telegram.disconnect") {
     state.connections.telegram.connected = false;
@@ -2662,12 +2938,13 @@ function applyRuntimeCommand(
     state.connections.google.connected = false;
     state.connections.google.email = null;
   }
-  return {
-    request_id: `browser-command-${state.runtimeCommands.length}`,
-    status: "succeeded",
-    body: command === "agent.connections.status" ? state.connections : {},
-    error: null,
-  };
+  // The fake agentd answers every command: inference ones statefully, the others with `{}` as before.
+  const reply = state.inference.runtimeCommand(request);
+  const body =
+    command === "agent.connections.status" && reply.status === "succeeded"
+      ? { ...(reply.body as object), telegram: state.connections.telegram, google: state.connections.google }
+      : reply.body;
+  return { ...reply, request_id: `browser-command-${state.runtimeCommands.length}`, body };
 }
 
 function initialHostedChatState(): FakeHostedChatState {
@@ -3419,6 +3696,42 @@ async function expectVisibleText(page: Page, text: string) {
     .getByText(text, { exact: true })
     .and(page.locator(":not(#__next-route-announcer__)"))
     .waitFor({ state: "visible", timeout: 15_000 });
+}
+
+/** The secret is nowhere the page keeps or shows it: text, markup, inputs, URL, or browser storage. */
+async function assertSecretAbsent(page: Page, secret: string) {
+  // No named functions inside: tsx wraps them in a `__name` helper that doesn't exist in the page.
+  const found = await page.evaluate((value) => {
+    const [localStorage, sessionStorage] = [window.localStorage, window.sessionStorage].map((storage) =>
+      Array.from({ length: storage.length }, (_, index) => storage.key(index) ?? "").some(
+        (key) => key.includes(value) || (storage.getItem(key) ?? "").includes(value)
+      )
+    );
+    return {
+      text: document.body.innerText.includes(value),
+      markup: document.documentElement.outerHTML.includes(value),
+      inputs: Array.from(document.querySelectorAll("input, textarea")).some((element) =>
+        (element as HTMLInputElement).value.includes(value)
+      ),
+      url: window.location.href.includes(value),
+      localStorage,
+      sessionStorage,
+    };
+  }, secret);
+  assert.deepEqual(found, {
+    text: false, markup: false, inputs: false, url: false, localStorage: false, sessionStorage: false,
+  });
+}
+
+/** Waits until the element's text, with whitespace collapsed, is exactly `text`. */
+async function expectTestIdText(page: Page, testId: string, text: string, timeoutMs = 15_000) {
+  const read = async () =>
+    ((await page.getByTestId(testId).first().textContent({ timeout: 1_000 }).catch(() => null)) ?? "")
+      .replace(/\s+/gu, " ")
+      .trim();
+  await waitFor(async () => (await read()) === text, timeoutMs, async () =>
+    `${testId} should read ${JSON.stringify(text)} but reads ${JSON.stringify(await read())}\n${await pageText(page)}`
+  );
 }
 
 async function onboardingScreenshots(page: Page, stage: string) {

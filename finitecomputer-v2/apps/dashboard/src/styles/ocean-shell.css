@@ -1105,6 +1105,10 @@ button.ocean-pill-button {
   color: var(--text-secondary);
 }
 
+.ocean-connection-card__status.is-attention {
+  color: var(--warning-text);
+}
+
 .ocean-connection-card__account {
   max-width: min(28rem, 72vw);
   margin-top: 0.35rem;
@@ -1199,6 +1203,66 @@ button.ocean-pill-button {
   gap: 0.75rem;
   border-top: 1px solid var(--border);
   padding-top: 1rem;
+}
+
+.ocean-inference-summary {
+  display: grid;
+  gap: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-card);
+  padding: 1.25rem;
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}
+
+.ocean-inference-summary__hint,
+.ocean-inference-summary__line {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.ocean-inference-summary__hint code {
+  font-size: 0.85em;
+}
+
+/* A model ID or command wraps as one piece; it breaks inside only when it alone is wider than the card. */
+.ocean-inference-id,
+.ocean-inference-summary__hint code {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.ocean-inference-summary__operation {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  font-size: 0.9rem;
+}
+
+.ocean-inference-summary__operation:empty {
+  display: none;
+}
+
+.ocean-inference-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  font-size: 0.9rem;
+}
+
+.ocean-inference-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  color: var(--text-primary);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 4px;
 }
 
 .ocean-utility-card {

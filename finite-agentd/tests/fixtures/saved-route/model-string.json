@@ -1,0 +1,6 @@
+{
+  "description": "model is a string, not a mapping",
+  "fp_base_url": null,
+  "model": "glm-5-3-flash",
+  "expected": "other"
+}

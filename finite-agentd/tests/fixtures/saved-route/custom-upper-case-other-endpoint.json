@@ -1,0 +1,10 @@
+{
+  "description": "A user's own custom endpoint with provider CUSTOM",
+  "fp_base_url": "https://fp.example.invalid/v1",
+  "model": {
+    "default": "local-model",
+    "provider": "CUSTOM",
+    "base_url": "https://llm.example.invalid/v1"
+  },
+  "expected": "other"
+}

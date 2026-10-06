@@ -436,6 +436,22 @@ jobs:
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_stop_generation.py"
           "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_stop_generation.py'
 
+      - name: Packaged Hermes session route safety contract
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: |
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/infra/images/test_hermes_session_route_safety.py"
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_session_route_safety.py"
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_session_route_safety.py'
+
+      - name: Packaged Finite inference helper contract
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+        run: |
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/infra/images/test_finite_inference_helper.py"
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_finite_inference_helper.py"
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_finite_inference_helper.py'
+
       - name: Packaged Brain and Sites inventory contracts
         working-directory: ${{ github.workspace }}
         env:

@@ -1,0 +1,14 @@
+{
+  "description": "Bare Finite Private block on the product URL",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "custom",
+    "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1",
+    "api_key": "${FINITE_PRIVATE_API_KEY}",
+    "api_mode": "chat_completions",
+    "context_length": 393216,
+    "supports_vision": true
+  },
+  "expected": "finite_private"
+}

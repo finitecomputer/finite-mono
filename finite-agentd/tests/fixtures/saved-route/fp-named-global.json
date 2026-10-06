@@ -1,0 +1,9 @@
+{
+  "description": "Shape left by /model --provider finite-private --global",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "finite-private"
+  },
+  "expected": "finite_private"
+}

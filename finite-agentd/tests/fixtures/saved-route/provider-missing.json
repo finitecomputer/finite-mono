@@ -1,0 +1,8 @@
+{
+  "description": "Mapping with no provider",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash"
+  },
+  "expected": "other"
+}
