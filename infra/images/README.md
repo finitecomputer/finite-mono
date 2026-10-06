@@ -53,6 +53,22 @@ Notes:
   Runtime release and rollback use the usual digest-pinned image procedure;
   there is no data migration or manual lock cleanup for this fix.
 
+- The goal-judge patch keeps a `/goal` control sent while the judge runs in
+  force. The gateway judges a goal turn off the event loop, and the Finite
+  Chat adapter answers `/goal pause`, `clear`, `wait` and `gate` meanwhile;
+  the judge then wrote back the goal it had loaded, reviving a paused or
+  cleared goal and queueing another turn. The judge's writes are now held and
+  committed once, only while the stored goal is still the one judged (under
+  an in-process lock every goal write takes); otherwise the verdict is
+  dropped with its notice and continuation. A control that lands after the
+  commit drops the continuation and the stale notice. A `wait` or `gate`
+  change mid-judge leaves the goal active and idle, as those controls do when
+  sent between turns; the next message continues it. The stored goal JSON is
+  unchanged. `PinnedHermesGoalJudgeTests` in
+  `finitechat/tests/hermes/test_pinned_hermes_stop_settlement.py` runs the
+  real runner's judge path against the packaged Python. Remove the patch when
+  the pinned upstream gateway passes them.
+
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.
   Their fixed native routes reuse Hermes authentication and existing CLI signer
