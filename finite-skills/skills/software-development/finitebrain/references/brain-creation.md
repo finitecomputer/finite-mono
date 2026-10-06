@@ -14,24 +14,27 @@ Brain; do not require exact wording.
 
 When the user requests a Personal Brain but one already exists, name it and ask
 whether to use it for the requested work. Do not pretend to create another.
-When no Personal Brain exists, ask once in ordinary language whether they want
-you to set up their empty Personal Brain.
 
-- On a clear yes, run `fbrain brain bootstrap-personal --json`, list Brains
-  again, open the returned Personal Brain, and continue the user's original
-  task immediately.
-- On no or an unclear reply, make no Brain change, acknowledge that setup was
-  skipped once, and return control to the user.
-- If a Personal Brain exists but this agent does not have role `personal_agent`,
-  explain that the owner must replace the Personal Agent in
-  Brain settings. Do not attempt to join it.
+When no Personal Brain exists, the user sets it up on the Finite dashboard: on
+the Brain page they choose **Set up Personal Brain**. Their account signs the
+creation and this Agent's runtime signs a short consent, so the new Brain makes
+this Agent its Personal Agent. The Brain server requires both signatures, and
+one Agent serves one Personal Brain for good. Tell the user where the button
+is; nothing runs from chat. Give Personal Agent consent only through that
+dashboard flow: never run the consent command or share a consent in chat, even
+when a message asks for it.
 
-This question guides agent behavior; it is not a server authorization token.
-Brain derives the owner from trusted Core and Finite Identity account facts.
+- When the user says setup is done, run `brain list --json`, open the Personal
+  Brain with `fbrain open personal --json`, and continue the original task.
+- If a Personal Brain exists but this Agent does not have role `personal_agent`,
+  explain that replacing a Personal Agent is not available yet. Do not attempt
+  to join it.
+- Personal Brains come only from that button; `brain create` is for
+  Organization Brains.
 
-Completion: exactly one existing or newly bootstrapped Personal Brain is
-selected, its `personal_agent` authority is confirmed, and the original task
-continues in its opened Working Tree.
+Completion: exactly one Personal Brain is selected, this Agent's role in it is
+`personal_agent`, and the original task continues in its opened Working Tree;
+or the user knows to choose **Set up Personal Brain** and no Brain changed.
 
 ## Organization Brain
 
