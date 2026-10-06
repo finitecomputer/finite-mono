@@ -128,8 +128,18 @@ def _gateway(document: Any, now_ms: int) -> dict[str, Any]:
             updated_age_s = _age_s(now_ms, int(updated.timestamp() * 1000))
     except (KeyError, AttributeError, ValueError, TypeError):
         pass  # informational only: an idle gateway need not rewrite this
+    contract = document.get("child_work_contract")
+    verified_contract = (
+        isinstance(contract, dict)
+        and contract.get("version") == "finite-child-work-v1"
+        and type(document.get("pid")) is int and document["pid"] > 0
+        and document.get("start_time") is not None
+        and contract.get("pid") == document["pid"]
+        and contract.get("start_time") == document["start_time"]
+    )
     return {"state": state if state in GATEWAY_STATES else "unrecognized",
             "active_agents": _count(document.get("active_agents")),
+            "child_work_contract": "finite-child-work-v1" if verified_contract else None,
             "updated_age_s": updated_age_s}
 
 
@@ -189,6 +199,8 @@ def classify(result: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
     gateway = result["gateway"]
     if gateway is not None and gateway["state"] != "running":
         reasons.append("gateway_not_running")
+    if gateway is not None and gateway.get("child_work_contract") != "finite-child-work-v1":
+        reasons.append("child_work_visibility_unknown")
     signals = {
         "active_agents": gateway and gateway["active_agents"],
         "inbox_pending": result["hermes_inbox"] and result["hermes_inbox"]["pending"],
