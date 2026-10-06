@@ -69,6 +69,16 @@ wrapper can still synthesize the passing report artifact when the richer
 in-test report hook is absent; that report is not independent live-runtime
 evidence.
 
+On SIGTERM or ctrl-c, agentd stops its children before it exits, in a fixed
+order. The gateways (Hermes, SimpleX) go first while the Finite Chat sidecar
+is still serving, because the Hermes adapter releases its in-flight and queued
+inbox leases through the sidecar. The sidecar and health server stop after
+that. Each phase gets SIGTERM, a short grace, then SIGKILL. The gateways get
+8 seconds and the services get 2, so the whole stop fits inside a 15-second
+container stop window. agentd has to wait for the reap: when it exits, the
+runtime is dropped and any child still draining gets SIGKILLed. A lease that
+was never released stays stranded until the sidecar's 45-minute lease expiry.
+
 ## Optional hosted Hermes process
 
 `finite-agentd hosted-hermes` validates trusted launch settings and replaces

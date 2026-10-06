@@ -75,7 +75,7 @@ impl HostedHermesHandle {
                                 }, restart_count);
                             }
                             _ = stop_rx.recv() => {
-                                terminate_child(&mut child).await;
+                                terminate_child(&mut child, crate::supervisor::TERMINATE_GRACE).await;
                                 break;
                             }
                         }

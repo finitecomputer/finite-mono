@@ -264,14 +264,15 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
             result
         }
         signal = tokio::signal::ctrl_c() => {
-            supervisor.shutdown().await;
             signal.map_err(AgentdError::from)
         }
         _ = sigterm.recv() => {
-            supervisor.shutdown().await;
             Ok(())
         }
     };
+    // Every exit drains here: returning drops the runtime, which SIGKILLs any
+    // child still running, so the stop must be awaited before we return.
+    supervisor.shutdown().await;
     if let Some(hosted) = &hosted_hermes {
         hosted.shutdown().await;
     }
