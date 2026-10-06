@@ -158,6 +158,8 @@ class _FiniteTurn:
     # and whether settlement has closed it to a rewind still on its way.
     retry_rewind: _RetryRewind | None = None
     retry_closed: bool = False
+    # The /bg or /btw dispatch this turn's event made, if any.
+    launch: _Launch | None = None
 
     def answered_by_gateway(self) -> bool:
         """Hermes carried out this turn's command or prompt reply itself.
@@ -169,12 +171,13 @@ class _FiniteTurn:
         under way, so a stop then leaves it unrun at worst, for the user to
         resend. A command that can start model work counts only once the
         handler has returned: /goal then saved the goal and queued its kickoff
-        as separate work, and /blueprint scheduled its job. /retry never
-        counts: it re-sends the last message as model work.
+        as separate work, /blueprint scheduled its job, and /bg or /btw
+        started its child. /retry never counts: it re-sends the last message
+        as model work.
         """
         if self.ordinary or self.command == "retry" or (self.event.text or "") != self.text:
             return False
-        if self.command in _HERMES_TURN_COMMANDS:
+        if self.command in _HERMES_TURN_COMMANDS or self.command in _CHILD_COMMANDS:
             return self.answered
         return self.dispatched
 
@@ -182,6 +185,97 @@ class _FiniteTurn:
 _FINITE_TURN: contextvars.ContextVar[_FiniteTurn | None] = contextvars.ContextVar(
     "finitechat_turn", default=None
 )
+
+# Pinned commands whose handler replies once it has started a child task:
+# /bg runs a prompt in a fresh agent, /btw answers a side question. The child
+# sends its result to the chat itself.
+_CHILD_COMMANDS = frozenset({"bg", "btw"})
+# The coroutines those handlers start, by qualified name. Any other task that
+# a handler happens to create is not a child.
+_LAUNCH_CHILD_QUALNAMES = (
+    "._run_background_task",
+    "._handle_btw_command.<locals>._run_side_question",
+)
+# A child already sending its result when the adapter disconnects gets this
+# long to finish, so a stop does not cut off a reply it has begun to send.
+LAUNCH_DELIVERY_GRACE_SECS = 1.5
+# How long disconnect waits for the children it cancels to unwind.
+LAUNCH_CANCEL_WAIT_SECS = 0.5
+
+
+@dataclass(eq=False)
+class _Launch:
+    """A /bg or /btw dispatch, and the work it started that outlives its reply.
+
+    The pinned handlers reply as soon as they start that work, and the work
+    delivers its own result. Until it has, the command's inbox entry stays
+    leased: a stop releases it so the command runs again after the restart,
+    a lease-expiry redelivery joins the work still running instead of
+    starting it twice, and the rollout's idle gate reads the leased entry as
+    busy.
+    """
+
+    entry: tuple[str, Any, str]
+    key: str
+    command: str
+    # The child tasks the handler started, found once it returned.
+    children: list[asyncio.Task[Any]] = field(default_factory=list)
+    # Result sends in flight, whether one reached the chat, and the failure
+    # of the last that did not: "retryable", "final" or None.
+    sending: int = 0
+    delivered: bool = False
+    send_failure: str | None = None
+    # Disconnect is cancelling the children; their settlement is its call.
+    disconnecting: bool = False
+    # The command's own turn (or inline dispatch) reached the point where it
+    # would have settled the entry. Until then the launch stays registered,
+    # so the command never settles an entry the launch already has.
+    command_done: bool = False
+    # How the launch settled the entry: released (True), acked (False), or
+    # not yet (None).
+    released: bool | None = None
+
+    @property
+    def settled(self) -> bool:
+        return self.released is not None
+
+    def owns_entry(self) -> bool:
+        return bool(self.children)
+
+    def unfinished(self) -> bool:
+        return any(not child.done() for child in self.children)
+
+    def track(self, task: asyncio.Task[Any] | None) -> bool:
+        return task is not None and task in self.children
+
+    def record_send(self, result: Any) -> None:
+        if getattr(result, "success", False):
+            self.delivered = True
+        elif self.send_failure != "retryable":
+            # The sidecar decides whether resending could ever succeed.
+            self.send_failure = "retryable" if getattr(result, "retryable", True) else "final"
+
+
+_LAUNCH: contextvars.ContextVar[_Launch | None] = contextvars.ContextVar(
+    "finitechat_launch", default=None
+)
+
+
+def _is_launch_child(task: asyncio.Task[Any], launch: _Launch) -> bool:
+    """``task`` is a child the pinned handler started under ``launch``.
+
+    A task copies the context it was created in, so only tasks created while
+    the handler ran carry ``launch``; the coroutine name excludes helper
+    tasks the handler may also create. ``Task.get_context`` is Python 3.12+,
+    as pinned; an older runtime finds no children and acks the command.
+    """
+    get_context = getattr(task, "get_context", None)
+    if task.done() or get_context is None or get_context().get(_LAUNCH) is not launch:
+        return False
+    qualname = str(getattr(task.get_coro(), "__qualname__", ""))
+    return qualname.endswith(_LAUNCH_CHILD_QUALNAMES)
+
+
 # Pinned gateway commands that make their message a model turn in an idle
 # session: /blueprint (when a blueprint matches), /init, /learn, /moa, /plan,
 # /queue and /steer rewrite it into the agent's input, /retry re-sends the
@@ -880,6 +974,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._retry_rewinds: dict[str, tuple[_RetryRewind, tuple[str, Any, str]]] = {}
         # Settlements in flight. Each outlives a cancellation of its turn.
         self._settlements: set[asyncio.Task[None]] = set()
+        # Launches whose unfinished work owns their command's inbox entry, by
+        # entry key. Disconnect settles the rest; none outlives the process.
+        self._launches: dict[str, _Launch] = {}
 
     async def _process_message_background(
         self,
@@ -936,16 +1033,31 @@ class FiniteChatAdapter(BasePlatformAdapter):
         handler is still running. ``stop()`` marks the gateway stopping before
         it interrupts running turns, so a handler that returned before then
         finished its work uninterrupted.
+
+        A /bg or /btw dispatch, inline in a busy chat or as its own turn,
+        also records the children its handler started (see ``_Launch``).
         """
 
         async def handle(event: MessageEvent) -> Any:
             turn = _FINITE_TURN.get()
-            if turn is None or turn.event is not event:
+            if turn is not None and turn.event is not event:
+                turn = None
+            launch = self._begin_launch(event)
+            if turn is None and launch is None:
                 return await handler(event)
-            turn.dispatched = True
-            response = await handler(event)
-            turn.answered = True
-            turn.answered_before_stop = not self._gateway_stopping()
+            if turn is not None:
+                turn.dispatched = True
+                turn.launch = launch
+            token = _LAUNCH.set(launch)
+            try:
+                response = await handler(event)
+            finally:
+                _LAUNCH.reset(token)
+                if launch is not None:
+                    self._own_launch_children(launch)
+            if turn is not None:
+                turn.answered = True
+                turn.answered_before_stop = not self._gateway_stopping()
             return response
 
         super().set_message_handler(handle)
@@ -1065,6 +1177,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             self._poll_task = None
         await self._cancel_admission_tasks()
         await self._settle_orphaned_retry_rewinds()
+        await self._settle_launches_at_disconnect()
         await self._stop_service()
         await self.cancel_background_tasks()
         self._mark_disconnected()
@@ -1114,6 +1227,28 @@ class FiniteChatAdapter(BasePlatformAdapter):
         content: str,
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        launch = self._child_launch()
+        if launch is None:
+            return await self._send_message(chat_id, content, reply_to, metadata)
+        # A /bg or /btw child delivering its result: its launch settles by it.
+        launch.sending += 1
+        try:
+            result = await self._send_message(chat_id, content, reply_to, metadata)
+        except Exception:
+            launch.send_failure = "retryable"
+            raise
+        finally:
+            launch.sending -= 1
+        launch.record_send(result)
+        return result
+
+    async def _send_message(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: str | None,
+        metadata: dict[str, Any] | None,
     ) -> SendResult:
         payload = self._send_payload(chat_id, content, reply_to, metadata)
         drained = self._attach_brain_approval_metadata(payload)
@@ -1519,6 +1654,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # Keep the existing holder and order; its completion settles the
             # renewed lease too (the protocol settles by event identity).
             return
+        if self._launch_coalesces(event_key):
+            return
         # The sidecar's recently-acked ring owns durable deduplication. The
         # checks above only coalesce renewed leases while this process still
         # holds the same event; they retain no completed-event history.
@@ -1670,9 +1807,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # busy-session handlers) never pass through the background turn that
             # fires the completion hook, so ack here — exactly once. Every other
             # event is acked (or released) by the completion hook. A /steer
-            # the running agent took is part of that turn and settles with it.
+            # the running agent took is part of that turn and settles with it,
+            # and a /bg or /btw with the child it started.
             self._inflight_admissions.discard(event_key)
-            if not self._ride_with_turn(steered_turn, room_id, seq, message_id):
+            launch = self._launches.get(event_key)
+            if not self._launch_takes_entry(launch) and not self._ride_with_turn(
+                steered_turn, room_id, seq, message_id
+            ):
                 await self._ack_finitechat_event(room_id, seq, message_id)
         return True
 
@@ -2106,6 +2247,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         if turn is not None and turn.settlement is not None:
             await self._join_settlement(turn)
             return
+        if turn is not None and self._launch_takes_entry(turn.launch):
+            # The work the command started settles its entry (see ``_Launch``).
+            if event_key:
+                self._inflight_admissions.discard(event_key)
+            return
         if (
             turn is not None
             and outcome_name != "cancelled"
@@ -2292,6 +2438,150 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 outcome,
             )
         return False
+
+    def _begin_launch(self, event: MessageEvent) -> _Launch | None:
+        """A launch record for a /bg or /btw inbox event about to be dispatched."""
+        command = _gateway_command(event)
+        if command not in _CHILD_COMMANDS:
+            return None
+        room_id, seq, message_id = _inbox_entry(event, self.room_id)
+        key = _adapter_event_key(room_id, seq, message_id) if message_id else None
+        if key is None:
+            return None
+        return _Launch(entry=(room_id, seq, message_id), key=key, command=command)
+
+    def _own_launch_children(self, launch: _Launch) -> None:
+        """Once the handler is done, let the children it started own the entry.
+
+        The pinned handlers start each child last, with no await before they
+        return, so every child is still pending here.
+        """
+        launch.children = [task for task in asyncio.all_tasks() if _is_launch_child(task, launch)]
+        if not launch.owns_entry():
+            return
+        self._launches[launch.key] = launch
+        for child in launch.children:
+            child.add_done_callback(lambda _child, launch=launch: self._child_finished(launch))
+
+    def _launch_takes_entry(self, launch: _Launch | None) -> bool:
+        """At the command's own settlement point: its launch settles the entry instead.
+
+        Called once the command's turn (or inline dispatch) would settle the
+        entry. A launch that already settled it leaves the registry then.
+        """
+        if launch is None or not launch.owns_entry():
+            return False
+        launch.command_done = True
+        if launch.settled and self._launches.get(launch.key) is launch:
+            del self._launches[launch.key]
+        return True
+
+    def _launch_coalesces(self, event_key: str | None) -> bool:
+        """A redelivered entry joins its launch's work instead of running it twice.
+
+        The sidecar redelivers a leased entry once its lease expires, which a
+        long child can outlast. Once the launch released the entry, or its
+        work ended without its result reaching the chat, the redelivery runs
+        the command again.
+        """
+        launch = self._launches.get(event_key) if event_key else None
+        if launch is None:
+            return False
+        if launch.unfinished() or launch.released is False:
+            return True
+        del self._launches[launch.key]
+        return False
+
+    def _child_finished(self, launch: _Launch) -> None:
+        """Settle the entry once every child has ended on its own.
+
+        A child whose result reached the chat, or never can (the sidecar
+        refused it for good), is acked. A retryable send failure keeps the
+        entry leased: its lease expiry, or a disconnect, hands the command
+        back to run again. A child cancelled by anyone but this adapter's
+        disconnect is released unless it delivered.
+        """
+        if launch.settled or launch.disconnecting or launch.unfinished():
+            return
+        crashed = any(not child.cancelled() and child.exception() for child in launch.children)
+        if any(child.cancelled() for child in launch.children) and not launch.delivered:
+            self._settle_launch(launch, release=True)
+        elif launch.send_failure == "retryable" or (crashed and not launch.delivered):
+            logger.warning(
+                "[finitechat] /%s result for %s/%s was not delivered; its entry stays "
+                "leased for redelivery",
+                launch.command,
+                launch.entry[0],
+                launch.entry[1],
+            )
+        else:
+            if launch.send_failure == "final":
+                logger.warning(
+                    "[finitechat] /%s result for %s/%s was refused for good; acking it",
+                    launch.command,
+                    launch.entry[0],
+                    launch.entry[1],
+                )
+            self._settle_launch(launch, release=False)
+
+    def _settle_launch(self, launch: _Launch, *, release: bool) -> None:
+        """Ack or release the launch's entry once, outside any cancellable task."""
+        launch.released = release
+        if launch.command_done and self._launches.get(launch.key) is launch:
+            del self._launches[launch.key]
+        settlement = asyncio.ensure_future(
+            self._deliver_settlement([launch.entry], release=release)
+        )
+        self._settlements.add(settlement)
+        settlement.add_done_callback(self._settlements.discard)
+
+    async def _settle_launches_at_disconnect(self) -> None:
+        """Settle every launch before the gateway cancels the work it owns.
+
+        The pinned gateway cancels its background tasks only after the
+        adapter disconnects. A child already sending its result gets a short
+        grace to finish; the rest are cancelled first, so none can deliver
+        after its entry was released. An entry is acked once its result
+        reached the chat: running it again would repeat finished work.
+        Otherwise it is released and the command runs again after the
+        restart, which may repeat a child's side effects (the inbox's
+        at-least-once contract for interrupted model work).
+        """
+        launches = [launch for launch in self._launches.values() if not launch.settled]
+        sending = [
+            child
+            for launch in launches
+            if launch.sending
+            for child in launch.children
+            if not child.done()
+        ]
+        if sending:
+            await asyncio.wait(sending, timeout=LAUNCH_DELIVERY_GRACE_SECS)
+        cancelled: list[asyncio.Task[Any]] = []
+        for launch in launches:
+            if launch.settled or not launch.unfinished():
+                continue
+            launch.disconnecting = True
+            for child in launch.children:
+                if not child.done():
+                    child.cancel()
+                    cancelled.append(child)
+        if cancelled:
+            await asyncio.wait(cancelled, timeout=LAUNCH_CANCEL_WAIT_SECS)
+        for launch in launches:
+            if not launch.settled:
+                delivered = launch.delivered and launch.send_failure is None
+                self._settle_launch(launch, release=not delivered)
+        if self._settlements:
+            await asyncio.wait(set(self._settlements), timeout=LAUNCH_CANCEL_WAIT_SECS)
+
+    @staticmethod
+    def _child_launch() -> _Launch | None:
+        """The launch whose child is the current task, if any."""
+        launch = _LAUNCH.get()
+        if launch is None or not launch.track(asyncio.current_task()):
+            return None
+        return launch
 
     def _gateway_session_store(self) -> Any:
         return getattr(getattr(self, "gateway_runner", None), "session_store", None)
