@@ -2570,7 +2570,7 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 await eventually(lambda: bool(stops))
                 await stops[0]
                 # The handler saved the goal and queued its kickoff; the stop
-                # dropped the kickoff, which is the documented limit.
+                # dropped the in-memory kickoff; its child journal owns recovery.
                 self.assertEqual(h.state("msg-1"), "acked")
                 self.assertNotIn(("release", "msg-1"), timeline)
             finally:
@@ -2578,7 +2578,11 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
 
             restarted = await self.boot_after_restart(home, h.inbox)
             try:
-                self.assertEqual(restarted.handed, [])
+                await eventually(lambda: len(restarted.runs) == 1)
+                await restarted.wait_turns_finished()
+                self.assertEqual(restarted.handed, [None])
+                self.assertEqual(restarted.runs, ["synthetic task"])
+                self.assertNotIn("msg-1", restarted.handed)
             finally:
                 await restarted.close()
 

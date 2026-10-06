@@ -181,8 +181,10 @@ its own.
   drain. A message handed over as the drain begins can show Hermes's refusal reply
   and still run after the restart. A `/goal` handed over in that window is
   acked: it has saved the goal, and only its kickoff turn is refused,
-  visibly. A stop that interrupts the kickoff loses that turn too; the saved
-  goal continues after the user's next turn or `/goal resume`. `/retry`
+  visibly. Its unstarted kickoff is now retained in the child-work journal
+  and resumed on restart, separately from inbox foreground replay. A started
+  child whose completion is uncertain receives an explicit interrupted outcome
+  instead of automatic execution replay. `/retry`
   rewinds the transcript before it re-sends the last message. If a drain
   refuses the re-sent turn or a stop cuts it off first, the adapter puts the
   rewound transcript back and releases the entry, so the same message is
@@ -406,3 +408,32 @@ durable cursors, storage, inbox in-flight state (leases), and reply/edit route
 resolution. The service surface covers inbound stream, acknowledge, release,
 send/edit, activity, recovery, and explicit home-channel state; strict hosted
 mode never falls back to Python polling or per-message CLI subprocesses.
+
+
+Accepted `/bg`, `/btw`, and goal continuations have a separate Hermes-owned
+`hermes-home/finite-child-work.sqlite3` journal. Include it and
+`hermes-home/finite-child-results/` in the same Recovery Set as the existing
+Hermes state. Acceptance precedes acknowledgement, and execution-start markers
+precede effects. Background and goal completion manifests, including retained
+local attachment bytes and a receipt cursor for every item, precede result delivery. Delivery retries have at-least-once
+semantics: transport success followed by a crash before its durable receipt can
+repeat a reply, but never automatically reruns background model/tool effects.
+An interrupted execution reports its uncertainty; an unchanged active goal is
+paused for review. Saved unstarted goals resume only if their exact persisted
+state still matches, the source remains authorized, and the foreground session
+and inbox admission queue are free. Generic Hermes resume remains suppressed.
+
+`finite-child-work-v1` accounting includes pending child outcomes. Its status
+marker is bound to the writer's PID and process start time; an old-runtime
+writer cannot inherit the marker after rollback. This is observability, not an
+admission/drain fence, and cannot authorize automated upgrades by itself.
+
+An older Runtime can ignore this journal while replaying foreground work or
+advancing a goal outside it. Keeping its bytes unchanged is not safe rollback,
+and rolling forward cannot undo effects already performed by the old binary.
+Candidate-to-old downgrade is held while obligations are pending or unknown,
+or admissions are not fenced; the current protocol has no supported fence.
+The hold includes automatic old-image restart after an upgrade failure, which
+currently bypasses the rollout wrapper. Preserve the whole Recovery Set and
+all newer accepted writes; do not clear journal rows or restore an older
+snapshot to make a downgrade pass. See the [Runtime rollback hold](../../../infra/runbooks/runtime-image.md#hold-for-runtime-child-work-recovery-candidates).
