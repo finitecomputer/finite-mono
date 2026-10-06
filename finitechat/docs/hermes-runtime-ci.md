@@ -84,8 +84,9 @@ TTL of 45 minutes. It fails if the Agent sets
 
 - **Three graceful stops** (`docker stop --time 15`), each with its own
   markers. Before restart, the stopped inbox must have no entry in the Leased
-  state. The queued follow-up must be Pending. The interrupted turn can be
-  Pending or Acked. Repeating the stop exercises the race where a lease is
+  state. Both the queued follow-up and interrupted turn must be Pending: the
+  fake provider is stalled, so neither turn can have completed. Repeating the
+  stop exercises the race where a lease is
   released and then re-leased onto the adapter's closing stream.
 - **SIGKILL.** A crash strands both leases until the TTL expires. The smoke
   does not wait 45 minutes. After it proves exit 137 and removes the

@@ -140,7 +140,14 @@ its own.
   flip them to `Leased`, so a leased entry is not re-emitted on the next tick.
   The adapter settles the lease from the turn: the completion hook `ack`s on
   success or failure, and a turn cancelled by shutdown or recovery calls
-  `release`, which returns the entry to `Pending` for redelivery. A user
+  `release`, which returns the entry to `Pending` for redelivery. Hermes
+  `stop()` interrupts running turns cooperatively and reports them as
+  success, so every turn that finishes after `stop()` begins is released; a
+  turn that completed in that window can run once more after restart. While
+  Hermes drains to stop or restart it refuses new turns with a reply, so the
+  adapter holds delivered events instead and releases them on disconnect. The
+  stream never leases for a client that has disconnected, and it releases a
+  batch it could not send. A user
   `/stop`, `/new` or `/reset` instead `ack`s the cancelled turn and its held
   queued admissions; earlier undelivered entries are acked when delivered in that
   process. A lease older than the TTL (config, generous default) is swept back

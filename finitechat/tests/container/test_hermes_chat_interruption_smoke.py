@@ -300,15 +300,13 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
         with self.assertRaisesRegex(smoke.SmokeFailure, "seq=3"):
             smoke.require_graceful_inbox_released(inbox, message_ids=self.IDS)
 
-    def test_graceful_check_accepts_a_released_or_legitimately_acked_active_turn(self) -> None:
+    def test_graceful_check_requires_both_unfinished_turns_to_be_released(self) -> None:
         self.assertEqual(
             smoke.require_graceful_inbox_released(self.released(), message_ids=self.IDS),
             {"active": "pending", "queued": "pending"},
         )
-        self.assertEqual(
-            smoke.require_graceful_inbox_released(self.released("acked"), message_ids=self.IDS),
-            {"active": "acked", "queued": "pending"},
-        )
+        with self.assertRaisesRegex(smoke.SmokeFailure, "stalled active turn"):
+            smoke.require_graceful_inbox_released(self.released("acked"), message_ids=self.IDS)
 
     def test_graceful_check_rejects_a_settled_or_missing_queued_follow_up(self) -> None:
         settled = self.released()

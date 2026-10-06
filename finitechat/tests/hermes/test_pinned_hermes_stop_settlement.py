@@ -28,7 +28,7 @@ from unittest.mock import patch
 
 from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platforms.base import SendResult
-from gateway.run import GatewayRunner
+from gateway.run import _INTERRUPT_REASON_GATEWAY_SHUTDOWN, GatewayRunner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.py"
@@ -85,7 +85,14 @@ def raw_photo(seq: int) -> dict[str, Any]:
 class StopHarness:
     """Real pinned gateway + adapter; simulated model, transport, and sidecar."""
 
-    def __init__(self, home: str):
+    def __init__(
+        self,
+        home: str,
+        *,
+        inbox: dict[str, tuple[dict[str, Any], str]] | None = None,
+        stall: bool = True,
+    ):
+        self.home = home
         self.module = load_adapter_module()
         config = PlatformConfig(enabled=True, extra={"home": home, "room_id": ROOM_ID})
         config.typing_indicator = False
@@ -95,16 +102,37 @@ class StopHarness:
         self.runner._session_db = None
         self.runner._persist_active_agents = lambda: None
         self.runner.adapters[self.adapter.platform] = self.adapter
+        # The pinned _create_adapter injects this into every plugin adapter.
+        self.adapter.gateway_runner = self.runner
         self.module._finite_private_control_request = lambda *_args: None
 
-        self.inbox: dict[str, tuple[dict[str, Any], str]] = {}
+        self.inbox: dict[str, tuple[dict[str, Any], str]] = {} if inbox is None else inbox
+        self.stall = stall
         self.settled: list[tuple[str, str]] = []
         self.runs: list[str] = []
+        self.refused: list[str] = []
         self.replies: list[str] = []
         self.started = asyncio.Event()
+        # Holds the stalled msg-1 turn open until the test finishes it or the
+        # gateway's shutdown interrupt reaches its agent.
+        self.turn_gate = asyncio.Event()
+        self.interrupted_by_shutdown = False
+        # The sidecar wakes the inbound stream on release and re-leases the
+        # entry to it until the adapter's stream is closed (disconnect).
+        self.redeliver_on_release = False
+        self.stream_open = True
+        self.redeliveries: list[str] = []
+        self._stream_tasks: set[asyncio.Task] = set()
         self.adapter._finitechat_json = self._sidecar
         self.adapter.send = self._send
         self.adapter.set_message_handler(self._handle)
+        disconnect = self.adapter.disconnect
+
+        async def close_stream_then_disconnect():
+            self.stream_open = False
+            await disconnect()
+
+        self.adapter.disconnect = close_stream_then_disconnect
 
     async def _sidecar(self, action, payload, *, timeout):
         del timeout
@@ -114,6 +142,12 @@ class StopHarness:
             raw, state = self.inbox[message_id]
             if state == "leased":
                 self.inbox[message_id] = (raw, "acked" if action == "ack" else "pending")
+            if action == "release" and self.redeliver_on_release and self.stream_open:
+                self.redeliveries.append(message_id)
+                self.inbox[message_id] = (raw, "leased")
+                task = asyncio.create_task(self.adapter._handle_finitechat_event(raw))
+                self._stream_tasks.add(task)
+                task.add_done_callback(self._stream_tasks.discard)
         return self.module._FiniteChatResult(True, {}, None, False)
 
     async def _send(self, chat_id, content, **_kwargs):
@@ -125,17 +159,36 @@ class StopHarness:
         session_key = self.runner._session_key_for_source(event.source)
         if (event.text or "").startswith("/stop"):
             return await self.runner._busy_stop_command(event, session_key, event.source)
+        if self.runner._draining:
+            # The pinned GatewayRunner._handle_message refuses a new turn
+            # while it drains for stop or restart; the base adapter reports
+            # the delivered refusal as a successful turn.
+            self.refused.append(event.message_id)
+            return (
+                f"⏳ Gateway is {self.runner._status_action_gerund()} "
+                "and is not accepting new work right now."
+            )
         self.runs.append(event.message_id)
-        self.runner._begin_session_run_generation(session_key)
+        generation = self.runner._begin_session_run_generation(session_key)
+        harness = self
 
         class Agent:
             def hard_interrupt(self, message=None):
-                del message
+                if message == _INTERRUPT_REASON_GATEWAY_SHUTDOWN:
+                    harness.interrupted_by_shutdown = True
+                    harness.turn_gate.set()
 
         self.runner._session_state(session_key).turn.agent = Agent()
-        if event.message_id == "msg-1":
-            self.started.set()
-            await asyncio.Event().wait()
+        try:
+            if self.stall and event.message_id == "msg-1":
+                self.started.set()
+                await self.turn_gate.wait()
+                # Shutdown interrupts the run cooperatively. An interrupted
+                # run that already called the model returns its empty
+                # response, which the pinned base reports as SUCCESS.
+                return "" if self.interrupted_by_shutdown else "done"
+        finally:
+            self.runner._release_running_agent_state(session_key, run_generation=generation)
         return "done"
 
     async def deliver(self, raw: dict[str, Any]) -> None:
@@ -165,6 +218,8 @@ class StopHarness:
         await asyncio.wait_for(settled(), 5)
 
     async def close(self) -> None:
+        if self._stream_tasks:
+            await asyncio.gather(*self._stream_tasks, return_exceptions=True)
         await self.adapter._cancel_admission_tasks()
         await self.adapter.cancel_background_tasks()
         self.runner.close_all_session_db_handles()
@@ -176,7 +231,10 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
     def run_scenario(self, scenario):
         with (
             tempfile.TemporaryDirectory(prefix="finite-stop-") as home,
-            patch.dict(os.environ, {"HERMES_HOME": home}),
+            # Finite ships no drain override, so stop() interrupts running
+            # turns at once (pinned default 0s); a developer config must not
+            # change that here.
+            patch.dict(os.environ, {"HERMES_HOME": home, "HERMES_RESTART_DRAIN_TIMEOUT": "0"}),
         ):
 
             async def main():
@@ -264,6 +322,108 @@ class PinnedHermesStopSettlementTests(unittest.TestCase):
 
             self.assertEqual(h.state("msg-1"), "pending", "shutdown must keep the turn durable")
             self.assertNotIn(("ack", "msg-1"), h.settled)
+
+        self.run_scenario(scenario)
+
+    def test_graceful_stop_releases_the_interrupted_turn_and_the_queued_follow_up(self):
+        """Canonical Linux smoke 37424007408 acked both entries on SIGTERM.
+
+        The pinned ``stop()`` drains with a 0s budget and interrupts the turn
+        cooperatively, so its completion hook reports SUCCESS. The next queued
+        turn is then refused with a reply, which also reports SUCCESS. Neither
+        turn ran, so both must stay durable and run once after restart.
+        """
+
+        async def scenario(h: StopHarness):
+            h.redeliver_on_release = True
+            await h.deliver(raw_event(1, "long running work"))
+            await asyncio.wait_for(h.started.wait(), 2)
+            await h.deliver(raw_event(2, "queued follow-up"))
+            self.assertEqual(h.state("msg-2"), "leased")
+
+            # Skip the pinned out-of-loop watchdog, which hard-exits on overrun.
+            with patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "finite-graceful-stop"}):
+                await asyncio.wait_for(h.runner.stop(), 30)
+
+            self.assertTrue(h.interrupted_by_shutdown)
+            self.assertEqual(
+                {"active": h.state("msg-1"), "queued": h.state("msg-2")},
+                {"active": "pending", "queued": "pending"},
+            )
+            self.assertEqual(h.runs, ["msg-1"])
+            self.assertEqual(h.refused, [], "a draining gateway must not be handed a turn")
+            self.assertNotIn(("ack", "msg-1"), h.settled)
+            self.assertNotIn(("ack", "msg-2"), h.settled)
+            # Released while the stream was still open, then held again and
+            # released for good once the stream closed.
+            self.assertIn("msg-1", h.redeliveries)
+
+            restarted = StopHarness(h.home, inbox=h.inbox, stall=False)
+            try:
+                await restarted.tick()
+                await restarted.wait_settled("msg-1")
+                await restarted.wait_settled("msg-2")
+            finally:
+                await restarted.close()
+            self.assertEqual(restarted.runs, ["msg-1", "msg-2"])
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertEqual(h.state("msg-2"), "acked")
+
+        self.run_scenario(scenario)
+
+    def test_turn_cancelled_during_stop_is_held_when_redelivered(self):
+        """A turn that ignores the interrupt is cancelled at adapter teardown.
+
+        The pinned teardown cancels background turns before ``disconnect()``,
+        so the released lease comes back on the still-open stream to an idle
+        session. Handing it to the stopping gateway would ack it unrun.
+        """
+
+        async def scenario(h: StopHarness):
+            await h.deliver(raw_event(1, "long running work"))
+            await asyncio.wait_for(h.started.wait(), 2)
+            h.runner._running = False
+            h.runner._draining = True
+
+            await h.adapter.cancel_background_tasks()
+            self.assertEqual(h.state("msg-1"), "pending")
+            # The open stream re-leases it once the session is idle.
+            await h.tick()
+            self.assertEqual(h.state("msg-1"), "leased")
+            self.assertEqual(h.refused, [])
+
+            await h.adapter.disconnect()
+            self.assertEqual(h.state("msg-1"), "pending")
+            self.assertEqual(h.runs, ["msg-1"])
+            self.assertEqual(h.refused, [])
+
+        self.run_scenario(scenario)
+
+    def test_restart_drain_acks_a_finished_turn_and_holds_new_messages(self):
+        """``request_restart`` keeps adapters up while running turns finish.
+
+        A turn that finishes in that window ran, so it is acked. A message
+        that arrives is not handed to the draining gateway, which would only
+        refuse it; its lease is held and released when the adapter stops.
+        """
+
+        async def scenario(h: StopHarness):
+            h.runner._running = True
+            await h.deliver(raw_event(1, "long running work"))
+            await asyncio.wait_for(h.started.wait(), 2)
+            h.runner._draining = True
+            await h.deliver(raw_event(2, "sent during the restart drain"))
+            h.turn_gate.set()
+            await h.wait_settled("msg-1")
+            await h.settle_loop()
+
+            self.assertEqual(h.state("msg-1"), "acked")
+            self.assertEqual(h.state("msg-2"), "leased")
+            self.assertEqual(h.refused, [])
+
+            await h.adapter.disconnect()
+            self.assertEqual(h.state("msg-2"), "pending")
+            self.assertEqual(h.runs, ["msg-1"])
 
         self.run_scenario(scenario)
 
