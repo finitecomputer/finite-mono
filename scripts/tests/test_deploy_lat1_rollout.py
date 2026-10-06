@@ -293,7 +293,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                      sections:{runtime_idle:{status:"green", project_id:$project, agent_runtime_id:$runtime,
                        source_machine_id:$machine, source_host_id:$host,
                        lifecycle:{verdict:"operable", reason:null},
-                       gateway:{state:"running", active_agents:0, updated_age_s:5},
+                       gateway:{state:"running", active_agents:0, child_work_contract:"finite-child-work-v1", updated_age_s:5},
                        hermes_inbox:{present:true, pending:0, leased:0, oldest_pending_age_s:null, oldest_lease_age_s:null, newest_lease_age_s:null},
                        agentd_inbox:{present:true, events:0}, running_markers:{present:false, messages:0},
                        verdict:"idle", reasons:[]}}}'
@@ -1243,6 +1243,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     "gateway": {
                         "state": "running",
                         "active_agents": 0,
+                        "child_work_contract": "finite-child-work-v1",
                         "updated_age_s": 5,
                     },
                     "hermes_inbox": {
@@ -1275,7 +1276,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             env=env,
         )
 
-    def test_runtime_idle_gate_is_the_last_runner_read_before_enqueue(self) -> None:
+    def test_runtime_idle_gate_refuses_without_an_admission_fence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             temp = Path(directory)
             entry = plan_entry("project-a", "runtime-a", "kata-a")
@@ -1315,8 +1316,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 if "--expected-agent-runtime-id" in call and "--plan-only" not in call
             ]
             self.assertEqual(len(idle), 1, calls)
-            self.assertEqual(len(enqueue), 1, calls)
-            self.assertEqual(idle[0], enqueue[0] - 1, calls)
+            self.assertEqual(enqueue, [], calls)
             self.assertTrue(
                 calls[idle[0]].startswith("root@test-lat1\t"), calls[idle[0]]
             )
@@ -1329,7 +1329,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             drift_reads = [
                 i
                 for i, call in enumerate(calls)
-                if "provider-snapshot-v1" in call and i < enqueue[0]
+                if "provider-snapshot-v1" in call and i < idle[0]
             ]
             self.assertTrue(drift_reads)
             self.assertLess(max(drift_reads), idle[0])
@@ -1341,14 +1341,12 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             ]
             names = [event["event"] for event in events]
             gate = names.index("entry_idle_gate")
-            self.assertEqual(events[gate]["status"], "succeeded")
-            self.assertEqual(
-                names[gate - 1 : gate + 2],
-                ["entry_preflight", "entry_idle_gate", "core"],
-            )
+            self.assertEqual(events[gate]["status"], "skipped")
+            self.assertEqual(events[gate]["reason"], "admission_fence_unavailable")
+            self.assertNotIn("core", names)
             self.assertEqual(events[-1]["status"], "success")
-            self.assertEqual(events[-1]["passed_count"], 1)
-            self.assertEqual(events[-1]["idle_skipped"], 0)
+            self.assertEqual(events[-1]["passed_count"], 0)
+            self.assertEqual(events[-1]["idle_skipped"], 1)
 
     def test_runtime_idle_gate_never_enqueues_unless_exactly_idle(self) -> None:
         exact = self.runtime_idle_report()
@@ -1459,8 +1457,8 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     self.assertEqual(retried.returncode, 0, retried.stderr)
                     final = self.read_events(state_root, plan_hash)[-1]
                     self.assertEqual(final["status"], "success")
-                    self.assertEqual(final["passed_count"], 1)
-                    self.assertEqual(final["idle_skipped"], 0)
+                    self.assertEqual(final["passed_count"], 0)
+                    self.assertEqual(final["idle_skipped"], 1)
 
     def test_probe_unavailable_with_runtime_idle_gate_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

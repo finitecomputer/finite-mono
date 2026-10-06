@@ -401,23 +401,19 @@ scripts/finite-status --runtime-idle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_
 It first requires an `operable` lifecycle probe for that exact assignment. It
 then reads only counts and ages from the Agent's durable root. `verdict` is
 `idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit 2).
-Execute only on `idle`; defer the others and re-check later. `unfinished_markers`
-means an earlier interrupted turn left a running marker; the restart will post
-one notice per marker to the user. The check is a point-in-time read, not a stop
-fence. A message that arrives between the check and the stop can still strand.
+An old Runtime without `finite-child-work-v1` accounting reports `unknown`
+even when foreground and inbox counts are zero. Background work can be active
+in that state. The new contract includes accepted child work and undelivered
+outcomes in `active_agents`.
 
-To make that read part of execution, pass
-`--roll-require-runtime-idle /absolute/path/to/finite-status` (the path on the
-Runner host) to both `--prepare` and `--execute-plan-hash`. It requires exactly
-one `--roll-project-id` and refuses `--roll-all` and `--probe-override`. After
-the final provider-fact drift check, the wrapper runs `--runtime-idle` for the
-exact assignment under the Runner's environment and binary, as its last Runner
-call before Core enqueues. Only exit 0 with an exact green, `idle`, operable,
-all-zero report enqueues. Anything else, and an unavailable lifecycle probe,
-records an `entry_idle_gate` or `entry_lifecycle_probe` skip; the run still ends
-`success`, with `idle_skipped` or `probe_skipped` counted. Re-execute the same
-approved hash later to retry. This narrows the window to the gate read, Core's
-enqueue and the Runner's pickup; it is still not atomic with the stop.
+For automated idle-gated execution, pass
+`--roll-require-runtime-idle /absolute/path/to/finite-status` to both prepare
+and execute. Identity, lifecycle eligibility and provider drift are rechecked
+at execution. **This mode currently refuses every upgrade:** an idle observation
+cannot fence new admissions through Core enqueue and Runner pickup. It records
+`admission_fence_unavailable` for an otherwise idle target. Repeated polling
+cannot remove this hold. The ordinary reviewed, disruptive rollout lane has no
+idle-safety guarantee and must not be used as a substitute for this automation.
 
 #### Lifecycle probe gate, skips, and the override
 
