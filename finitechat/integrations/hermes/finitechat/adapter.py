@@ -91,6 +91,8 @@ def _requester_state() -> Any:
         candidate.lock = threading.Lock()
         # Resolved lease root -> session key -> lease ID -> (count, expiry).
         candidate.leases = {}
+        # Resolved lease roots whose startup cleanup has completed.
+        candidate.started_roots = set()
         state = sys.modules.setdefault(_REQUESTER_STATE_MODULE, candidate)
     return state
 
@@ -341,12 +343,13 @@ class _RequesterContextBroker:
     text without teaching Sites about Chat or Hermes.
 
     Every broker for one root shares that root's lease counts, so a broker
-    from a reloaded plugin can finish a call an earlier one started. Startup
+    from a reloaded plugin can finish a call an earlier one started. A broker
     removes only expired files: any process that registers this plugin with
-    the same FINITE_HOME may construct a broker while a turn holds a lease.
-    So a process killed mid-call leaves its lease readable until it expires.
-    The state module name is versioned: change its data shape only under a
-    new name, since a running process keeps the first shape it published.
+    the same FINITE_HOME may construct one while a turn holds a lease. Leases
+    left by a killed gateway are removed when the next gateway connects; see
+    `_clear_requester_leases_at_gateway_start`. The state module name is
+    versioned: change its data shape only under a new name, since a running
+    process keeps the first shape it published.
     """
 
     def __init__(self, root: Path | None = None) -> None:
@@ -496,6 +499,44 @@ class _RequesterContextBroker:
         for root in (self.root, self.root_v2):
             with contextlib.suppress(OSError):
                 (root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+
+
+def _clear_requester_leases_at_gateway_start() -> None:
+    """Remove leases a previous gateway left for this FINITE_HOME, once per process.
+
+    A gateway killed mid-call never runs its post hook, and the readers check
+    only session, user and expiry, so a later turn in that session could use
+    the dead call's lease. Pinned Hermes takes the gateway lock for its
+    HERMES_HOME before connecting any adapter, and the Finite Runtime runs one
+    gateway per Agent with its own HERMES_HOME and FINITE_HOME. So at this
+    gateway's first connect, a lease this process does not hold belongs to a
+    process that is gone. Two Hermes homes sharing one FINITE_HOME is not a
+    supported layout: a second gateway's start would end the first's live
+    calls, which then fail closed as "requester context unavailable".
+
+    A first connect can fail before reaching this; Hermes then retries with a
+    new adapter and `is_reconnect=True`. So every connect calls this, and the
+    shared state records the root only once cleanup completes. Later connects
+    and plugin reloads skip it. A failure raises, failing the connect, so the
+    retry cleans up before any turn is taken.
+    """
+    root = _requester_context_root()
+    state = _requester_state()
+    resolved = os.path.realpath(root)
+    with state.lock:
+        if resolved in state.started_roots:
+            return
+        # Calls this process already holds keep their leases.
+        held = {_requester_context_filename(key) for key in state.leases.get(resolved, {})}
+        for directory in (root, root.parent / REQUESTER_CONTEXT_V2_DIR):
+            try:
+                entries = list(directory.iterdir())
+            except FileNotFoundError:
+                continue
+            for path in entries:
+                if path.name not in held and (path.is_file() or path.is_symlink()):
+                    path.unlink(missing_ok=True)
+        state.started_roots.add(resolved)
 
 
 def _requester_context_root() -> Path:
@@ -851,6 +892,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
         await self._ensure_service()
         await self._recover_interrupted_turns()
+        _clear_requester_leases_at_gateway_start()
         self._mark_connected()
         self._write_bridge_status("connected")
         if self.inbound_stream:
