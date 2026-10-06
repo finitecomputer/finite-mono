@@ -24,9 +24,10 @@ use finite_brain_core::{
     FolderId, FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
     FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
     RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
-    bootstrap_organization_brain, bootstrap_organization_brain_with_requester, decode_sync_payload,
-    generate_capability_token, sha256_hex, validate_admin_access_change_event,
-    validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
+    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
+    bootstrap_personal_brain, decode_sync_payload, generate_capability_token, sha256_hex,
+    validate_admin_access_change_event, validate_folder_rotation_fanout, validate_revision_event,
+    validate_tombstone_event, verify_personal_agent_consent_event,
 };
 use finite_brain_store::{
     BrainInvitationTargetKind, BrainInviteTokenRole, BrainStore, ControlSyncRecord,
@@ -387,7 +388,9 @@ impl From<StoreError> for ApiError {
             StoreError::MissingBrain { .. } | StoreError::MissingFolder { .. } => {
                 Self::new(StatusCode::NOT_FOUND, value.to_string())
             }
-            StoreError::DuplicateId { .. } | StoreError::Conflict { .. } => {
+            StoreError::DuplicateId { .. }
+            | StoreError::Conflict { .. }
+            | StoreError::PersonalBrainConflict { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
             }
             StoreError::MissingRequiredGrant { .. }
@@ -1827,8 +1830,10 @@ mod tests {
         ORIGIN,
     };
     use finite_brain_core::{
-        FolderKey, FolderObjectAad, MAX_FOLDER_ACCESS_REMOVAL_GRANTS, bootstrap_personal_brain,
-        encrypt_folder_object_with_nonce,
+        FolderKey, FolderObjectAad, MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        PERSONAL_AGENT_CONSENT_VERSION, PersonalAgentConsentPayload, bootstrap_personal_brain,
+        encrypt_folder_object_with_nonce, personal_agent_consent_event_template,
+        personal_brain_id_for_owner, sign_brain_event_template,
     };
     use finite_nostr::{
         GiftWrapValidation, HttpAuthEventRequest, build_rumor, encode_http_auth_header,
@@ -2591,7 +2596,7 @@ mod tests {
         assert_error(
             response,
             StatusCode::BAD_REQUEST,
-            "account-bound agent selection is no longer resolved by the Brain server",
+            "Personal Agent fields are only valid for a Personal Brain",
         )
         .await;
         assert!(
@@ -2617,7 +2622,7 @@ mod tests {
         assert_error(
             response,
             StatusCode::BAD_REQUEST,
-            "Personal Brain creation runs through the account agent bootstrap",
+            "Personal Brain creation requires personalAgentNpub and that Agent's signed personalAgentConsent",
         )
         .await;
         assert!(
@@ -2626,6 +2631,350 @@ mod tests {
                 .lock()
                 .unwrap()
                 .list_visible_brains(&UserId::new(npub(&owner_keys)).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn personal_agent_consent(
+        agent_keys: &Keys,
+        owner_npub: &str,
+        brain_server: &str,
+        created_at: u64,
+        expires_at: u64,
+    ) -> serde_json::Value {
+        let payload = PersonalAgentConsentPayload {
+            version: PERSONAL_AGENT_CONSENT_VERSION.to_owned(),
+            agent_npub: npub(agent_keys),
+            owner_npub: owner_npub.to_owned(),
+            brain_id: personal_brain_id_for_owner(owner_npub)
+                .unwrap()
+                .as_str()
+                .to_owned(),
+            brain_server: brain_server.to_owned(),
+            nonce: "cd".repeat(16),
+            expires_at,
+        };
+        let template = personal_agent_consent_event_template(&payload, created_at).unwrap();
+        let event = sign_brain_event_template(agent_keys, &template).unwrap();
+        serde_json::from_str(&event.as_json()).unwrap()
+    }
+
+    fn personal_brain_body(brain_id: &str, agent_npub: &str, consent: serde_json::Value) -> String {
+        serde_json::json!({
+            "brainId": brain_id,
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentNpub": agent_npub,
+            "personalAgentConsent": consent,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn owner_and_agent_signatures_create_one_personal_brain() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let agent = npub(&agent_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let consent =
+            personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600);
+        let body = personal_brain_body(brain_id.as_str(), &agent, consent);
+
+        let response = post_brain(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // A request retried after a lost response reaches the same Brain.
+        let retry = post_brain(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW + 1,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+
+        let stored = state.store.lock().unwrap().load_brain(&brain_id).unwrap();
+        assert_eq!(stored.brain.kind, BrainKind::Personal);
+        assert_eq!(
+            stored.brain.owner_user_id,
+            Some(UserId::new(owner).unwrap())
+        );
+        assert!(stored.brain.folders.is_empty());
+        assert_eq!(
+            stored.personal_agent.unwrap().agent_npub,
+            UserId::new(agent).unwrap()
+        );
+        let brains =
+            authed_request(router, &agent_keys, "GET", "/v1/brains", None, TEST_NOW + 2).await;
+        let brains: VisibleBrainsResponse = read_json(brains).await;
+        assert_eq!(brains.brains.len(), 1);
+        assert_eq!(brains.brains[0].brain_id, brain_id.as_str());
+        assert_eq!(brains.brains[0].role, "personal_agent");
+    }
+
+    #[tokio::test]
+    async fn personal_agent_consent_must_bind_this_agent_owner_brain_server_and_time() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let agent = npub(&agent_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let other_owner = npub(&Keys::generate());
+        let valid =
+            || personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600);
+        let signed_by_owner = {
+            let payload = PersonalAgentConsentPayload {
+                version: PERSONAL_AGENT_CONSENT_VERSION.to_owned(),
+                agent_npub: agent.clone(),
+                owner_npub: owner.clone(),
+                brain_id: brain_id.as_str().to_owned(),
+                brain_server: TEST_BASE_URL.to_owned(),
+                nonce: "cd".repeat(16),
+                expires_at: TEST_NOW + 600,
+            };
+            let template = personal_agent_consent_event_template(&payload, TEST_NOW).unwrap();
+            let event = sign_brain_event_template(&owner_keys, &template).unwrap();
+            serde_json::from_str(&event.as_json()).unwrap()
+        };
+        let cases = [
+            (
+                personal_brain_body(brain_id.as_str(), &npub(&Keys::generate()), valid()),
+                StatusCode::FORBIDDEN,
+                "signed by a different Agent",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &other_owner,
+                        TEST_BASE_URL,
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different owner",
+            ),
+            (
+                // Only the owner binding stops a consent for someone else's
+                // Personal Brain, even when the request names that Brain.
+                personal_brain_body(
+                    personal_brain_id_for_owner(&other_owner).unwrap().as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &other_owner,
+                        TEST_BASE_URL,
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different owner",
+            ),
+            (
+                personal_brain_body("personal-elsewhere", &agent, valid()),
+                StatusCode::FORBIDDEN,
+                "names a different Personal Brain",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        "https://other.example",
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different Brain server",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        TEST_BASE_URL,
+                        TEST_NOW - 700,
+                        TEST_NOW - 100,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "has expired",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        TEST_BASE_URL,
+                        TEST_NOW + 120,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "signed in the future",
+            ),
+            (
+                personal_brain_body(brain_id.as_str(), &agent, signed_by_owner),
+                StatusCode::BAD_REQUEST,
+                "signer does not match its Agent",
+            ),
+        ];
+        for (body, status, message) in cases {
+            let state = test_state();
+            let response = post_brain(
+                router_with_state(state.clone()),
+                &owner_keys,
+                &body,
+                TEST_NOW,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_error(response, status, message).await;
+            for key in [&owner, &other_owner] {
+                assert!(
+                    state
+                        .store
+                        .lock()
+                        .unwrap()
+                        .list_visible_brains(&UserId::new(key.clone()).unwrap())
+                        .unwrap()
+                        .is_empty(),
+                    "created a Personal Brain despite: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn organization_creation_cannot_take_a_personal_brain_id() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let squat = create_brain_body(brain_id.as_str(), "organization");
+
+        let response = post_brain(
+            router.clone(),
+            &Keys::generate(),
+            &squat,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "reserved for Personal Brains",
+        )
+        .await;
+
+        let body = personal_brain_body(
+            brain_id.as_str(),
+            &npub(&agent_keys),
+            personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600),
+        );
+        let response = post_brain(router, &owner_keys, &body, TEST_NOW, None, None, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_agent_serves_only_one_personal_brain() {
+        let agent_keys = Keys::generate();
+        let agent = npub(&agent_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let first_owner_keys = Keys::generate();
+        let first_owner = npub(&first_owner_keys);
+        let first = personal_brain_body(
+            personal_brain_id_for_owner(&first_owner).unwrap().as_str(),
+            &agent,
+            personal_agent_consent(
+                &agent_keys,
+                &first_owner,
+                TEST_BASE_URL,
+                TEST_NOW,
+                TEST_NOW + 600,
+            ),
+        );
+        let response = post_brain(
+            router.clone(),
+            &first_owner_keys,
+            &first,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let second_owner_keys = Keys::generate();
+        let second_owner = npub(&second_owner_keys);
+        let second = personal_brain_body(
+            personal_brain_id_for_owner(&second_owner).unwrap().as_str(),
+            &agent,
+            personal_agent_consent(
+                &agent_keys,
+                &second_owner,
+                TEST_BASE_URL,
+                TEST_NOW,
+                TEST_NOW + 600,
+            ),
+        );
+        let response = post_brain(
+            router,
+            &second_owner_keys,
+            &second,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::CONFLICT,
+            "agent is already the personal agent of another personal brain",
+        )
+        .await;
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_visible_brains(&UserId::new(second_owner).unwrap())
                 .unwrap()
                 .is_empty()
         );
@@ -6922,10 +7271,11 @@ mod tests {
         let email = &sent[0];
         assert_eq!(email.to, "friend@example.com");
         assert!(email.subject.contains("Acme"));
-        // One short human paragraph plus one explicit agent instruction line.
+        // One short human paragraph plus one agent instruction line. An Agent
+        // that reads this email redeems the link only when its owner asks.
         assert!(email.text.contains("invited you to the Finite brain"));
         assert!(email.text.contains(&format!(
-            "Agent instruction: fbrain invite-accept {}",
+            "Agent instruction: run fbrain invite-accept {} only when your owner asks you to join this brain.",
             created.url
         )));
         assert!(email.text.contains("single-use capability"));

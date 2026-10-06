@@ -1,6 +1,15 @@
 //! FiniteBrain Portable v1 core domain and validation logic.
 
+pub mod personal_agent_consent;
 pub mod portability;
+
+pub use personal_agent_consent::{
+    MAX_PERSONAL_AGENT_CONSENT_SECONDS, PERSONAL_AGENT_CONSENT_VERSION,
+    PersonalAgentConsentPayload, is_reserved_personal_brain_id,
+    personal_agent_consent_event_template, personal_agent_consent_nonce,
+    personal_brain_id_for_owner, validate_personal_agent_consent_payload,
+    verify_personal_agent_consent_event,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -1018,6 +1027,12 @@ fn bootstrap_organization_brain_with_admins(
     admin_user_ids: Vec<String>,
 ) -> Result<BootstrapOutput, CoreError> {
     let brain_id = BrainId::new(brain_id)?;
+    if is_reserved_personal_brain_id(brain_id.as_str()) {
+        return Err(CoreError::InvalidBootstrapInput {
+            reason: "Brain IDs shaped like personal-<16 hex characters> are reserved for Personal Brains"
+                .to_owned(),
+        });
+    }
     let name = DisplayName::new("brain_name", name)?;
     let admin_user_ids = admin_user_ids
         .into_iter()

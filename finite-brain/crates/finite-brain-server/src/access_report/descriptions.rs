@@ -3,10 +3,11 @@
 //! mutex is never held across these awaits.
 //!
 //! Brain decides eligibility: only keys with recorded participation by that
-//! exact key are sent to Core or shown a stored alias. Core additionally
-//! enforces the account/Brain sharing scope.
+//! exact key are sent to Core or shown a stored alias. Brain asks Core v2,
+//! which applies no per-Brain sharing scope (FIN-166); an older Core answers
+//! v1 and still enforces the account/Brain sharing scope.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use finite_brain_store::AccessReportSnapshot;
@@ -40,6 +41,7 @@ pub(crate) async fn describe_page(
         .map(|row| row.hex.clone())
         .collect::<Vec<_>>();
     let (coverage, by_hex) = core_descriptions(state, snapshot, &eligible, actor_hex).await;
+    let asked = eligible.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut described = BTreeMap::new();
     for row in rows {
         if row.participation.is_none() || row.hex.is_empty() {
@@ -60,7 +62,7 @@ pub(crate) async fn describe_page(
                 })
             });
         let description = match by_hex.get(&row.hex) {
-            Some(core) => view(core),
+            Some(core) => view(core, &asked),
             None => IdentityDescriptionView::bare(
                 "unavailable",
                 Some(
@@ -79,7 +81,10 @@ pub(crate) async fn describe_page(
     }
 }
 
-fn view(core: &CoreDescription) -> IdentityDescriptionView {
+/// `asked` is the page's eligible keys. An owner's human keys are shown only
+/// when they are among them: without a sharing scope, a key outside the
+/// request would link the owner across Brains (older Core does not filter).
+fn view(core: &CoreDescription, asked: &BTreeSet<&str>) -> IdentityDescriptionView {
     IdentityDescriptionView {
         state: core.state.clone(),
         reason: None,
@@ -92,7 +97,12 @@ fn view(core: &CoreDescription) -> IdentityDescriptionView {
                 email: account.email.clone(),
                 source: account.source.clone(),
                 observed_at: account.observed_at.clone(),
-                human_public_keys_hex: account.human_public_keys_hex.clone(),
+                human_public_keys_hex: account
+                    .human_public_keys_hex
+                    .iter()
+                    .filter(|key| asked.contains(key.as_str()))
+                    .cloned()
+                    .collect(),
             }
         }),
         source: core.source.as_ref().map(|source| DescriptionSourceView {
