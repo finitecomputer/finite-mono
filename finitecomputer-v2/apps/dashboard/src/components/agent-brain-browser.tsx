@@ -2,8 +2,10 @@
 import { BrainChatState } from "@/components/brain-chat-state";
 import { BrainTable } from "@/components/brain-membership-table";
 import { AgentInventoryRefresh } from "@/components/agent-inventory-refresh";
+import { PersonalBrainSetupRow } from "@/components/personal-brain-setup";
 import { useAgentInventory } from "@/hooks/use-agent-inventory";
 import { readBrainInventory } from "@/lib/agent-product-inventory";
+import { needsPersonalBrainSetup } from "@/lib/personal-brain-setup";
 import headingStyles from "@/styles/agent-page-heading.module.css";
 
 export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string; agentName: string }) {
@@ -11,6 +13,7 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
   const brains = inventory.data?.brains;
   const accessible = brains?.filter(brain => !brain.pending).length ?? 0;
   const pending = brains?.filter(brain => brain.pending).length ?? 0;
+  const refresh = () => void inventory.refresh();
   return <>
     <header className="brain-heading">
       <h1 className={headingStyles.title}>Brain</h1>
@@ -20,7 +23,9 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
     </header>
     <section aria-label="Brain memberships" aria-busy={inventory.busy}>
       {brains && brains.length > 0 && <BrainTable key={inventory.revision} brains={brains} />}
-      {brains?.length === 0 && <BrainChatState agentName={agentName} machineId={runtimeId} />}
+      {brains && brains.length > 0 && needsPersonalBrainSetup(brains) &&
+        <PersonalBrainSetupRow runtimeId={runtimeId} agentName={agentName} onChanged={refresh} />}
+      {brains?.length === 0 && <BrainChatState agentName={agentName} machineId={runtimeId} onPersonalBrainCreated={refresh} />}
       {!brains && !inventory.busy && <BrainChatState agentName={agentName} machineId={runtimeId} unavailable />}
     </section>
     <AgentInventoryRefresh {...inventory} label="brains" />
