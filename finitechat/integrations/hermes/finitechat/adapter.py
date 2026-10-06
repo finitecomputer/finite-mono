@@ -207,6 +207,8 @@ _LAUNCH_CHILD_QUALNAMES = (
 LAUNCH_DELIVERY_GRACE_SECS = 1.5
 # How long disconnect waits for the children it cancels to unwind.
 LAUNCH_CANCEL_WAIT_SECS = 0.5
+# Under FINITECHAT_HOME: one file per chat whose latest turn the inbox owns.
+TURN_OWNERS_DIR = "hermes-turn-owners"
 
 
 @dataclass(eq=False)
@@ -1043,6 +1045,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
             # /goal entry, and a redelivery of that entry joins it meanwhile.
             turn.entry = launch.entry
             self._inflight_admissions.add(launch.key)
+        room_id, seq, message_id = turn.entry or _inbox_entry(event, self.room_id)
+        self._record_turn_owner(
+            session_key,
+            (room_id, seq, message_id) if message_id and isinstance(seq, int) else None,
+        )
         turn_token = _FINITE_TURN.set(turn)
         self._running_turns[session_key] = turn
         try:
@@ -1103,18 +1110,23 @@ class FiniteChatAdapter(BasePlatformAdapter):
         super().set_message_handler(handle)
 
     async def handle_message(self, event: MessageEvent) -> None:
-        """Decline Hermes's synthetic auto-resume turn for Finite sessions.
+        """Decline Hermes's synthetic auto-resume turn where the inbox owns recovery.
 
         The durable inbox owns recovery of interrupted Finite turns: a stop
         releases the turn's lease and a crash leaves it to lease expiry, so
         the message runs again whole. At boot the pinned gateway also starts
         its own resume turn for every session it marked ``resume_pending``,
         and the model sees the interrupted message in that turn too, so the
-        same work would run twice. Hermes frees the session slot it reserved
-        for the resume when no turn starts, and the session stays marked, so
-        the redelivered message runs with Hermes's recovery note.
+        same work would run twice. So the resume is declined for a chat whose
+        latest turn the inbox owned (see ``_record_turn_owner``). Hermes frees
+        the session slot it reserved for the resume when no turn starts, and
+        the session stays marked, so the redelivered message runs with
+        Hermes's recovery note. A turn with no inbox entry, such as a goal
+        continuation, has no other owner, so Hermes resumes it.
         """
-        if _is_hermes_resume_event(event):
+        if _is_hermes_resume_event(event) and self._inbox_owns_latest_turn(
+            self._event_session_key(event)
+        ):
             logger.info(
                 "[finitechat] declined Hermes auto-resume for chat %s; "
                 "the Finite inbox redelivers interrupted turns",
@@ -2508,6 +2520,47 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 outcome,
             )
         return False
+
+    def _record_turn_owner(self, session_key: str, entry: tuple[str, Any, str] | None) -> None:
+        """Record durably whether the inbox owns the turn now starting in this chat.
+
+        A turn that settles an inbox entry writes the chat's marker; any other
+        turn (a goal continuation, a background notice, Hermes's own resume)
+        removes it. The marker survives the turn's ack: Hermes's crash
+        recovery marks every recently active chat for resume, and one whose
+        latest turn the inbox settled has nothing for Hermes to resume.
+        """
+        if not self.home:
+            return
+        root = Path(self.home) / TURN_OWNERS_DIR
+        path = root / f"{hashlib.sha256(session_key.encode('utf-8')).hexdigest()}.json"
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if entry is None:
+                path.unlink(missing_ok=True)
+                return
+            room_id, seq, message_id = entry
+            record = {"version": 1, "room_id": room_id, "seq": seq, "message_id": message_id}
+            tmp_path = path.with_suffix(".tmp")
+            tmp_path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            logger.warning("[finitechat] could not record a chat's turn owner: %s", exc)
+
+    def _inbox_owns_latest_turn(self, session_key: str) -> bool:
+        """The inbox owned this chat's latest turn, as ``_record_turn_owner`` left it.
+
+        A home without owner records was last run by a runtime that kept
+        none: the 458a baseline, whose stop acks the turns it interrupts and
+        leaves them to Hermes's resume. So Hermes resumes them on the first
+        boot after the upgrade, as 458a's own restart would.
+        """
+        if not self.home:
+            return True
+        root = Path(self.home) / TURN_OWNERS_DIR
+        if not root.is_dir():
+            return False
+        return (root / f"{hashlib.sha256(session_key.encode('utf-8')).hexdigest()}.json").exists()
 
     def _begin_launch(self, event: MessageEvent, command: str | None) -> _Launch | None:
         """A launch record for a /bg, /btw or /goal set or resume inbox event."""

@@ -842,7 +842,13 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
                 source = h.adapter.build_source(
                     chat_id=ROOM_ID, chat_type="group", user_id="alice", thread_id="segment-1"
                 )
-                await h.adapter.handle_message(MessageEvent(text="", source=source, internal=True))
+                resume = MessageEvent(text="", source=source, internal=True)
+                # The chat's latest turn was an inbox turn, which the inbox
+                # redelivers itself.
+                h.adapter._record_turn_owner(
+                    h.adapter._event_session_key(resume), (ROOM_ID, 1, "msg-1")
+                )
+                await h.adapter.handle_message(resume)
                 self.assertEqual(h.adapter._session_tasks, {}, "no resume turn starts")
                 await h.settle_loop()
                 self.assertEqual(h.runs, [])
