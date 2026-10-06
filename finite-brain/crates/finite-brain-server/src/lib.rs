@@ -6922,10 +6922,11 @@ mod tests {
         let email = &sent[0];
         assert_eq!(email.to, "friend@example.com");
         assert!(email.subject.contains("Acme"));
-        // One short human paragraph plus one explicit agent instruction line.
+        // One short human paragraph plus one agent instruction line. An Agent
+        // that reads this email redeems the link only when its owner asks.
         assert!(email.text.contains("invited you to the Finite brain"));
         assert!(email.text.contains(&format!(
-            "Agent instruction: fbrain invite-accept {}",
+            "Agent instruction: run fbrain invite-accept {} only when your owner asks you to join this brain.",
             created.url
         )));
         assert!(email.text.contains("single-use capability"));
