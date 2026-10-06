@@ -626,9 +626,16 @@ class TargetTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.home = AgentRoot(Path(self.temporary.name).resolve())
         self.home.gateway(active=1)
+        self.scratch = Path(self.temporary.name).resolve() / "tmp"
+        self.scratch.mkdir()
+        self.tempdir = mock.patch.object(tempfile, "tempdir", str(self.scratch))
+        self.tempdir.start()
 
     def tearDown(self) -> None:
+        left = list(self.scratch.iterdir())
+        self.tempdir.stop()
         self.temporary.cleanup()
+        self.assertEqual(left, [])
 
     def probe(self, verdict: str = "operable", state_root: object = None, machine: str = "machine-a") -> dict:
         checks = [{"name": name, "status": "pass", "detail": "qualified", "evidence": {}} for name in CHECKS]
