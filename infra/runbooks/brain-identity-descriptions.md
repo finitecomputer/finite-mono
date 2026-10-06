@@ -6,13 +6,14 @@ responsible account (FIN-122). Contracts:
 [Core](../../finitecomputer-v2/docs/brain-identity-descriptions-v1.md) and
 [Brain report](../../finite-brain/docs/brain-access-report-v1.md).
 
-Shipping the new binaries and image does change some things: the access
-report route, the `fbrain access list` report and `access summary`, the
-Join/Approve card wording, and the additive Core and Brain schemas all ship
-with them. Only the optional connections are off until the variables below
-are set: the dashboard observation hook, Core's private listener and Brain's
-description client. This runbook does not authorize a deploy, a backfill or
-any data repair; each needs its own explicit approval.
+The initial v1 release introduced the access report route, `fbrain access list`
+and `access summary`, hosted contact-sharing disclosures, and additive Core and
+Brain schemas. Its optional connections stay off until configured: the
+dashboard observation hook, Core's private listener and Brain's description
+client. Existing configured deployments use the v2 upgrade procedure below;
+do not repeat first-time configuration or clear their settings. This runbook
+does not authorize a deploy, a backfill or any data repair; each needs its own
+explicit approval.
 
 ## Where it runs
 
@@ -21,10 +22,10 @@ The authority is [`infra/nixos/hosts/finite-lat-2`](../nixos/hosts/finite-lat-2/
 older Core and Brain deploy notes that name lat1 are stale for this feature.
 All three connections stay on lat2 loopback.
 
-`fbrain` ships as a normal CLI component release. Hosted Agent Runtimes do not
-need a runtime-image upgrade for this feature: existing CLIs keep working
-against the new Brain, and only admins who run `fbrain access list` need the
-new CLI. Do not roll the agent fleet for it.
+`fbrain` ships as a normal CLI component release. The server-side descriptions
+feature alone does not require a Runtime upgrade. The dashboard roster and
+Personal Brain setup do: they use new Runtime plugin routes and CLI commands.
+Existing Agents also need the new CLI for the `open personal` selection fix.
 
 Optional settings live in root-owned environment files so each part can be
 switched on or off by editing one file and restarting one unit; there is no
@@ -36,7 +37,7 @@ loopback (see the [port map](../nixos/README.md#port-map-consolidated-box)).
 | Part | Role | Off when |
 | --- | --- | --- |
 | Core | Private listener with two routes: trusted hosted observations (writer) and scoped exact-key descriptions (reader) | Any of its four variables is unset or invalid |
-| Dashboard | After a Join or Approve that the Brain server confirmed, tells Core which existing hosted key acted and that the account shares contact with that Brain's admins | Either of its two variables is unset |
+| Dashboard | After an Approve that Brain confirmed, tells Core which existing hosted key acted and that the account shares contact with that Brain's admins. The retained invitation-accept API can also record an explicit sharing request, but has no current Chat UI caller. | Either of its two variables is unset |
 | Brain | Asks Core to describe participating report keys | Either of its two variables is unset or invalid |
 
 Descriptions never grant or remove access. If Core is off, old or down, every
@@ -76,7 +77,10 @@ Brain sends `FINITE_BRAIN_PUBLIC_BASE_URL` as its identity; it must equal the
 Core Brain server value. Record each new secret in the secrets inventory by
 name and location only.
 
-## Rollout order
+## Initial v1 configuration
+
+This describes the original 0.7.0 introduction into an unconfigured deployment.
+For an existing v1 deployment, use "Descriptions v2" below instead.
 
 Core, Brain and the digest-pinned dashboard image ship together in one lat2
 NixOS closure ([deploy-core.md](deploy-core.md#steps)). Deploy them with every
@@ -88,7 +92,7 @@ optional setting unset, then switch each part on separately.
    `just deploy-lat2-closure "$ARTIFACT_DIR" --prepare`, `scripts/finite-status`,
    and `just deploy-lat2-closure "$ARTIFACT_DIR" --activate`. This applies
    Migration 0038 (Core) and SCHEMA_V30 (Brain), both additive, and runs the
-   new dashboard image with the Join/Approve disclosure text and the hook
+   new dashboard image with hosted contact-sharing disclosure text and the hook
    still off. Tabs loaded before the new image do not send
    `shareAccountContact`; their Joins and Approvals still work and never
    record sharing.
@@ -114,8 +118,8 @@ optional setting unset, then switch each part on separately.
    run `scripts/finite-status` again.
 
 `fbrain` 0.7.0 is published through the normal CLI release
-([release-cli.md](release-cli.md)) after the closure is live. Do not upgrade
-Agent Runtimes for this feature.
+([release-cli.md](release-cli.md)) after the closure is live. That server-only
+introduction did not require an Agent Runtime upgrade.
 
 ## Descriptions v2 (FIN-166)
 
@@ -129,12 +133,25 @@ accepted risk in the Core contract.
 
 1. Run `scripts/finite-status` and `scripts/finite-status --brain-identity`
    and keep the output.
-2. Deploy the closure as in "Rollout order" step 2 and verify health.
-3. From an ordinary admin session on a designated Brain, run
+2. Deploy Core and Brain using the exact reviewed lat2 closure and verify
+   health. Preserve the existing identity configuration. When shipping the
+   dashboard roster and Personal Brain setup too, retain the current dashboard
+   pin for this first closure activation.
+3. For that combined release, qualify the candidate Runtime on a designated
+   canary, then upgrade the selected existing Agents using the
+   [Runtime rollout procedure](runtime-image.md). The participation filter
+   takes effect with the Brain server; the `open personal` fix takes effect
+   separately on each Agent's Runtime upgrade.
+4. Deploy a second closure with the new dashboard digest after Runtime
+   qualification, then run `finite skills sync` for the selected existing
+   Agents. The updated skill points to the dashboard setup button, so sync it
+   after that button is available. Old Runtimes keep their existing CLI and
+   show an update-required or unavailable result for the new dashboard routes.
+5. From an ordinary admin session on a designated Brain, run
    `fbrain access list --brain <exact-id> --json`. Expect `resolved` rows for
    participating keys without a sharing scope, `noParticipation` for keys that
    never acted, and owner `humanPublicKeysHex` limited to keys on that page.
-4. Run both `scripts/finite-status` commands again.
+6. Run both `scripts/finite-status` commands again.
 
 To return to the v1 policy, roll back the closure (Core or Brain alone is
 enough). To stop all descriptions, remove `/etc/finite/brain-identity.env` as
@@ -172,7 +189,9 @@ Brain SQLite Recovery Set; restoring them restores descriptions, not keys.
   is upgraded separately. Their `access list` is the older summary; the
   managed FiniteBrain skill tells them to check the report `version` and say
   a newer CLI is needed rather than claim a complete report.
-- Only hosted human actions (Join, applied Approve) record sharing. No current
+- Applied Approve is the current Chat UI path that records a hosted human's
+  association and sharing. The retained invitation-accept API also records an
+  explicit sharing request; the old Join card has been removed. No current
   flow emits an owned-agent observation. Under v1 an agent whose owner never
   acted as a hosted human in that Brain stays `notShared` there; v2 needs no
   sharing.

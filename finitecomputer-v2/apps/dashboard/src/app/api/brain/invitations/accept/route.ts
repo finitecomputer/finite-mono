@@ -20,7 +20,7 @@ const NO_STORE = { "cache-control": "no-store" };
 const MAX_BODY_BYTES = 8 * 1024;
 
 /// Join a Brain the account was invited to, with the hosted human
-/// principal's signature (the invitation card's action).
+/// principal's signature. Retained API; no current Chat UI caller.
 export async function POST(request: Request) {
   if (!requestOriginMatchesHost(request)) {
     return Response.json({ error: "Joining requires the dashboard." }, { status: 403, headers: NO_STORE });
