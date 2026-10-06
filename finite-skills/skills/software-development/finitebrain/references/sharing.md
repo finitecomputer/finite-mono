@@ -97,8 +97,7 @@ with no `--brain`, from outside any Brain Working Tree, with the intended
 server selected. Inside a Working Tree the same command lists the invitations
 that Brain issued, like `--brain <id>`, and needs admin standing.
 `brain list --json` rows with `role: "invited"` are the same incoming
-invitations. Also point the user to pending approval and invitation cards in
-chat.
+invitations. Chat shows no invitation cards, only pending approval cards.
 
 Accept by invitation id (`invitation-...`), not invite code (`invite-...`).
 An invite code's public instructions at

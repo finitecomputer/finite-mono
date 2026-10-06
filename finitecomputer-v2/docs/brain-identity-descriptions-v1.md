@@ -135,10 +135,12 @@ first and asks v1 only when Core answers exactly 400
 Accepted risk (decision recorded in FIN-166, 2026-10-05): any participation by
 an Agent key in a Brain releases the Agent's name and its owner's account email
 to that Brain's admins. That includes participation the owner did not request:
-a non-owner's request in chat, an "Agent instruction" in an invite email,
-injected content, or the Agent's automatic Folder Key writes. Participation by
-a hosted human key releases that human's email. An admin still cannot learn who
-owns a key only by adding it to their Brain.
+a non-owner's request in chat, an "Agent instruction" in an invite email, or
+injected content. Folder Key Grant wraps a client delivers while it syncs are
+not participation, so holding a key and syncing releases nothing (see the
+Brain access report contract). Participation by a hosted human key releases
+that human's email. An admin still cannot learn who owns a key only by adding
+it to their Brain.
 
 Owner human keys: v2 lists in `responsibleAccount.humanPublicKeysHex` only the
 owner's keys that are in the same request. Brain also drops listed keys it did
@@ -274,11 +276,13 @@ Dashboard: `src/lib/brain-identity-observation.ts`, called through `after()`
 from `POST /api/brain/invitations/accept` once the Brain server returns an
 acceptance by the exact hosted key, and from `POST /api/brain/approvals/approve`
 once the Brain server applies a delegation-grant approval signed for that
-exact Brain (how existing admins qualify). Both cards tell the user that the
-action lets the Brain's admins see their account email and that they are
-responsible for their agents there, and send `shareAccountContact: true` with
-that text. A request without it (a tab loaded before the text existed) still
-joins or approves but records no sharing. It loads the key with Hosted Device
+exact Brain (how existing admins qualify). Chat shows only the Approve card;
+the Join card was removed, so the accept route records only for older tabs
+and other callers. The card tells the user that the action lets the Brain's
+admins see their account email and that they are responsible for their agents
+there, and sends `shareAccountContact: true` with that text. A request without
+it (a tab loaded before the text existed) still joins or approves but records
+no sharing. It loads the key with Hosted Device
 `identifyMember` (no mint), retries a lost response once with the same
 operation id, and never changes the join result. Configuration:
 `FC_CORE_BRAIN_IDENTITY_URL` and `FC_CORE_BRAIN_OBSERVATION_TOKEN`; the Brain

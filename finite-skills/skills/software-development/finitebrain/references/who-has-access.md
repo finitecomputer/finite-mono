@@ -53,12 +53,18 @@ account exists, so never guess who a key is from a name, an email, timing or
 who invited it. `storedNip05` is a stored public name with its stored time,
 not rechecked and not a mailbox.
 
-A key's details appear only after its responsible account shares contact with
-this Brain. That happens when the person next accepts an invitation or
-approves a Brain request in Finite, which tells them this Brain's admins will
-see their account email and their responsibility for their agents. Nothing an
-admin or Agent runs changes a description, so leave access unchanged when the
-goal is only to make a name appear.
+Core describes only keys that have themselves acted in this Brain: joined,
+approved, or wrote a Brain record. Folder Key wraps delivered during sync do
+not count. An acting Agent key is described from Core's record of that Agent
+and its current owner. A human key is described only once Core links it to a
+Finite account, which happens when the person approves a Brain request in
+Finite Chat. If this Brain's Core is older and answers only v1 descriptions,
+the account must also have shared contact with this Brain through that
+approval. Nothing backfills older keys, so many stay `unknown` or `notShared`
+(shown as "Unknown" on the roster); a new Personal Brain can too.
+
+Never change access, join, write or approve only to make a name appear. Join
+a Brain only when your owner asks you to.
 
 ## Folder States
 
