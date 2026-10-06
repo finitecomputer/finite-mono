@@ -39,6 +39,13 @@ SESSIONS_DDL = ("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NUL
                 " ended_at REAL, end_reason TEXT)")
 
 
+def stamp_write(path: Path) -> None:
+    """Give the write just made to `path` a later mtime. The production hosts stamp every write at a new
+    mtime (Linux 6.13+ fine-grained timestamps); a test host with coarse ones may not, so set it here."""
+    info = path.stat()
+    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 2_000_000_000))
+
+
 class AgentRoot:
     """A synthetic `<work_root>/kata/<runtime>` durable root."""
 
@@ -419,12 +426,10 @@ class ObserveTests(unittest.TestCase):
     def test_a_live_write_during_the_copy_is_unstable_never_read(self) -> None:
         live = self.home.agent / "hermes-home" / "state.db"
         real_read = os.read
-        bumps = iter(range(1, 1_000_000))
 
         def read_while_writer_commits(fd, size):
             data = real_read(fd, size)
-            stamp = int(GATEWAY_START_S * 1e9) + next(bumps)
-            os.utime(live, ns=(stamp, stamp))
+            stamp_write(live)
             return data
 
         with mock.patch.object(idle.os, "read", read_while_writer_commits):
@@ -444,6 +449,7 @@ class ObserveTests(unittest.TestCase):
             copies.append(name)
             if name == "state.db" and len(copies) == 1:
                 writer.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                stamp_write(home / "state.db")  # same inode and size: only the mtime shows the checkpoint
                 writer.execute("INSERT INTO messages VALUES (1, 'a later turn on another page')")
             return signature
 
@@ -476,6 +482,7 @@ class ObserveTests(unittest.TestCase):
             event = next(events, None) if name == "state.db" else None
             if event == "close":  # the last connection checkpoints and removes the WAL
                 writer.close()
+                stamp_write(home / "state.db")
             elif event == "replace":  # a new inode under the same name, same size and mtime
                 replacement = home / "replacement.db"
                 replacement.write_bytes((home / "state.db").read_bytes())

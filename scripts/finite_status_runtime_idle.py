@@ -306,6 +306,9 @@ def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
             # Only a checkpoint writes state.db. One between the two copies, then a WAL
             # reset, truncation or close, pairs the old db copy with a WAL that no longer
             # holds its newest rows, so the db must still be the one that was copied.
+            # A checkpoint keeps the inode and often the size, so this relies on the state
+            # root's filesystem giving each write a new mtime (fine-grained timestamps, as
+            # ext4 has on Linux 6.13 and later). A coarse timestamp tick can hide one.
             try:
                 unchanged = _identity(os.stat("state.db", dir_fd=home, follow_symlinks=False)) == database
             except OSError:
