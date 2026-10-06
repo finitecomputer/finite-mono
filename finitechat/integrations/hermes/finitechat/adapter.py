@@ -18,8 +18,10 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,11 +68,36 @@ REQUESTER_CONTEXT_V2_DIR = "requester-context-v2"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
 REQUESTER_CONTEXT_V2_VERSION = 2
-_AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "finitechat_authenticated_turn_user", default=None
-)
+_REQUESTER_STATE_MODULE = "_finitechat_requester_state_v1"
+
+
+def _requester_state() -> Any:
+    """Process-lifetime requester data shared by every load of this plugin.
+
+    A forced plugin rediscovery imports this file again under the same
+    `hermes_plugins.*` name, so a running adapter can set its turn marker in
+    one copy while hooks registered by the next copy read another. Only data
+    lives here, outside that namespace: the markers, lock and lease counts.
+    """
+    state = sys.modules.get(_REQUESTER_STATE_MODULE)
+    if state is None:
+        candidate: Any = types.ModuleType(_REQUESTER_STATE_MODULE)
+        candidate.turn_user = contextvars.ContextVar(
+            "finitechat_authenticated_turn_user", default=None
+        )
+        candidate.requester_context = contextvars.ContextVar(
+            "finitechat_authenticated_requester_context", default=None
+        )
+        candidate.lock = threading.Lock()
+        # Resolved lease root -> session key -> lease ID -> (count, expiry).
+        candidate.leases = {}
+        state = sys.modules.setdefault(_REQUESTER_STATE_MODULE, candidate)
+    return state
+
+
+_AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = _requester_state().turn_user
 _AUTHENTICATED_FINITE_REQUESTER_CONTEXT: contextvars.ContextVar[tuple[str, str] | None] = (
-    contextvars.ContextVar("finitechat_authenticated_requester_context", default=None)
+    _requester_state().requester_context
 )
 
 
@@ -312,14 +339,32 @@ class _RequesterContextBroker:
     the active values into terminal subprocesses. The small file lease lets
     `fsite` distinguish that live binding from arbitrary or stale environment
     text without teaching Sites about Chat or Hermes.
+
+    Every broker for one root shares that root's lease counts, so a broker
+    from a reloaded plugin can finish a call an earlier one started. Startup
+    removes only expired files: any process that registers this plugin with
+    the same FINITE_HOME may construct a broker while a turn holds a lease.
+    So a process killed mid-call leaves its lease readable until it expires.
+    The state module name is versioned: change its data shape only under a
+    new name, since a running process keeps the first shape it published.
     """
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = root or _requester_context_root()
         self.root_v2 = self.root.parent / REQUESTER_CONTEXT_V2_DIR
-        self._lock = threading.Lock()
-        self._leases: dict[str, dict[str, tuple[int, int]]] = {}
-        self._clear_on_start()
+        state = _requester_state()
+        self._lock = state.lock
+        with self._lock:
+            try:
+                for root in (self.root, self.root_v2):
+                    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    root.chmod(0o700)
+            except OSError as exc:
+                logger.warning("[finitechat] could not prepare requester context leases: %s", exc)
+            self._leases: dict[str, dict[str, tuple[int, int]]] = state.leases.setdefault(
+                os.path.realpath(self.root), {}
+            )
+            self._prune(int(time.time()))
 
     def before_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
@@ -353,7 +398,7 @@ class _RequesterContextBroker:
         with self._lock:
             session_leases = self._leases.get(session_key)
             if session_leases is None:
-                self._remove(session_key)
+                # No call this process holds; the file may be another process's.
                 return
             count, expires_at = session_leases.get(lease_id, (0, 0))
             if count <= 1:
@@ -363,19 +408,6 @@ class _RequesterContextBroker:
             if not session_leases:
                 self._leases.pop(session_key, None)
                 self._remove(session_key)
-
-    def _clear_on_start(self) -> None:
-        try:
-            self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            self.root.chmod(0o700)
-            for root in (self.root, self.root_v2):
-                root.mkdir(mode=0o700, parents=True, exist_ok=True)
-                root.chmod(0o700)
-                for path in root.iterdir():
-                    if path.is_file() or path.is_symlink():
-                        path.unlink(missing_ok=True)
-        except OSError as exc:
-            logger.warning("[finitechat] could not reset requester context leases: %s", exc)
 
     def _prune(self, now: int) -> None:
         for leases in self._leases.values():

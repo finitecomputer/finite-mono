@@ -404,7 +404,7 @@ class FinitePlatformAdapterTests(unittest.TestCase):
                 self.module._AUTHENTICATED_FINITE_TURN_USER.reset(token)
             self.assertEqual(list(broker.root.glob("*.json")), [])
 
-    def test_parallel_terminal_leases_are_reference_counted_and_restart_clears_them(self):
+    def test_parallel_terminal_leases_are_reference_counted_across_broker_construction(self):
         with tempfile.TemporaryDirectory() as finite_home:
             root = Path(finite_home) / "contexts"
             broker = self.module._RequesterContextBroker(root)
@@ -430,7 +430,11 @@ class FinitePlatformAdapterTests(unittest.TestCase):
 
                 broker.before_tool_call(**first)
                 self.assertTrue(context_path.exists())
-                self.module._RequesterContextBroker(root)
+                # Another registration of the plugin must not end a live call;
+                # its broker finishes the call the first one started.
+                later = self.module._RequesterContextBroker(root)
+                self.assertTrue(context_path.exists())
+                later.after_tool_call(**first)
                 self.assertFalse(context_path.exists())
             finally:
                 broker.after_tool_call(**first)
