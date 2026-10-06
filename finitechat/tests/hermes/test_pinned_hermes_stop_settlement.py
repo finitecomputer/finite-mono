@@ -2290,9 +2290,8 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
         self.assertEqual(len(runs), 1, timeline)
         self.assertEqual(timeline.count(("ack", "msg-1")), 1, timeline)
         self.assertNotIn(("release", "msg-1"), timeline)
-        if not command.startswith("/goal"):
-            # /goal acks once the goal is saved; its kickoff turn follows.
-            self.assert_ran_once_then_acked(timeline, "msg-1", task=task)
+        # /goal's kickoff turn settles the /goal entry.
+        self.assert_ran_once_then_acked(timeline, "msg-1", task=task)
 
     def test_a_stop_after_the_ack_leaves_the_finished_turn_acked(self):
         async def scenario(home: str):
@@ -2598,7 +2597,7 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
         with patch.object(approval, "_session_yolo", set()):
             self.run_scenario(scenario)
 
-    def test_goal_saved_before_a_stop_is_not_set_again(self):
+    def test_goal_whose_kickoff_a_stop_drops_kicks_off_after_restart(self):
         async def scenario(home: str):
             timeline: list[tuple[str, str]] = []
             h = GatewayHarness(home, timeline=timeline, stall=False)
@@ -2607,18 +2606,17 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 await h.deliver(raw_event(1, "/goal synthetic task"))
                 await eventually(lambda: bool(stops))
                 await stops[0]
-                # The handler saved the goal and queued its kickoff; the stop
-                # dropped the kickoff, which is the documented limit.
-                self.assertEqual(h.state("msg-1"), "acked")
-                self.assertNotIn(("release", "msg-1"), timeline)
+                # The handler saved the goal and queued its kickoff, which the
+                # stop dropped: a saved goal alone is not its kickoff, so the
+                # entry goes back with it.
+                self.assertEqual(h.models(), [])
+                self.assertEqual(timeline, [("release", "msg-1")])
+                self.assertEqual(h.state("msg-1"), "pending")
             finally:
                 await h.close()
 
-            restarted = await self.boot_after_restart(home, h.inbox)
-            try:
-                self.assertEqual(restarted.handed, [])
-            finally:
-                await restarted.close()
+            after = await self.run_command_after_restart(home, h.inbox, "synthetic task")
+            self.assert_command_ran_once(after, "/goal synthetic task", "synthetic task")
 
         self.run_scenario(scenario)
 
@@ -2767,13 +2765,15 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                             ),
                         ):
                             await h.deliver(raw_event(1, "/goal synthetic task"))
-                            await h.wait_settled("msg-1")
-                            # The command's own tail, then the kickoff turn's.
+                            # The command's own tail, then the kickoff turn's,
+                            # which settles the /goal entry.
                             await eventually(lambda: h.notices_held == 1)
+                            self.assertEqual(h.state("msg-1"), "leased")
                             tail.set()
                             await eventually(lambda: ("model", "synthetic task") in timeline)
                             tail = h.hold_turn_tails()
                             await eventually(lambda: h.notices_held == 2)
+                            self.assertEqual(h.state("msg-1"), "acked")
                             self.assertEqual(len(h.adapter._pending_messages), 1)
                             runs = len(h.models())
 

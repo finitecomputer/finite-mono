@@ -160,8 +160,9 @@ its own.
   `/undo` and `/yolo`, and replies to a pending prompt, count once the
   gateway's handler has received them; `/goal` (the saved goal),
   `/blueprint` (a scheduled job), `/bg` and `/btw` once the handler has
-  returned without rewriting them. A `/bg` or `/btw` that started its child
-  is settled by that child instead (see **Child work**). A stop that cancels a control after the handler received it
+  returned without rewriting them. A `/bg`, `/btw` or `/goal` that started
+  work past its reply is settled by that work instead (see **Child work**).
+  A stop that cancels a control after the handler received it
   but before it took effect leaves a command the user resends. A command the
   handler never received, or one that starts model work before Hermes ran or
   rewrote it, is released like other model work. While
@@ -180,10 +181,10 @@ its own.
   command Hermes rewrote into the turn's input, that Hermes answered without
   binding a run to the turn's session guard; a redelivery then waits out the
   drain. A message handed over as the drain begins can show Hermes's refusal reply
-  and still run after the restart. A `/goal` handed over in that window is
-  acked: it has saved the goal, and only its kickoff turn is refused,
-  visibly. A stop that interrupts the kickoff loses that turn too; the saved
-  goal continues after the user's next turn or `/goal resume`. `/retry`
+  and still run after the restart. A `/goal` handed over in that window saves
+  the goal, and the drain refuses its kickoff turn visibly; that turn
+  releases the `/goal` entry, so the goal is set again after the restart and
+  kicks off. `/retry`
   rewinds the transcript before it re-sends the last message. If a drain
   refuses the re-sent turn or a stop cuts it off first, the adapter puts the
   rewound transcript back and releases the entry, so the same message is
@@ -284,6 +285,20 @@ its own.
   good is acked. The leased entry is what the rollout idle gate
   (`scripts/finite_status_runtime_idle.py`) reads as busy while a child runs.
   A runtime without this adapter still reads idle then.
+  `/goal <text>` and `/goal resume` reply once their handler has queued the
+  turn that kicks the goal off. A saved goal alone is not that kickoff. The
+  adapter records the queued event by wrapping the gateway's `_enqueue_fifo`
+  during the dispatch; it does not copy the inbox record onto it, which would
+  change the kickoff turn's requester. The `/goal` entry stays leased until
+  that turn has run, and the turn settles it like its own entry. If the
+  gateway runs the event inside a turn it is finishing, that turn settles it
+  with its own. A stop that drops or interrupts the kickoff releases the
+  entry, as does a draining gateway that discards it, so after the restart
+  the goal is set or resumed again and kicks off once. Once `/goal pause`,
+  `clear`, `stop` or `done`, or a user `/stop`, `/new` or `/reset`, ends the
+  loop, earlier `/goal` entries in that chat are final: they are acked, never
+  released, so a restart cannot bring the goal back. The goal judge's later
+  continuations have no inbox entry.
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar
