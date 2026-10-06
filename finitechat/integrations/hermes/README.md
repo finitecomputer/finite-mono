@@ -243,7 +243,9 @@ its own.
   work, such as `/retry` or `/plan`, waits for its own turn instead. So do
   `/goal <text>` and `/goal resume`; the `/goal` controls (`status`, `show`,
   `pause`, `clear`, `stop`, `done`, `wait`, `unwait`, `gate`) answer at once,
-  so a pause sent between goal turns stops the loop. During a drain Hermes also refuses
+  so a pause sent between goal turns stops the loop. A control sent while the
+  goal judge runs stays in force when its verdict returns (the image's
+  goal-judge patch, `infra/images/README.md`). During a drain Hermes also refuses
   clarification and approval text sent to a busy session; that refusal is
   shown and acked, because replaying it later would start a turn without its
   prompt. Text, photos, audio, video, and files each
