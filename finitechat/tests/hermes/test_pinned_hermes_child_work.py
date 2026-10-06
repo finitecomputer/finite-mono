@@ -16,6 +16,7 @@ are synthetic. Each restart boots a new gateway over the same home and inbox.
 
 import asyncio
 import contextlib
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -1106,6 +1107,161 @@ class PinnedHermesPluginRediscoveryTests(GoalScenario):
                 # The kickoff ran before the /goal entry was acked.
                 self.assertLess(runs[0], h.timeline.index(("ack", "msg-3")), h.timeline)
             finally:
+                await h.close()
+
+        self.run_scenario(scenario)
+
+
+class PinnedHermesAutoResumeTests(GoalScenario):
+    """Hermes's own auto-resume runs only for interrupted turns the inbox does not own.
+
+    The adapter declined every resume (6439252c), which dropped interrupted
+    goal continuations that the 458a baseline resumed: they have no inbox
+    entry to redeliver. Each turn start now records durably whether the inbox
+    owns that chat's latest turn, and only such a chat's resume is declined.
+    """
+
+    @staticmethod
+    def owner_marker(h: ChildHarness) -> Path:
+        from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
+
+        session_key = h.runner._session_key_for_source(chat_source(h))
+        digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+        return Path(h.home) / "hermes-turn-owners" / f"{digest}.json"
+
+    async def restart(
+        self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
+    ) -> ChildHarness:
+        restarted = ChildHarness(home, timeline=[], inbox=inbox)
+        await restarted.boot_with_gate_closed()
+        self.assertEqual(await restarted.open_gate(), 1, "Hermes schedules its resume")
+        return restarted
+
+    def test_an_interrupted_goal_continuation_resumes_after_restart(self):
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            verdicts = ["continue"]
+
+            def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                return (
+                    verdicts.pop(0) if verdicts else "done",
+                    "synthetic judge",
+                    False,
+                    None,
+                    False,
+                )
+
+            try:
+                with patch("hermes_cli.goals.judge_goal", judge):
+                    await h.seed()
+                    h.hold_model = lambda message: message.startswith(CONTINUATION)
+                    await h.deliver(raw_event(2, GOALS["set"]))
+                    await eventually(lambda: any(m.startswith(CONTINUATION) for m in h.models()))
+                    # The kickoff settled the /goal entry; the continuation has none.
+                    self.assertEqual(h.state("msg-2"), "acked")
+                    self.assertFalse(self.owner_marker(h).exists())
+                    await h.stop_gracefully()
+                    self.assertTrue(h.interrupted_by_shutdown)
+                    self.assertTrue(h.resume_pending())
+            finally:
+                h.model_gate.set()
+                await h.close()
+
+            restarted = await self.restart(home, h.inbox)
+            try:
+                await eventually(lambda: bool(restarted.models()))
+                await restarted.wait_turns_finished()
+                # Hermes resumed the continuation itself, once, as on 458a; no
+                # inbox entry ran.
+                self.assertEqual(len(restarted.models()), 1, restarted.timeline)
+                self.assertEqual([m for m in restarted.handed if m is not None], [])
+                self.assertFalse(restarted.resume_pending())
+            finally:
+                await restarted.close()
+
+        self.run_scenario(scenario)
+
+    def test_an_interrupted_inbox_turn_runs_once_after_restart(self):
+        """By the inbox redelivery here; after an upgrade from 458a, by Hermes's resume."""
+        for runtime in ("this", "458a"):
+            with self.subTest(runtime=runtime):
+
+                async def scenario(home: str, runtime: str = runtime):
+                    h = ChildHarness(home, timeline=[])
+                    try:
+                        await h.seed()
+                        h.hold_model = lambda message: message == "long work"
+                        await h.deliver(raw_event(2, "long work"))
+                        await eventually(lambda: ("model", "long work") in h.timeline)
+                        marker = json.loads(self.owner_marker(h).read_text(encoding="utf-8"))
+                        self.assertEqual(
+                            (marker["room_id"], marker["seq"], marker["message_id"]),
+                            (ROOM_ID, 2, "msg-2"),
+                        )
+                        await h.stop_gracefully()
+                        self.assertEqual(h.state("msg-2"), "pending")
+                        self.assertTrue(h.resume_pending())
+                        # Still there after the release, and survives the restart.
+                        self.assertTrue(self.owner_marker(h).exists())
+                        if runtime == "458a":
+                            # The 458a runtime keeps no owner records, and its
+                            # stop acks the turn it interrupted.
+                            shutil.rmtree(self.owner_marker(h).parent)
+                            raw, _state = h.inbox["msg-2"]
+                            h.inbox["msg-2"] = (raw, "acked")
+                    finally:
+                        h.model_gate.set()
+                        await h.close()
+
+                    restarted = await self.restart(home, h.inbox)
+                    try:
+                        await eventually(lambda: bool(restarted.models()))
+                        await restarted.wait_turns_finished()
+                        await restarted.settle_loop()
+                        self.assertEqual(restarted.state("msg-2"), "acked")
+                        if runtime == "this":
+                            # Hermes's resume was declined; the redelivery ran it.
+                            self.assertEqual(restarted.handed, ["msg-2"])
+                            self.assertEqual(restarted.models(), ["long work"])
+                        else:
+                            # Hermes resumed it, once, as 458a's own restart would.
+                            self.assertEqual([m for m in restarted.handed if m is not None], [])
+                            self.assertEqual(len(restarted.models()), 1, restarted.timeline)
+                    finally:
+                        await restarted.close()
+
+                self.run_scenario(scenario)
+
+
+class PinnedHermesAdapterReplacementTests(GoalScenario):
+    """A gateway that replaces a failed adapter disconnects the old one first.
+
+    The pinned fatal-error path calls only ``disconnect()`` on the old
+    instance (no ``cancel_background_tasks()`` first) before its reconnect
+    watcher builds a new one. The old instance hands back the work it owned
+    then, so the new one starts with nothing to coalesce against.
+    """
+
+    def test_disconnecting_a_replaced_adapter_hands_back_its_work(self):
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            tail: asyncio.Event | None = None
+            try:
+                await self.prepare(h, "resume")
+                await self.launch(h, "bg")
+                tail = h.hold_turn_tails()
+                await h.deliver(raw_event(3, GOALS["resume"]))
+                await eventually(lambda: h.notices_held == 1)
+                self.assertEqual((h.state("msg-2"), h.state("msg-3")), ("leased", "leased"))
+                await h.adapter.disconnect()
+                for message_id in ("msg-2", "msg-3"):
+                    self.assertEqual(h.state(message_id), "pending", h.timeline)
+                self.assertEqual(h.results("bg"), [])
+                self.assertFalse(any(is_kickoff("resume", m) for m in h.models()))
+            finally:
+                if tail is not None:
+                    tail.set()
+                self.children.gate.set()
                 await h.close()
 
         self.run_scenario(scenario)
