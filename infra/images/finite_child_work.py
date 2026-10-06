@@ -355,12 +355,19 @@ def begin_goal(runner, event):
     return True
 
 
-def end_goal(runner, event, completed):
+def end_goal(runner, event, completed, *, launched):
     key = getattr(event, "_finite_goal_work", None)
     if key:
         store = journal(runner)
         row = store.get(key)
-        if row["state"] == "outcome" and completed:
+        if (
+            not launched
+            and getattr(runner, "_draining", False)
+            and row["state"] in {"running", "outcome"}
+        ):
+            # Drain refusal is a transport-successful response, not execution.
+            store.update(key, "queued", deliveries=[], delivered=0)
+        elif row["state"] == "outcome" and completed:
             if row["delivered"] == len(json.loads(row["deliveries"])):
                 store.update(key, "done")
         elif row["state"] == "running":
@@ -432,17 +439,52 @@ def retain_media(store, key, deliveries):
                 os.fsync(dst.fileno())
             item["kwargs"][field] = str(target)
     if directory.exists():
-        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        # Persist the newly created path as well as file contents before the
+        # manifest commit makes these bytes an acknowledged result obligation.
+        for path in (directory, directory.parent, store.home):
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
 
-def goal_result(runner, key, delivery):
-    """Own the goal's final text before transport can acknowledge its result."""
+async def goal_output(adapter, event, text, images, media, local, tts, metadata, force_document):
+    """Retain the complete parsed goal result before its first transport send."""
+    from urllib.parse import unquote
+
+    from gateway.platforms.base import _reply_anchor_for_event, should_send_media_as_audio
+
+    key = getattr(event, "_finite_goal_work", None)
+    if not key:
+        return False
+    runner = adapter.gateway_runner
     store = journal(runner)
     if store.get(key)["state"] == "queued":
-        return False  # A drain refused launch; retain the unstarted continuation.
-    store.update(key, "outcome", deliveries=[delivery])
+        return False  # Drain refused launch; preserve the queued continuation.
+    deliveries = []
+    captured = CaptureAdapter(adapter, deliveries)
+    common = {"chat_id": event.source.chat_id, "metadata": metadata}
+    for path in tts:
+        await captured.send_voice(audio_path=path, **common)
+    if text:
+        await captured.send(content=text, reply_to=_reply_anchor_for_event(event), **common)
+    for url, caption in images:
+        if url.startswith("file://"):
+            await captured.send_image_file(image_path=unquote(url[7:]), caption=caption, **common)
+        else:
+            await captured.send_image(image_url=url, caption=caption, **common)
+    for path, voice in [*media, *((path, False) for path in local)]:
+        ext = Path(path).suffix.lower()
+        if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif"} and not voice and not force_document:
+            await captured.send_image_file(image_path=path, **common)
+        elif should_send_media_as_audio(adapter.platform, ext, is_voice=voice):
+            await captured.send_voice(audio_path=path, is_voice=voice, **common)
+        elif ext in {".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp"}:
+            await captured.send_video(video_path=path, **common)
+        else:
+            await captured.send_document(file_path=path, **common)
+    retain_media(store, key, deliveries)
+    store.update(key, "outcome", deliveries=deliveries, delivered=0)
+    await deliver(runner, key)
     return True
