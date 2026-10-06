@@ -45,7 +45,9 @@ stop; a message that arrives after it can still be in flight at stop time.
 """
 from __future__ import annotations
 
+import contextlib
 import errno
+import fcntl
 import json
 import os
 import shutil
@@ -54,7 +56,7 @@ import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 MAX_STATE_BYTES = 32 * 1024 * 1024
 MAX_SESSION_DB_BYTES = 4 * 1024 * 1024 * 1024
@@ -258,10 +260,34 @@ def _copy_stable(directory: int, name: str, target: Path, required: bool) -> tup
     return _identity(before)
 
 
+@contextlib.contextmanager
+def _scratch_dir(parent: str) -> Iterator[Path]:
+    """A private directory for one read's copy, removed on exit. The read holds
+    a shared lock on it until then, however long the read stalls, so a
+    concurrent read's sweep never removes a live copy."""
+    try:
+        path = tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=parent)
+    except OSError:  # a full or unusable temp dir
+        raise Unreadable("unreadable") from None
+    fd = None
+    try:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            raise Unreadable("unreadable") from None
+        yield Path(path)
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+        if fd is not None:
+            os.close(fd)
+
+
 def _sweep_stale_scratch(parent: str) -> None:
     """Remove copies of the chat database left by a read that was killed
     mid-copy (SIGTERM, SIGKILL, OOM, reboot): only this tool's directories,
-    owned by this user and untouched for STALE_SCRATCH_S. Best effort."""
+    owned by this user, untouched for STALE_SCRATCH_S and not locked by a
+    live read. A killed read's lock dies with it. Best effort."""
     try:
         names = [name for name in os.listdir(parent) if name.startswith(SCRATCH_PREFIX)]
     except OSError:
@@ -274,10 +300,18 @@ def _sweep_stale_scratch(parent: str) -> None:
                 continue
             touched = max([info.st_mtime] + [os.lstat(os.path.join(path, entry)).st_mtime
                                               for entry in os.listdir(path)])
+            if time.time() - touched <= STALE_SCRATCH_S:
+                continue
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         except OSError:
             continue
-        if time.time() - touched > STALE_SCRATCH_S:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # refused while a live read holds its lock
             shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
 
 
 def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
@@ -303,38 +337,34 @@ def _background(home: int, now_ms: int, offset_ms: int) -> dict[str, Any]:
     _sweep_stale_scratch(parent)
     for _attempt in range(3):
         try:
-            scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=parent))
-        except OSError:  # a full or unusable temp dir
-            raise Unreadable("unreadable") from None
-        try:
-            database = _copy_stable(home, "state.db", scratch / "state.db", required=True)
-            _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
-            # Only a checkpoint writes state.db. One between the two copies, then a WAL
-            # reset, truncation or close, pairs the old db copy with a WAL that no longer
-            # holds its newest rows, so the db must still be the one that was copied.
-            # A checkpoint keeps the inode and often the size, so this relies on the state
-            # root's filesystem giving each write a new mtime (fine-grained timestamps, as
-            # ext4 has on Linux 6.13 and later). A coarse timestamp tick can hide one.
-            try:
-                unchanged = _identity(os.stat("state.db", dir_fd=home, follow_symlinks=False)) == database
-            except OSError:
-                unchanged = False
-            if not unchanged:
-                raise Unreadable("unstable")
-            connection = sqlite3.connect(scratch / "state.db")  # the copy, so WAL recovery stays private
-            try:
-                live, stale, ended = connection.execute(BACKGROUND_SQL, cutoffs).fetchone()
-            finally:
-                connection.close()
-            return {"gateway_started_age_s": _age_s(now_ms, pid.st_mtime_ns // 1_000_000),
-                    "open": live, "stale_open": stale, "recently_ended": ended}
+            with _scratch_dir(parent) as scratch:
+                database = _copy_stable(home, "state.db", scratch / "state.db", required=True)
+                _copy_stable(home, "state.db-wal", scratch / "state.db-wal", required=False)
+                # Only a checkpoint writes state.db. One between the two copies, then a WAL
+                # reset, truncation or close, pairs the old db copy with a WAL that no longer
+                # holds its newest rows, so the db must still be the one that was copied.
+                # A checkpoint keeps the inode and often the size, so this relies on the state
+                # root's filesystem giving each write a new mtime (fine-grained timestamps, as
+                # ext4 has on Linux 6.13 and later). A coarse timestamp tick can hide one.
+                try:
+                    unchanged = _identity(os.stat("state.db", dir_fd=home, follow_symlinks=False)) == database
+                except OSError:
+                    unchanged = False
+                if not unchanged:
+                    raise Unreadable("unstable")
+                connection = sqlite3.connect(scratch / "state.db")  # the copy, so WAL recovery stays private
+                try:
+                    live, stale, ended = connection.execute(BACKGROUND_SQL, cutoffs).fetchone()
+                finally:
+                    connection.close()
         except Unreadable as error:
             if str(error) != "unstable":  # only a file changed mid-copy is retried
                 raise
         except sqlite3.Error:
             raise Unreadable("malformed") from None
-        finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+        else:
+            return {"gateway_started_age_s": _age_s(now_ms, pid.st_mtime_ns // 1_000_000),
+                    "open": live, "stale_open": stale, "recently_ended": ended}
     raise Unreadable("unstable")
 
 
