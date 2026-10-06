@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
+import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
+from typing import ClassVar
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "hermes-chat-interruption-docker-smoke.py"
 WORKFLOW_PATH = REPO_ROOT.parent / ".github" / "workflows" / "hermes-runtime-smoke.yml"
+SIDECAR_INBOX_PATH = REPO_ROOT / "crates" / "finitechat-cli" / "src" / "hermes.rs"
 
 spec = importlib.util.spec_from_file_location("hermes_chat_interruption_smoke", SCRIPT_PATH)
 assert spec is not None and spec.loader is not None
@@ -48,7 +53,15 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
 
     def test_matrix_keeps_the_three_bounded_cases(self) -> None:
         source = SCRIPT_PATH.read_text(encoding="utf-8")
-        self.assertIn('interrupt("graceful-stop", kill=False, restore=False)', source)
+        self.assertEqual(
+            smoke.GRACEFUL_STOP_CASES,
+            ["graceful-stop", "graceful-stop-repeat-2", "graceful-stop-repeat-3"],
+        )
+        self.assertIn(
+            "for graceful_case in GRACEFUL_STOP_CASES:\n"
+            "            interrupt(graceful_case, kill=False, restore=False)",
+            source,
+        )
         self.assertIn('interrupt("sigkill", kill=True, restore=False)', source)
         self.assertIn('interrupt("empty-target-restore", kill=False, restore=True)', source)
         self.assertIn(
@@ -229,6 +242,237 @@ class HermesChatInterruptionSmokeTest(unittest.TestCase):
         self.assertTrue(failure.rstrip().endswith("raise"))
         for point in ("before_stop", "before_container_removal", "after_restart"):
             self.assertIn(f'diagnose("{point}"', source)
+
+    # Shapes below follow runtime-diagnostics-37421176063: the not-awaited
+    # shutdown left both the active (seq 4) and queued (seq 6) entries leased.
+    @staticmethod
+    def inbox_fixture(now_ms: int = 10_000_000) -> dict:
+        def event(seq: int, message_id: str, lease: dict | None) -> dict:
+            entry = {
+                "key": f"room-a\x1f{seq}\x1f{message_id}",
+                "room_id": "room-a",
+                "seq": seq,
+                "message_id": message_id,
+                "created_at_ms": now_ms - 5_000,
+                "event": {"text": f"body {seq}"},
+            }
+            if lease is not None:
+                entry["lease"] = lease
+            return entry
+
+        return {
+            "events": [
+                event(3, "older", {"state": "pending"}),
+                event(
+                    4,
+                    "active",
+                    {"state": "leased", "lease_id": "l-4", "leased_at_ms": now_ms - 3_747},
+                ),
+                event(
+                    6, "queued", {"state": "leased", "lease_id": "l-6", "leased_at_ms": now_ms - 91}
+                ),
+                event(7, "other", {"state": "leased", "lease_id": "l-7", "leased_at_ms": now_ms}),
+            ],
+            "cursors": {"room-a": 7},
+            "acked": [{"key": "room-a\x1f2\x1fdone", "acked_at_ms": now_ms - 9_000}],
+        }
+
+    IDS: ClassVar[dict[str, str]] = {"active": "active", "queued": "queued"}
+
+    def released(self, active: str = "pending") -> dict:
+        inbox = self.inbox_fixture()
+        inbox["events"] = [e for e in inbox["events"] if e["message_id"] != "other"]
+        for entry in inbox["events"]:
+            if entry["message_id"] in ("active", "queued"):
+                entry["lease"] = {"state": "pending"}
+        if active == "acked":
+            inbox["events"] = [e for e in inbox["events"] if e["message_id"] != "active"]
+            inbox["acked"].append({"key": "room-a\x1f4\x1factive", "acked_at_ms": 1})
+        return inbox
+
+    def test_graceful_check_fails_on_the_observed_not_awaited_inbox(self) -> None:
+        with self.assertRaisesRegex(smoke.SmokeFailure, "leased before restart: seq=4"):
+            smoke.require_graceful_inbox_released(self.inbox_fixture(), message_ids=self.IDS)
+
+    def test_graceful_check_fails_on_any_leased_entry(self) -> None:
+        inbox = self.released()
+        inbox["events"][0]["lease"] = {"state": "leased", "lease_id": "x", "leased_at_ms": 1}
+        with self.assertRaisesRegex(smoke.SmokeFailure, "seq=3"):
+            smoke.require_graceful_inbox_released(inbox, message_ids=self.IDS)
+
+    def test_graceful_check_accepts_a_released_or_legitimately_acked_active_turn(self) -> None:
+        self.assertEqual(
+            smoke.require_graceful_inbox_released(self.released(), message_ids=self.IDS),
+            {"active": "pending", "queued": "pending"},
+        )
+        self.assertEqual(
+            smoke.require_graceful_inbox_released(self.released("acked"), message_ids=self.IDS),
+            {"active": "acked", "queued": "pending"},
+        )
+
+    def test_graceful_check_rejects_a_settled_or_missing_queued_follow_up(self) -> None:
+        settled = self.released()
+        settled["events"] = [e for e in settled["events"] if e["message_id"] != "queued"]
+        missing = copy.deepcopy(settled)
+        settled["acked"].append({"key": "room-a\x1f6\x1fqueued", "acked_at_ms": 1})
+        with self.assertRaisesRegex(smoke.SmokeFailure, "settled before it ran"):
+            smoke.require_graceful_inbox_released(settled, message_ids=self.IDS)
+        with self.assertRaisesRegex(smoke.SmokeFailure, "vanished"):
+            smoke.require_graceful_inbox_released(missing, message_ids=self.IDS)
+
+    def test_expiry_fixture_backdates_only_the_two_known_leases(self) -> None:
+        original = self.inbox_fixture()
+        pristine = copy.deepcopy(original)
+
+        simulated, records = smoke.simulate_lease_expiry(
+            original, message_ids=self.IDS, now_ms=10_000_000
+        )
+
+        self.assertEqual(original, pristine, "the input inbox must not be mutated")
+        shift = smoke.PRODUCTION_LEASE_TTL_MS + smoke.SIMULATED_EXPIRY_MARGIN_MS
+        expected = copy.deepcopy(pristine)
+        expected["events"][1]["lease"]["leased_at_ms"] -= shift
+        expected["events"][2]["lease"]["leased_at_ms"] -= shift
+        self.assertEqual(json.dumps(simulated), json.dumps(expected))
+        self.assertEqual(
+            [(r["role"], r["seq"], r["lease_id"], r["original_leased_at_ms"]) for r in records],
+            [("active", 4, "l-4", 10_000_000 - 3_747), ("queued", 6, "l-6", 10_000_000 - 91)],
+        )
+        for record in records:
+            self.assertEqual(
+                record["original_leased_at_ms"] - record["simulated_leased_at_ms"], shift
+            )
+        # The sidecar's TTL rule now sees both as expired and the third as live.
+        now = 10_000_000
+        ages = [now - e["lease"]["leased_at_ms"] for e in simulated["events"][1:]]
+        self.assertGreaterEqual(ages[0], smoke.PRODUCTION_LEASE_TTL_MS)
+        self.assertGreaterEqual(ages[1], smoke.PRODUCTION_LEASE_TTL_MS)
+        self.assertLess(ages[2], smoke.PRODUCTION_LEASE_TTL_MS)
+
+    def test_expiry_fixture_refuses_anything_but_two_fresh_leases(self) -> None:
+        now = 10_000_000
+        cases = {
+            "not leased": lambda i: i["events"][1].update(lease={"state": "pending"}),
+            "not a fresh": lambda i: i["events"][1]["lease"].update(
+                leased_at_ms=now - smoke.PRODUCTION_LEASE_TTL_MS
+            ),
+            "found 2 times": lambda i: i["events"].append(copy.deepcopy(i["events"][2])),
+            "found 0 times": lambda i: i["events"].pop(2),
+        }
+        for message, mutate in cases.items():
+            inbox = self.inbox_fixture(now)
+            mutate(inbox)
+            with self.subTest(message), self.assertRaisesRegex(smoke.SmokeFailure, message):
+                smoke.simulate_lease_expiry(inbox, message_ids=self.IDS, now_ms=now)
+        with self.assertRaisesRegex(smoke.SmokeFailure, "exactly two distinct"):
+            smoke.simulate_lease_expiry(
+                self.inbox_fixture(now),
+                message_ids={"active": "active", "queued": "active"},
+                now_ms=now,
+            )
+
+    def test_backdate_verification_rejects_any_other_change(self) -> None:
+        original = self.inbox_fixture()
+        simulated, records = smoke.simulate_lease_expiry(
+            original, message_ids=self.IDS, now_ms=10_000_000
+        )
+        for mutate in (
+            lambda i: i["events"][3]["lease"].update(leased_at_ms=0),
+            lambda i: i["events"].reverse(),
+            lambda i: i["cursors"].update({"room-a": 8}),
+            lambda i: i["events"][1]["lease"].update(lease_id="other"),
+        ):
+            changed = copy.deepcopy(simulated)
+            mutate(changed)
+            with self.assertRaises(smoke.SmokeFailure):
+                smoke.require_only_leases_backdated(original, changed, records)
+
+    def test_production_lease_ttl_matches_the_sidecar(self) -> None:
+        source = SIDECAR_INBOX_PATH.read_text(encoding="utf-8")
+        match = re.search(
+            r"const DEFAULT_HERMES_INBOX_LEASE_TTL_MILLIS: u64 = (\d+) \* (\d+) \* (\d+);", source
+        )
+        assert match is not None
+        a, b, c = (int(group) for group in match.groups())
+        self.assertEqual(smoke.PRODUCTION_LEASE_TTL_MS, a * b * c)
+        self.assertIn(f'"{smoke.LEASE_TTL_ENV}"', source)
+
+    def test_smoke_never_shortens_the_lease_ttl(self) -> None:
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        self.assertEqual(source.count("LEASE_TTL_ENV"), 3)  # definition, guard, guard message
+        self.assertIn('["docker", "exec", name, "printenv", LEASE_TTL_ENV]', source)
+
+    def test_stopped_inbox_write_is_compare_and_swap_on_an_isolated_container(self) -> None:
+        ok = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.object(smoke.smoke, "run", return_value=ok) as run:
+            smoke.write_stopped_inbox(
+                image="image",
+                home_volume="home",
+                expected_sha256="abc",
+                fixture=Path("/tmp/fixture.json"),
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(command[command.index("--network") + 1], "none")
+        self.assertIn("EXPECTED_SHA256=abc", command)
+        self.assertIn(
+            "type=bind,src=/tmp/fixture.json,dst=/fixture/hermes-inbox.json,readonly", command
+        )
+        self.assertIn('test "$(sha256sum "$f" | cut -d" " -f1)" = "$EXPECTED_SHA256"', command[-1])
+
+    def test_case_flow_orders_the_inbox_contract_checks(self) -> None:
+        source = SCRIPT_PATH.read_text(encoding="utf-8")
+        flow = source[
+            source.index("def interrupt_case(") : source.index("def simulate_stopped_lease_expiry(")
+        ]
+        stopped = flow.index("require_graceful_inbox_released(")
+        removed = flow.index("smoke.docker_container_rm(name)")
+        expiry = flow.index("simulate_stopped_lease_expiry(case_name")
+        restart = flow.index("health = start_agent()")
+        self.assertLess(flow.index('smoke.run(["docker", "kill", "--signal", "KILL"'), stopped)
+        self.assertLess(stopped, removed)
+        self.assertLess(removed, expiry)
+        self.assertLess(expiry, restart)
+        self.assertIn('if not kill:\n            set_stage("check_stopped_inbox_released"', flow)
+        self.assertIn('if kill:\n            set_stage("simulate_lease_expiry"', flow)
+        self.assertLess(restart, flow.index("require_restart_order("))
+        self.assertLess(flow.index('case["fresh_turns"]'), flow.index("wait_inbox_settled("))
+
+    def test_settled_inbox_requires_both_acked_and_nothing_leased(self) -> None:
+        inbox = self.released()
+        inbox["events"] = [e for e in inbox["events"] if e["message_id"] not in self.IDS.values()]
+        inbox["acked"] += [
+            {"key": "room-a\x1f4\x1factive", "acked_at_ms": 1},
+            {"key": "room-a\x1f6\x1fqueued", "acked_at_ms": 1},
+        ]
+        self.assertEqual(
+            smoke.require_settled_out_of_inbox(inbox, message_ids=self.IDS)["leased_entries"], 0
+        )
+        with self.assertRaisesRegex(smoke.SmokeFailure, "queued still in inbox"):
+            smoke.require_settled_out_of_inbox(self.released(), message_ids=self.IDS)
+        leased = copy.deepcopy(inbox)
+        leased["events"][0]["lease"] = {"state": "leased", "lease_id": "x", "leased_at_ms": 1}
+        with self.assertRaisesRegex(smoke.SmokeFailure, "leased seqs"):
+            smoke.require_settled_out_of_inbox(leased, message_ids=self.IDS)
+
+    def test_restart_order_requires_one_queued_handoff_after_the_rerun(self) -> None:
+        def req(text: str) -> dict:
+            return {"latest_user_text": text}
+
+        active = req("FINITE_INTERRUPT_STALL:c keep this turn open")
+        queued = req("Reply with exactly: c queued follow-up ok")
+        check = lambda requests: smoke.require_restart_order(  # noqa: E731
+            requests, active_marker="FINITE_INTERRUPT_STALL:c", queued_expected="c queued"
+        )
+        self.assertEqual(check([active, queued]), {"active_reruns": 1, "queued_handoffs": 1})
+        self.assertEqual(check([queued]), {"active_reruns": 0, "queued_handoffs": 1})
+        for requests, message in (
+            ([active, queued, queued], "2 times"),
+            ([active], "0 times"),
+            ([queued, active], "before the interrupted"),
+            ([active, active, queued], "reran 2 times"),
+        ):
+            with self.subTest(message), self.assertRaisesRegex(smoke.SmokeFailure, message):
+                check(requests)
 
     def test_dispatch_workflow_runs_and_uploads_the_matrix(self) -> None:
         workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
