@@ -240,7 +240,10 @@ its own.
   task still runs the usage-notice call and cleanup; the base adapter treats
   the session as busy until then while Hermes is idle, and would run a
   command inline outside any background turn. A command that starts model
-  work, such as `/retry` or `/plan`, waits for its own turn instead. During a drain Hermes also refuses
+  work, such as `/retry` or `/plan`, waits for its own turn instead. So do
+  `/goal <text>` and `/goal resume`; the `/goal` controls (`status`, `show`,
+  `pause`, `clear`, `stop`, `done`, `wait`, `unwait`, `gate`) answer at once,
+  so a pause sent between goal turns stops the loop. During a drain Hermes also refuses
   clarification and approval text sent to a busy session; that refusal is
   shown and acked, because replaying it later would start a turn without its
   prompt. Text, photos, audio, video, and files each
