@@ -253,7 +253,8 @@ class ObserveTests(unittest.TestCase):
         for reason, arrange in cases:
             with self.subTest(reason):
                 self.tearDown(); self.setUp()
-                outside.parent.mkdir(exist_ok=True); outside.write_text(json.dumps({"events": []}))
+                outside = Path(self.temporary.name).resolve() / "outside.json"  # inside this case's temp dir
+                outside.write_text(json.dumps({"events": []}))
                 arrange()
                 result = self.observe()
                 self.assertEqual((result["verdict"], result["reasons"]), ("unknown", [reason]))
@@ -528,6 +529,22 @@ class ObserveTests(unittest.TestCase):
             result = self.observe()
         self.assertEqual((result["verdict"], result["reasons"]), ("busy", ["background_sessions"]))
         self.assertEqual(copies, ["state.db", "state.db-wal"] * 3)  # each change was retried
+
+    def test_a_db_removed_after_the_wal_copy_is_retried_then_missing(self) -> None:
+        real = idle._copy_stable
+        copies = []
+
+        def remove_after_wal_copy(directory, name, target, required):
+            signature = real(directory, name, target, required)
+            copies.append(name)
+            if name == "state.db-wal":
+                (self.home.agent / "hermes-home" / "state.db").unlink()
+            return signature
+
+        with mock.patch.object(idle, "_copy_stable", remove_after_wal_copy):
+            result = self.observe()
+        self.assertEqual((result["verdict"], result["reasons"]), ("unknown", ["background_missing"]))
+        self.assertEqual(copies, ["state.db", "state.db-wal"])
 
     def test_a_file_renamed_over_the_source_mid_copy_is_unstable(self) -> None:
         # The open descriptor still reads the old inode, so only a by-name check sees it.
