@@ -6,7 +6,9 @@ import io
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +30,11 @@ def event(lease: dict | None = None, created_ms: int = NOW_MS - 30_000) -> dict:
     return item
 
 
+GATEWAY_START_S = NOW_MS / 1000 - 3600
+SESSIONS_DDL = ("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL,"
+                " ended_at REAL, end_reason TEXT)")
+
+
 class AgentRoot:
     """A synthetic `<work_root>/kata/<runtime>` durable root."""
 
@@ -38,6 +45,22 @@ class AgentRoot:
         self.gateway()
         self.write("hermes-inbox.json", {"events": [], "cursors": {SECRET: 4},
                                          "acked": [{"key": SECRET, "acked_at_ms": 1}]})
+        self.pid()
+        with contextlib.closing(sqlite3.connect(self.agent / "hermes-home" / "state.db")) as db:
+            db.execute(SESSIONS_DDL)
+            db.execute("INSERT INTO sessions VALUES (?, 'finitechat', ?, NULL, NULL)", (SECRET, GATEWAY_START_S - 99))
+            db.commit()
+
+    def pid(self, started_s: float = GATEWAY_START_S) -> None:
+        """`hermes gateway run` creates gateway.pid O_EXCL once at process start."""
+        path = self.agent / "hermes-home" / "gateway.pid"
+        path.write_text(json.dumps({"pid": 7, "start_time": 123}))
+        os.utime(path, (started_s, started_s))
+
+    def session(self, started_s: float, ended_s: float | None = None, sid: str = "bg_120000_" + SECRET) -> None:
+        with contextlib.closing(sqlite3.connect(self.agent / "hermes-home" / "state.db")) as db:
+            db.execute("INSERT INTO sessions VALUES (?, 'finitechat', ?, ?, NULL)", (sid, started_s, ended_s))
+            db.commit()
 
     def write(self, name: str, document: object) -> Path:
         path = self.agent / name
@@ -66,7 +89,10 @@ class ObserveTests(unittest.TestCase):
     def test_running_gateway_with_absent_agentd_and_marker_files_is_idle(self) -> None:
         result = self.observe()
         self.assertEqual((result["verdict"], result["reasons"]), ("idle", []))
-        self.assertEqual(result["gateway"], {"state": "running", "active_agents": 0, "updated_age_s": 600})
+        self.assertEqual(result["gateway"], {"state": "running", "active_agents": 0, "updated_age_s": 600,
+                                             "background": {"gateway_started_age_s": 3600, "open": 0,
+                                                            "stale_open": 0, "recently_ended": 0}})
+        self.assertEqual(result["hermes_inbox"]["newest_ack_age_s"], (NOW_MS - 1) // 1000)
         self.assertEqual(result["agentd_inbox"], {"present": False, "events": 0})
         self.assertEqual(result["running_markers"], {"present": False, "messages": 0})
         (self.home.agent / "hermes-inbox.json").unlink()
@@ -94,7 +120,7 @@ class ObserveTests(unittest.TestCase):
         cases["inbox_leased"]()
         self.assertEqual(self.observe()["hermes_inbox"], {
             "present": True, "pending": 0, "leased": 2, "oldest_pending_age_s": None,
-            "oldest_lease_age_s": 840, "newest_lease_age_s": 5})
+            "oldest_lease_age_s": 840, "newest_lease_age_s": 5, "newest_ack_age_s": None})
         cases["inbox_pending"]()
         self.assertEqual(self.observe()["hermes_inbox"]["oldest_pending_age_s"], 90)
 
@@ -206,6 +232,127 @@ class ObserveTests(unittest.TestCase):
         with mock.patch.object(idle, "MAX_STATE_BYTES", 64):
             self.home.write("hermes-inbox.json", {"events": [], "pad": "x" * 64})
             self.assertEqual(self.observe()["reasons"], ["gateway_oversize", "hermes_inbox_oversize"])
+
+    def test_an_entry_acked_within_the_quiet_window_is_busy(self) -> None:
+        # A /bg or /btw command entry is acked when its child launches; the
+        # old Runtime keeps no other trace of a /btw child.
+        quiet_ms = idle.QUIET_AFTER_ACK_S * 1000
+        for acked_ms, verdict in ((NOW_MS - 60_000, "busy"), (NOW_MS - quiet_ms + 1000, "busy"),
+                                  (NOW_MS - quiet_ms, "idle"), (NOW_MS + 5_000, "busy")):
+            with self.subTest(age_ms=NOW_MS - acked_ms):
+                self.home.write("hermes-inbox.json", {"events": [], "acked": [
+                    {"key": SECRET, "acked_at_ms": 1}, {"key": SECRET + "2", "acked_at_ms": acked_ms}]})
+                result = self.observe()
+                self.assertEqual((result["verdict"], result["reasons"]),
+                                 (verdict, ["recent_ack"] if verdict == "busy" else []))
+        self.assertEqual(self.observe()["hermes_inbox"]["newest_ack_age_s"], 0)
+
+    def test_open_bg_session_of_the_current_gateway_is_busy_at_any_age(self) -> None:
+        self.home.session(GATEWAY_START_S + 1)
+        result = self.observe()
+        self.assertEqual((result["verdict"], result["reasons"]), ("busy", ["background_sessions"]))
+        self.assertEqual(result["gateway"]["background"], {"gateway_started_age_s": 3600, "open": 1,
+                                                           "stale_open": 0, "recently_ended": 0})
+        self.tearDown(); self.setUp()
+        self.home.session(GATEWAY_START_S + 1, sid="20260921_120000_" + SECRET)  # a chat session, not /bg
+        self.assertEqual(self.observe()["verdict"], "idle")
+
+    def test_open_bg_session_from_an_earlier_gateway_process_is_reported_not_busy(self) -> None:
+        # A stop or crash leaves a killed child's row open forever.
+        self.home.session(GATEWAY_START_S - 5)
+        result = self.observe()
+        self.assertEqual((result["verdict"], result["gateway"]["background"]["stale_open"]), ("idle", 1))
+        self.home.pid(GATEWAY_START_S - 10)  # the same row under the process that ran it
+        self.assertEqual(self.observe()["reasons"], ["background_sessions"])
+
+    def test_bg_session_ended_within_the_delivery_window_is_busy(self) -> None:
+        # The row is ended before the result is sent to the chat.
+        window = idle.BACKGROUND_DELIVERY_S
+        for ended_s, verdict in ((NOW_MS / 1000 - 10, "busy"), (NOW_MS / 1000 - window - 1, "idle")):
+            with self.subTest(ended_s=ended_s):
+                self.tearDown(); self.setUp()
+                self.home.session(GATEWAY_START_S + 1, ended_s)
+                self.assertEqual(self.observe()["verdict"], verdict)
+
+    def test_rows_still_in_the_wal_are_read_from_a_scratch_copy_without_touching_live_files(self) -> None:
+        home = self.home.agent / "hermes-home"
+        writer = sqlite3.connect(home / "state.db")
+        try:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            writer.execute("INSERT INTO sessions VALUES ('bg_1', 'finitechat', ?, NULL, NULL)", (GATEWAY_START_S + 1,))
+            writer.commit()
+            before = {p.name: (p.stat().st_mtime_ns, p.stat().st_size) for p in home.iterdir()}
+            self.assertGreater(before["state.db-wal"][1], 0)
+            self.assertEqual(self.observe()["reasons"], ["background_sessions"])
+            self.assertEqual({p.name: (p.stat().st_mtime_ns, p.stat().st_size) for p in home.iterdir()}, before)
+        finally:
+            writer.close()
+
+    def test_missing_unsafe_or_unreadable_session_state_fails_unknown(self) -> None:
+        def home() -> Path:
+            return self.home.agent / "hermes-home"
+
+        def outside() -> Path:
+            return Path(self.temporary.name).resolve() / "outside.db"
+
+        cases = [
+            ("background_pid_missing", lambda: (home() / "gateway.pid").unlink()),
+            ("background_not_regular", lambda: ((home() / "gateway.pid").unlink(),
+                                                (home() / "gateway.pid").symlink_to(outside()))),
+            ("background_missing", lambda: (home() / "state.db").unlink()),
+            ("background_symlink", lambda: (os.rename(home() / "state.db", outside()),
+                                            (home() / "state.db").symlink_to(outside()))),
+            ("background_not_regular", lambda: ((home() / "state.db").unlink(), (home() / "state.db").mkdir())),
+            ("background_malformed", lambda: (home() / "state.db").write_bytes(b"not a database" * 100)),
+            ("background_malformed", lambda: self._drop_sessions_table()),
+        ]
+        for reason, arrange in cases:
+            with self.subTest(reason):
+                self.tearDown(); self.setUp()
+                arrange()
+                result = self.observe()
+                self.assertEqual((result["verdict"], result["reasons"]), ("unknown", [reason]))
+        self.tearDown(); self.setUp()
+        with mock.patch.object(idle, "MAX_SESSION_DB_BYTES", 64):
+            self.assertEqual(self.observe()["reasons"], ["background_oversize"])
+        with mock.patch.dict(sys.modules, {"sqlite3": None}):
+            self.assertEqual(self.observe()["reasons"], ["background_sqlite_unavailable"])
+
+    def test_a_copy_torn_by_a_live_writer_is_retried_then_unknown(self) -> None:
+        real = idle._copy_stable
+        calls = []
+
+        def torn(directory, name, target, required):
+            calls.append(name)
+            if len(calls) == 1:
+                raise idle.Unreadable("unstable")
+            return real(directory, name, target, required)
+
+        with mock.patch.object(idle, "_copy_stable", torn):
+            self.assertEqual(self.observe()["verdict"], "idle")
+        with mock.patch.object(idle, "_copy_stable", side_effect=idle.Unreadable("unstable")) as always:
+            self.assertEqual(self.observe()["reasons"], ["background_unstable"])
+        self.assertEqual(always.call_count, 3)
+
+    def test_a_live_write_during_the_copy_is_unstable_never_read(self) -> None:
+        live = self.home.agent / "hermes-home" / "state.db"
+        real_read = os.read
+        bumps = iter(range(1, 1_000_000))
+
+        def read_while_writer_commits(fd, size):
+            data = real_read(fd, size)
+            stamp = int(GATEWAY_START_S * 1e9) + next(bumps)
+            os.utime(live, ns=(stamp, stamp))
+            return data
+
+        with mock.patch.object(idle.os, "read", read_while_writer_commits):
+            self.assertEqual(self.observe()["reasons"], ["background_unstable"])
+
+    def _drop_sessions_table(self) -> None:
+        with contextlib.closing(sqlite3.connect(self.home.agent / "hermes-home" / "state.db")) as db:
+            db.execute("DROP TABLE sessions")
+            db.commit()
 
     @unittest.skipIf(os.geteuid() == 0, "root bypasses file modes")
     def test_permission_denied_is_unknown(self) -> None:
