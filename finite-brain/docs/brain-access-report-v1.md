@@ -66,8 +66,9 @@ name that limitation instead of claiming global completeness.
    private description withheld; an account-scoped authenticated hosted flow may
    supply the explicit participation evidence without logging every report read.
 4. Call the optional private Core batch client for eligible page keys and this
-   exact Brain server/ID. Core additionally enforces the account/Brain sharing
-   scope. No response or caller-supplied description changes access facts.
+   exact Brain server/ID. Core descriptions v2 apply no account/Brain sharing
+   scope (FIN-166); a v1 answer from an older Core still enforces it. No
+   response or caller-supplied description changes access facts.
 5. Recheck caller authority and the fingerprint after the external call. If the
    caller lost authority, deny. If report authority changed, restart within a
    small bounded retry budget or return a conflict; never combine stale access
@@ -121,9 +122,10 @@ shared keys; explicit read-only Guests; Folder Invitations; Mount Offers; pendin
 wrong-key and automatically added recipients; missing grants; demoted Members
 and removed keys retaining grants. Test same-email keys remain separate.
 
-Prove arbitrary-key insertion cannot disclose private contacts, an agent cannot
-release its account holder's contact, revoked/absent scopes withhold, and owner
-transfer requires the successor's sharing scope. Verify denial before lookup,
+Prove arbitrary-key insertion cannot disclose private contacts, and that a v1
+answer still withholds without a scope. Under v2, an agent's own participation
+releases its owner's contact by decision (see the Core contract's
+"Disclosure without a sharing scope"). Verify denial before lookup,
 admin removal/access change during lookup, paging conflicts and source outages.
 Compare text/JSON and before/after exports, authority and content sequences.
 
@@ -169,5 +171,9 @@ coupling the two product features.
   A Core outage, old Core or invalid batch keeps every row and marks
   participating keys `unavailable`; malformed, partial, foreign or
   extra-key batches are refused whole.
+- Brain asks Core descriptions v2 and asks v1 only when Core answers exactly
+  400 `{"error": "unsupported descriptions version"}`; any other failure stays
+  a failure. Either version's answer is accepted. An owner's
+  `humanPublicKeysHex` keeps only keys Brain asked about on that page.
 - `fbrain access list --brain <id>` renders text and `--json`; `fbrain access
   summary` keeps the older metadata view.
