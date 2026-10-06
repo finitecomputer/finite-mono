@@ -32,6 +32,7 @@ MAX_STATE_BYTES = 32 * 1024 * 1024
 GATEWAY_STATES = frozenset({"starting", "running", "degraded", "draining", "stopping",
                             "stopped", "startup_failed"})
 BUSY_REASONS = ("active_agents", "inbox_pending", "inbox_leased", "agentd_inbox")
+MISSING = object()  # an absent file; distinct from a parsed JSON null
 
 
 class Unreadable(ValueError):
@@ -48,12 +49,12 @@ def _open_dir(name: str, parent: int | None) -> int:
         raise Unreadable("symlink" if error.errno in (errno.ELOOP, errno.ENOTDIR) else "unreadable") from None
 
 
-def _read_json(directory: int, name: str) -> Any | None:
-    """Return parsed JSON, or None when the file is absent."""
+def _read_json(directory: int, name: str) -> Any:
+    """Return parsed JSON, or MISSING when the file is absent."""
     try:
         fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
     except FileNotFoundError:
-        return None
+        return MISSING
     except OSError as error:
         raise Unreadable("symlink" if error.errno == errno.ELOOP else "unreadable") from None
     try:
@@ -84,12 +85,26 @@ def _count(value: Any) -> int:
     return value
 
 
-def _list(document: Any | None, key: str) -> list[Any]:
-    # serde(default): an absent file or key is empty; any other shape fails to load.
-    if document is None:
+def _list(document: Any, key: str, **defaults: type) -> list[Any]:
+    """Mirror the finitechat serde loaders: an absent file is empty, `{}` is
+    empty (every field is serde(default)) and unknown fields are ignored, but
+    a present null or wrongly typed field fails the whole load."""
+    if document is MISSING:
         return []
     if not isinstance(document, dict):
         raise Unreadable("malformed")
+    if "cursors" in defaults:
+        cursors = document.get("cursors", {})
+        if not isinstance(cursors, dict) or not all(
+                type(value) is int and value >= 0 for value in cursors.values()):
+            raise Unreadable("malformed")
+    if "acked" in defaults:
+        acked = document.get("acked", [])
+        if not isinstance(acked, list) or not all(
+                isinstance(item, dict) and isinstance(item.get("key"), str)
+                and type(item.get("acked_at_ms")) is int and item["acked_at_ms"] >= 0
+                for item in acked):
+            raise Unreadable("malformed")
     value = document.get(key, [])
     if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
         raise Unreadable("malformed")
@@ -100,8 +115,8 @@ def _age_s(now_ms: int, then_ms: int) -> int:
     return max(0, (now_ms - then_ms) // 1000)
 
 
-def _gateway(document: Any | None, now_ms: int) -> dict[str, Any]:
-    if document is None:
+def _gateway(document: Any, now_ms: int) -> dict[str, Any]:
+    if document is MISSING:
         raise Unreadable("missing")
     if not isinstance(document, dict) or not isinstance(document.get("gateway_state"), str):
         raise Unreadable("malformed")
@@ -118,10 +133,10 @@ def _gateway(document: Any | None, now_ms: int) -> dict[str, Any]:
             "updated_age_s": updated_age_s}
 
 
-def _hermes_inbox(document: Any | None, now_ms: int) -> dict[str, Any]:
+def _hermes_inbox(document: Any, now_ms: int) -> dict[str, Any]:
     pending: list[int] = []
     leased: list[int] = []
-    for event in _list(document, "events"):
+    for event in _list(document, "events", cursors=dict, acked=list):
         lease = event.get("lease", {"state": "pending"})
         if not isinstance(lease, dict):
             raise Unreadable("malformed")
@@ -131,7 +146,7 @@ def _hermes_inbox(document: Any | None, now_ms: int) -> dict[str, Any]:
             leased.append(_age_s(now_ms, _count(lease.get("leased_at_ms"))))
         else:
             raise Unreadable("unknown_lease")
-    return {"present": document is not None, "pending": len(pending), "leased": len(leased),
+    return {"present": document is not MISSING, "pending": len(pending), "leased": len(leased),
             "oldest_pending_age_s": max(pending, default=None),
             "oldest_lease_age_s": max(leased, default=None),
             "newest_lease_age_s": min(leased, default=None)}
@@ -154,9 +169,9 @@ def observe(state_root: Path, now_ms: int) -> dict[str, Any]:
             ("gateway", home, "hermes-home/gateway_state.json", _gateway),
             ("hermes_inbox", agent, "hermes-inbox.json", _hermes_inbox),
             ("agentd_inbox", agent, "agentd-inbox.json",
-             lambda doc, _: {"present": doc is not None, "events": len(_list(doc, "events"))}),
+             lambda doc, _: {"present": doc is not MISSING, "events": len(_list(doc, "events", cursors=dict))}),
             ("running_markers", agent, "hermes-running.json",
-             lambda doc, _: {"present": doc is not None, "messages": len(_list(doc, "messages"))}),
+             lambda doc, _: {"present": doc is not MISSING, "messages": len(_list(doc, "messages"))}),
         )
         for key, directory, relative, parse in readers:
             try:

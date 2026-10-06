@@ -117,6 +117,34 @@ class ObserveTests(unittest.TestCase):
                 self.assertEqual((result["verdict"], result["reasons"]), ("unknown", ["gateway_not_running"]))
         self.assertEqual(result["gateway"]["state"], "unrecognized")
 
+    def test_empty_objects_load_as_empty_but_null_or_mistyped_fields_fail(self) -> None:
+        # The finitechat serde loaders default absent fields and ignore unknown
+        # ones, but reject a JSON null document or a present null field.
+        for name in ("hermes-inbox.json", "agentd-inbox.json", "hermes-running.json"):
+            self.home.write(name, {"future_field": SECRET})
+        self.assertEqual(self.observe()["verdict"], "idle")
+        cases = [
+            ("hermes_inbox_malformed", "hermes-inbox.json", "null"),
+            ("agentd_inbox_malformed", "agentd-inbox.json", "null"),
+            ("running_markers_malformed", "hermes-running.json", "null"),
+            ("hermes_inbox_malformed", "hermes-inbox.json", {"events": None}),
+            ("hermes_inbox_malformed", "hermes-inbox.json", {"events": [], "cursors": None}),
+            ("hermes_inbox_malformed", "hermes-inbox.json", {"events": [], "cursors": {"r": -1}}),
+            ("hermes_inbox_malformed", "hermes-inbox.json", {"events": [], "acked": None}),
+            ("hermes_inbox_malformed", "hermes-inbox.json", {"events": [], "acked": [{"key": "k"}]}),
+            ("agentd_inbox_malformed", "agentd-inbox.json", {"events": [], "cursors": []}),
+            ("running_markers_malformed", "hermes-running.json", {"messages": [], "x": 1} | {"messages": None}),
+        ]
+        for reason, name, document in cases:
+            with self.subTest(reason=reason, document=document):
+                self.tearDown(); self.setUp()
+                self.home.write(name, document)
+                result = self.observe()
+                self.assertEqual((result["verdict"], result["reasons"]), ("unknown", [reason]))
+        self.tearDown(); self.setUp()
+        self.home.write("hermes-home/gateway_state.json", "null")
+        self.assertEqual(self.observe()["reasons"], ["gateway_malformed"])
+
     def test_malformed_state_and_unknown_leases_fail_unknown(self) -> None:
         cases = [
             ("gateway_malformed", lambda: self.home.gateway(active="0")),
