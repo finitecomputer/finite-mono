@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -68,6 +69,9 @@ REQUESTER_CONTEXT_V2_DIR = "requester-context-v2"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
 REQUESTER_CONTEXT_V2_VERSION = 2
+# The readers' size limit and the name they derive from a session key.
+REQUESTER_CONTEXT_MAX_BYTES = 4096
+_REQUESTER_CONTEXT_NAME = re.compile(r"[0-9a-f]{64}\.json")
 _REQUESTER_STATE_MODULE = "_finitechat_requester_state_v1"
 
 
@@ -93,6 +97,10 @@ def _requester_state() -> Any:
         candidate.leases = {}
         # Resolved lease roots whose startup cleanup has completed.
         candidate.started_roots = set()
+        # Resolved lease root -> (stale lease paths a reader could still
+        # accept, or None when the lease directories could not be listed;
+        # the reason). Present only while startup cleanup is incomplete.
+        candidate.quarantine = {}
         state = sys.modules.setdefault(_REQUESTER_STATE_MODULE, candidate)
     return state
 
@@ -347,7 +355,9 @@ class _RequesterContextBroker:
     removes only expired files: any process that registers this plugin with
     the same FINITE_HOME may construct one while a turn holds a lease. Leases
     left by a killed gateway are removed when the next gateway connects; see
-    `_clear_requester_leases_at_gateway_start`. The state module name is
+    `_clear_requester_leases_at_gateway_start`. Until that cleanup completes,
+    `before_tool_call` retries it and blocks terminal calls in the sessions it
+    could not clean. The state module name is
     versioned: change its data shape only under a new name, since a running
     process keeps the first shape it published.
     """
@@ -369,12 +379,15 @@ class _RequesterContextBroker:
             )
             self._prune(int(time.time()))
 
-    def before_tool_call(self, **kwargs: Any) -> None:
+    def before_tool_call(self, **kwargs: Any) -> dict[str, str] | None:
         if str(kwargs.get("tool_name") or "") != "terminal":
-            return
+            return None
+        blocked = _stale_requester_lease_block(self.root)
+        if blocked is not None:
+            return blocked
         session_key, user_id = _active_finite_session()
         if session_key is None or user_id is None:
-            return
+            return None
         lease_id = _requester_context_lease_id(kwargs)
         now = int(time.time())
         with self._lock:
@@ -390,6 +403,7 @@ class _RequesterContextBroker:
                 user_id=user_id,
                 expires_at_unix=now + REQUESTER_CONTEXT_TTL_SECS,
             )
+        return None
 
     def after_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
@@ -517,8 +531,13 @@ def _clear_requester_leases_at_gateway_start() -> None:
     A first connect can fail before reaching this; Hermes then retries with a
     new adapter and `is_reconnect=True`. So every connect calls this, and the
     shared state records the root only once cleanup completes. Later connects
-    and plugin reloads skip it. A failure raises, failing the connect, so the
-    retry cleans up before any turn is taken.
+    and plugin reloads skip it.
+
+    Cleanup never fails the connect, so Chat stays up. A stale lease that
+    cannot be removed and has not expired is quarantined instead: the broker
+    blocks terminal calls in its session (every session when the directories
+    cannot be listed) and retries the removal on each terminal call and
+    connect until it succeeds or the lease expires.
     """
     root = _requester_context_root()
     state = _requester_state()
@@ -526,17 +545,138 @@ def _clear_requester_leases_at_gateway_start() -> None:
     with state.lock:
         if resolved in state.started_roots:
             return
-        # Calls this process already holds keep their leases.
-        held = {_requester_context_filename(key) for key in state.leases.get(resolved, {})}
+        _sweep_stale_requester_leases(state, root, resolved)
+        stale = state.quarantine.get(resolved)
+    if stale is not None:
+        logger.error(
+            "[finitechat] could not clear requester leases a previous gateway left under %s "
+            "(%s); terminal calls in the affected Finite Chat sessions are blocked until "
+            "the files can be removed or expire. Fix the permissions or remove the files.",
+            root.parent,
+            stale[1],
+        )
+
+
+def _sweep_stale_requester_leases(state: Any, root: Path, resolved: str) -> None:
+    """Remove leftover leases this process does not hold; the caller holds state.lock.
+
+    Records the root as started when no lease a reader could accept remains,
+    otherwise quarantines what remains. A retry revisits only the quarantined
+    files, so it never removes a lease written after the first sweep.
+    """
+    held = {_requester_context_filename(key) for key in state.leases.get(resolved, {})}
+    previous = state.quarantine.get(resolved)
+    if previous is not None and previous[0] is not None:
+        candidates = [Path(path) for path in previous[0]]
+    else:
+        candidates = []
         for directory in (root, root.parent / REQUESTER_CONTEXT_V2_DIR):
             try:
-                entries = list(directory.iterdir())
+                candidates.extend(directory.iterdir())
             except FileNotFoundError:
                 continue
-            for path in entries:
-                if path.name not in held and (path.is_file() or path.is_symlink()):
-                    path.unlink(missing_ok=True)
-        state.started_roots.add(resolved)
+            except OSError as exc:
+                state.quarantine[resolved] = (None, f"cannot list {directory}: {exc.strerror}")
+                return
+    now = int(time.time())
+    stale: dict[str, str] = {}
+    for path in candidates:
+        if path.name not in held:
+            reason = _remove_stale_lease(path, now)
+            if reason is not None:
+                stale[str(path)] = reason
+    if stale:
+        more = f" and {len(stale) - 1} more" if len(stale) > 1 else ""
+        state.quarantine[resolved] = (frozenset(stale), min(stale.values()) + more)
+        return
+    if state.quarantine.pop(resolved, None) is not None:
+        logger.warning("[finitechat] cleared the requester leases a previous gateway left")
+    state.started_roots.add(resolved)
+
+
+def _remove_stale_lease(path: Path, now: int) -> str | None:
+    """Remove one leftover file; return why a reader could still accept it, if so.
+
+    Only files and symlinks are removed; directories are left alone. A file
+    that cannot be removed is harmless only when it has a reader's lease name
+    and is a regular file whose integer expiry has passed. Anything else
+    unreadable, malformed or unexpired is treated as live.
+    """
+    try:
+        mode = path.lstat().st_mode
+        if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            path.unlink()
+        return None
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        if _REQUESTER_CONTEXT_NAME.fullmatch(path.name) is None or _lease_expired(path, now):
+            return None
+        return f"cannot remove {path}: {exc.strerror}"
+
+
+def _lease_expired(path: Path, now: int) -> bool:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > REQUESTER_CONTEXT_MAX_BYTES:
+            return False
+        payload = json.loads(os.read(fd, REQUESTER_CONTEXT_MAX_BYTES + 1))
+    except (OSError, ValueError, RecursionError):
+        return False
+    finally:
+        os.close(fd)
+    expires_at = payload.get("expires_at_unix") if isinstance(payload, dict) else None
+    return type(expires_at) is int and 0 <= expires_at <= now
+
+
+def _stale_requester_lease_block(root: Path) -> dict[str, str] | None:
+    """Return a block directive for a terminal call that could use a stale lease.
+
+    The session's own platform and key decide, not the authenticated-turn
+    marker: an internal turn carries the session and user of an earlier
+    request, and the readers check nothing else. Hermes treats a pre-tool
+    hook that raises as allowing the call, so any failure here blocks.
+    """
+    scope = "Other sessions are not affected."
+    try:
+        state = _requester_state()
+        resolved = os.path.realpath(root)
+        with state.lock:
+            if resolved not in state.quarantine:
+                return None
+            _sweep_stale_requester_leases(state, root, resolved)
+            stale = state.quarantine.get(resolved)
+        if stale is None:
+            return None
+        from gateway.session_context import get_session_env
+
+        platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
+        session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
+        if platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value} or not session_key:
+            return None
+        paths, reason = stale
+        if paths is None:
+            scope = "Every Finite Chat session is affected."
+        elif _requester_context_filename(session_key) not in {Path(path).name for path in paths}:
+            return None
+    except Exception as exc:
+        logger.exception("[finitechat] could not check for stale requester leases")
+        reason = f"the check failed: {exc}"
+        scope = "Other sessions may be affected too."
+    return {
+        "action": "block",
+        "message": (
+            "Terminal is unavailable in this Finite Chat session: a requester lease left "
+            f"by a previous gateway could not be cleared ({reason}). Commands here could "
+            f"otherwise act for that earlier request. {scope} This clears by itself once "
+            "the file can be removed or expires; an operator can remove it or fix the "
+            "directory permissions."
+        ),
+    }
 
 
 def _requester_context_root() -> Path:

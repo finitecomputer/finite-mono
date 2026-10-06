@@ -9,6 +9,7 @@ Python name resolution is restricted to loopback while each test runs.
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import http.server
 import json
@@ -51,12 +52,31 @@ CHILD_PRELUDE = (
     "socket.getaddrinfo = guard\n"
     "from hermes_cli import plugins\n"
 )
-LEASE_CHECK = (
-    'k=$(printf %s "$HERMES_SESSION_KEY" | shasum -a 256 | cut -d" " -f1); '
-    'f="$FINITE_HOME/requester-context-v1/$k.json"; '
-    'if [ -f "$f" ] && grep -q "\\"requesting_user_id\\":\\"$HERMES_SESSION_USER_ID\\"" "$f"; '
-    "then echo LEASE_PRESENT; else echo LEASE_ABSENT; fi"
+SESSION_DIGEST = shlex.join(
+    [
+        sys.executable,
+        "-c",
+        "import hashlib, os; "
+        "print(hashlib.sha256(os.environ.get('HERMES_SESSION_KEY', '').encode()).hexdigest())",
+    ]
 )
+
+
+def lease_check(directory: str, label: str) -> str:
+    """Shell that reports whether the session's lease for its user is in `directory`."""
+    return (
+        f"k=$({SESSION_DIGEST}); "
+        f'f="$FINITE_HOME/{directory}/$k.json"; '
+        'if [ -f "$f" ] && grep -q "\\"requesting_user_id\\":\\"$HERMES_SESSION_USER_ID\\"" "$f"; '
+        f"then echo {label}_PRESENT; else echo {label}_ABSENT; fi"
+    )
+
+
+LEASE_CHECK = lease_check("requester-context-v1", "LEASE")
+BOTH_LEASES_CHECK = f"{LEASE_CHECK}; {lease_check('requester-context-v2', 'V2')}"
+SESSION_ECHO = 'echo "SESSION=$HERMES_SESSION_PLATFORM|$HERMES_SESSION_KEY|$HERMES_SESSION_USER_ID"'
+BLOCKED = "Terminal is unavailable in this Finite Chat session"
+STATE_MODULE = "_finitechat_requester_state_v1"
 
 
 def lease_name(session_key: str) -> str:
@@ -106,6 +126,27 @@ def kill_gateway_mid_call(session_key: str, user: str, v2=None) -> None:
     assert result.returncode == -9, result.stderr
 
 
+@contextlib.contextmanager
+def unlink_fails(*names: tuple[str, str]):
+    """Removing these (lease directory, file name) entries fails until exit."""
+    unlink = Path.unlink
+
+    def guarded(path, *args, **kwargs):
+        if (path.parent.name, path.name) in names:
+            raise PermissionError(errno.EACCES, "Permission denied", str(path))
+        return unlink(path, *args, **kwargs)
+
+    with patch.object(Path, "unlink", guarded):
+        yield
+
+
+def blocked_message(result: str) -> str:
+    """The error the pinned dispatcher returned for a blocked tool call."""
+    error = json.loads(result).get("error")
+    assert isinstance(error, str) and error.startswith(BLOCKED), result
+    return error
+
+
 def leases_in(finite_home: Path) -> list[str]:
     return sorted(
         p.name
@@ -123,8 +164,9 @@ def as_new_gateway_process() -> Path:
     lifetime, so the tests reuse that home and drop only the record of the
     completed startup cleanup.
     """
-    state = sys.modules["_finitechat_requester_state_v1"]
+    state = sys.modules[STATE_MODULE]
     state.started_roots.discard(os.path.realpath(HOME.v1))
+    getattr(state, "quarantine", {}).pop(os.path.realpath(HOME.v1), None)
     return HOME.finite_home
 
 
@@ -164,6 +206,10 @@ class PluginHome:
                     "approvals": {"mode": "off"},
                     "display": {"streaming": False},
                     "plugins": {"enabled": ["finitechat"]},
+                    # A background review would ask the fake model for one
+                    # more terminal call after a turn has finished.
+                    "memory": {"nudge_interval": 0},
+                    "skills": {"creation_nudge_interval": 0},
                     "_config_version": 10,
                 }
             )
@@ -308,12 +354,20 @@ def setUpModule():
 class LeaseTestCase(unittest.TestCase):
     def setUp(self):
         self.home = HOME
-        self.assertEqual(self.home.leases(), [])
         plugins.discover_plugins()
         MODEL.command = LEASE_CHECK
 
     def tearDown(self):
-        self.assertEqual(self.home.leases(), [])
+        # Leave the shared home clean even when a test fails, so one failure
+        # does not fail every later test.
+        left = self.home.leases()
+        for root in (self.home.v1, self.home.v2):
+            if root.exists():
+                for path in root.iterdir():
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+        quarantine = getattr(sys.modules[STATE_MODULE], "quarantine", {})
+        quarantine.pop(os.path.realpath(self.home.v1), None)
+        self.assertEqual(left, [])
 
 
 class GatewayHarness:
@@ -346,9 +400,6 @@ class GatewayHarness:
             _ = timeout
             return self.adapter_module._FiniteChatResult(True, {}, None, False)
 
-        async def send(_chat_id, _content, **_kwargs):
-            return SendResult(success=True, message_id="out")
-
         async def service_ready():
             return None
 
@@ -359,6 +410,12 @@ class GatewayHarness:
         self.adapter._ensure_service = service_ready
         self.adapter._poll_loop = no_inbound
         self.adapter._stream_loop = no_inbound
+        self.sent: list[str] = []
+
+        async def send(*args, **kwargs):
+            self.sent.append(str(kwargs.get("content", args[1] if len(args) > 1 else "")))
+            return SendResult(success=True, message_id="out")
+
         self.adapter.send = send
         self.adapter_module._finite_private_control_request = lambda *_a: None
         self.adapter.set_message_handler(self.runner._handle_message)
@@ -373,7 +430,9 @@ class GatewayHarness:
             )
         return await self.runner._connect_initial_adapter_with_timeout(self.adapter, platform)
 
-    async def turn(self, user: str, segment: str, *, internal: bool = False, v2=None) -> str:
+    async def turn(
+        self, user: str, segment: str, *, internal: bool = False, v2=None, text: str = ""
+    ) -> str:
         global TURN_SEQ
         # Adapters for one home share delivered-event dedup, so IDs never repeat.
         TURN_SEQ += 1
@@ -390,7 +449,7 @@ class GatewayHarness:
                 "message_id": f"msg-{self.seq}",
                 "conversation_id": "home",
                 "segment_id": segment,
-                "text": f"turn {self.seq}",
+                "text": text or f"turn {self.seq}",
                 "message_type": "text",
                 "source": {
                     "platform": "finitechat",
@@ -405,7 +464,11 @@ class GatewayHarness:
             }
         )
         deadline = time.monotonic() + WAIT_SECS
-        while len(self.model.results) == before or self.adapter._session_tasks:
+        while (
+            len(self.model.results) == before
+            or self.adapter._session_tasks
+            or self.runner._background_tasks
+        ):
             if time.monotonic() > deadline:
                 raise AssertionError(f"turn {self.seq} did not finish its terminal call")
             await asyncio.sleep(0.05)
@@ -664,6 +727,131 @@ class HookLifecycleTests(LeaseTestCase):
             plugins.invoke_hook("post_tool_call", tool_name="terminal", tool_call_id="live")
         self.assertEqual(self.home.leases(), [])
 
+    def quarantine(self, *sessions: str) -> None:
+        """Run startup cleanup while these sessions' leases cannot be removed."""
+        as_new_gateway_process()
+        with unlink_fails(*(("requester-context-v1", lease_name(key)) for key in sessions)):
+            self.home.current_module()._clear_requester_leases_at_gateway_start()
+
+    def terminal(self, command: str, call_id: str) -> str:
+        return handle_function_call(
+            "terminal", {"command": command}, task_id=f"task-{call_id}", tool_call_id=call_id
+        )
+
+    def test_leftovers_that_cannot_be_removed_block_until_a_reader_would_reject_them(self):
+        keys = {
+            name: f"agent:main:finitechat:group:room-1:{name}"
+            for name in ("expired", "live", "junk", "nested", "unreadable")
+        }
+        as_new_gateway_process()
+        now = int(time.time())
+
+        def lease(name: str, expires_at: int) -> bytes:
+            payload = {
+                "version": 1,
+                "session_key": keys[name],
+                "platform": "finitechat",
+                "requesting_user_id": ALICE,
+                "expires_at_unix": expires_at,
+            }
+            return json.dumps(payload).encode()
+
+        self.home.v1.mkdir(parents=True, exist_ok=True)
+        contents = {
+            "expired": lease("expired", now),
+            "live": lease("live", now + 5),
+            "junk": b"{not json",
+            "nested": b"[" * 3000,
+            "unreadable": lease("unreadable", now),
+        }
+        for name, content in contents.items():
+            (self.home.v1 / lease_name(keys[name])).write_bytes(content)
+        unreadable = self.home.v1 / lease_name(keys["unreadable"])
+        unreadable.chmod(0)
+        (self.home.v1 / "notes.tmp").write_text("not a lease name")
+        stuck = [("requester-context-v1", lease_name(key)) for key in keys.values()]
+        stuck.append(("requester-context-v1", "notes.tmp"))
+        state = sys.modules[STATE_MODULE]
+        root = os.path.realpath(self.home.v1)
+
+        with unlink_fails(*stuck):
+            self.home.current_module()._clear_requester_leases_at_gateway_start()
+            # Only an expired regular lease is known to be harmless; files
+            # that are not lease names are never read.
+            quarantined = {Path(path).name for path in state.quarantine[root][0]}
+            blocked = ["live", "junk", "nested"]
+            if not os.access(unreadable, os.R_OK):  # root reads it anyway
+                blocked.append("unreadable")
+            self.assertEqual(quarantined, {lease_name(keys[name]) for name in blocked})
+            with self.turn(ALICE, keys["expired"], marker=None):
+                self.assertIn("exit_code", json.loads(self.terminal(LEASE_CHECK, "expired")))
+            for name in blocked:
+                with self.turn(ALICE, keys[name], marker=None):
+                    blocked_message(self.terminal(LEASE_CHECK, name))
+
+            # Once the live lease expires, the next call unblocks its session
+            # though the file cannot be removed.
+            while int(time.time()) < now + 5:
+                time.sleep(0.1)
+            with self.turn(ALICE, keys["live"], marker=None):
+                self.assertIn("exit_code", json.loads(self.terminal(LEASE_CHECK, "live-later")))
+            with self.turn(ALICE, keys["junk"], marker=None):
+                blocked_message(self.terminal(LEASE_CHECK, "junk-later"))
+        self.assertNotIn(root, state.started_roots)
+        unreadable.chmod(0o600)
+        with self.turn(ALICE, keys["junk"], marker=None):
+            self.assertIn("LEASE_ABSENT", self.terminal(LEASE_CHECK, "junk-cleared"))
+        self.assertIn(root, state.started_roots)
+        # A retry revisits only quarantined files, so harmless leftovers stay
+        # until something removes them.
+        leftovers = [self.home.v1 / lease_name(keys[name]) for name in ("expired", "live")]
+        leftovers.append(self.home.v1 / "notes.tmp")
+        for path in leftovers:
+            self.assertTrue(path.exists(), path)
+            path.unlink()
+
+    def test_a_failing_quarantine_check_blocks_the_call(self):
+        session = "agent:main:finitechat:group:room-1:seg-1"
+        other = "agent:main:finitechat:group:room-1:seg-2"
+        kill_gateway_mid_call(session, ALICE)
+        self.quarantine(session)
+        module = self.home.current_module()
+        # Hermes treats a raising pre-tool hook as allowing the call.
+        with (
+            patch.object(module, "_sweep_stale_requester_leases", side_effect=RuntimeError("boom")),
+            self.assertLogs(level="ERROR"),
+            self.turn(BOB, other),
+        ):
+            self.assertIn("the check failed: boom", blocked_message(self.terminal("true", "boom")))
+        with self.turn(BOB, other):
+            self.assertIn("LEASE_PRESENT", self.terminal(LEASE_CHECK, "after"))
+
+    def test_execute_code_reaches_a_stale_session_only_through_the_gate(self):
+        session = "agent:main:finitechat:group:room-1:seg-1"
+        kill_gateway_mid_call(session, ALICE)
+        code = (
+            "import os\n"
+            "names = ('HERMES_SESSION_PLATFORM', 'HERMES_SESSION_KEY', 'HERMES_SESSION_USER_ID')\n"
+            "print('DIRECT=' + '|'.join(os.environ.get(name, '') for name in names))\n"
+            "from hermes_tools import terminal\n"
+            f"print('RPC=' + str(terminal({LEASE_CHECK!r})))\n"
+        )
+        with unlink_fails(("requester-context-v1", lease_name(session))):
+            self.quarantine(session)
+            # An internal turn: the session and user, no authenticated marker.
+            with self.turn(ALICE, session, marker=None):
+                result = json.loads(
+                    handle_function_call(
+                        "execute_code", {"code": code}, task_id="task-exec", tool_call_id="exec"
+                    )
+                )
+        # The sandbox's own environment has no session for a reader to use,
+        # and its terminal calls pass through the same pre-tool hook.
+        self.assertIn("DIRECT=||\n", result["output"])
+        self.assertIn(f"RPC={{'error': '{BLOCKED}", result["output"])
+        with self.turn(ALICE, session, marker=None):
+            self.assertIn("LEASE_ABSENT", self.terminal(LEASE_CHECK, "internal"))
+
 
 class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
     """A gateway's connect removes leases a killed gateway left behind."""
@@ -720,30 +908,146 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
         self.assertEqual(leases_in(finite_home), [])
         await second.adapter.cancel_background_tasks()
 
-    async def test_failed_cleanup_fails_the_connect_until_a_retry_completes_it(self):
+    async def test_lease_that_cannot_be_removed_blocks_only_its_sessions_terminal(self):
+        root = os.path.realpath(HOME.v1)
+        state = sys.modules[STATE_MODULE]
+        for kept in ("requester-context-v1", "requester-context-v2"):
+            with self.subTest(kept=kept):
+                finite_home = as_new_gateway_process()
+                kill_gateway_mid_call(self.SESSION, ALICE, self.V2)
+                gateway = GatewayHarness(finite_home)
+                MODEL.command = BOTH_LEASES_CHECK
+                with unlink_fails((kept, lease_name(self.SESSION))):
+                    with self.assertLogs(level="ERROR") as logs:
+                        self.assertTrue(await gateway.connect(reconnect=False))
+                    self.assertTrue(gateway.adapter.is_connected)
+                    self.assertIn("could not clear requester leases", "\n".join(logs.output))
+                    self.assertNotIn(root, state.started_roots)
+                    self.assertEqual(leases_in(finite_home), [lease_name(self.SESSION)])
+
+                    # Internal and human turns in the dead call's session still
+                    # answer, and the model gets the reason as the tool result.
+                    for internal in (True, False):
+                        sent = len(gateway.sent)
+                        result = await gateway.turn(ALICE, "seg-1", internal=internal, v2=self.V2)
+                        message = blocked_message(result)
+                        self.assertIn("cannot remove", message)
+                        self.assertIn("Other sessions are not affected.", message)
+                        self.assertIn("done", gateway.sent[sent:])
+                    # Another session's terminal and lease work as before.
+                    result = await gateway.turn(ALICE, "seg-2", v2=self.V2)
+                    self.assertIn("LEASE_PRESENT", result)
+                    self.assertIn("V2_PRESENT", result)
+                    self.assertEqual(leases_in(finite_home), [lease_name(self.SESSION)])
+
+                # Once the file can be removed, the next terminal call clears
+                # it, without a reconnect, and the session works again.
+                result = await gateway.turn(ALICE, "seg-1", v2=self.V2)
+                self.assertIn("LEASE_PRESENT", result)
+                self.assertIn("V2_PRESENT", result)
+                self.assertIn(root, state.started_roots)
+                self.assertNotIn(root, state.quarantine)
+                result = await gateway.turn(ALICE, "seg-1", internal=True)
+                self.assertIn("LEASE_ABSENT", result)
+                self.assertIn("V2_ABSENT", result)
+                self.assertEqual(leases_in(finite_home), [])
+                await gateway.adapter.cancel_background_tasks()
+
+    async def test_quarantine_survives_reconnects_and_reloads_until_cleanup_completes(self):
+        finite_home = as_new_gateway_process()
+        root = os.path.realpath(HOME.v1)
+        state = sys.modules[STATE_MODULE]
+        kill_gateway_mid_call(self.SESSION, ALICE)
+        live_session = "agent:main:finitechat:group:room-1:seg-2"
+        old = GatewayHarness(finite_home)
+        with unlink_fails(("requester-context-v1", lease_name(self.SESSION))):
+            self.assertTrue(await old.connect(reconnect=False))
+
+            # A live call in another session holds its lease meanwhile.
+            gate = Path(tempfile.mkdtemp(dir=HOME.scratch)) / "gate"
+            MODEL.command = (
+                f"touch {shlex.quote(str(gate))}.started; "
+                f"while [ ! -e {shlex.quote(str(gate))} ]; do sleep 0.05; done; {LEASE_CHECK}"
+            )
+            held_turn = asyncio.create_task(old.turn(BOB, "seg-2"))
+            self.addCleanup(gate.touch)
+            while not Path(f"{gate}.started").exists():
+                await asyncio.sleep(0.05)
+            MODEL.command = LEASE_CHECK
+            both = sorted([lease_name(self.SESSION), lease_name(live_session)])
+            self.assertEqual(leases_in(finite_home), both)
+
+            # Reconnects, a repeated startup connect and a forced reload all
+            # keep Chat up, the quarantine and the live call's lease.
+            gateways = [old]
+            for reconnect, reload in ((True, False), (False, False), (True, True)):
+                if reload:
+                    plugins.discover_plugins(force=True)
+                gateways.append(GatewayHarness(finite_home, old.runner))
+                self.assertTrue(await gateways[-1].connect(reconnect=reconnect))
+                self.assertNotIn(root, state.started_roots)
+                self.assertEqual(leases_in(finite_home), both)
+            result = await gateways[-1].turn(ALICE, "seg-1", internal=True)
+            self.assertIn("cannot remove", blocked_message(result))
+
+        # With the fault gone, the next connect completes the cleanup.
+        gateways.append(GatewayHarness(finite_home, old.runner))
+        self.assertTrue(await gateways[-1].connect(reconnect=True))
+        self.assertIn(root, state.started_roots)
+        self.assertNotIn(root, state.quarantine)
+        self.assertEqual(leases_in(finite_home), [lease_name(live_session)])
+        gate.touch()
+        self.assertIn("LEASE_PRESENT", await held_turn)
+        self.assertIn("LEASE_ABSENT", await gateways[-1].turn(ALICE, "seg-1", internal=True))
+        self.assertIn("LEASE_PRESENT", await gateways[-1].turn(ALICE, "seg-1"))
+        self.assertEqual(leases_in(finite_home), [])
+        for gateway in gateways:
+            await gateway.adapter.cancel_background_tasks()
+
+    async def test_unlistable_lease_directory_blocks_every_session_until_it_lists(self):
         finite_home = as_new_gateway_process()
         kill_gateway_mid_call(self.SESSION, ALICE)
-        unlink = Path.unlink
+        iterdir = Path.iterdir
 
-        def unlink_fails_in_home(path, *args, **kwargs):
-            if str(path).startswith(str(finite_home)):
-                raise PermissionError(path)
-            return unlink(path, *args, **kwargs)
+        def unlistable(path):
+            if path.name == "requester-context-v1":
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return iterdir(path)
 
-        first = GatewayHarness(finite_home)
-        with (
-            patch.object(Path, "unlink", unlink_fails_in_home),
-            self.assertRaises(PermissionError),
-        ):
-            await first.connect(reconnect=False)
-        self.assertFalse(first.adapter.is_connected)
+        gateway = GatewayHarness(finite_home)
+        with patch.object(Path, "iterdir", unlistable):
+            self.assertTrue(await gateway.connect(reconnect=False))
+            for user, segment in ((ALICE, "seg-1"), (BOB, "seg-2")):
+                message = blocked_message(await gateway.turn(user, segment))
+                self.assertIn("cannot list", message)
+                self.assertIn("Every Finite Chat session is affected.", message)
         self.assertEqual(leases_in(finite_home), [lease_name(self.SESSION)])
 
-        second = GatewayHarness(finite_home, first.runner)
-        self.assertTrue(await second.connect(reconnect=True))
+        self.assertIn("LEASE_PRESENT", await gateway.turn(BOB, "seg-2"))
+        self.assertIn("LEASE_ABSENT", await gateway.turn(ALICE, "seg-1", internal=True))
         self.assertEqual(leases_in(finite_home), [])
-        self.assertIn("LEASE_ABSENT", await second.turn(ALICE, "seg-1", internal=True))
-        await second.adapter.cancel_background_tasks()
+        await gateway.adapter.cancel_background_tasks()
+
+    async def test_bg_and_btw_children_carry_no_session_to_use_a_lease(self):
+        # Pinned Hermes resets the session variables when it handles a
+        # message and dispatches /bg and /btw before it binds the session, so
+        # their children run with an empty session the readers never match.
+        finite_home = as_new_gateway_process()
+        kill_gateway_mid_call(self.SESSION, ALICE)
+        gateway = GatewayHarness(finite_home)
+        with unlink_fails(("requester-context-v1", lease_name(self.SESSION))):
+            self.assertTrue(await gateway.connect(reconnect=False))
+            MODEL.command = f"{SESSION_ECHO}; {LEASE_CHECK}"
+            blocked_message(await gateway.turn(ALICE, "seg-1"))
+            for command in ("/bg check the lease", "/btw check the lease"):
+                result = json.loads(await gateway.turn(ALICE, "seg-1", text=command))
+                self.assertEqual(result["exit_code"], 0, result)
+                self.assertIn("SESSION=||\n", result["output"])
+                self.assertIn("LEASE_ABSENT", result["output"])
+            self.assertEqual(leases_in(finite_home), [lease_name(self.SESSION)])
+        MODEL.command = LEASE_CHECK
+        self.assertIn("LEASE_ABSENT", await gateway.turn(ALICE, "seg-1", internal=True))
+        await gateway.adapter.cancel_background_tasks()
 
     async def test_startup_cleanup_keeps_calls_this_process_holds(self):
         finite_home = as_new_gateway_process()
@@ -964,7 +1268,42 @@ class OrganizationCreateAfterReloadTests(unittest.IsolatedAsyncioTestCase, Lease
         self.assert_admins(result, {human_home: human_npub, agent_home: agent_npub})
         self.assertEqual(leases_in(finite_home), [])
 
-    def create_organization_command(self, agent_home: Path) -> str:
+    async def test_stale_session_cannot_create_until_its_lease_is_cleared(self):
+        scratch = Path(tempfile.mkdtemp(dir=self.home.scratch))
+        self.start_server(scratch)
+        human_home = scratch / "human"
+        human_npub = self.identity(human_home, "00" * 31 + "04")
+        human = npub_hex(human_npub)
+        finite_home = as_new_gateway_process()
+        agent_home = scratch / "agent-cli"
+        agent_home.mkdir()
+        os.symlink(finite_home, agent_home / "finite")
+        agent_npub = self.identity(agent_home, "00" * 31 + "03")
+        admins = {human_home: human_npub, agent_home: agent_npub}
+        session = "agent:main:finitechat:group:room-1:seg-org"
+        kill_gateway_mid_call(session, human)
+
+        gateway = GatewayHarness(finite_home)
+        with unlink_fails(("requester-context-v1", lease_name(session))):
+            self.assertTrue(await gateway.connect(reconnect=False))
+            MODEL.command = self.create_organization_command(agent_home, "Stale Org")
+            for internal in (True, False):
+                blocked_message(await gateway.turn(human, "seg-org", internal=internal))
+            with contextlib.closing(sqlite3.connect(self.database)) as db:
+                self.assertEqual(db.execute("SELECT count(*) FROM brain_admins").fetchone(), (0,))
+            MODEL.command = self.create_organization_command(agent_home, "Other Org")
+            self.assert_admins(json.loads(await gateway.turn(human, "seg-other")), admins)
+
+        # The next terminal call in the same gateway clears the lease.
+        MODEL.command = self.create_organization_command(agent_home, "Cleared Org")
+        self.assert_admins(json.loads(await gateway.turn(human, "seg-org")), admins)
+        refused = json.loads(await gateway.turn(human, "seg-org", internal=True))
+        await gateway.adapter.cancel_background_tasks()
+        self.assertNotEqual(refused["exit_code"], 0, refused["output"])
+        self.assertIn("requester context is unavailable", refused["output"])
+        self.assertEqual(leases_in(finite_home), [])
+
+    def create_organization_command(self, agent_home: Path, name: str = "Reload Org") -> str:
         return " ".join(
             shlex.quote(part)
             for part in (
@@ -977,7 +1316,7 @@ class OrganizationCreateAfterReloadTests(unittest.IsolatedAsyncioTestCase, Lease
                 "brain",
                 "create",
                 "organization",
-                "Reload Org",
+                name,
                 "--json",
             )
         )
