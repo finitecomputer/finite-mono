@@ -15,6 +15,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -228,7 +229,11 @@ class LiveHermesAgentMediaE2ETest(unittest.IsolatedAsyncioTestCase):
         else:
             adapter.handle_message = handle_agent_message
 
-        with contextlib.redirect_stdout(io.StringIO()):
+        # Connect clears requester leases under FINITE_HOME; keep it in the scratch home.
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.dict(os.environ, {"FINITE_HOME": str(agent_home)}),
+        ):
             started = time.monotonic()
             connected = await adapter.connect()
             smoke.step("adapter_connect", started)
