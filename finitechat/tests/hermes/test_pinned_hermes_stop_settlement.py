@@ -3220,6 +3220,45 @@ class PinnedHermesGoalJudgeTests(DrainScenario):
 
                 self.run_scenario(scenario)
 
+    def test_goal_store_failing_during_the_judge_keeps_its_decision(self):
+        """A goal store that fails while the judge runs keeps the loop going.
+
+        A goal row is never deleted, so a store that reads back no goal could
+        not be read; that is no evidence of a control. A failed save leaves
+        the stored goal one turn behind but still running. Before the patch
+        the loop went on in both cases.
+        """
+        for failure in ("unavailable", "read", "write"):
+            with self.subTest(failure=failure):
+
+                async def scenario(home: str, failure: str = failure):
+                    from hermes_cli import goals
+
+                    sid = "finite-judged-goal"
+                    goals.GoalManager(session_id=sid).set("synthetic task")
+                    db = goals._get_session_db()
+                    error = sqlite3.OperationalError("synthetic disk I/O error")
+                    breaks = {
+                        "unavailable": lambda: patch.object(goals, "_get_session_db", lambda: None),
+                        "read": lambda: patch.object(db, "get_meta", side_effect=error),
+                        "write": lambda: patch.object(db, "set_meta", side_effect=error),
+                    }
+                    with contextlib.ExitStack() as stack:
+
+                        def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                            stack.enter_context(breaks[failure]())
+                            return "continue", "synthetic judge", False, None, False
+
+                        stack.enter_context(patch("hermes_cli.goals.judge_goal", judge))
+                        mgr = goals.GoalManager(session_id=sid)
+                        decision = mgr.evaluate_after_turn("done")
+                        self.assertEqual(decision["verdict"], "continue")
+                        self.assertTrue(decision["should_continue"])
+                        self.assertTrue(mgr.keeps_decision(decision))
+                        self.assertTrue(mgr.still_reports(decision))
+
+                self.run_scenario(scenario)
+
     def test_another_chats_goal_control_leaves_the_judged_goal_going(self):
         async def scenario(home: str):
             from hermes_cli.goals import GoalManager, load_goal
