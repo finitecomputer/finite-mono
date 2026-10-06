@@ -1310,7 +1310,7 @@ def pinned_model_text_commands() -> set[str]:
 
 
 class PinnedHermesModelCommandTests(DrainScenario):
-    """Review r4193904833 and round 06: commands that become a model turn.
+    """Review r4193904833: commands that become a model turn.
 
     In an idle session the pinned gateway rewrites /queue, /steer, /plan and
     /learn (and /init, /blueprint and /moa) into this message's agent turn;
@@ -1420,6 +1420,44 @@ class PinnedHermesModelCommandTests(DrainScenario):
 
                     after = await self.run_after_restart(home, h.inbox, "msg-2")
                     self.assert_ran_once_then_acked(after, "msg-2")
+
+                self.run_scenario(scenario)
+
+    def test_goal_controls_wait_out_a_restart_drain(self):
+        """A /goal control waits out a drain with every /goal, then runs once after it.
+
+        Only a running turn's tail keeps a control live; a drain holds it.
+        """
+        for text, status in (("/goal pause", "paused"), ("/goal status", "active")):
+            with self.subTest(text=text):
+
+                async def scenario(home: str, text: str = text, status: str = status):
+                    from hermes_cli.goals import GoalManager, load_goal
+
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    h.redeliver_on_release = True
+                    try:
+                        sid = chat_session_id(h)
+                        GoalManager(session_id=sid).set("synthetic task")
+                        # Another chat's running turn keeps the drain open.
+                        other = await h.hold_turn_open(raw_event(1, "other work", segment="s2"))
+                        h.begin_restart_drain()
+                        await h.deliver(raw_event(2, text))
+                        self.assertNotIn("msg-2", h.handed)
+                        self.assertEqual(h.state("msg-2"), "leased")
+
+                        other.set()
+                        await h.finish_restart()
+                        self.assertNotIn(("ack", "msg-2"), timeline)
+                        self.assertEqual(h.state("msg-2"), "pending")
+                        self.assertEqual(getattr(load_goal(sid), "status", None), "active")
+                    finally:
+                        await h.close()
+
+                    after = await self.run_after_restart(home, h.inbox, "msg-2")
+                    self.assertEqual(after.count(("ack", "msg-2")), 1, after)
+                    self.assertEqual(getattr(load_goal(sid), "status", None), status)
 
                 self.run_scenario(scenario)
 
@@ -2190,11 +2228,10 @@ class PinnedHermesCommandFinalityTests(DrainScenario):
 class PinnedHermesTurnBoundaryTests(DrainScenario):
     """Where a turn's work begins and ends, as its settlement sees it.
 
-    Linux CI job 112252876639 at 338eb795 and reviews 5427930434 and round 08.
-    The pinned base adapter runs the completion hook a second time, as
-    CANCELLED, when a shutdown cancels the turn's task after the hook began:
-    in the usage-notice tail after the ack, or while a settlement is still on
-    its way. That second run released an acked turn, released the steer the
+    Linux CI job 112252876639 and review 5427930434. The pinned base adapter
+    runs the completion hook a second time, as CANCELLED, when a shutdown
+    cancels the turn's task after the hook began: in the usage-notice tail
+    after the ack, or while a settlement is still on its way. That second run released an acked turn, released the steer the
     turn had taken, and acked a /retry the first run had just released, which
     removes the entry. Settling a model-launching command by its unchanged
     text acked one a stop cancelled before Hermes ran it. A command sent while
@@ -2691,7 +2728,7 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 self.run_scenario(scenario)
 
     def test_goal_control_sent_between_goal_turns_answers_at_once(self):
-        """Fable round 09: a /goal pause sent between goal turns waited out the loop.
+        """A /goal pause sent between goal turns stops the loop instead of waiting it out.
 
         The judge keeps the goal going, so the next continuation is queued
         while the kickoff turn finishes after its ack. A control form answers
@@ -3152,6 +3189,36 @@ class PinnedHermesGoalJudgeTests(DrainScenario):
                 self.assertFalse(mgr.keeps_decision(decision))
 
         self.run_scenario(scenario)
+
+    def test_judge_holds_its_goal_writes_only_while_it_runs(self):
+        """A later goal write on the judge's thread reaches the store, after a verdict or an error.
+
+        The judge's own writes are held while it runs. A hold left in place
+        would silently drop the thread's next write for that session, such as
+        a compression's goal migration.
+        """
+        for outcome in ("verdict", "error"):
+            with self.subTest(outcome=outcome):
+
+                async def scenario(home: str, outcome: str = outcome):
+                    from hermes_cli.goals import GoalManager, load_goal
+
+                    def judge(*_args: Any, **_kwargs: Any) -> tuple[str, str, bool, None, bool]:
+                        if outcome == "error":
+                            raise RuntimeError("synthetic judge failure")
+                        return "continue", "synthetic judge", False, None, False
+
+                    sid = "finite-judged-goal"
+                    GoalManager(session_id=sid).set("synthetic task")
+                    with patch("hermes_cli.goals.judge_goal", judge):
+                        try:
+                            GoalManager(session_id=sid).evaluate_after_turn("done")
+                        except RuntimeError:
+                            self.assertEqual(outcome, "error")
+                    GoalManager(session_id=sid).pause()
+                    self.assertEqual(getattr(load_goal(sid), "status", None), "paused")
+
+                self.run_scenario(scenario)
 
     def test_another_chats_goal_control_leaves_the_judged_goal_going(self):
         async def scenario(home: str):
