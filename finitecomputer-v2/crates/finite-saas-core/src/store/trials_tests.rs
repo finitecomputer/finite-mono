@@ -46,6 +46,17 @@ pub(super) fn reservation(code: &str, org: &str, user: &str, attempt: &str) -> R
         checkout_expires_at: time::OffsetDateTime::now_utc().unix_timestamp() + 3600,
     }
 }
+/// Reservation and redemption read Postgres time, so a test clock starts from
+/// the wall clock once; access checks then receive it explicitly.
+fn trial_clock() -> time::OffsetDateTime {
+    time::OffsetDateTime::now_utc()
+        .replace_nanosecond(0)
+        .unwrap()
+}
+fn rfc3339(at: time::OffsetDateTime) -> String {
+    at.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
 pub(super) fn subscription(
     org: &str,
     user: &str,
@@ -59,18 +70,20 @@ pub(super) fn subscription(
         stripe_price_id: Some("price_standard".into()),
         expected_stripe_price_id: Some("price_standard".into()),
         subscription_status: status,
-        current_period_end: Some("2026-10-06T12:00:00Z".into()),
+        // A trial still running whenever the suite runs. Tests that judge
+        // access at a chosen instant set this and `now` together.
+        current_period_end: Some(rfc3339(trial_clock() + time::Duration::days(7))),
         cancel_at_period_end: false,
         stripe_event_id: Some(format!("evt_{user}_{time}")),
         stripe_event_created: Some(time),
         now: None,
     }
 }
-async fn overview(db: &TestDb, user: &str) -> BillingOverview {
+async fn overview(db: &TestDb, user: &str, now: &str) -> BillingOverview {
     db.billing_overview(LinkVerifiedUserInput {
         verified_email: format!("{user}@example.com"),
         workos_user_id: user.into(),
-        now: None,
+        now: Some(now.into()),
     })
     .await
     .unwrap()
@@ -215,7 +228,14 @@ async fn trial_subscription_lifecycle_preserves_seat_and_blocks_only_trial_accou
             .await
             .unwrap();
         let org = customer(&db, "alice").await;
-        let before = overview(&db, "alice").await;
+        let clock = trial_clock();
+        let (now, period_end) = (rfc3339(clock), clock + time::Duration::days(7));
+        let sync = |status, time| SyncStripeSubscriptionInput {
+            current_period_end: Some(rfc3339(period_end)),
+            now: Some(now.clone()),
+            ..subscription(&org, "alice", status, time)
+        };
+        let before = overview(&db, "alice", &now).await;
         assert!(before.trial_access.is_none());
         db.reserve_trial("alice", reservation(&c.code, &org, "alice", "checkout"))
             .await
@@ -223,29 +243,26 @@ async fn trial_subscription_lifecycle_preserves_seat_and_blocks_only_trial_accou
         use crate::BillingSubscriptionStatus::*;
         // No matching reservation means billing writes roll back as well.
         assert!(
-            db.sync_trial_stripe_subscription(
-                subscription(&org, "alice", Trialing, 10),
-                Some("wrong")
-            )
-            .await
-            .is_err()
+            db.sync_trial_stripe_subscription(sync(Trialing, 10), Some("wrong"))
+                .await
+                .is_err()
         );
-        assert!(!overview(&db, "alice").await.can_create_agent);
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", Trialing, 10),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", Trialing, 10),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
-        let active = overview(&db, "alice").await;
+        assert!(!overview(&db, "alice", &now).await.can_create_agent);
+        db.sync_trial_stripe_subscription(sync(Trialing, 10), Some("checkout"))
+            .await
+            .unwrap();
+        db.sync_trial_stripe_subscription(sync(Trialing, 10), Some("checkout"))
+            .await
+            .unwrap();
+        let active = overview(&db, "alice", &now).await;
         assert!(active.can_create_agent);
         assert!(!active.trial_access.unwrap().blocked);
+        // Access ends exactly at the Stripe period end.
+        let last_second = rfc3339(period_end - time::Duration::seconds(1));
+        assert!(overview(&db, "alice", &last_second).await.can_create_agent);
+        let expired = overview(&db, "alice", &rfc3339(period_end)).await;
+        assert!(!expired.can_create_agent);
+        assert!(expired.trial_access.unwrap().blocked);
         let request = db
             .request_agent_creation(RequestAgentCreationInput {
                 verified_email: "alice@example.com".into(),
@@ -253,39 +270,45 @@ async fn trial_subscription_lifecycle_preserves_seat_and_blocks_only_trial_accou
                 display_name: "Trial Agent".into(),
                 launch_code: String::new(),
                 idempotency_key: "launch".into(),
-                now: None,
+                now: Some(now.clone()),
             })
             .await
             .unwrap();
         assert_eq!(request.request.customer_org_id, org);
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", PastDue, 20),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
-        assert!(overview(&db, "alice").await.trial_access.unwrap().blocked);
+        db.sync_trial_stripe_subscription(sync(PastDue, 20), Some("checkout"))
+            .await
+            .unwrap();
+        assert!(
+            overview(&db, "alice", &now)
+                .await
+                .trial_access
+                .unwrap()
+                .blocked
+        );
         // Delayed trial event cannot restore access.
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", Trialing, 11),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
-        assert!(overview(&db, "alice").await.trial_access.unwrap().blocked);
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", Active, 30),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
-        assert!(!overview(&db, "alice").await.trial_access.unwrap().blocked);
-        db.sync_trial_stripe_subscription(
-            subscription(&org, "alice", Canceled, 40),
-            Some("checkout"),
-        )
-        .await
-        .unwrap();
+        db.sync_trial_stripe_subscription(sync(Trialing, 11), Some("checkout"))
+            .await
+            .unwrap();
+        assert!(
+            overview(&db, "alice", &now)
+                .await
+                .trial_access
+                .unwrap()
+                .blocked
+        );
+        db.sync_trial_stripe_subscription(sync(Active, 30), Some("checkout"))
+            .await
+            .unwrap();
+        assert!(
+            !overview(&db, "alice", &now)
+                .await
+                .trial_access
+                .unwrap()
+                .blocked
+        );
+        db.sync_trial_stripe_subscription(sync(Canceled, 40), Some("checkout"))
+            .await
+            .unwrap();
         db.expire_trial(ExpireTrial {
             stripe_session_id: "cs_checkout".into(),
             stripe_customer_id: "cus_alice".into(),
@@ -316,7 +339,7 @@ async fn trial_subscription_lifecycle_preserves_seat_and_blocks_only_trial_accou
         db.sync_stripe_subscription(subscription(&other, "existing", PastDue, 20))
             .await
             .unwrap();
-        assert!(overview(&db, "existing").await.trial_access.is_none());
+        assert!(overview(&db, "existing", &now).await.trial_access.is_none());
     })
     .await;
 }
