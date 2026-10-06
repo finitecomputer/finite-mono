@@ -36,6 +36,12 @@ from tests.hermes.test_pinned_hermes_stop_settlement import (
 )
 
 BG_RESULT = "BG-RESULT"
+
+
+class ChildDied(BaseException):
+    """Escapes the pinned children's ``except Exception``: the child ends with no send."""
+
+
 BTW_ANSWER = "BTW-ANSWER"
 COMMANDS = {
     "bg": "/bg synthetic task",
@@ -63,8 +69,9 @@ class SyntheticChildren:
         self.gate = threading.Event()
         self.gates: dict[str, threading.Event] = {}
         self.started: dict[str, list[str]] = {"bg": [], "btw": []}
-        # What the /bg agent answers.
+        # What the /bg agent answers, and the commands whose child dies.
         self.bg_response = BG_RESULT
+        self.die: set[str] = set()
         self._lock = threading.Lock()
 
     def runs(self, command: str) -> int:
@@ -75,6 +82,8 @@ class SyntheticChildren:
         with self._lock:
             self.started[command].append(text)
         self.gates.get(text, self.gate).wait(10)
+        if command in self.die:
+            raise ChildDied()
 
     @contextlib.contextmanager
     def patched(self) -> Iterator[None]:
@@ -548,37 +557,62 @@ class PinnedHermesChildWorkTests(ChildWorkScenario):
                 self.run_scenario(scenario)
 
     def test_an_undelivered_result_keeps_the_entry_for_redelivery(self):
-        for retryable in (True, False):
-            with self.subTest(retryable=retryable):
+        for failure in ("retryable", "final", "child died"):
+            for ending in ("stop", "lease expiry"):
+                if failure == "final" and ending != "stop":
+                    continue
+                with self.subTest(failure=failure, ending=ending):
+                    self.run_scenario(
+                        lambda home, failure=failure, ending=ending: self.undelivered(
+                            home, failure, ending
+                        )
+                    )
 
-                async def scenario(home: str, retryable: bool = retryable):
-                    h = ChildHarness(home, timeline=[])
-                    try:
-                        await h.seed()
-                        await self.launch(h, "bg")
-                        h.refuse = lambda text: retryable if is_result("bg", text) else None
-                        self.children.gate.set()
-                        await eventually(lambda: any(kind == "refused" for kind, _ in h.timeline))
-                        await h.settle_loop()
-                        if not retryable:
-                            # A send the sidecar refuses for good never succeeds.
-                            await h.wait_settled("msg-2")
-                            self.assertEqual(h.state("msg-2"), "acked")
-                            return
-                        self.assertEqual(h.state("msg-2"), "leased")
-                        self.assertNotIn(("ack", "msg-2"), h.timeline)
-                        await h.stop_gracefully()
-                        self.assertEqual(h.state("msg-2"), "pending")
-                    finally:
-                        await h.close()
+    async def undelivered(self, home: str, failure: str, ending: str) -> None:
+        h = ChildHarness(home, timeline=[])
+        try:
+            await h.seed()
+            await self.launch(h, "bg")
+            if failure == "child died":
+                self.children.die.add("bg")
+            else:
+                h.refuse = lambda text: (failure == "retryable") if is_result("bg", text) else None
+            self.children.gate.set()
+            await eventually(
+                lambda: (
+                    any(kind == "refused" for kind, _ in h.timeline)
+                    if failure != "child died"
+                    else not [t for t in h.runner._background_tasks if not t.done()]
+                )
+            )
+            await h.settle_loop()
+            if failure == "final":
+                # A send the sidecar refuses for good never succeeds.
+                await h.wait_settled("msg-2")
+                self.assertEqual(h.state("msg-2"), "acked")
+                return
+            self.assertEqual(h.state("msg-2"), "leased")
+            self.assertNotIn(("ack", "msg-2"), h.timeline)
+            self.children.die.clear()
+            h.refuse = None
+            if ending == "lease expiry":
+                # The expired lease brings the command back to run again.
+                await h.deliver(h.inbox["msg-2"][0])
+                await h.wait_settled("msg-2")
+                await h.wait_turns_finished()
+                self.assert_delivered_once(h, "bg")
+                self.assertEqual(self.children.runs("bg"), 2)
+                return
+            await h.stop_gracefully()
+            self.assertEqual(h.state("msg-2"), "pending")
+        finally:
+            await h.close()
 
-                    restarted = await self.restart_and_deliver(home, h.inbox, "bg")
-                    try:
-                        self.assert_delivered_once(restarted, "bg")
-                    finally:
-                        await restarted.close()
-
-                self.run_scenario(scenario)
+        restarted = await self.restart_and_deliver(home, h.inbox, "bg")
+        try:
+            self.assert_delivered_once(restarted, "bg")
+        finally:
+            await restarted.close()
 
     def test_each_bg_owns_only_the_child_it_started(self):
         async def scenario(home: str):
@@ -1034,6 +1068,35 @@ class PinnedHermesGoalFollowUpTests(GoalScenario):
 
         self.run_scenario(scenario)
 
+    def test_a_redelivery_joins_a_continuation_waiting_in_hermes_overflow_queue(self):
+        async def scenario(home: str):
+            h = RealRunHarness(home, timeline=[])
+            busy = threading.Event()
+            with h.synthetic_model():
+                try:
+                    await self.prepare(h, "resume")
+                    h.hold_thread = lambda message: busy if message == "long work" else None
+                    await h.deliver(raw_event(4, "long work"))
+                    await eventually(lambda: ("model", "long work") in h.timeline)
+                    for seq in (2, 3):
+                        await h.deliver(raw_event(seq, GOALS["resume"]))
+                        await eventually(lambda seq=seq: len(self.goal_replies(h)) == seq - 1)
+                    # msg-3's continuation waits behind msg-2's in Hermes's overflow.
+                    await h.deliver(h.inbox["msg-3"][0])
+                    await h.settle_loop()
+                    self.assertEqual(len(self.goal_replies(h)), 2, h.replies)
+                    busy.set()
+                    await h.wait_settled("msg-4")
+                    await h.wait_turns_finished()
+                    for message_id in ("msg-2", "msg-3"):
+                        self.assertEqual(h.state(message_id), "acked", h.timeline)
+                    self.assertEqual(len(self.goal_replies(h)), 2, h.replies)
+                finally:
+                    busy.set()
+                    await h.close()
+
+        self.run_scenario(scenario)
+
     def test_continuations_still_in_hermes_queue_are_settled_once(self):
         """Two busy /goal resumes: the second continuation waits in Hermes's overflow queue.
 
@@ -1286,8 +1349,13 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
                 await h.adapter.disconnect()
                 for message_id in ("msg-2", "msg-3"):
                     self.assertEqual(h.state(message_id), "pending", h.timeline)
-                self.assertEqual(h.results("bg"), [])
                 self.assertFalse(any(is_kickoff("resume", m) for m in h.models()))
+                # The child was cancelled before its entry went back, so it
+                # cannot deliver a result the redelivery will produce again.
+                self.children.gate.set()
+                await asyncio.sleep(0.2)
+                await h.settle_loop()
+                self.assertEqual(h.results("bg"), [])
             finally:
                 if tail is not None:
                     tail.set()
