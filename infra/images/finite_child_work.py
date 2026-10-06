@@ -332,8 +332,27 @@ def save_goal(runner, event, child, session_id):
 
 def begin_goal(runner, event):
     key = getattr(event, "_finite_goal_work", None)
-    if key:
-        journal(runner).update(key, "running")
+    if not key:
+        return True
+    from hermes_cli.goals import load_goal
+
+    store = journal(runner)
+    row = store.get(key)
+    if row["state"] != "queued":
+        return False
+    payload = json.loads(row["payload"])
+    state = load_goal(payload["session_id"])
+    if (
+        state is None
+        or state.status != "active"
+        or json.loads(state.to_json()) != payload["goal"]
+        or not runner._is_user_authorized(event.source)
+    ):
+        store.update(key, "done")
+        runner._finite_child_live.discard(key)
+        return False
+    store.update(key, "running")
+    return True
 
 
 def end_goal(runner, event, completed):

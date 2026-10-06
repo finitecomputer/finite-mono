@@ -731,7 +731,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if getattr(event, "_finite_goal_work", None) and not self._gateway_stopping():
                 from gateway.finite_child_work import begin_goal
 
-                begin_goal(self.gateway_runner, event)
+                if not begin_goal(self.gateway_runner, event):
+                    return None
             turn = _FINITE_TURN.get()
             if turn is None or turn.event is not event:
                 return await handler(event)
