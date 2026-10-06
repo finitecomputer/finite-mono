@@ -207,6 +207,9 @@ _LAUNCH_CHILD_QUALNAMES = (
 LAUNCH_DELIVERY_GRACE_SECS = 1.5
 # How long disconnect waits for the children it cancels to unwind.
 LAUNCH_CANCEL_WAIT_SECS = 0.5
+# Without a gateway to ask, how long disconnect waits for settlements: the
+# pinned adapter teardown default.
+SETTLE_TIMEOUT_SECS = 5.0
 # Under FINITECHAT_HOME: one file per chat whose latest turn the inbox owns.
 TURN_OWNERS_DIR = "hermes-turn-owners"
 
@@ -1255,10 +1258,13 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 await self._poll_task
             self._poll_task = None
         await self._cancel_admission_tasks()
+        # Hermes's stop has already done this; its fatal-adapter path has not.
+        # Either way every turn settles before the sidecar service stops.
+        await self.cancel_background_tasks()
         await self._settle_orphaned_retry_rewinds()
         await self._settle_launches_at_disconnect()
+        await self._finish_settlements()
         await self._stop_service()
-        await self.cancel_background_tasks()
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
         logger.info("[finitechat] disconnected")
@@ -2868,8 +2874,23 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 # before the adapter disconnects.
                 delivered = launch.delivered and launch.send_failure is None
                 self._settle_launch(launch, release=not delivered)
-        if self._settlements:
-            await asyncio.wait(set(self._settlements), timeout=LAUNCH_CANCEL_WAIT_SECS)
+
+    async def _finish_settlements(self) -> None:
+        """Wait for every ack, release and owner write before the sidecar stops.
+
+        A release that never reaches the sidecar leaves its entry leased until
+        the lease expires. Hermes bounds the whole disconnect by its adapter
+        teardown timeout, and so is this wait.
+        """
+        pending = {*self._settlements, *self._owner_writes.values()}
+        if not pending:
+            return
+        budget = getattr(
+            getattr(self, "gateway_runner", None), "_adapter_disconnect_timeout_secs", None
+        )
+        value = budget() if callable(budget) else None
+        timeout = float(value) if isinstance(value, (int, float)) else SETTLE_TIMEOUT_SECS
+        await asyncio.wait(pending, timeout=timeout if timeout > 0 else None)
 
     def _child_launch(self) -> _Launch | None:
         """The launch whose child is the current task, if any."""
