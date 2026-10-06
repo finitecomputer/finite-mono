@@ -24,6 +24,14 @@ MONOREPO_ROOT = REPO_ROOT.parent
 DURABLE_SMOKE_PATH = REPO_ROOT / "scripts" / "hermes-durable-home-docker-smoke.py"
 DEFAULT_IMAGE = "finite-agent-chat-interruption-smoke"
 DOCKER_HOST_ARGS = ["--add-host", "host.docker.internal:host-gateway"]
+# Owned by finitechat-cli `HERMES_INBOX_FILE` under FINITECHAT_HOME, which
+# `smoke.start_agent_container` places at /home/node/.finitechat/agent.
+AGENT_HOME_MOUNT = "/home/node"
+HERMES_INBOX_PATH = f"{AGENT_HOME_MOUNT}/.finitechat/agent/hermes-inbox.json"
+DIAGNOSTIC_LOG_LINES = 120
+DIAGNOSTIC_TEXT_LIMIT = 6000
+DIAGNOSTIC_INBOX_EVENTS = 40
+DIAGNOSTIC_PROVIDER_REQUESTS = 40
 
 spec = importlib.util.spec_from_file_location("hermes_durable_smoke", DURABLE_SMOKE_PATH)
 assert spec is not None and spec.loader is not None
@@ -127,19 +135,50 @@ class FakeModelState:
         self.requests: list[dict[str, Any]] = []
 
     def observe(self, payload: dict[str, Any]) -> str | None:
+        return self.record(payload)[1]
+
+    def record(self, payload: dict[str, Any]) -> tuple[dict[str, Any], str | None]:
         text = all_text(payload.get("messages") or payload.get("input") or payload)
         matches = re.findall(r"FINITE_INTERRUPT_STALL:([a-z0-9-]+)", text)
         stall = matches[-1] if matches else None
         with self.condition:
-            self.requests.append(
+            request = {
+                "stream": payload.get("stream"),
+                "stall": stall,
+                "text": text,
+                "latest_user_text": latest_user_text(payload),
+                "received_at_ms": int(time.time() * 1000),
+                "outcome": "pending",
+            }
+            self.requests.append(request)
+            return request, stall
+
+    def finish(self, request: dict[str, Any], outcome: str) -> None:
+        with self.condition:
+            request["outcome"] = outcome
+            request["finished_at_ms"] = int(time.time() * 1000)
+
+    def summary(self, *, limit: int = DIAGNOSTIC_PROVIDER_REQUESTS) -> dict[str, Any]:
+        """Request metadata without prompt bodies: synthetic markers only."""
+        with self.condition:
+            requests = list(enumerate(self.requests))
+        return {
+            "count": len(requests),
+            "requests": [
                 {
-                    "stream": payload.get("stream"),
-                    "stall": stall,
-                    "text": text,
-                    "latest_user_text": latest_user_text(payload),
+                    "index": index,
+                    "stream": request.get("stream"),
+                    "stall": request.get("stall"),
+                    "latest_user_reply_marker": reply_marker(
+                        str(request.get("latest_user_text") or "")
+                    ),
+                    "received_at_ms": request.get("received_at_ms"),
+                    "finished_at_ms": request.get("finished_at_ms"),
+                    "outcome": request.get("outcome"),
                 }
-            )
-            return stall
+                for index, request in requests[-limit:]
+            ],
+        }
 
     def mark_seen(self, name: str) -> None:
         with self.condition:
@@ -168,6 +207,11 @@ class FakeModelState:
         with self.condition:
             self.released.add(name)
             self.condition.notify_all()
+
+
+def reply_marker(text: str) -> str | None:
+    matches = re.findall(r"Reply with exactly:\s*([^\n]+)", text)
+    return matches[-1].strip().strip('"')[:120] if matches else None
 
 
 def expected_reply(payload: dict[str, Any]) -> str:
@@ -203,7 +247,7 @@ def start_fake_model(state: FakeModelState, port: int) -> ThreadingHTTPServer:
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or "0")
             payload = json.loads(self.rfile.read(length) or b"{}")
-            stall = state.observe(payload)
+            request, stall = state.record(payload)
             reply = expected_reply(payload)
             if payload.get("stream") is True:
                 self.send_response(200)
@@ -231,8 +275,9 @@ def start_fake_model(state: FakeModelState, port: int) -> ThreadingHTTPServer:
                 try:
                     self.wfile.write(f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n".encode())
                     self.wfile.flush()
+                    state.finish(request, "streamed")
                 except (BrokenPipeError, ConnectionResetError):
-                    pass
+                    state.finish(request, "client_disconnected")
                 self.close_connection = True
                 return
 
@@ -256,6 +301,7 @@ def start_fake_model(state: FakeModelState, port: int) -> ThreadingHTTPServer:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+            state.finish(request, "responded")
 
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -382,6 +428,107 @@ def wait_durable_inbox_event(container: str, message_id: str, *, timeout: float 
     raise SmokeFailure(f"queued message {message_id} was not retained in the durable Hermes inbox")
 
 
+def bounded_text(text: str, limit: int = DIAGNOSTIC_TEXT_LIMIT) -> str:
+    return text if len(text) <= limit else "...(truncated)\n" + text[-limit:]
+
+
+def summarize_hermes_inbox(
+    inbox: dict[str, Any], *, now_ms: int, limit: int = DIAGNOSTIC_INBOX_EVENTS
+) -> dict[str, Any]:
+    """Lease state per entry; never the event payload (it carries message text)."""
+    events = [event for event in inbox.get("events") or [] if isinstance(event, dict)]
+    summarized = []
+    for event in events[-limit:]:
+        lease = event.get("lease")
+        if not isinstance(lease, dict):
+            lease = {}
+        leased_at_ms = lease.get("leased_at_ms")
+        summarized.append(
+            {
+                "key": event.get("key"),
+                "seq": event.get("seq"),
+                "message_id": event.get("message_id"),
+                "created_at_ms": event.get("created_at_ms"),
+                # Entries written before leases existed load as pending.
+                "lease_state": lease.get("state", "pending"),
+                "lease_id": lease.get("lease_id"),
+                "leased_at_ms": leased_at_ms,
+                "lease_age_ms": now_ms - leased_at_ms if isinstance(leased_at_ms, int) else None,
+            }
+        )
+    acked = [entry for entry in inbox.get("acked") or [] if isinstance(entry, dict)]
+    return {
+        "event_count": len(events),
+        "events": summarized,
+        "cursors": inbox.get("cursors"),
+        "acked_count": len(acked),
+        "acked_recent": [
+            {"key": entry.get("key"), "acked_at_ms": entry.get("acked_at_ms")}
+            for entry in acked[-limit:]
+        ],
+    }
+
+
+def read_hermes_inbox(*, image: str, container: str, home_volume: str, live: bool) -> str:
+    """Read the inbox without mutating it: exec into a live Agent, else mount read-only."""
+    if live:
+        command = ["docker", "exec", container, "cat", HERMES_INBOX_PATH]
+    else:
+        # `docker run --mount` would create a missing volume; never do that here.
+        inspected = smoke.run(["docker", "volume", "inspect", home_volume], check=False, timeout=30)
+        if inspected.returncode != 0:
+            raise SmokeFailure(f"home volume {home_volume} does not exist")
+        command = [
+            "docker",
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--entrypoint",
+            "cat",
+            "--mount",
+            f"type=volume,src={home_volume},dst={AGENT_HOME_MOUNT},readonly",
+            image,
+            HERMES_INBOX_PATH,
+        ]
+    result = smoke.run(command, check=False, timeout=60)
+    if result.returncode != 0:
+        raise SmokeFailure(f"inbox read exited {result.returncode}: {result.stderr[-500:]}")
+    return result.stdout
+
+
+def capture_diagnostics(
+    point: str,
+    *,
+    image: str,
+    container: str,
+    home_volume: str,
+    live: bool,
+    model_state: FakeModelState,
+) -> dict[str, Any]:
+    """Best-effort snapshot; every part records its own error and never raises."""
+    now_ms = int(time.time() * 1000)
+    snapshot: dict[str, Any] = {"point": point, "captured_at_ms": now_ms}
+    try:
+        raw = read_hermes_inbox(
+            image=image, container=container, home_volume=home_volume, live=live
+        )
+        snapshot["hermes_inbox"] = summarize_hermes_inbox(json.loads(raw), now_ms=now_ms)
+    except Exception as exc:
+        snapshot["hermes_inbox_error"] = bounded_text(f"{type(exc).__name__}: {exc}", 1000)
+    try:
+        snapshot["agent_log_tail"] = bounded_text(
+            smoke.agent_log_tail(container, lines=DIAGNOSTIC_LOG_LINES)
+        )
+    except Exception as exc:
+        snapshot["agent_log_error"] = bounded_text(f"{type(exc).__name__}: {exc}", 1000)
+    try:
+        snapshot["provider"] = model_state.summary()
+    except Exception as exc:
+        snapshot["provider_error"] = bounded_text(f"{type(exc).__name__}: {exc}", 1000)
+    return snapshot
+
+
 def volume_archive(*, image: str, source_volume: str, snapshot_volume: str) -> str:
     smoke.run(["docker", "volume", "create", snapshot_volume])
     smoke.run(
@@ -487,6 +634,23 @@ def main() -> int:
     def write_report() -> None:
         report_path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
 
+    def set_stage(stage: str, case: dict[str, Any] | None = None) -> None:
+        if case is not None:
+            case["stage"] = stage
+            stage = f"{case['name']}/{stage}"
+        report["stage"] = stage
+        write_report()
+
+    def diagnose(point: str, *, live: bool) -> dict[str, Any]:
+        return capture_diagnostics(
+            point,
+            image=image,
+            container=name,
+            home_volume=home_volume,
+            live=live,
+            model_state=model_state,
+        )
+
     env = os.environ.copy()
     env.update(
         {
@@ -522,6 +686,22 @@ def main() -> int:
         return health
 
     def interrupt(case_name: str, *, kill: bool, restore: bool) -> None:
+        case: dict[str, Any] = {
+            "name": case_name,
+            "signal": "SIGKILL" if kill else "SIGTERM",
+            "empty_target_restore": restore,
+            "status": "running",
+            "diagnostics": [],
+        }
+        report["cases"].append(case)
+        try:
+            interrupt_case(case, case_name, kill=kill, restore=restore)
+        except Exception:
+            case["status"] = "failed"
+            raise
+
+    def interrupt_case(case: dict[str, Any], case_name: str, *, kill: bool, restore: bool) -> None:
+        set_stage("send_stalled_turn", case)
         prompt = f"FINITE_INTERRUPT_STALL:{case_name} keep this turn open"
         user_app(
             image=image,
@@ -530,7 +710,9 @@ def main() -> int:
             args=["send", "--room-id", room_id, "--text", prompt],
             env=env,
         )
+        set_stage("wait_stall_seen", case)
         model_state.wait_seen(case_name)
+        set_stage("send_queued", case)
         queued_expected = f"{case_name} queued follow-up ok"
         queued_prompt = f"Reply with exactly: {queued_expected}"
         queued_sent = user_app(
@@ -541,6 +723,8 @@ def main() -> int:
             env=env,
         )
         queued_message_id = smoke.first_matching_mine_message_id(queued_sent, queued_prompt)
+        case["queued_prompt_message_id"] = queued_message_id
+        set_stage("wait_durable_inbox", case)
         wait_durable_inbox_event(name, queued_message_id)
         if any(
             queued_expected in str(request.get("latest_user_text") or "")
@@ -549,17 +733,18 @@ def main() -> int:
             raise SmokeFailure(
                 f"{case_name} follow-up reached Hermes before the active turn released"
             )
-        case: dict[str, Any] = {
-            "name": case_name,
-            "signal": "SIGKILL" if kill else "SIGTERM",
-            "empty_target_restore": restore,
-            "provider_stream_in_flight": True,
-            "queued_before_restart": {
-                "prompt_message_id": queued_message_id,
-                "durable_unacked": True,
-                "handed_to_model": False,
-            },
-        }
+        case.update(
+            {
+                "provider_stream_in_flight": True,
+                "queued_before_restart": {
+                    "prompt_message_id": queued_message_id,
+                    "durable_unacked": True,
+                    "handed_to_model": False,
+                },
+            }
+        )
+        case["diagnostics"].append(diagnose("before_stop", live=True))
+        set_stage("stop_container", case)
         if kill:
             smoke.run(["docker", "kill", "--signal", "KILL", name], timeout=30)
         else:
@@ -575,8 +760,11 @@ def main() -> int:
             raise SmokeFailure(f"{case_name} escalated to SIGKILL instead of stopping gracefully")
         case["container_exit_code"] = exit_code
         model_state.release(case_name)
+        case["diagnostics"].append(diagnose("before_container_removal", live=False))
+        set_stage("remove_container", case)
         smoke.docker_container_rm(name)
         if restore:
+            set_stage("archive_and_restore", case)
             case["archive_sha256"] = volume_archive(
                 image=image,
                 source_volume=home_volume,
@@ -587,10 +775,13 @@ def main() -> int:
                 target_volume=home_volume,
                 snapshot_volume=snapshot_volume,
             )
+        set_stage("restart_agent", case)
         health = start_agent()
         status = smoke.wait_agent_room_connected(name, room_id, server_url)
         if health.get("npub") != agent_npub or status.get("room_id") != room_id:
             raise SmokeFailure(f"{case_name} changed the Agent identity or room")
+        case["diagnostics"].append(diagnose("after_restart", live=True))
+        set_stage("wait_queued_reply", case)
         queued_reply = wait_existing_reply(
             image=image,
             volume=user_volume,
@@ -604,6 +795,7 @@ def main() -> int:
             queued_expected in str(request.get("latest_user_text") or "")
             for request in model_state.requests
         )
+        case["queued_model_handoffs_observed"] = queued_handoffs
         if queued_handoffs != 1:
             raise SmokeFailure(
                 f"{case_name} queued follow-up reached the model {queued_handoffs} times"
@@ -613,6 +805,7 @@ def main() -> int:
             "first_next_ordinary_turn": True,
             "model_handoffs": queued_handoffs,
         }
+        set_stage("fresh_turns", case)
         case["fresh_turns"] = [
             wait_reply(
                 image=image,
@@ -632,10 +825,11 @@ def main() -> int:
             ),
         ]
         case["status"] = "passed"
-        report["cases"].append(case)
+        case.pop("stage", None)
         write_report()
 
     try:
+        set_stage("start_finitechat_server")
         server = subprocess.Popen(
             [
                 str(server_bin),
@@ -656,11 +850,13 @@ def main() -> int:
         smoke.run(["docker", "volume", "create", home_volume])
         smoke.run(["docker", "volume", "create", user_volume])
 
+        set_stage("start_agent")
         health = start_agent()
         agent_npub = str(health.get("npub") or "")
         account_id = health.get("account_id")
         if not agent_npub or not isinstance(account_id, str):
             raise SmokeFailure(f"agent health omitted identity: {health}")
+        set_stage("create_room")
         welcome = smoke.create_welcome_room(
             image=image,
             user_volume=user_volume,
@@ -678,6 +874,7 @@ def main() -> int:
         interrupt("graceful-stop", kill=False, restore=False)
         interrupt("sigkill", kill=True, restore=False)
         interrupt("empty-target-restore", kill=False, restore=True)
+        set_stage("check_streaming_path")
         stalled_requests = [request for request in model_state.requests if request.get("stall")]
         if not stalled_requests or not all(
             request.get("stream") is True for request in stalled_requests
@@ -685,6 +882,7 @@ def main() -> int:
             raise SmokeFailure("an interrupted Hermes turn did not use the streaming provider path")
         report["provider_request_count"] = len(model_state.requests)
         report["status"] = "passed"
+        report.pop("stage", None)
         write_report()
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
@@ -694,6 +892,8 @@ def main() -> int:
         report["finitechat_server_log"] = (
             server_log.read_text(errors="replace")[-4000:] if server_log.exists() else ""
         )
+        report["failure_stage"] = report.get("stage")
+        report["failure_diagnostics"] = diagnose("on_failure", live=False)
         write_report()
         raise
     finally:
