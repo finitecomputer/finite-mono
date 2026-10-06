@@ -414,8 +414,8 @@ Accepted `/bg`, `/btw`, and goal continuations have a separate Hermes-owned
 `hermes-home/finite-child-work.sqlite3` journal. Include it and
 `hermes-home/finite-child-results/` in the same Recovery Set as the existing
 Hermes state. Acceptance precedes acknowledgement, and execution-start markers
-precede effects. Background completion manifests and retained attachment bytes,
-and goal final text, precede result delivery. Delivery retries have at-least-once
+precede effects. Background and goal completion manifests, including retained
+local attachment bytes and a receipt cursor for every item, precede result delivery. Delivery retries have at-least-once
 semantics: transport success followed by a crash before its durable receipt can
 repeat a reply, but never automatically reruns background model/tool effects.
 An interrupted execution reports its uncertainty; an unchanged active goal is

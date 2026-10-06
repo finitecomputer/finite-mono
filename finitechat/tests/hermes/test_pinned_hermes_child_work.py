@@ -284,6 +284,117 @@ class ChildWorkTests(DrainScenario):
 
         self.run_scenario(scenario)
 
+    def test_goal_attachment_after_text_survives_stop_and_repeated_restart(self):
+        async def scenario(home):
+            from gateway.platforms.base import SendResult
+
+            h = GatewayHarness(home, timeline=[], stall=False)
+            original = Path(home, "goal-result.pdf")
+            original.write_bytes(b"synthetic PDF bytes")
+            sending = asyncio.Event()
+            run = h.runner._run_agent
+
+            async def result(*args, **kwargs):
+                output = await run(*args, **kwargs)
+                output["final_response"] = f"Synthetic goal result\nMEDIA:{original}"
+                return output
+
+            async def blocked(**_kwargs):
+                sending.set()
+                await asyncio.Event().wait()
+
+            h.runner._run_agent = result
+            h.adapter.send_document = blocked
+            try:
+                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await asyncio.wait_for(sending.wait(), 3)
+                self.assertIn("Synthetic goal result", h.replies)
+                await h.stop_gracefully()
+            finally:
+                await self.shutdown(h)
+            original.unlink()
+            restarted = GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
+            seen = []
+
+            async def delivered(**kwargs):
+                seen.append(Path(kwargs["file_path"]).read_bytes())
+                return SendResult(success=True)
+
+            restarted.adapter.send_document = delivered
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await eventually(lambda: journal(restarted.runner).count() == 0)
+                self.assertEqual(seen, [b"synthetic PDF bytes"])
+                self.assertNotIn("Synthetic goal result", restarted.replies)
+                self.assertEqual(restarted.runs, [])
+            finally:
+                await self.shutdown(restarted)
+            again = await self.boot(home, h.inbox)
+            try:
+                await asyncio.sleep(0.05)
+                self.assertEqual(journal(again.runner).count(), 0)
+                self.assertEqual(again.runs, [])
+                self.assertEqual(again.replies, [])
+            finally:
+                await self.shutdown(again)
+
+        self.run_scenario(scenario)
+
+    def test_goal_failed_attachment_stays_pending_after_text_success(self):
+        async def scenario(home):
+            from gateway.platforms.base import SendResult
+
+            h = GatewayHarness(home, timeline=[], stall=False)
+            original = Path(home, "goal-result.pdf")
+            original.write_bytes(b"retry PDF bytes")
+            attempted = asyncio.Event()
+            run = h.runner._run_agent
+
+            async def result(*args, **kwargs):
+                output = await run(*args, **kwargs)
+                output["final_response"] = f"Goal result\nMEDIA:{original}"
+                return output
+
+            async def failed(**_kwargs):
+                attempted.set()
+                return SendResult(success=False, error="synthetic upload failure")
+
+            h.runner._run_agent = result
+            h.adapter.send_document = failed
+            try:
+                await h.deliver(raw_event(1, "/goal synthetic task"))
+                await asyncio.wait_for(attempted.wait(), 3)
+                await h.wait_turns_finished()
+                pending = journal(h.runner).pending()
+                self.assertEqual(len(pending), 1)
+                self.assertEqual(pending[0]["state"], "outcome")
+                self.assertEqual(pending[0]["delivered"], 1)
+                self.assertEqual(len(json.loads(pending[0]["deliveries"])), 2)
+                self.assertGreater(h.runner._active_work_count(), 0)
+                original.unlink()
+            finally:
+                await self.shutdown(h)
+            restarted = GatewayHarness(home, timeline=[], inbox=h.inbox, stall=False)
+            seen = []
+
+            async def delivered(**kwargs):
+                seen.append(Path(kwargs["file_path"]).read_bytes())
+                return SendResult(success=True)
+
+            restarted.adapter.send_document = delivered
+            try:
+                await restarted.boot_with_gate_closed()
+                await restarted.open_gate()
+                await eventually(lambda: journal(restarted.runner).count() == 0)
+                self.assertEqual(seen, [b"retry PDF bytes"])
+                self.assertNotIn("Goal result", restarted.replies)
+                self.assertEqual(restarted.runs, [])
+            finally:
+                await self.shutdown(restarted)
+
+        self.run_scenario(scenario)
+
     def test_background_attachment_survives_worker_temporary_files(self):
         async def scenario(home):
             h = GatewayHarness(home, timeline=[], stall=False)
@@ -443,6 +554,36 @@ class ChildWorkTests(DrainScenario):
                 await eventually(lambda: journal(restarted.runner).count() == 0)
                 self.assertTrue(any("was interrupted" in reply for reply in restarted.replies))
                 self.assertEqual(restarted.runs, [])
+            finally:
+                await self.shutdown(restarted)
+
+        self.run_scenario(scenario)
+
+    def test_drain_refused_goal_remains_queued_for_restart(self):
+        async def scenario(home):
+            from gateway.platforms.base import MessageEvent
+
+            h = GatewayHarness(home, timeline=[], stall=False)
+            source = chat_source(h)
+            try:
+                await h.runner._handle_goal_command(
+                    MessageEvent(text="/goal synthetic task", source=source, message_id="msg-1")
+                )
+                key = h.runner._session_key_for_source(source)
+                kickoff = h.adapter._pending_messages.pop(key)
+                h.runner._running = True
+                h.runner._draining = True
+                await h.adapter.handle_message(kickoff)
+                await h.wait_turns_finished()
+                self.assertEqual(h.runs, [])
+                self.assertEqual(journal(h.runner).pending()[0]["state"], "queued")
+            finally:
+                await self.shutdown(h)
+            restarted = await self.boot(home, {})
+            try:
+                await eventually(lambda: len(restarted.runs) == 1)
+                await restarted.wait_turns_finished()
+                self.assertEqual(restarted.runs, ["synthetic task"])
             finally:
                 await self.shutdown(restarted)
 

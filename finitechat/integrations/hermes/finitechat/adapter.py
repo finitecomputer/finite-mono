@@ -728,7 +728,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         """
 
         async def handle(event: MessageEvent) -> Any:
-            if getattr(event, "_finite_goal_work", None) and not self._gateway_stopping():
+            if getattr(event, "_finite_goal_work", None) and not self._gateway_draining():
                 from gateway.finite_child_work import begin_goal
 
                 if not begin_goal(self.gateway_runner, event):
@@ -882,6 +882,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 self.gateway_runner,
                 event,
                 outcome_name == "success" and turn is not None and turn.answered_before_stop,
+                launched=turn is not None and self._model_run_started(turn),
             )
         await self._settle_event_ack(event, outcome_name)
         if outcome_name != "success":
