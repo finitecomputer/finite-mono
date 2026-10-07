@@ -3533,6 +3533,45 @@ class PinnedHermesGoalJudgeTests(DrainScenario):
 
         self.run_scenario(scenario)
 
+    def test_a_goal_the_gateway_cannot_read_back_ends_any_decision_with_the_store_notice(self):
+        """A done, paused or parked decision too: a failed read may hide a control.
+
+        The decision's own notice ("achieved", "paused", "parked") could then
+        report a goal the control had already changed.
+        """
+        endings = {
+            "done": ("done", "done", None),
+            "paused": ("continue", "paused", 1),
+            "parked": ("wait", "active", None),
+        }
+        for ending, (verdict, status, max_turns) in endings.items():
+            with self.subTest(ending=ending):
+
+                async def scenario(
+                    home: str, verdict: str = verdict, status: str = status, max_turns=max_turns
+                ) -> None:
+                    from hermes_cli import goals
+
+                    sid = "finite-judged-goal"
+                    goals.GoalManager(session_id=sid).set("synthetic task", max_turns=max_turns)
+                    with patch("hermes_cli.goals.judge_goal", HeldJudge([verdict], hold=False)):
+                        mgr = goals.GoalManager(session_id=sid)
+                        decision = mgr.evaluate_after_turn("done")
+                    self.assertEqual(
+                        (decision["verdict"], decision["status"], decision["should_continue"]),
+                        (verdict, status, False),
+                    )
+                    error = sqlite3.OperationalError("synthetic disk I/O error")
+                    with patch.object(goals._get_session_db(), "get_meta", side_effect=error):
+                        acted = mgr.standing_decision(decision)
+                    assert acted is not None
+                    self.assertEqual(
+                        (acted["verdict"], acted["should_continue"]), ("store_failed", False)
+                    )
+                    self.assertIn(self.STORE_FAILED, acted["message"])
+
+                self.run_scenario(scenario)
+
     def test_control_saved_before_a_failed_goal_read_stays_in_force(self):
         """A control is not undone by a goal read that fails right after it is saved.
 
