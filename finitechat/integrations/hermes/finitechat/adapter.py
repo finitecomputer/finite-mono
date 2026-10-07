@@ -931,6 +931,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._poll_task: asyncio.Task | None = None
         self._service_proc: asyncio.subprocess.Process | None = None
         self._service_ready_file: Path | None = None
+        # Set once this adapter begins stopping its service. A settlement still
+        # running then must not start another: nothing would stop it, and it
+        # would hold the store's writer lease from the next gateway's service.
+        # Hermes reconnects with a new adapter, which starts its own.
+        self._service_stopped = False
         self._finitechat_cmd = _resolve_finitechat_command(str(extra.get("finitechat_bin") or ""))
         self._finitechat_lock = asyncio.Lock()
         self._home_channel_hydrated = False
@@ -3029,6 +3034,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 )
 
     async def _ensure_service(self) -> bool:
+        if self._service_stopped:
+            return False
         if self.service_url:
             healthy = await asyncio.to_thread(_finitechat_service_health, self.service_url, 2)
             if healthy:
@@ -3076,9 +3083,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[finitechat] could not start Hermes service: %s", exc)
             return False
+        if self._service_stopped:
+            # The stop began while this process started, and found none to stop.
+            await self._stop_service()
+            return False
 
         deadline = asyncio.get_running_loop().time() + SERVICE_START_TIMEOUT_SECS
         while asyncio.get_running_loop().time() < deadline:
+            if self._service_stopped:
+                return False
             if self._service_proc.returncode is not None:
                 logger.warning(
                     "[finitechat] Hermes service exited during startup (%s)",
@@ -3104,6 +3117,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return False
 
     async def _stop_service(self) -> None:
+        self._service_stopped = True
         proc = self._service_proc
         self._service_proc = None
         self._service_ready_file = None

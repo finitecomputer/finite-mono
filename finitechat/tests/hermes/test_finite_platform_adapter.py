@@ -2834,6 +2834,95 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertIn("serve", calls[0])
         self.assertTrue(fake_process.terminated)
 
+    def test_a_stopped_adapter_starts_no_service_and_a_new_adapter_does(self):
+        """Once disconnect() stops the service, this adapter starts no other.
+
+        A settlement still running then would start one that nothing stops,
+        holding the store's writer lease from the next gateway's service. Its
+        call fails like any to an unavailable sidecar, so the entry keeps its
+        lease. A stop that lands while a service starts stops that one too.
+        Hermes reconnects with a new adapter, which starts its own.
+        """
+        extra = {
+            "home": self.state_home,
+            "finitechat_bin": "/bin/finitechat",
+            "service_addr": "127.0.0.1:0",
+            "inbound_stream": True,
+        }
+        processes: list[Any] = []
+        writes_ready_file = [True]
+        on_start: list[Any] = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        async def fake_create_subprocess_exec(*args, **_kwargs):
+            if writes_ready_file[0]:
+                ready_file = Path(args[args.index("--ready-file") + 1])
+                ready_file.write_text('{"url":"http://127.0.0.1:7777"}', encoding="utf-8")
+            processes.append(FakeProcess())
+            for step in on_start:
+                await step()
+            return processes[-1]
+
+        def unreachable(*_args):
+            return self.module._FiniteChatResult(False, {}, "connection refused", True, True)
+
+        def new_adapter():
+            return self.module.FiniteChatAdapter(PlatformConfig(extra=dict(extra)))
+
+        async def scenario():
+            stopped = new_adapter()
+            self.assertTrue(await stopped._ensure_service())
+            await stopped._stop_service()
+            # The stream clears the URL of a service that stopped answering.
+            stopped.service_url = ""
+            self.assertFalse(await stopped._release_finitechat_event("room-agent-1", 5, "msg-5"))
+            self.assertEqual(len(processes), 1)
+            self.assertIsNone(stopped._service_proc)
+
+            # disconnect() stops the service while this one is being started...
+            starting = new_adapter()
+            on_start.append(starting._stop_service)
+            self.assertFalse(await starting._ensure_service())
+            on_start.clear()
+            self.assertEqual((len(processes), processes[-1].returncode), (2, -15))
+            self.assertIsNone(starting._service_proc)
+
+            # ...or while it waits for its ready file.
+            waiting = new_adapter()
+            writes_ready_file[0] = False
+            start = asyncio.create_task(waiting._ensure_service())
+            await asyncio.sleep(0.01)
+            self.assertIsNotNone(waiting._service_proc)
+            await waiting._stop_service()
+            self.assertFalse(await start)
+            self.assertEqual((len(processes), processes[-1].returncode), (3, -15))
+            writes_ready_file[0] = True
+
+            reconnected = new_adapter()
+            self.assertTrue(await reconnected._ensure_service())
+            self.assertEqual((len(processes), processes[-1].returncode), (4, None))
+
+        with (
+            patch.object(
+                self.module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+            ),
+            patch.object(self.module, "_finitechat_service_health", lambda *_args: True),
+            patch.object(self.module, "_finitechat_service_json", unreachable),
+        ):
+            asyncio.run(scenario())
+
     def brain_adapter(self):
         adapter = self.adapter()
         # Isolate the module-level broker (shared with the post_tool_call
