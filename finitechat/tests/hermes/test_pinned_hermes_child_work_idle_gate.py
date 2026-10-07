@@ -9,7 +9,9 @@ apart from the child-work tests.
 
 import importlib.util
 import json
+import os
 import shutil
+import sqlite3
 import tempfile
 import time
 from pathlib import Path
@@ -54,9 +56,18 @@ def idle_report(h: ChildHarness, home: str) -> dict[str, Any]:
         shutil.copyfile(
             Path(home) / "gateway_state.json", agent / "hermes-home" / "gateway_state.json"
         )
-        (agent / "hermes-inbox.json").write_text(
+        # The check also reads the gateway's pid file and its session database,
+        # where /bg sessions are recorded; the synthetic agent records none.
+        (agent / "hermes-home" / "gateway.pid").write_text(str(os.getpid()), encoding="utf-8")
+        with sqlite3.connect(agent / "hermes-home" / "state.db") as db:
+            db.execute("CREATE TABLE sessions (id TEXT, started_at REAL, ended_at REAL)")
+        inbox = agent / "hermes-inbox.json"
+        inbox.write_text(
             json.dumps({"events": events, "acked": [], "cursors": {}}), encoding="utf-8"
         )
+        # A recent inbox write alone reads busy; age it so only leases decide.
+        quiet = time.time() - 31 * 60
+        os.utime(inbox, (quiet, quiet))
         return idle.observe(Path(root), now_ms)
 
 
