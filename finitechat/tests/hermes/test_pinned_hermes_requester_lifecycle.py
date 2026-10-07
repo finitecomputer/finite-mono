@@ -408,6 +408,13 @@ def setUpModule():
     unittest.addModuleCleanup(forget_finitechat_plugin)
     MODEL = FakeModel()
     HOME = PluginHome(MODEL.url)
+    # Hermes fixes TERMINAL_CWD when gateway.run is first imported, falling
+    # back to $HOME. Where $HOME holds this checkout (as in CI), Hermes would
+    # append the checkout's AGENTS.md hints to every terminal result here, so
+    # use this home's configured workspace instead.
+    terminal_cwd = patch.dict(os.environ, {"TERMINAL_CWD": str(HOME.scratch / "workspace")})
+    terminal_cwd.start()
+    unittest.addModuleCleanup(terminal_cwd.stop)
 
 
 class LeaseTestCase(unittest.TestCase):
