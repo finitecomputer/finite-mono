@@ -27,6 +27,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import weakref
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -264,6 +265,13 @@ def _time_left(deadline: float | None, cap: float | None = None) -> float | None
         return cap
     left = max(0.0, deadline - time.monotonic())
     return left if cap is None else min(cap, left)
+
+
+async def _await_until(deadline: float | None, work: Awaitable[Any]) -> None:
+    """Await ``work`` until a ``time.monotonic()`` deadline, then cancel it; None awaits it all.
+    Work that would start after the deadline never runs."""
+    with contextlib.suppress(TimeoutError):
+        await asyncio.wait_for(work, _time_left(deadline))
 
 
 def _write_turn_owner_file(path: Path, entry: tuple[str, Any, str] | None) -> None:
@@ -931,6 +939,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._poll_task: asyncio.Task | None = None
         self._service_proc: asyncio.subprocess.Process | None = None
         self._service_ready_file: Path | None = None
+        # Set once this adapter begins stopping its service. A settlement still
+        # running then must not start another: nothing would stop it, and it
+        # would hold the store's writer lease from the next gateway's service.
+        # Hermes reconnects with a new adapter, which starts its own.
+        self._service_stopped = False
         self._finitechat_cmd = _resolve_finitechat_command(str(extra.get("finitechat_bin") or ""))
         self._finitechat_lock = asyncio.Lock()
         self._home_channel_hydrated = False
@@ -1206,10 +1219,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._poll_task
             self._poll_task = None
-        await self._cancel_admission_tasks()
+        await self._cancel_admission_tasks(settle_by)
         # Hermes's stop has done this already; its fatal-adapter path has not.
         await self.cancel_background_tasks()
-        await self._settle_orphaned_retry_rewinds()
+        await self._settle_orphaned_retry_rewinds(settle_by)
         await self._settle_launches_at_disconnect(settle_by)
         await self._finish_settlements(settle_by)
         await self._stop_service()
@@ -2170,7 +2183,12 @@ class FiniteChatAdapter(BasePlatformAdapter):
         for _event, room_id, seq, message_id, _event_key in admissions.values():
             await self._ack_finitechat_event(room_id, seq, message_id)
 
-    async def _cancel_admission_tasks(self) -> None:
+    async def _cancel_admission_tasks(self, settle_by: float | None = None) -> None:
+        """Cancel the deferred admissions, then release their entries in order.
+
+        Releases end at ``settle_by``; an entry not released by then keeps its
+        lease until it expires.
+        """
         admissions = list(self._deferred_admissions.values())
         tasks = list(self._admission_tasks.values())
         for task in tasks:
@@ -2181,7 +2199,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._deferred_admissions.clear()
         for queue in admissions:
             for _event, room_id, seq, message_id, _event_key in queue.values():
-                await self._release_finitechat_event(room_id, seq, message_id)
+                await _await_until(
+                    settle_by, self._release_finitechat_event(room_id, seq, message_id)
+                )
 
     async def _set_processing_activity(
         self,
@@ -2408,7 +2428,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     self._goal_entries.pop(key or "", None)
                     self._final_entries.discard(key or "")
 
-    async def _settle_orphaned_retry_rewinds(self) -> None:
+    async def _settle_orphaned_retry_rewinds(self, settle_by: float | None = None) -> None:
         """Settle each /retry whose re-sent message Hermes queued and then dropped.
 
         Hermes queues the re-sent message behind a reserved session slot, and
@@ -2417,6 +2437,10 @@ class FiniteChatAdapter(BasePlatformAdapter):
         place. The rewind is undone under the same no-overwrite check and the
         entry released, as for a refused re-send. A rewind whose queued turn
         is still running is left to that turn.
+
+        Each rewind is undone whatever the time, but its sidecar call ends at
+        ``settle_by``. An entry not settled by then keeps its lease until it
+        expires, as when the sidecar is down.
         """
         running = {
             _adapter_event_key(*_inbox_entry(turn.event, self.room_id))
@@ -2427,7 +2451,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             release = await self._settle_retry_rewind(
                 None, rewind, release=True, model_started=False
             )
-            await self._deliver_settlement([entry], release=release)
+            await _await_until(settle_by, self._deliver_settlement([entry], release=release))
 
     def _model_run_started(self, turn: _FiniteTurn) -> bool:
         """The gateway started an agent run for this turn's work.
@@ -2758,7 +2782,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return time.monotonic() + timeout - SERVICE_STOP_RESERVE_SECS
 
     async def _finish_settlements(self, settle_by: float | None) -> None:
-        """Wait for every ack, release and owner write before the sidecar stops."""
+        """Wait for the acks, releases and owner writes in flight, until ``settle_by``.
+
+        One still running then is left to finish after the sidecar stops; an
+        entry it has not settled keeps its lease until it expires.
+        """
         pending = {*self._settlements, *self._owner_writes.values()}
         if pending:
             await asyncio.wait(pending, timeout=_time_left(settle_by))
@@ -3029,6 +3057,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
                 )
 
     async def _ensure_service(self) -> bool:
+        if self._service_stopped:
+            return False
         if self.service_url:
             healthy = await asyncio.to_thread(_finitechat_service_health, self.service_url, 2)
             if healthy:
@@ -3076,9 +3106,15 @@ class FiniteChatAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[finitechat] could not start Hermes service: %s", exc)
             return False
+        if self._service_stopped:
+            # The stop began while this process started, and found none to stop.
+            await self._stop_service()
+            return False
 
         deadline = asyncio.get_running_loop().time() + SERVICE_START_TIMEOUT_SECS
         while asyncio.get_running_loop().time() < deadline:
+            if self._service_stopped:
+                return False
             if self._service_proc.returncode is not None:
                 logger.warning(
                     "[finitechat] Hermes service exited during startup (%s)",
@@ -3104,6 +3140,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return False
 
     async def _stop_service(self) -> None:
+        self._service_stopped = True
         proc = self._service_proc
         self._service_proc = None
         self._service_ready_file = None

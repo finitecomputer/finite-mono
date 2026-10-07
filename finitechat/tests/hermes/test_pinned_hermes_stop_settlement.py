@@ -2849,52 +2849,85 @@ class PinnedHermesTurnBoundaryTests(DrainScenario):
                 self.run_scenario(scenario)
 
     def test_retry_queued_behind_a_reserved_slot_is_undone_when_a_stop_drops_it(self):
+        """With a sidecar that never answers the release, the stop still ends within
+        Hermes's teardown budget, the rewind undone; once the entry's lease expires,
+        its redelivery retries the last message once."""
         from gateway.run import _AGENT_PENDING_SENTINEL
 
-        async def scenario(home: str):
-            timeline: list[tuple[str, str]] = []
-            h = GatewayHarness(home, timeline=timeline, stall=False)
-            session_key = h.runner._session_key_for_source(chat_source(h))
-            queued: list[str] = []
-            background = h.adapter._process_message_background
+        for sidecar in ("answers", "never answers"):
+            with self.subTest(sidecar=sidecar):
 
-            async def queued_turn_never_starts(event: MessageEvent, key: str) -> None:
-                raw = event.raw_message if isinstance(event.raw_message, dict) else {}
-                if raw.get("message_id") == "msg-4" and event.text != "/retry":
-                    # The stop cancels it before it runs, with no completion hook.
-                    queued.append(event.text)
-                    await asyncio.Event().wait()
-                await background(event, key)
+                async def scenario(home: str, sidecar: str = sidecar):
+                    timeline: list[tuple[str, str]] = []
+                    h = GatewayHarness(home, timeline=timeline, stall=False)
+                    session_key = h.runner._session_key_for_source(chat_source(h))
+                    queued: list[str] = []
+                    background = h.adapter._process_message_background
+                    sidecar_back = asyncio.Event()
+                    at_service_stop: list[str] = []
+                    stop_service = h.adapter._stop_service
 
-            try:
-                await seed_exchanges(h)
-                h.adapter._process_message_background = queued_turn_never_starts
+                    async def queued_turn_never_starts(event: MessageEvent, key: str) -> None:
+                        raw = event.raw_message if isinstance(event.raw_message, dict) else {}
+                        if raw.get("message_id") == "msg-4" and event.text != "/retry":
+                            # The stop cancels it before it runs, with no completion hook.
+                            queued.append(event.text)
+                            await asyncio.Event().wait()
+                        await background(event, key)
 
-                async def reserve_the_slot() -> None:
-                    # As the pinned cold path claims it for a competing turn,
-                    # right after the rewind: the re-sent message is queued.
-                    h.runner._session_state(session_key).turn.agent = _AGENT_PENDING_SENTINEL
+                    async def no_answer(_action: str, _message_id: str) -> bool:
+                        await sidecar_back.wait()
+                        return True
 
-                PinnedHermesRetryRewindTests.begin_after(h, "rewrite_transcript", reserve_the_slot)
-                await h.deliver(raw_event(4, "/retry"))
-                await eventually(lambda: bool(queued))
-                h.runner._release_running_agent_state(session_key)
-                self.assertEqual(queued, ["third question"])
-                self.assertEqual(len(h.adapter._retry_rewinds), 1)
-                self.assertEqual(h.state("msg-4"), "leased")
-                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES[:4])
+                    async def record_service_stop() -> None:
+                        at_service_stop.append(h.state("msg-4"))
+                        await stop_service()
 
-                await h.stop_gracefully()
-                self.assertEqual(h.adapter._retry_rewinds, {})
-                self.assertEqual(timeline, [("release", "msg-4")])
-                self.assertEqual(h.state("msg-4"), "pending")
-                self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
-            finally:
-                await h.close()
+                    try:
+                        await seed_exchanges(h)
+                        h.adapter._process_message_background = queued_turn_never_starts
 
-            await self.assert_retried_once_after_restart(home, h.inbox)
+                        async def reserve_the_slot() -> None:
+                            # As the pinned cold path claims it for a competing turn,
+                            # right after the rewind: the re-sent message is queued.
+                            turn = h.runner._session_state(session_key).turn
+                            turn.agent = _AGENT_PENDING_SENTINEL
 
-        self.run_scenario(scenario)
+                        PinnedHermesRetryRewindTests.begin_after(
+                            h, "rewrite_transcript", reserve_the_slot
+                        )
+                        await h.deliver(raw_event(4, "/retry"))
+                        await eventually(lambda: bool(queued))
+                        h.runner._release_running_agent_state(session_key)
+                        self.assertEqual(queued, ["third question"])
+                        self.assertEqual(len(h.adapter._retry_rewinds), 1)
+                        self.assertEqual(h.state("msg-4"), "leased")
+                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES[:4])
+
+                        h.adapter._stop_service = record_service_stop
+                        budget = {}
+                        if sidecar == "never answers":
+                            h.before_settle = no_answer
+                            budget["HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT"] = "1.5"
+                        with patch.dict(os.environ, budget):
+                            await h.stop_gracefully()
+                        self.assertEqual(h.adapter._retry_rewinds, {})
+                        self.assertEqual(chat_transcript(h), SEEDED_EXCHANGES)
+                        if sidecar == "answers":
+                            self.assertEqual(timeline, [("release", "msg-4")])
+                            self.assertEqual(at_service_stop, ["pending"])
+                        else:
+                            self.assertEqual(timeline, [])
+                            self.assertEqual(at_service_stop, ["leased"])
+                            raw, _state = h.inbox["msg-4"]
+                            h.inbox["msg-4"] = (raw, "pending")
+                    finally:
+                        sidecar_back.set()
+                        await h.close()
+
+                    await self.assert_retried_once_after_restart(home, h.inbox)
+
+                self.run_scenario(scenario)
 
 
 class HeldJudge:

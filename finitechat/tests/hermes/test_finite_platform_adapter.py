@@ -1203,6 +1203,53 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual([call[0] for call in calls], ["activity", "ack", "activity", "ack"])
         self.assertEqual(calls[-1][1]["message_id"], "msg-22")
 
+    def test_past_its_deadline_disconnect_skips_only_its_sidecar_calls(self):
+        """Disconnect bounds its sidecar calls by its deadline, and nothing else.
+
+        Here the service stop's reserve takes the whole teardown budget. The
+        deferred admission is still cancelled, so it never reaches Hermes, and
+        an orphaned /retry rewind is still undone, so its redelivery retries
+        the restored transcript once. Their entries keep their leases.
+        """
+        adapter = self.adapter()
+        calls = []
+        adapter._finitechat_json = self._record_json(calls)
+        reserve = self.module.SERVICE_STOP_RESERVE_SECS
+        adapter.gateway_runner = types.SimpleNamespace(
+            _adapter_disconnect_timeout_secs=lambda: reserve
+        )
+        session_key = "agent:main:finitechat:dm:room-agent-1:chat-build-1"
+        undone = []
+
+        async def settle_retry_rewind(_turn, rewind, *, release, model_started):
+            undone.append((rewind, release, model_started))
+            return release
+
+        adapter._settle_retry_rewind = settle_retry_rewind
+
+        async def disconnect_past_deadline():
+            owner = asyncio.create_task(asyncio.Event().wait())
+            adapter._active_sessions[session_key] = asyncio.Event()
+            adapter._session_tasks[session_key] = owner
+            await adapter._handle_finitechat_event(self._text_event(31, "msg-31", "waiting"))
+            admission = adapter._admission_tasks[session_key]
+            adapter._retry_rewinds["msg-4-key"] = ("rewind", ("room-agent-1", 4, "msg-4"))
+            await adapter.disconnect()
+            cancelled = admission.cancelled()
+            # The chat goes idle; nothing is left to admit the waiting message.
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            for _ in range(20):
+                await asyncio.sleep(0)
+            return cancelled
+
+        self.assertTrue(asyncio.run(disconnect_past_deadline()))
+        self.assertEqual(adapter._deferred_admissions, {})
+        self.assertEqual(adapter.handled_messages, [])
+        self.assertEqual(undone, [("rewind", True, False)])
+        self.assertEqual(adapter._retry_rewinds, {})
+        self.assertEqual(calls, [])
+
     def test_deferred_text_survives_adapter_restart_until_admission(self):
         first_adapter = self.adapter()
         first_calls = []
@@ -2833,6 +2880,95 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(calls[0][0:2], ("/bin/finitechat", "hermes"))
         self.assertIn("serve", calls[0])
         self.assertTrue(fake_process.terminated)
+
+    def test_a_stopped_adapter_starts_no_service_and_a_new_adapter_does(self):
+        """Once disconnect() stops the service, this adapter starts no other.
+
+        A settlement still running then would start one that nothing stops,
+        holding the store's writer lease from the next gateway's service. Its
+        call fails like any to an unavailable sidecar, so the entry keeps its
+        lease. A stop that lands while a service starts stops that one too.
+        Hermes reconnects with a new adapter, which starts its own.
+        """
+        extra = {
+            "home": self.state_home,
+            "finitechat_bin": "/bin/finitechat",
+            "service_addr": "127.0.0.1:0",
+            "inbound_stream": True,
+        }
+        processes: list[Any] = []
+        writes_ready_file = [True]
+        on_start: list[Any] = []
+
+        class FakeProcess:
+            def __init__(self):
+                self.returncode = None
+
+            def terminate(self):
+                self.returncode = -15
+
+            def kill(self):
+                self.returncode = -9
+
+            async def wait(self):
+                return self.returncode
+
+        async def fake_create_subprocess_exec(*args, **_kwargs):
+            if writes_ready_file[0]:
+                ready_file = Path(args[args.index("--ready-file") + 1])
+                ready_file.write_text('{"url":"http://127.0.0.1:7777"}', encoding="utf-8")
+            processes.append(FakeProcess())
+            for step in on_start:
+                await step()
+            return processes[-1]
+
+        def unreachable(*_args):
+            return self.module._FiniteChatResult(False, {}, "connection refused", True, True)
+
+        def new_adapter():
+            return self.module.FiniteChatAdapter(PlatformConfig(extra=dict(extra)))
+
+        async def scenario():
+            stopped = new_adapter()
+            self.assertTrue(await stopped._ensure_service())
+            await stopped._stop_service()
+            # The stream clears the URL of a service that stopped answering.
+            stopped.service_url = ""
+            self.assertFalse(await stopped._release_finitechat_event("room-agent-1", 5, "msg-5"))
+            self.assertEqual(len(processes), 1)
+            self.assertIsNone(stopped._service_proc)
+
+            # disconnect() stops the service while this one is being started...
+            starting = new_adapter()
+            on_start.append(starting._stop_service)
+            self.assertFalse(await starting._ensure_service())
+            on_start.clear()
+            self.assertEqual((len(processes), processes[-1].returncode), (2, -15))
+            self.assertIsNone(starting._service_proc)
+
+            # ...or while it waits for its ready file.
+            waiting = new_adapter()
+            writes_ready_file[0] = False
+            start = asyncio.create_task(waiting._ensure_service())
+            await asyncio.sleep(0.01)
+            self.assertIsNotNone(waiting._service_proc)
+            await waiting._stop_service()
+            self.assertFalse(await start)
+            self.assertEqual((len(processes), processes[-1].returncode), (3, -15))
+            writes_ready_file[0] = True
+
+            reconnected = new_adapter()
+            self.assertTrue(await reconnected._ensure_service())
+            self.assertEqual((len(processes), processes[-1].returncode), (4, None))
+
+        with (
+            patch.object(
+                self.module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+            ),
+            patch.object(self.module, "_finitechat_service_health", lambda *_args: True),
+            patch.object(self.module, "_finitechat_service_json", unreachable),
+        ):
+            asyncio.run(scenario())
 
     def brain_adapter(self):
         adapter = self.adapter()
