@@ -21,7 +21,8 @@ pub enum ParticipationKind {
     /// A Brain record was accepted from a request authenticated (NIP-98) by
     /// this key. This is request authentication, not a durable signature over
     /// the stored record: Folder Key Grant records are ephemeral-key gift
-    /// wraps.
+    /// wraps. Folder Key Grant records never count: any key-holding client
+    /// delivers pending wraps during sync, with no request from its owner.
     AuthenticatedBrainAction,
 }
 
@@ -71,8 +72,12 @@ pub(super) const MOUNT_OFFER_ACCEPTANCE_SQL: &str =
  WHERE source_brain_id = ?1 AND destination_admin_npub = ?2
    AND status IN ('accepted', 'revoked') AND accepted_at IS NOT NULL";
 
-pub(super) const AUTHENTICATED_ACTION_SQL: &str = "SELECT MIN(accepted_at) FROM brain_record_index
- WHERE brain_id = ?1 AND actor_npub = ?2";
+// Walk the (brain_id, actor_npub, accepted_at) index in order and stop at the
+// first record that is not a sync-delivered Folder Key Grant. Unlike the MIN
+// reads, this returns no row when there is none.
+pub(super) const AUTHENTICATED_ACTION_SQL: &str = "SELECT accepted_at FROM brain_record_index
+ WHERE brain_id = ?1 AND actor_npub = ?2 AND record_type <> 'folder_key_grant'
+ ORDER BY accepted_at LIMIT 1";
 
 /// An applied Approval (for example a hosted admin approving a
 /// delegation-grant) records its exact signer. Approval targets are not
@@ -125,7 +130,9 @@ impl BrainStore {
                 let recorded_at = statement
                     .query_row(params![brain_id.as_str(), key.as_str()], |row| {
                         row.get::<_, Option<String>>(0)
-                    })?;
+                    })
+                    .optional()?
+                    .flatten();
                 let Some(recorded_at) = recorded_at else {
                     continue;
                 };

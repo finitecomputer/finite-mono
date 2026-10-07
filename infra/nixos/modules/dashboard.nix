@@ -4,11 +4,12 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # PR1060: Persistent editable trial codes and account/agent identities.
-    # Roll out Core from this source before enabling the new dashboard actions.
-    # Source b3fd86b6eca34370bf1a593759f8379312c9760c; excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/37386098344
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:79bda4c3060cf4aa66a623c72b61bcd8b097666fd4e5a3929e737d8afa245066";
+    # Brain admin roster, signed Personal Brain setup, and Chat invitation cleanup.
+    # Stage Core/Brain from the source below with its old dashboard pin first;
+    # qualify and upgrade Runtimes before activating this dashboard.
+    # Source 6caa3067e59d340519618b2589ed2e101991deff; excludes PR1055.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37417667361
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ebeacff555f1d9b40239c6649503d0abec714ea957da9a7d4753453ff593ecf2";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With

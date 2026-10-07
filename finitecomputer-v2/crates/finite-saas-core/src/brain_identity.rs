@@ -14,7 +14,11 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 pub const OBSERVATION_VERSION: &str = "finite-core-brain-account-observation-v1";
+/// v1 releases an account's description only to a Brain it shared with.
 pub const DESCRIPTIONS_VERSION: &str = "finite-core-brain-identity-descriptions-v1";
+/// v2 (FIN-166) drops the per-Brain sharing scope: Brain's participation rule
+/// alone decides which keys it asks about. Same request and response shape.
+pub const DESCRIPTIONS_VERSION_V2: &str = "finite-core-brain-identity-descriptions-v2";
 pub const OBSERVATION_PATH: &str = "/api/core/internal/v1/brain-account-observations";
 pub const DESCRIPTIONS_PATH: &str = "/api/core/internal/v1/brain-identity-descriptions";
 /// Header for the trusted dashboard's observation credential. Distinct from
@@ -389,7 +393,7 @@ pub enum DescriptionsInputError {
 
 impl BrainIdentityDescriptionsRequest {
     pub fn validate(&self, configured_brain_server: &str) -> Result<(), DescriptionsInputError> {
-        if self.version != DESCRIPTIONS_VERSION {
+        if self.version != DESCRIPTIONS_VERSION && self.version != DESCRIPTIONS_VERSION_V2 {
             return Err(DescriptionsInputError::Version);
         }
         if self.brain_server != configured_brain_server {
@@ -417,6 +421,11 @@ impl BrainIdentityDescriptionsRequest {
             return Err(DescriptionsInputError::KeyCount);
         }
         Ok(())
+    }
+
+    /// v1 requires the account's sharing scope for this Brain; v2 does not.
+    pub fn requires_sharing_scope(&self) -> bool {
+        self.version == DESCRIPTIONS_VERSION
     }
 }
 

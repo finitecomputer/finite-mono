@@ -651,6 +651,37 @@ runtime_agent_npub() {
   '
 }
 
+# Personal Brain setup needs two signatures, as on the dashboard Brain page:
+# the Agent signs a consent naming the customer, then the customer's hosted
+# key signs the creation through the dashboard route.
+set_up_personal_brain() {
+  local owner_npub
+  local consent_json="$state_dir/personal-agent-consent-$$.json"
+  owner_npub="$(curl_customer "$dashboard_url/api/brain/personal" | node -e '
+    let body = "";
+    process.stdin.on("data", (chunk) => body += chunk);
+    process.stdin.on("end", () => {
+      const npub = String(JSON.parse(body).ownerNpub || "");
+      if (!npub.startsWith("npub1")) process.exit(1);
+      process.stdout.write(npub);
+    });
+  ')"
+  runtime_exec "$container_machine_id" \
+    fbrain brain personal-agent-consent --owner "$owner_npub" --json >"$consent_json"
+  node - "$consent_json" <<'JS' | curl_customer \
+    -o /dev/null \
+    -H "origin: $dashboard_url" \
+    -H 'content-type: application/json' \
+    -X POST \
+    --data-binary @- \
+    "$dashboard_url/api/brain/personal"
+const fs = require("node:fs");
+const { agentNpub, brainId, consent } = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+process.stdout.write(JSON.stringify({ agentNpub, brainId, consent }));
+JS
+  rm -f "$consent_json"
+}
+
 personal_agent_brain_id() {
   runtime_exec "$container_machine_id" fbrain brain list --json >"$brains_json"
   node - "$brains_json" <<'JS'
@@ -1096,7 +1127,7 @@ fi
 
 agent_npub_before="$(runtime_agent_npub)"
 if [[ "${DEVFINITY_CHAT_SITES_ACCEPTANCE:-0}" != "1" ]]; then
-  runtime_exec "$container_machine_id" fbrain brain bootstrap-personal --json >/dev/null
+  set_up_personal_brain
   brain_id="$(personal_agent_brain_id)"
   brain_tree="/data/workspace/finitebrain/$brain_id"
   brain_proof="Devfinity Agent Brain Proof $(date +%s)-$$"

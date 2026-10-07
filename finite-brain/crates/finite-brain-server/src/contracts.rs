@@ -14,6 +14,10 @@ pub struct CreateBrainRequest {
     pub personal_agent_email: Option<String>,
     #[serde(default)]
     pub personal_agent_npub: Option<String>,
+    /// The Personal Agent's signed `finite-brain-personal-agent-consent-v1`
+    /// event naming the signing owner.
+    #[serde(default)]
+    pub personal_agent_consent: Option<serde_json::Value>,
     #[serde(default)]
     pub initial_agent_email: Option<String>,
     #[serde(default)]
