@@ -1533,6 +1533,54 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
 
         self.run_scenario(scenario)
 
+    def test_a_waiting_message_whose_release_never_returns_still_stops_the_service(self):
+        """The releases disconnect() makes before its bounded waits share their deadline.
+
+        A message waiting behind a running turn is released when the adapter
+        disconnects. A sidecar that never answers that release must not let
+        Hermes abandon disconnect() before the service stops; the release is
+        cut off instead, and the message keeps its lease until it expires.
+        """
+
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            sidecar_back = asyncio.Event()
+            at_service_stop: list[str] = []
+            stop_service = h.adapter._stop_service
+            status_file = Path(home) / h.module.BRIDGE_STATUS_FILE
+
+            async def hold_release(action: str, message_id: str) -> bool:
+                if (action, message_id) == ("release", "msg-3"):
+                    await sidecar_back.wait()
+                return True
+
+            async def record_service_stop() -> None:
+                at_service_stop.append(h.state("msg-3"))
+                await stop_service()
+
+            try:
+                await h.seed()
+                h.hold_model = lambda message: message == "long work"
+                await h.deliver(raw_event(2, "long work"))
+                await eventually(lambda: ("model", "long work") in h.timeline)
+                await h.deliver(raw_event(3, "follow-up"))
+                self.assertTrue(h.adapter._deferred_admissions, "msg-3 waits behind msg-2")
+                h.before_settle = hold_release
+                h.adapter._stop_service = record_service_stop
+                status_file.unlink(missing_ok=True)
+                with patch.dict(os.environ, {"HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT": "1.5"}):
+                    await h.stop_gracefully()
+                self.assertEqual(at_service_stop, ["leased"])
+                self.assertNotIn("follow-up", h.models())
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                self.assertEqual(status["status"], "disconnected")
+            finally:
+                sidecar_back.set()
+                h.model_gate.set()
+                await h.close()
+
+        self.run_scenario(scenario)
+
 
 class PinnedHermesStoppedInboxTurnTests(GoalScenario):
     """A turn that starts after a stop released an inbox turn does not disown it.
