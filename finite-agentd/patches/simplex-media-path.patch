@@ -1,6 +1,45 @@
 --- a/platforms/simplex/adapter.py
 +++ b/platforms/simplex/adapter.py
-@@ -569,4 +569,14 @@
+@@ -389,7 +389,8 @@
+         # into _pending_responses (e.g. fire-and-forget).
+         if corr_id and isinstance(corr_id, str) and corr_id.startswith(_CORR_PREFIX):
+             self._pending_corr_ids.discard(corr_id)
+-            return
++            if resp.get("type") != "rcvFileAcceptedSndCancelled":
++                return
+
+         resp_type = resp.get("type") or event.get("type", "")
+
+@@ -438,6 +439,27 @@
+                 await self._handle_chat_item(resp)
+             except Exception:
+                 logger.exception("SimpleX: error processing chat item")
++            return
++
++        # Failed transfers must not swallow the caption or retain pending state.
++        if resp_type in {
++            "rcvFileError", "rcvFileSndCancelled", "rcvFileAcceptedSndCancelled"
++        }:
++            transfer = resp.get("rcvFileTransfer", {}) or {}
++            file_id = transfer.get("fileId") if isinstance(transfer, dict) else None
++            pending = self._pending_file_transfers.pop(file_id, None)
++            if pending:
++                item_data = pending["chatItem"]
++                item_data.pop("file", None)
++                msg_content = item_data["content"]["msgContent"]
++                caption = msg_content.get("text", "") or ""
++                msg_content["text"] = (caption + "\n\n" if caption else "") + (
++                    "[SimpleX attachment unavailable: download failed or was cancelled.]"
++                )
++                try:
++                    await self._handle_chat_item(pending)
++                except Exception:
++                    logger.exception("SimpleX: error processing failed file message")
+             return
+
+         # File transfer completion — deliver any deferred chat item
+@@ -568,6 +590,16 @@
+                 if isinstance(file_source, dict)
                  else None
              )
 +            # Finite's managed daemon returns paths relative to --files-folder.
@@ -15,7 +54,11 @@
 +                file_path = str(resolved)
              file_name = file_info.get("fileName", "")
              file_id = file_info.get("fileId")
-@@ -580,8 +590,12 @@
+
+@@ -577,11 +609,15 @@
+             if not ext and file_name:
+                 ext = Path(file_name).suffix.lower()
+
 -            # Voice notes typically arrive before the file finishes
 +            # Images and voice notes can arrive before the file finishes
              # downloading. Defer the message until rcvFileComplete fires.
