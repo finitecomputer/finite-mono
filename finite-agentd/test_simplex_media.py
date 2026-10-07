@@ -77,6 +77,9 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             async def handle_message(self, event):
                 self.delivered.append(event)
 
+            def _enqueue_text_event(self, event):
+                self.delivered.append(event)
+
             def build_source(self, **kw):
                 return SimpleNamespace(**kw)
 
@@ -101,9 +104,12 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapter.delivered, [])
         complete = copy.deepcopy(self.item)
         complete["chatItem"]["file"]["fileSource"] = {"filePath": path}
-        await self.adapter._handle_event(
-            {"resp": {"type": "rcvFileComplete", "chatItem": complete}}
-        )
+        completion = {"resp": {"type": "rcvFileComplete", "chatItem": complete}}
+        await self.adapter._handle_event(completion)
+        self.assertEqual(self.adapter._pending_file_transfers, {})
+        delivered = len(self.adapter.delivered)
+        await self.adapter._handle_event(completion)
+        self.assertEqual(len(self.adapter.delivered), delivered)
 
     async def test_relative_completion_reaches_transcription_as_existing_absolute_file(self):
         with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):
@@ -113,6 +119,64 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.message_type, "voice")
         self.assertEqual(event.media_urls, [str(self.voice.resolve())])
         self.assertTrue(Path(event.media_urls[0]).is_file())
+
+    async def test_photo_waits_for_download_then_delivers_caption_and_existing_file(self):
+        photo = self.root / "stage.jpg"
+        photo.write_bytes(b"synthetic image")
+        self.item["chatItem"]["content"]["msgContent"] = {
+            "type": "image",
+            "text": "Use this stage photo",
+        }
+        self.item["chatItem"]["file"] = {"fileId": 1, "fileName": "stage.jpg"}
+        with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):
+            await self.receive("stage.jpg")
+        self.assertEqual(self.adapter.commands, ["/freceive 1"])
+        self.assertEqual(len(self.adapter.delivered), 1)
+        event = self.adapter.delivered[0]
+        self.assertEqual(event.message_type, "photo")
+        self.assertEqual(event.text, "Use this stage photo")
+        self.assertEqual(event.media_urls, [str(photo.resolve())])
+        self.assertTrue(Path(event.media_urls[0]).is_file())
+
+    async def test_photo_without_caption_waits_for_download(self):
+        self.item["chatItem"]["content"]["msgContent"] = {"type": "image", "text": ""}
+        self.item["chatItem"]["file"] = {"fileId": 1, "fileName": "photo.png"}
+        photo = self.root / "photo.png"
+        photo.write_bytes(b"synthetic image")
+        with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):
+            await self.receive("photo.png")
+        self.assertEqual(len(self.adapter.delivered), 1)
+        self.assertEqual(self.adapter.delivered[0].message_type, "photo")
+        self.assertEqual(self.adapter.delivered[0].media_urls, [str(photo.resolve())])
+
+    async def test_already_downloaded_photo_is_delivered_immediately(self):
+        photo = self.root / "photo.png"
+        photo.write_bytes(b"synthetic image")
+        self.item["chatItem"]["content"]["msgContent"] = {"type": "image", "text": "Photo"}
+        self.item["chatItem"]["file"] = {
+            "fileId": 1,
+            "fileName": "photo.png",
+            "fileSource": {"filePath": str(photo)},
+        }
+        await self.adapter._handle_chat_item(self.item)
+        self.assertEqual(self.adapter.commands, [])
+        self.assertEqual(self.adapter.delivered[0].message_type, "photo")
+        self.assertEqual(self.adapter.delivered[0].media_urls, [str(photo)])
+
+    async def test_image_sent_as_file_waits_for_download(self):
+        photo = self.root / "stage.jpeg"
+        photo.write_bytes(b"synthetic image")
+        self.item["chatItem"]["content"]["msgContent"] = {
+            "type": "file",
+            "text": "Use the attached photo",
+        }
+        self.item["chatItem"]["file"] = {"fileId": 1, "fileName": "stage.jpeg"}
+        with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):
+            await self.receive("stage.jpeg")
+        self.assertEqual(len(self.adapter.delivered), 1)
+        self.assertEqual(self.adapter.delivered[0].message_type, "photo")
+        self.assertEqual(self.adapter.delivered[0].text, "Use the attached photo")
+        self.assertEqual(self.adapter.delivered[0].media_urls, [str(photo.resolve())])
 
     async def test_absolute_path_is_preserved(self):
         with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):

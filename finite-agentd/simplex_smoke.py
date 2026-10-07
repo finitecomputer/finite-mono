@@ -101,6 +101,10 @@ async def run():
         runner = GatewayRunner(config=GatewayConfig())
 
         ports = [port(), port(), port()]
+        files = [Path(td) / f"files{i}" for i in range(3)]
+        for folder in files:
+            folder.mkdir()
+        os.environ["SIMPLEX_FILES_FOLDER"] = str(files[0])
         procs = []
         peers = []
         adapter = None
@@ -111,6 +115,8 @@ async def run():
                         BIN,
                         "-d",
                         td + f"/peer{i}",
+                        "--files-folder",
+                        str(files[i]),
                         "-p",
                         str(p),
                         "--mute",
@@ -164,6 +170,33 @@ async def run():
                 )
 
             await peers[1].until(reply)
+            # Real image transfers must reach Hermes together with their caption,
+            # after the daemon has made the full-size file available.
+            from PIL import Image
+
+            fixture = Path(td) / "synthetic.png"
+            Image.new("RGB", (32, 32), "red").save(fixture)
+            image_path, thumbnail = adapter._prepare_image(str(fixture))
+            for caption in ("synthetic photo caption", ""):
+                payload = json.dumps(
+                    [
+                        {
+                            "filePath": image_path,
+                            "msgContent": {"type": "image", "image": thumbnail, "text": caption},
+                        }
+                    ]
+                )
+                response = await peers[1].cmd(f"/_send @{human_contact} json {payload}")
+                assert response["type"] != "chatCmdError", response["type"]
+                event = await asyncio.wait_for(incoming.get(), 60)
+                assert event.message_type.value == "photo", event.message_type
+                assert event.text == caption, event.text
+                assert len(event.media_urls) == 1, event.media_urls
+                received = Path(event.media_urls[0])
+                assert received.is_absolute() and received.is_file(), received
+                assert received.read_bytes() == Path(image_path).read_bytes()
+                await peers[1].until(reply)
+            print("PASS: captioned and uncaptioned images downloaded and delivered to Hermes")
             # Owner-only topics use the exact same live adapter/socket.
             owner = event.source.user_id
             pairing = PairingStore()
