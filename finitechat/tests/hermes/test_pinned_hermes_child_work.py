@@ -1262,6 +1262,7 @@ class PinnedHermesAutoResumeTests(GoalScenario):
                     await eventually(lambda: any(m.startswith(CONTINUATION) for m in h.models()))
                     # The kickoff settled the /goal entry; the continuation has none.
                     self.assertEqual(h.state("msg-2"), "acked")
+                    await asyncio.gather(*h.adapter._owner_writes.values())
                     self.assertFalse(self.owner_marker(h).exists())
                     await h.stop_gracefully()
                     self.assertTrue(h.interrupted_by_shutdown)
@@ -1296,6 +1297,7 @@ class PinnedHermesAutoResumeTests(GoalScenario):
                         h.hold_model = lambda message: message == "long work"
                         await h.deliver(raw_event(2, "long work"))
                         await eventually(lambda: ("model", "long work") in h.timeline)
+                        await asyncio.gather(*h.adapter._owner_writes.values())
                         marker = json.loads(self.owner_marker(h).read_text(encoding="utf-8"))
                         self.assertEqual(
                             (marker["room_id"], marker["seq"], marker["message_id"]),
@@ -1384,6 +1386,7 @@ class PinnedHermesAutoResumeTests(GoalScenario):
 
             try:
                 await h.seed()
+                await asyncio.gather(*h.adapter._owner_writes.values())
                 self.assertEqual(self.owner_named(h), "msg-1")
                 h.hold_model = lambda message: message == "internal work"
                 with patch.object(h.module, "_write_turn_owner_file", slow_write):

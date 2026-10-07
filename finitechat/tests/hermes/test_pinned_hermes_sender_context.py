@@ -172,6 +172,12 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
+
+        async def finish_owner_writes():
+            await asyncio.gather(*adapter._owner_writes.values(), return_exceptions=True)
+
+        # Runs before the home is removed (cleanups run last-in first-out).
+        self.addAsyncCleanup(finish_owner_writes)
         bridge_calls = []
         handler_events = []
         handler_started = asyncio.Event()

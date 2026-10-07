@@ -402,7 +402,8 @@ def setUpModule():
     open_fds = len(os.listdir("/dev/fd"))
     if open_fds > 768:
         raise RuntimeError(f"{open_fds} descriptors open: an earlier module leaked them")
-    # An earlier module in this process may have registered the plugin.
+    # An earlier module in this process may have left a discovered plugin
+    # manager behind, which discovery here would reuse without loading.
     forget_finitechat_plugin()
     unittest.addModuleCleanup(forget_finitechat_plugin)
     MODEL = FakeModel()
@@ -1179,7 +1180,7 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
             )
             # The lease files stay as they were; turns may still write the
             # adapter's own records elsewhere in the home.
-            held = {root: tree_snapshot(root) for root in (HOME.v1, HOME.v2)}
+            held = {lease_dir: tree_snapshot(lease_dir) for lease_dir in (HOME.v1, HOME.v2)}
 
             previous = HOME.current_module()
             plugins.discover_plugins(force=True)
@@ -1193,7 +1194,9 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
                 )
                 self.assertIn("cannot remove", message)
                 self.assertIn("Other sessions are not affected.", message)
-            self.assertEqual({root: tree_snapshot(root) for root in (HOME.v1, HOME.v2)}, held)
+            self.assertEqual(
+                {lease_dir: tree_snapshot(lease_dir) for lease_dir in (HOME.v1, HOME.v2)}, held
+            )
             self.assertNotIn(root, state.started_roots)
             result = await gateway.turn(BOB, "seg-2", v2=self.V2)
             self.assertIn("LEASE_PRESENT", result)
