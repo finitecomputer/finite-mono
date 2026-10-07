@@ -59,7 +59,11 @@ pub(super) fn subscription(
         stripe_price_id: Some("price_standard".into()),
         expected_stripe_price_id: Some("price_standard".into()),
         subscription_status: status,
-        current_period_end: Some("2026-10-06T12:00:00Z".into()),
+        current_period_end: Some(
+            (time::OffsetDateTime::now_utc() + time::Duration::days(7))
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap(),
+        ),
         cancel_at_period_end: false,
         stripe_event_id: Some(format!("evt_{user}_{time}")),
         stripe_event_created: Some(time),
