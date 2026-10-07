@@ -1743,6 +1743,53 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     }
 
 
+def collect_runtime_idle(project: str, runtime: str, machine: str, expected_host: str) -> dict[str, Any]:
+    """Point-in-time Chat turn idleness of one exact, operable Kata assignment.
+
+    The lifecycle probe proves the assignment and supplies its durable root;
+    finite_status_runtime_idle reads only aggregate turn and inbox state there.
+    """
+    if __package__:
+        from . import finite_status_runtime_idle as idle
+    else:
+        import finite_status_runtime_idle as idle
+    hostname = socket.gethostname().split(".", 1)[0]
+    if hostname != expected_host:
+        raise CollectionError("runtime idle target host does not match this host")
+    raw = collect_lifecycle_probe([{
+        "project_id": project, "agent_runtime_id": runtime,
+        "source_machine_id": machine, "source_host_id": hostname,
+        "link_state": "active",
+    }], hostname, retain_report=True)
+    agent = raw["agents"].get(runtime, probe_agent_entry("unknown", "probe_unavailable"))
+    state_root = None
+    if agent["verdict"] == "operable":
+        handle = next(check for check in agent["report"]["checks"] if check["name"] == "canonical_handle")
+        candidate = handle["evidence"].get("state_root")
+        if (isinstance(candidate, str) and Path(candidate).is_absolute()
+                and Path(candidate).name == runtime and Path(candidate).parent.name == "kata"
+                and os.path.realpath(candidate) == candidate):
+            state_root = Path(candidate)
+    now = utc_now()
+    if state_root is None:
+        reason = "lifecycle_not_operable" if agent["verdict"] != "operable" else "state_root_mismatch"
+        observed = {"verdict": "unknown", "reasons": [reason], "gateway": None,
+                    "hermes_inbox": None, "agentd_inbox": None, "running_markers": None}
+    else:
+        observed = idle.observe(state_root, int(now.timestamp() * 1000))
+    status = {"idle": "green", "unknown": "unknown"}.get(observed["verdict"], "red")
+    return {
+        "schema_version": "finite.status.v1", "generated_at": isoformat(now),
+        "overall_status": status, "exit_code": {"green": 0, "red": 1, "unknown": 2}[status],
+        "sections": {"runtime_idle": {
+            "status": status, "project_id": project, "agent_runtime_id": runtime,
+            "source_machine_id": machine, "source_host_id": hostname,
+            "lifecycle": {"verdict": agent["verdict"], "reason": agent.get("reason")},
+            **observed,
+        }},
+    }
+
+
 def collect_runtime_cleanup_layout(report: dict[str, Any]) -> dict[str, Any]:
     """Select retained network/namespace facts; never expose OCI env or hook args."""
     result: dict[str, Any] = {"status": "unknown", "repair_authority": False}
@@ -4509,6 +4556,9 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
     mode.add_argument("--runtime-lifecycle", nargs=4,
                       metavar=("PROJECT_ID", "AGENT_RUNTIME_ID", "SOURCE_MACHINE_ID", "SOURCE_HOST_ID"),
                       help="inspect one exact Kata assignment's lifecycle control without stopping it; emits JSON")
+    mode.add_argument("--runtime-idle", nargs=4,
+                      metavar=("PROJECT_ID", "AGENT_RUNTIME_ID", "SOURCE_MACHINE_ID", "SOURCE_HOST_ID"),
+                      help="read one exact operable Kata assignment's point-in-time Chat turn and inbox counts; emits JSON")
     parser.add_argument("--expected-agent-principal-sha256",
                         help="compare both routes against an independently established Principal hash")
     parser.add_argument("--guest-agent-probe", action="store_true",
@@ -4562,6 +4612,11 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         for value in options.runtime_lifecycle
     ):
         parser.error("--runtime-lifecycle requires four simple identifiers")
+    if options.runtime_idle and any(
+        not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", value)
+        for value in options.runtime_idle
+    ):
+        parser.error("--runtime-idle requires four simple identifiers")
     if options.runtime_route and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", options.runtime_route):
         parser.error("--runtime-route requires a simple source machine identifier")
     if options.expected_agent_principal_sha256 and (
@@ -4592,6 +4647,8 @@ def main(arguments: list[str] | None = None) -> None:
         elif options.runtime_lifecycle:
             report = collect_runtime_lifecycle(*options.runtime_lifecycle,
                                                guest_agent_probe=options.guest_agent_probe)
+        elif options.runtime_idle:
+            report = collect_runtime_idle(*options.runtime_idle)
         elif options.tinfoil:
             from finite_tinfoil_status import collect
 
@@ -4637,6 +4694,7 @@ def main(arguments: list[str] | None = None) -> None:
         or options.brain_roster
         or options.runtime_route
         or options.runtime_lifecycle
+        or options.runtime_idle
         or options.runtime_assignment
         or options.kata_recovery_host
     ):

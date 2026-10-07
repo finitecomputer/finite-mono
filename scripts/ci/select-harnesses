@@ -93,13 +93,19 @@ STRIPE_PRICE_CONTRACT_PATHS = {
     "scripts/check_stripe_price_contract.py",
 }
 
+# The Hermes bridge job also runs this classifier against the pinned gateway
+# (finitechat/tests/hermes/test_pinned_hermes_child_work_idle_gate.py).
+RUNTIME_IDLE_PATH = "scripts/finite_status_runtime_idle.py"
+
 FINITE_STATUS_PATHS = {
     "scripts/finite-status",
     "scripts/finite_status.py",
     "scripts/finite_status_brain_roster.py",
+    "scripts/finite_status_runtime_idle.py",
     "scripts/check_finite_status_contract.py",
     "scripts/tests/test_finite_status.py",
     "scripts/tests/test_finite_status_brain_roster.py",
+    "scripts/tests/test_finite_status_runtime_idle.py",
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
@@ -393,6 +399,8 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path in FINITE_STATUS_PATHS:
         selection.run_finite_status_contract = True
+        if path == RUNTIME_IDLE_PATH:
+            selection.run_hermes_bridge = True
         return
 
     if path in STRIPE_PRICE_CONTRACT_PATHS:
