@@ -1177,7 +1177,9 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
             self.assertIn(
                 "cannot remove", blocked_message(await gateway.turn(ALICE, "seg-1", internal=True))
             )
-            held = tree_snapshot(finite_home)
+            # The lease files stay as they were; turns may still write the
+            # adapter's own records elsewhere in the home.
+            held = {root: tree_snapshot(root) for root in (HOME.v1, HOME.v2)}
 
             previous = HOME.current_module()
             plugins.discover_plugins(force=True)
@@ -1191,7 +1193,7 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
                 )
                 self.assertIn("cannot remove", message)
                 self.assertIn("Other sessions are not affected.", message)
-            self.assertEqual(tree_snapshot(finite_home), held)
+            self.assertEqual({root: tree_snapshot(root) for root in (HOME.v1, HOME.v2)}, held)
             self.assertNotIn(root, state.started_roots)
             result = await gateway.turn(BOB, "seg-2", v2=self.V2)
             self.assertIn("LEASE_PRESENT", result)
