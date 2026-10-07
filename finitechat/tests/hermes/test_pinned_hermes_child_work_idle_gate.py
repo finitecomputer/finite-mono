@@ -1,12 +1,13 @@
 """The rollout idle check reads accepted child work as busy, against the pinned gateway.
 
-Round 09 proved the check blind to /bg and /btw children: Hermes counts no
-agent for them, and their command entry was acked at launch. The entry now
-stays leased until the work is done, and the real classifier reads that
-lease. The classifier ships with the rollout tooling, so this check lives
-apart from the child-work tests.
+The check was blind to /bg and /btw children: Hermes counts no agent for
+them, and their command entry was acked at launch. The entry now stays
+leased until the work is done, and the real classifier reads that lease.
+The classifier ships with the rollout tooling, so this check lives apart
+from the child-work tests.
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -21,9 +22,11 @@ from gateway.run import GatewayRunner
 
 from tests.hermes.test_pinned_hermes_child_work import (
     COMMANDS,
+    GOALS,
     ChildHarness,
     GoalScenario,
 )
+from tests.hermes.test_pinned_hermes_stop_settlement import eventually, raw_event
 
 IDLE_CHECK = Path(__file__).resolve().parents[3] / "scripts" / "finite_status_runtime_idle.py"
 
@@ -96,20 +99,39 @@ class PinnedHermesChildWorkIdleCheckTests(GoalScenario):
 
                 self.run_scenario(scenario)
 
-    def test_a_pending_goal_kickoff_reads_busy(self):
-        async def scenario(home: str):
-            h = ChildHarness(home, timeline=[])
-            try:
-                await self.prepare(h, "set")
-                await self.launch_goal(h, "set")
-                self.assertEqual(h.state("msg-2"), "leased")
-                self.assertEqual(idle_report(h, home)["verdict"], "busy")
-                h.model_gate.set()
-                await h.wait_settled("msg-2")
-                await h.wait_turns_finished()
-                self.assertEqual(idle_report(h, home)["verdict"], "idle")
-            finally:
-                h.model_gate.set()
-                await h.close()
+    def test_a_goal_kickoff_reads_busy_by_its_lease(self):
+        """Queued behind the command's own turn, the kickoff is no agent yet; only
+        its command's lease reads busy. Running, Hermes counts it as well."""
+        reasons = {"queued": ["inbox_leased"], "running": ["active_agents", "inbox_leased"]}
+        for when, expected in reasons.items():
+            with self.subTest(when=when):
 
-        self.run_scenario(scenario)
+                async def scenario(home: str, when: str = when, expected: list[str] = expected):
+                    h = ChildHarness(home, timeline=[])
+                    tail: asyncio.Event | None = None
+                    try:
+                        await self.prepare(h, "set")
+                        if when == "queued":
+                            # The command's own tail holds its kickoff queued.
+                            tail = h.hold_turn_tails()
+                            await h.deliver(raw_event(2, GOALS["set"]))
+                            await eventually(lambda: h.notices_held == 1)
+                        else:
+                            await self.launch_goal(h, "set")
+                        self.assertEqual(h.state("msg-2"), "leased")
+                        report = idle_report(h, home)
+                        self.assertEqual(report["verdict"], "busy", report)
+                        self.assertEqual(report["reasons"], expected, report)
+                        if tail is not None:
+                            tail.set()
+                        h.model_gate.set()
+                        await h.wait_settled("msg-2")
+                        await h.wait_turns_finished()
+                        self.assertEqual(idle_report(h, home)["verdict"], "idle")
+                    finally:
+                        if tail is not None:
+                            tail.set()
+                        h.model_gate.set()
+                        await h.close()
+
+                self.run_scenario(scenario)
