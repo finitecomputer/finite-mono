@@ -265,8 +265,8 @@ class ObserveTests(unittest.TestCase):
             self.assertEqual(self.observe()["reasons"], ["gateway_oversize", "hermes_inbox_oversize"])
 
     def test_an_entry_acked_within_the_quiet_window_is_busy(self) -> None:
-        # A /bg or /btw command entry is acked when its child launches; the
-        # old Runtime keeps no other trace of a /btw child.
+        # A Runtime from before #1071 acks a /bg or /btw command entry when
+        # its child launches and keeps no other trace of a /btw child.
         for acked_ms, verdict in ((NOW_MS - 60_000, "busy"), (NOW_MS - 1_799_000, "busy"),  # 29 min 59 s
                                   (NOW_MS - 1_800_000, "idle"), (NOW_MS + 5_000, "busy")):
             with self.subTest(age_ms=NOW_MS - acked_ms):
