@@ -2782,7 +2782,11 @@ class FiniteChatAdapter(BasePlatformAdapter):
         return time.monotonic() + timeout - SERVICE_STOP_RESERVE_SECS
 
     async def _finish_settlements(self, settle_by: float | None) -> None:
-        """Wait for every ack, release and owner write before the sidecar stops."""
+        """Wait for the acks, releases and owner writes in flight, until ``settle_by``.
+
+        One still running then is left to finish after the sidecar stops; an
+        entry it has not settled keeps its lease until it expires.
+        """
         pending = {*self._settlements, *self._owner_writes.values()}
         if pending:
             await asyncio.wait(pending, timeout=_time_left(settle_by))
