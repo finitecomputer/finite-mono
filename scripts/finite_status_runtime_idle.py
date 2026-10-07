@@ -9,9 +9,10 @@ Reads only `<state_root>/agent` (the guest's `/data/agent`):
   loads as pending) or `leased` (in flight).
 - `agentd-inbox.json` events and `hermes-running.json` messages.
 - `hermes-inbox.json` `acked` ring: the newest `acked_at_ms`, and the file's
-  mtime. A /bg or /btw command entry is acked when its child is launched, so
-  the child is visible to neither `active_agents` nor the inbox; a recent ack
-  or inbox write reads busy.
+  mtime. A Runtime from before #1071 acks a /bg or /btw command entry when
+  its child is launched, so the child is visible to neither `active_agents`
+  nor the inbox; a recent ack or inbox write reads busy. A later Runtime
+  keeps the entry leased until the child delivers.
 - `hermes-home/gateway.pid` mtime (created O_EXCL once per gateway process)
   and a private scratch copy of `hermes-home/state.db` (+ `-wal`, never
   `-shm`): /bg children run an AIAgent with session id `bg_*` whose row stays

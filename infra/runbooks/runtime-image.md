@@ -407,8 +407,11 @@ the restart will post one notice per marker to the user. The check is a
 point-in-time read, not a stop fence. A message that arrives between the check
 and the stop can still strand.
 
-A /bg or /btw child is acked when it launches, so neither `active_agents` nor
-the inbox shows it. The check therefore also reads:
+On a Runtime from before #1071, a /bg or /btw command is acked when its
+child launches, so neither `active_agents` nor the inbox shows the child; a
+later Runtime keeps the command leased until the child delivers
+(`inbox_leased`). To cover the older Runtimes, the check also reads, on every
+Runtime:
 
 - `recent_ack`: busy for 30 minutes after the inbox last acked an entry or was
   last written. Every Agent that chatted in the last 30 minutes defers, so a
