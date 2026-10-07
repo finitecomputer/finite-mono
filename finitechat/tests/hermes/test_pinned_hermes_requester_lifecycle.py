@@ -12,12 +12,14 @@ import contextlib
 import errno
 import hashlib
 import http.server
+import io
 import json
 import os
 import shlex
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -154,6 +156,54 @@ def leases_in(finite_home: Path) -> list[str]:
         if (finite_home / root).exists()
         for p in (finite_home / root).iterdir()
     )
+
+
+def tree_snapshot(top: Path) -> dict[str, tuple]:
+    """Every entry under `top`, links not followed: type, mode, contents' size and mtime."""
+    snapshot = {}
+    for directory, dirs, files in os.walk(top):
+        for name in dirs + files:
+            info = (Path(directory) / name).lstat()
+            # A directory's mtime moves with its entries; compare files only.
+            written = None if stat.S_ISDIR(info.st_mode) else (info.st_size, info.st_mtime_ns)
+            snapshot[os.path.join(directory, name)] = (info.st_mode, written)
+    return snapshot
+
+
+def plant_leftovers(finite_home: Path) -> tuple[list[str], list[str]]:
+    """Lease-named entries no reader accepts in both lease directories.
+
+    Returns every planted path and those standing for unreadable files; tests
+    fault opening those rather than relying on the uid they run as.
+    """
+    outside = finite_home / "outside.json"
+    outside.write_text(json.dumps({"expires_at_unix": 0}))
+    contents = {
+        "list": b"[]",
+        "null": b"null",
+        "scalar": b"7",
+        "string": b'"x"',
+        "nested": b"[" * 100_000,
+        "bad-bytes": b"\xff\xfe\x00",
+        "oversized": b'{"expires_at_unix":0,"pad":"' + b"x" * (4 << 20) + b'"}',
+        "unreadable": json.dumps({"expires_at_unix": 0}).encode(),
+    }
+    planted, unreadable = [], []
+    for root in (finite_home / "requester-context-v1", finite_home / "requester-context-v2"):
+        root.mkdir(mode=0o700, exist_ok=True)
+        for kind, content in contents.items():
+            path = root / lease_name(f"{root.name}:{kind}")
+            path.write_bytes(content)
+            planted.append(str(path))
+        fifo, link, directory = (
+            root / lease_name(f"{root.name}:{kind}") for kind in ("fifo", "symlink", "directory")
+        )
+        os.mkfifo(fifo)
+        link.symlink_to(outside)
+        directory.mkdir()
+        planted += [str(fifo), str(link), str(directory)]
+        unreadable.append(str(root / lease_name(f"{root.name}:unreadable")))
+    return planted, unreadable
 
 
 def as_new_gateway_process() -> Path:
@@ -368,6 +418,18 @@ class LeaseTestCase(unittest.TestCase):
         quarantine = getattr(sys.modules[STATE_MODULE], "quarantine", {})
         quarantine.pop(os.path.realpath(self.home.v1), None)
         self.assertEqual(left, [])
+
+    def assert_plugin_registered(self, module) -> None:
+        """Hook dispatch reaches `module`'s broker and Gateways get its adapter."""
+        hooks = plugins.get_plugin_manager()._hooks
+        for name in ("pre_tool_call", "post_tool_call"):
+            owners = [getattr(callback, "__self__", None) for callback in hooks.get(name, [])]
+            brokers = [
+                owner for owner in owners if isinstance(owner, module._RequesterContextBroker)
+            ]
+            self.assertEqual(len(brokers), 1, name)
+        self.assertIsNotNone(platform_registry.get("finitechat"))
+        self.assertIs(GatewayHarness().adapter_module, module)
 
 
 class GatewayHarness:
@@ -683,20 +745,106 @@ class HookLifecycleTests(LeaseTestCase):
             plugins.invoke_hook("pre_tool_call", **hook)
         self.assertEqual(self.home.leases(), [])
 
-    def test_registration_alone_keeps_a_killed_gateways_lease_until_expiry(self):
+    def test_registration_alone_keeps_a_killed_gateways_lease(self):
         session = "agent:main:finitechat:group:room-1:seg-1"
         # Registering the plugin (a reload, or a CLI process) cannot tell a
-        # dead call from a live one, so it removes only expired leases. The
-        # next gateway's connect removes the rest; see GatewayStartTests.
+        # dead call from a live one, so it leaves lease files alone, expired
+        # or not; readers refuse expired ones. The next gateway's connect
+        # removes them; see GatewayStartTests.
         start = int(time.time())
         kill_gateway_mid_call(session, ALICE)
-        self.assertEqual(self.held(session)["requesting_user_id"], ALICE)
+        held = self.held(session)
 
         plugins.discover_plugins(force=True)
-        self.assertEqual(self.held(session)["requesting_user_id"], ALICE)
+        self.assertEqual(self.lease(session), held)
         module = self.home.current_module()
         with patch("time.time", return_value=start + module.REQUESTER_CONTEXT_TTL_SECS + 1):
             plugins.discover_plugins(force=True)
+        self.assertEqual(self.lease(session), held)
+        (self.home.v1 / lease_name(session)).unlink()
+
+    def test_registration_never_opens_leftover_lease_files(self):
+        session = "agent:main:finitechat:group:room-1:seg-1"
+        planted, unreadable = plant_leftovers(self.home.finite_home)
+        self.addCleanup((self.home.finite_home / "outside.json").unlink)
+        before = tree_snapshot(self.home.finite_home)
+
+        # A new process's first discovery, as a gateway or CLI starts.
+        child = (
+            CHILD_PRELUDE + "import builtins, io, json, os\n"
+            "from gateway.platform_registry import platform_registry\n"
+            "from gateway.session_context import set_session_vars\n"
+            f"planted, unreadable = {planted!r}, {unreadable!r}\n"
+            "opened = []\n"
+            "def watch(original):\n"
+            "    def guarded(file, *args, **kwargs):\n"
+            "        if not isinstance(file, int) and os.fspath(file) in planted:\n"
+            "            opened.append(os.fspath(file))\n"
+            "            if os.fspath(file) in unreadable:\n"
+            "                raise PermissionError(13, 'Permission denied', os.fspath(file))\n"
+            "        return original(file, *args, **kwargs)\n"
+            "    return guarded\n"
+            "builtins.open = io.open = watch(io.open)\n"
+            "os.open = watch(os.open)\n"
+            "plugins.discover_plugins()\n"
+            "m = next(m for n, m in sys.modules.items() if n.endswith('finitechat.adapter'))\n"
+            "hooks = plugins.get_plugin_manager()._hooks\n"
+            "brokers = {name: sum(isinstance(getattr(c, '__self__', None),\n"
+            "    m._RequesterContextBroker) for c in hooks.get(name, []))\n"
+            "    for name in ('pre_tool_call', 'post_tool_call')}\n"
+            f"set_session_vars(platform='finitechat', session_key={session!r}, user_id={ALICE!r})\n"
+            f"m._AUTHENTICATED_FINITE_TURN_USER.set({ALICE!r})\n"
+            f"lease = m._requester_context_root() / m._requester_context_filename({session!r})\n"
+            "plugins.invoke_hook('pre_tool_call', tool_name='terminal', tool_call_id='c')\n"
+            "held = lease.exists()\n"
+            "plugins.invoke_hook('post_tool_call', tool_name='terminal', tool_call_id='c')\n"
+            "print(json.dumps({'opened': opened, 'brokers': brokers, 'held': held,\n"
+            "    'released': not lease.exists(),\n"
+            "    'platform': platform_registry.get('finitechat') is not None}))\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", child], capture_output=True, text=True, timeout=WAIT_SECS
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout.splitlines()[-1]),
+            {
+                "opened": [],
+                "brokers": {"pre_tool_call": 1, "post_tool_call": 1},
+                "held": True,
+                "released": True,
+                "platform": True,
+            },
+        )
+        self.assertEqual(tree_snapshot(self.home.finite_home), before)
+
+        # A forced rediscovery in this process, then a terminal call.
+        attempts = []
+
+        def refuse(original):
+            def guarded(file, *args, **kwargs):
+                if not isinstance(file, int) and os.fspath(file) in planted:
+                    attempts.append(os.fspath(file))
+                    raise PermissionError(errno.EACCES, "Permission denied", os.fspath(file))
+                return original(file, *args, **kwargs)
+
+            return guarded
+
+        previous = self.home.current_module()
+        with (
+            patch("io.open", refuse(io.open)),
+            patch("builtins.open", refuse(open)),
+            patch("os.open", refuse(os.open)),
+        ):
+            plugins.discover_plugins(force=True)
+            self.assertIsNot(self.home.current_module(), previous)
+            self.assert_plugin_registered(self.home.current_module())
+            with self.turn(ALICE, session):
+                self.assertIn("LEASE_PRESENT", self.terminal(LEASE_CHECK, "after-reload"))
+        self.assertEqual(attempts, [])
+        self.assertEqual(tree_snapshot(self.home.finite_home), before)
+        for path in map(Path, planted):
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
 
     def test_failed_terminal_call_cleans_up_and_abandoned_call_expires(self):
         session = "agent:main:finitechat:group:room-1:seg-1"
@@ -1004,6 +1152,52 @@ class GatewayStartTests(unittest.IsolatedAsyncioTestCase, LeaseTestCase):
         for gateway in gateways:
             await gateway.adapter.cancel_background_tasks()
 
+    async def test_forced_reload_beside_malformed_leftovers_keeps_the_session_blocked(self):
+        finite_home = as_new_gateway_process()
+        root = os.path.realpath(HOME.v1)
+        state = sys.modules[STATE_MODULE]
+        kill_gateway_mid_call(self.SESSION, ALICE, self.V2)
+        # A leftover no reader accepts, which cannot be removed either.
+        junk = HOME.v1 / lease_name("agent:main:finitechat:group:room-1:seg-unknown")
+        junk.write_bytes(b"[]")
+        stuck = [(kept, lease_name(self.SESSION)) for kept in (HOME.v1.name, HOME.v2.name)]
+        gateway = GatewayHarness(finite_home)
+        MODEL.command = BOTH_LEASES_CHECK
+        with unlink_fails(*stuck, (HOME.v1.name, junk.name)):
+            with self.assertLogs(level="ERROR"):
+                self.assertTrue(await gateway.connect(reconnect=False))
+            self.assertIn(
+                "cannot remove", blocked_message(await gateway.turn(ALICE, "seg-1", internal=True))
+            )
+            held = tree_snapshot(finite_home)
+
+            previous = HOME.current_module()
+            plugins.discover_plugins(force=True)
+            self.assertIsNot(HOME.current_module(), previous)
+            self.assert_plugin_registered(HOME.current_module())
+            # The running adapter, with the reloaded hooks, still refuses the
+            # dead call's session, internal turn or not, and keeps its lease.
+            for internal in (True, False):
+                message = blocked_message(
+                    await gateway.turn(ALICE, "seg-1", internal=internal, v2=self.V2)
+                )
+                self.assertIn("cannot remove", message)
+                self.assertIn("Other sessions are not affected.", message)
+            self.assertEqual(tree_snapshot(finite_home), held)
+            self.assertNotIn(root, state.started_roots)
+            result = await gateway.turn(BOB, "seg-2", v2=self.V2)
+            self.assertIn("LEASE_PRESENT", result)
+            self.assertIn("V2_PRESENT", result)
+
+        # With the fault gone, the next call clears both, without a restart.
+        result = await gateway.turn(ALICE, "seg-1", v2=self.V2)
+        self.assertIn("LEASE_PRESENT", result)
+        self.assertIn("V2_PRESENT", result)
+        self.assertIn(root, state.started_roots)
+        self.assertEqual(leases_in(finite_home), [])
+        self.assertIn("LEASE_ABSENT", await gateway.turn(ALICE, "seg-1", internal=True))
+        await gateway.adapter.cancel_background_tasks()
+
     async def test_unlistable_lease_directory_blocks_every_session_until_it_lists(self):
         finite_home = as_new_gateway_process()
         kill_gateway_mid_call(self.SESSION, ALICE)
@@ -1282,13 +1476,21 @@ class OrganizationCreateAfterReloadTests(unittest.IsolatedAsyncioTestCase, Lease
         admins = {human_home: human_npub, agent_home: agent_npub}
         session = "agent:main:finitechat:group:room-1:seg-org"
         kill_gateway_mid_call(session, human)
+        junk = finite_home / "requester-context-v1" / lease_name("unknown")
+        junk.write_bytes(b"[]")
 
         gateway = GatewayHarness(finite_home)
-        with unlink_fails(("requester-context-v1", lease_name(session))):
+        with unlink_fails(
+            *(("requester-context-v1", name) for name in (lease_name(session), junk.name))
+        ):
             self.assertTrue(await gateway.connect(reconnect=False))
             MODEL.command = self.create_organization_command(agent_home, "Stale Org")
-            for internal in (True, False):
-                blocked_message(await gateway.turn(human, "seg-org", internal=internal))
+            # A forced plugin reload beside a malformed leftover keeps the block.
+            for reload in (False, True):
+                if reload:
+                    plugins.discover_plugins(force=True)
+                for internal in (True, False):
+                    blocked_message(await gateway.turn(human, "seg-org", internal=internal))
             with contextlib.closing(sqlite3.connect(self.database)) as db:
                 self.assertEqual(db.execute("SELECT count(*) FROM brain_admins").fetchone(), (0,))
             MODEL.command = self.create_organization_command(agent_home, "Other Org")
