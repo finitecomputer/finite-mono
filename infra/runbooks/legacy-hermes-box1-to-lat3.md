@@ -242,13 +242,34 @@ sudo ctr --namespace k8s.io run --rm \
 sudo chmod 0600 '<BOX1_STAGE>/source-volume-inventory.json'
 sudo sha256sum '<BOX1_STAGE>/source-volume-inventory.json'
 
+SOURCE_CONTROL_PLANE_ROOT='<VERIFIED_SOURCE_CONTROL_PLANE_ROOT>'
+SOURCE_SITES_SCRATCH='<BOX1_STAGE>/sites-control-plane-read'
+SOURCE_PUBLISHED_ENDPOINTS='<BOX1_STAGE>/published-endpoints.json'
+sudo python3 - "$SOURCE_CONTROL_PLANE_ROOT/control-plane.sqlite" \
+  "$SOURCE_SITES_SCRATCH/control-plane.sqlite" <<'PY'
+import os
+from pathlib import Path
+import sqlite3
+import sys
+
+source, snapshot = map(Path, sys.argv[1:])
+if not source.is_file() or source.is_symlink():
+    raise SystemExit("verified source control database is missing or unsafe")
+os.umask(0o077)
+snapshot.parent.mkdir(mode=0o700, exist_ok=False)
+with sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True) as reader:
+    reader.execute("PRAGMA query_only=ON")
+    with sqlite3.connect(snapshot) as writer:
+        reader.backup(writer)
+PY
+
 sudo sh -c 'umask 077; \
   /run/current-system/sw/bin/finited \
   --workspace-root /etc/nixos/workspaces/ovh-fc-1 \
-  --control-plane-root /var/lib/finitecomputer \
+  --control-plane-root "$1" \
   list-published-endpoints \
-  --payload '"'"'{"machineId":"SOURCE_NAMESPACE"}'"'"' \
-  > <BOX1_STAGE>/published-endpoints.json'
+  --payload "$2" > "$3"' sh "$SOURCE_SITES_SCRATCH" \
+  '{"machineId":"SOURCE_NAMESPACE"}' "$SOURCE_PUBLISHED_ENDPOINTS"
 
 sudo ctr --namespace k8s.io run --rm \
   --user 0:0 \
@@ -298,8 +319,11 @@ sudo ctr --namespace k8s.io run --rm \
 
 The Sites command reads only the control-plane export and source-volume
 inventory. It fails if a locally run Site points outside `/home/node` or its
-source is missing. The integrations command reads configuration without
-executing it and emits names and policies only. Inspect both root-only files;
+source is missing. Verify the live control database location before taking
+the read snapshot; do not infer it from the parent directory. Invoke
+`finited` against the scratch copy because opening a live or incorrect control
+root can initialize or update administrative state. The integrations command
+reads configuration without executing it and emits names and policies only. Inspect both root-only files;
 they must contain no credential values.
 
 The session exporter first uses SQLite's backup API, then reads the scratch
