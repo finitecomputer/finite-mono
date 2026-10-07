@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import shutil
 import threading
 from collections.abc import Callable, Iterator
@@ -1405,6 +1406,56 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
                         await h.close()
 
                 self.run_scenario(scenario)
+
+    def test_a_settlement_outlasting_the_teardown_budget_still_stops_the_service(self):
+        """Hermes abandons disconnect() at its adapter teardown timeout.
+
+        Settling must end before that, counting the delivery grace already
+        spent, so the sidecar still stops and the bridge reports it; the
+        unsettled entry keeps its lease until it expires.
+        """
+
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            sending, sidecar_back = asyncio.Event(), asyncio.Event()
+            at_service_stop: list[str] = []
+            stop_service = h.adapter._stop_service
+            status_file = Path(home) / h.module.BRIDGE_STATUS_FILE
+
+            async def hold_result(text: str) -> None:
+                if is_result("bg", text):
+                    sending.set()
+                    await sidecar_back.wait()
+
+            async def hold_release(action: str, _message_id: str) -> bool:
+                if action == "release":
+                    await sidecar_back.wait()
+                return True
+
+            async def record_service_stop() -> None:
+                at_service_stop.append(h.state("msg-2"))
+                await stop_service()
+
+            try:
+                await h.seed()
+                h.before_reply = hold_result
+                await self.launch(h, "bg")
+                self.children.gate.set()
+                await eventually(sending.is_set)
+                h.before_settle = hold_release
+                h.adapter._stop_service = record_service_stop
+                status_file.unlink(missing_ok=True)
+                # Shorter than the delivery grace plus its own reserve, as well.
+                with patch.dict(os.environ, {"HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT": "1.5"}):
+                    await h.stop_gracefully()
+                self.assertEqual(at_service_stop, ["leased"])
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                self.assertEqual(status["status"], "disconnected")
+            finally:
+                sidecar_back.set()
+                await h.close()
+
+        self.run_scenario(scenario)
 
 
 class PinnedHermesStoppedInboxTurnTests(GoalScenario):
