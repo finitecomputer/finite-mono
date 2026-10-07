@@ -396,6 +396,8 @@ def forget_finitechat_plugin() -> None:
 
 def setUpModule():
     global MODEL, HOME
+    # An earlier module in this process may have registered the plugin.
+    forget_finitechat_plugin()
     unittest.addModuleCleanup(forget_finitechat_plugin)
     MODEL = FakeModel()
     HOME = PluginHome(MODEL.url)
