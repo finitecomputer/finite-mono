@@ -296,8 +296,10 @@ its own.
   requester. Once `/goal pause`, `clear`, `stop` or `done`, or a user
   `/stop`, `/new` or `/reset`, ends the loop, earlier `/goal` entries in that
   chat are final, so a restart cannot bring the goal back. The leased entry
-  is what the rollout's idle check reads as busy while this work runs; a
-  runtime without this adapter reads idle.
+  is what the rollout's idle check reads as busy while this work runs. A
+  runtime without this adapter acks the entry at launch, so the check sees
+  that work only indirectly: busy for 30 minutes after the ack, and while a
+  `/bg` child's session is open.
 - **Reply/edit routing (O2).** Every inbound event already carries its
   conversation and segment ids, and the sidecar mints `thread_id` from them. On
   send/edit/activity the adapter passes that `thread_id` back, and the sidecar
