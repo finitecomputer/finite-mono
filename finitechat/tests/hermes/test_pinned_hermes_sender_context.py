@@ -172,6 +172,12 @@ class PinnedHermesQueueAdmissionTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
+
+        async def finish_owner_writes():
+            await asyncio.gather(*adapter._owner_writes.values(), return_exceptions=True)
+
+        # Runs before the home is removed (cleanups run last-in first-out).
+        self.addAsyncCleanup(finish_owner_writes)
         bridge_calls = []
         handler_events = []
         handler_started = asyncio.Event()
@@ -514,7 +520,13 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.home = tempfile.TemporaryDirectory()
         self.addCleanup(self.home.cleanup)
+        # Cleanups run last-in first-out, so this runs after every adapter's
+        # own cleanup and before the home goes: a stop's owner-record write
+        # still in its thread would otherwise race the directory removal.
+        self.adapters = []
+        self.addAsyncCleanup(self.finish_owner_writes)
         self.adapter = PinnedHermesClarificationTests._adapter(self.home.name)
+        self.adapters.append(self.adapter)
         self.addAsyncCleanup(self.adapter.cancel_background_tasks)
         self.calls = []
 
@@ -537,6 +549,10 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
 
     def settlements(self):
         return [(action, payload) for action, payload in self.calls if action in {"ack", "release"}]
+
+    async def finish_owner_writes(self):
+        for adapter in self.adapters:
+            await asyncio.gather(*adapter._owner_writes.values(), return_exceptions=True)
 
     async def dispatch(self, handler):
         self.adapter.set_message_handler(handler)
@@ -567,6 +583,7 @@ class PinnedHermesSettlementTests(unittest.IsolatedAsyncioTestCase):
         restarted = PinnedHermesClarificationTests._adapter(self.home.name)
         restarted._finitechat_json = self.adapter._finitechat_json
         self.adapter = restarted
+        self.adapters.append(restarted)
         self.addAsyncCleanup(restarted.cancel_background_tasks)
         handled = []
 

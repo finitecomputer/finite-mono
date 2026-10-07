@@ -378,6 +378,16 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_finite_status_contract"},
         )
 
+    def test_runtime_idle_check_also_runs_the_hermes_bridge_child_work_test(self) -> None:
+        self.assertEqual(
+            selected("scripts/finite_status_runtime_idle.py"),
+            {"run_finite_status_contract", "run_hermes_bridge"},
+        )
+        idle_gate_test = ROOT / "finitechat/tests/hermes/test_pinned_hermes_child_work_idle_gate.py"
+        self.assertIn(
+            '"finite_status_runtime_idle.py"', idle_gate_test.read_text(encoding="utf-8")
+        )
+
     def test_devfinity_smoke_depends_on_nix_service_packages(self) -> None:
         selection = select_harnesses.HarnessSelection(run_devfinity_smoke=True)
 

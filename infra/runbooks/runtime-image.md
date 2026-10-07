@@ -399,12 +399,57 @@ scripts/finite-status --runtime-idle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_
 ```
 
 It first requires an `operable` lifecycle probe for that exact assignment. It
-then reads only counts and ages from the Agent's durable root. `verdict` is
-`idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit 2).
-Execute only on `idle`; defer the others and re-check later. `unfinished_markers`
-means an earlier interrupted turn left a running marker; the restart will post
-one notice per marker to the user. The check is a point-in-time read, not a stop
-fence. A message that arrives between the check and the stop can still strand.
+then reads the Agent's durable root and reports only counts and ages. `verdict`
+is `idle` (exit 0), `busy` or `unfinished_markers` (exit 1), or `unknown` (exit
+2). Execute only on `idle`; defer the others and re-check later.
+`unfinished_markers` means an earlier interrupted turn left a running marker;
+the restart will post one notice per marker to the user. The check is a
+point-in-time read, not a stop fence. A message that arrives between the check
+and the stop can still strand.
+
+On a Runtime from before #1071, a /bg or /btw command is acked when its
+child launches, so neither `active_agents` nor the inbox shows the child; a
+later Runtime keeps the command leased until the child delivers
+(`inbox_leased`). To cover the older Runtimes, the check also reads, on every
+Runtime:
+
+- `recent_ack`: busy for 30 minutes after the inbox last acked an entry or was
+  last written. Every Agent that chatted in the last 30 minutes defers, so a
+  cohort pass skips recently active Agents; run another pass later.
+- `background_sessions`: busy while a `bg_*` session of the current gateway
+  process is open, and for 5 minutes after one ends. The check counts them in
+  a private copy of `hermes-home/state.db` and `state.db-wal` in the Runner
+  host's temp dir (`TMPDIR`, else `/tmp`) and never opens the live database.
+  The copy needs Python's `sqlite3` module (else
+  `background_sqlite_unavailable`) and refuses either file over 4 GiB
+  (`background_oversize`). Such an Agent reads `unknown` on every pass and
+  never rolls this way. A full or unusable temp dir reads
+  `background_unreadable`.
+- Leftover copies: each read removes its copy. A read killed mid-copy
+  (SIGTERM, SIGKILL, OOM, reboot) leaves a copy of that Agent's chat database
+  behind. A later read on the same host, by the same user and with the same
+  `TMPDIR`, removes it once it has been untouched for 10 minutes; it never
+  removes the copy of a read that is still running. Without such a read, the
+  copy stays indefinitely, and Agent retirement and purge do not remove it.
+  After an interrupted read, and at the end of each cohort, check the Runner
+  host (and any `TMPDIR` set in `/etc/finite/runner*.env`):
+
+  ```sh
+  ls -ld /tmp/finite-status-idle.*
+  ```
+
+  When no `finite-status --runtime-idle` read is running on the host, remove
+  each one with `rm -rf -- /tmp/finite-status-idle.SUFFIX`.
+- Clocks: guest timestamps are compared on the guest clock, using the offset
+  between `gateway_state.json`'s `updated_at` (guest) and its mtime (host).
+  Without a usable `updated_at` (`clock_unavailable`) or with an offset over
+  60 seconds (`clock_skew`), the read is `unknown`. `gateway.clock_offset_ms`
+  reports the measured offset. Both persist from pass to pass, so such an
+  Agent never rolls this way until its clock or stamp is fixed. Before
+  executing a cohort, read every Agent in it with `--runtime-idle` and count
+  these. For each one, compare its guest clock with the host's (or find why
+  its gateway wrote no `updated_at`), fix that, and rerun the read before
+  rolling the Agent.
 
 To make that read part of execution, pass
 `--roll-require-runtime-idle /absolute/path/to/finite-status` (the path on the
