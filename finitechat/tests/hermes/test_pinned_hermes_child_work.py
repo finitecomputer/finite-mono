@@ -1,10 +1,10 @@
 """Accepted /bg and /btw work keeps its inbox entry until it delivers, against the pinned gateway.
 
-Review 5429204449 on #1069 and the round 09 reviews: the pinned handlers reply
-as soon as they start a child task, which sends the result to the chat
-itself. The command's entry was acked with that reply, so a graceful stop or
-an in-band restart cancelled the child with no result, no notice and nothing
-to replay, and the rollout's idle gate read the chat as idle while the child
+Review 5429204449 on #1069: the pinned handlers reply as soon as they
+start a child task, which sends the result to the chat itself. The
+command's entry was acked with that reply, so a graceful stop or an in-band
+restart cancelled the child with no result, no notice and nothing to
+replay, and the rollout's idle gate read the chat as idle while the child
 ran. The entry now stays leased until the child has delivered its result:
 a stop releases it, the command runs again after the restart, and a lease
 expiry redelivery joins the running child instead of starting another.
@@ -478,7 +478,7 @@ class PinnedHermesChildWorkTests(ChildWorkScenario):
         self.run_scenario(scenario)
 
     def test_a_refused_attachment_after_the_text_does_not_run_the_bg_again(self):
-        """Round 13 Opus S3: the text reached the chat, so the agent run is finished work.
+        """Once the text reached the chat, the agent run is finished work.
 
         Whether the child then ends or a stop cuts it off sending a later
         attachment, the entry is acked and nothing runs after the restart.
@@ -1050,7 +1050,7 @@ class PinnedHermesGoalFollowUpTests(GoalScenario):
                 self.run_scenario(scenario)
 
     def test_a_redelivery_joins_the_goal_command_riding_another_turn(self):
-        """Round 13 F6: a lease-expiry redelivery must not run /goal resume a second time."""
+        """A lease-expiry redelivery does not run /goal resume a second time."""
 
         async def scenario(home: str):
             h = RealRunHarness(home, timeline=[])
@@ -1442,7 +1442,7 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
         self.run_scenario(scenario)
 
     def test_every_settlement_reaches_the_sidecar_before_its_service_stops(self):
-        """Round 13 F3: a release slower than the cancel wait was lost with the service.
+        """A release slower than the cancel wait reaches the sidecar before its service stops.
 
         The fatal-adapter path calls only disconnect(), so it must also cancel
         running turns before the service stops.
@@ -1535,7 +1535,7 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
 
 
 class PinnedHermesStoppedInboxTurnTests(GoalScenario):
-    """Round 13 F1: a turn that starts after a stop released an inbox turn must not disown it.
+    """A turn that starts after a stop released an inbox turn does not disown it.
 
     The stop interrupts the inbox turn and releases its entry; the base adapter
     then drains whatever was queued behind it, which the draining gateway
