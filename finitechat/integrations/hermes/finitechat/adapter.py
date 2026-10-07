@@ -199,6 +199,8 @@ LAUNCH_DELIVERY_GRACE_SECS = 1.5
 LAUNCH_CANCEL_WAIT_SECS = 0.5
 # The pinned adapter teardown default, for an adapter without a gateway.
 SETTLE_TIMEOUT_SECS = 5.0
+# What disconnect() leaves of that budget for stopping the sidecar.
+SERVICE_STOP_RESERVE_SECS = 0.5
 TURN_OWNERS_DIR = "hermes-turn-owners"
 
 
@@ -254,6 +256,14 @@ def _is_launch_child(
         return False
     qualname = str(getattr(task.get_coro(), "__qualname__", ""))
     return qualname.endswith(_LAUNCH_CHILD_QUALNAMES)
+
+
+def _time_left(deadline: float | None, cap: float | None = None) -> float | None:
+    """Seconds until a ``time.monotonic()`` deadline, at most ``cap``; None waits for all."""
+    if deadline is None:
+        return cap
+    left = max(0.0, deadline - time.monotonic())
+    return left if cap is None else min(cap, left)
 
 
 def _write_turn_owner_file(path: Path, entry: tuple[str, Any, str] | None) -> None:
@@ -1190,6 +1200,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             logger.info("[finitechat] recovered %s interrupted Hermes turn(s)", recovered)
 
     async def disconnect(self) -> None:
+        settle_by = self._settle_deadline()
         if self._poll_task:
             self._poll_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -1199,8 +1210,8 @@ class FiniteChatAdapter(BasePlatformAdapter):
         # Hermes's stop has done this already; its fatal-adapter path has not.
         await self.cancel_background_tasks()
         await self._settle_orphaned_retry_rewinds()
-        await self._settle_launches_at_disconnect()
-        await self._finish_settlements()
+        await self._settle_launches_at_disconnect(settle_by)
+        await self._finish_settlements(settle_by)
         await self._stop_service()
         self._mark_disconnected()
         self._write_bridge_status("disconnected")
@@ -2702,7 +2713,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         self._settlements.add(settlement)
         settlement.add_done_callback(self._settlements.discard)
 
-    async def _settle_launches_at_disconnect(self) -> None:
+    async def _settle_launches_at_disconnect(self, settle_by: float | None) -> None:
         """Before the gateway cancels its background tasks. A child already sending
         gets a short grace; the rest are cancelled before their entries are released."""
         launches = [launch for launch in self._launches.values() if not launch.settled]
@@ -2714,7 +2725,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
             if not child.done()
         ]
         if sending:
-            await asyncio.wait(sending, timeout=LAUNCH_DELIVERY_GRACE_SECS)
+            await asyncio.wait(sending, timeout=_time_left(settle_by, LAUNCH_DELIVERY_GRACE_SECS))
         cancelled: list[asyncio.Task[Any]] = []
         for launch in launches:
             if launch.settled or not launch.unfinished():
@@ -2725,23 +2736,32 @@ class FiniteChatAdapter(BasePlatformAdapter):
                     child.cancel()
                     cancelled.append(child)
         if cancelled:
-            await asyncio.wait(cancelled, timeout=LAUNCH_CANCEL_WAIT_SECS)
+            await asyncio.wait(cancelled, timeout=_time_left(settle_by, LAUNCH_CANCEL_WAIT_SECS))
         for launch in launches:
             if not launch.settled and not launch.handed_off:
                 self._settle_launch(launch, release=not launch.delivered)
 
-    async def _finish_settlements(self) -> None:
-        """Wait for every ack, release and owner write before the sidecar stops,
-        within Hermes's adapter teardown timeout; a lost release waits out its lease."""
-        pending = {*self._settlements, *self._owner_writes.values()}
-        if not pending:
-            return
+    def _settle_deadline(self) -> float | None:
+        """When disconnect() stops waiting to settle; None waits for every settlement.
+
+        Hermes abandons disconnect() once its adapter teardown timeout has passed
+        since the call (0 waits without bound), so settling ends while the sidecar
+        stop still fits. An entry not settled by then keeps its lease until it expires.
+        """
         budget = getattr(
             getattr(self, "gateway_runner", None), "_adapter_disconnect_timeout_secs", None
         )
         value = budget() if callable(budget) else None
         timeout = float(value) if isinstance(value, (int, float)) else SETTLE_TIMEOUT_SECS
-        await asyncio.wait(pending, timeout=timeout if timeout > 0 else None)
+        if timeout <= 0:
+            return None
+        return time.monotonic() + timeout - SERVICE_STOP_RESERVE_SECS
+
+    async def _finish_settlements(self, settle_by: float | None) -> None:
+        """Wait for every ack, release and owner write before the sidecar stops."""
+        pending = {*self._settlements, *self._owner_writes.values()}
+        if pending:
+            await asyncio.wait(pending, timeout=_time_left(settle_by))
 
     def _child_launch(self) -> _Launch | None:
         launch = self._launch_context.get()

@@ -346,6 +346,12 @@ def forget_finitechat_plugin() -> None:
 
 def setUpModule():
     global MODEL, HOME
+    # The pinned terminal drains output with select(), which cannot watch a
+    # descriptor past 1023, so each call there returns empty output. Name
+    # the cause if an earlier module in this process leaked descriptors.
+    open_fds = len(os.listdir("/dev/fd"))
+    if open_fds > 768:
+        raise RuntimeError(f"{open_fds} descriptors open: an earlier module leaked them")
     unittest.addModuleCleanup(forget_finitechat_plugin)
     MODEL = FakeModel()
     HOME = PluginHome(MODEL.url)

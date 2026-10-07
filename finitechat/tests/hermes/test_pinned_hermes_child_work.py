@@ -1,10 +1,10 @@
 """Accepted /bg and /btw work keeps its inbox entry until it delivers, against the pinned gateway.
 
-Review 5429204449 on #1069 and the round 09 reviews: the pinned handlers reply
-as soon as they start a child task, which sends the result to the chat
-itself. The command's entry was acked with that reply, so a graceful stop or
-an in-band restart cancelled the child with no result, no notice and nothing
-to replay, and the rollout's idle gate read the chat as idle while the child
+Review 5429204449 on #1069: the pinned handlers reply as soon as they
+start a child task, which sends the result to the chat itself. The
+command's entry was acked with that reply, so a graceful stop or an in-band
+restart cancelled the child with no result, no notice and nothing to
+replay, and the rollout's idle gate read the chat as idle while the child
 ran. The entry now stays leased until the child has delivered its result:
 a stop releases it, the command runs again after the restart, and a lease
 expiry redelivery joins the running child instead of starting another.
@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import os
 import shutil
 import threading
 from collections.abc import Callable, Iterator
@@ -477,7 +478,7 @@ class PinnedHermesChildWorkTests(ChildWorkScenario):
         self.run_scenario(scenario)
 
     def test_a_refused_attachment_after_the_text_does_not_run_the_bg_again(self):
-        """Round 13 Opus S3: the text reached the chat, so the agent run is finished work.
+        """Once the text reached the chat, the agent run is finished work.
 
         Whether the child then ends or a stop cuts it off sending a later
         attachment, the entry is acked and nothing runs after the restart.
@@ -680,6 +681,22 @@ def is_kickoff(kind: str, message: str) -> bool:
 
 
 class GoalScenario(ChildWorkScenario):
+    @staticmethod
+    def owner_marker(h: ChildHarness) -> Path:
+        from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
+
+        session_key = h.runner._session_key_for_source(chat_source(h))
+        digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
+        return Path(h.home) / "hermes-turn-owners" / f"{digest}.json"
+
+    @staticmethod
+    def owner_named(h: ChildHarness) -> str | None:
+        """The message id the chat's owner record names, or None with no record."""
+        path = GoalScenario.owner_marker(h)
+        if not path.exists():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))["message_id"]
+
     async def prepare(self, h: ChildHarness, kind: str) -> None:
         """An idle chat; for a resume, one whose goal the judge found done."""
         if kind == "set":
@@ -1033,7 +1050,7 @@ class PinnedHermesGoalFollowUpTests(GoalScenario):
                 self.run_scenario(scenario)
 
     def test_a_redelivery_joins_the_goal_command_riding_another_turn(self):
-        """Round 13 F6: a lease-expiry redelivery must not run /goal resume a second time."""
+        """A lease-expiry redelivery does not run /goal resume a second time."""
 
         async def scenario(home: str):
             h = RealRunHarness(home, timeline=[])
@@ -1214,14 +1231,6 @@ class PinnedHermesAutoResumeTests(GoalScenario):
     owns that chat's latest turn, and only such a chat's resume is declined.
     """
 
-    @staticmethod
-    def owner_marker(h: ChildHarness) -> Path:
-        from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
-
-        session_key = h.runner._session_key_for_source(chat_source(h))
-        digest = hashlib.sha256(session_key.encode("utf-8")).hexdigest()
-        return Path(h.home) / "hermes-turn-owners" / f"{digest}.json"
-
     async def restart(
         self, home: str, inbox: dict[str, tuple[dict[str, Any], str]]
     ) -> ChildHarness:
@@ -1325,6 +1334,74 @@ class PinnedHermesAutoResumeTests(GoalScenario):
 
                 self.run_scenario(scenario)
 
+    def test_the_goal_kickoff_turn_records_its_goal_command_as_the_chats_owner(self):
+        """A crash during the kickoff settles nothing, so this record decides recovery:
+        Hermes's resume is declined and the /goal command's redelivery reruns it."""
+
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            try:
+                await self.prepare(h, "set")
+                await self.launch_goal(h, "set")
+                await asyncio.gather(*h.adapter._owner_writes.values())
+                marker = json.loads(self.owner_marker(h).read_text(encoding="utf-8"))
+                self.assertEqual(
+                    (marker["room_id"], marker["seq"], marker["message_id"]),
+                    (ROOM_ID, 2, "msg-2"),
+                )
+            finally:
+                h.model_gate.set()
+                await h.close()
+
+        self.run_scenario(scenario)
+
+    def test_the_service_stops_only_after_the_last_owner_record_is_written(self):
+        """A turn start records its owner without waiting for the write; disconnect waits."""
+
+        async def scenario(home: str):
+            from gateway.platforms.base import MessageEvent, MessageType
+
+            from tests.hermes.test_pinned_hermes_stop_settlement import chat_source
+
+            h = ChildHarness(home, timeline=[])
+            write = h.module._write_turn_owner_file
+            writing = threading.Event()
+            at_service_stop: list[str | None] = []
+            stop_service = h.adapter._stop_service
+
+            def slow_write(path: Path, entry: Any) -> None:
+                if entry is None:
+                    writing.set()
+                    threading.Event().wait(0.5)
+                write(path, entry)
+
+            async def record_service_stop() -> None:
+                at_service_stop.append(self.owner_named(h))
+                await stop_service()
+
+            try:
+                await h.seed()
+                self.assertEqual(self.owner_named(h), "msg-1")
+                h.hold_model = lambda message: message == "internal work"
+                with patch.object(h.module, "_write_turn_owner_file", slow_write):
+                    internal = MessageEvent(
+                        text="internal work",
+                        message_type=MessageType.TEXT,
+                        source=chat_source(h),
+                        internal=True,
+                    )
+                    await h.adapter.handle_message(internal)
+                    await eventually(writing.is_set)
+                    h.adapter._stop_service = record_service_stop
+                    await h.adapter.disconnect()
+                # The internal turn is the chat's latest, and the inbox owns none of it.
+                self.assertEqual(at_service_stop, [None])
+            finally:
+                h.model_gate.set()
+                await h.close()
+
+        self.run_scenario(scenario)
+
 
 class PinnedHermesAdapterReplacementTests(GoalScenario):
     """A gateway that replaces a failed adapter disconnects the old one first.
@@ -1365,7 +1442,7 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
         self.run_scenario(scenario)
 
     def test_every_settlement_reaches_the_sidecar_before_its_service_stops(self):
-        """Round 13 F3: a release slower than the cancel wait was lost with the service.
+        """A release slower than the cancel wait reaches the sidecar before its service stops.
 
         The fatal-adapter path calls only disconnect(), so it must also cancel
         running turns before the service stops.
@@ -1406,9 +1483,59 @@ class PinnedHermesAdapterReplacementTests(GoalScenario):
 
                 self.run_scenario(scenario)
 
+    def test_a_settlement_outlasting_the_teardown_budget_still_stops_the_service(self):
+        """Hermes abandons disconnect() at its adapter teardown timeout.
+
+        Settling must end before that, counting the delivery grace already
+        spent, so the sidecar still stops and the bridge reports it; the
+        unsettled entry keeps its lease until it expires.
+        """
+
+        async def scenario(home: str):
+            h = ChildHarness(home, timeline=[])
+            sending, sidecar_back = asyncio.Event(), asyncio.Event()
+            at_service_stop: list[str] = []
+            stop_service = h.adapter._stop_service
+            status_file = Path(home) / h.module.BRIDGE_STATUS_FILE
+
+            async def hold_result(text: str) -> None:
+                if is_result("bg", text):
+                    sending.set()
+                    await sidecar_back.wait()
+
+            async def hold_release(action: str, _message_id: str) -> bool:
+                if action == "release":
+                    await sidecar_back.wait()
+                return True
+
+            async def record_service_stop() -> None:
+                at_service_stop.append(h.state("msg-2"))
+                await stop_service()
+
+            try:
+                await h.seed()
+                h.before_reply = hold_result
+                await self.launch(h, "bg")
+                self.children.gate.set()
+                await eventually(sending.is_set)
+                h.before_settle = hold_release
+                h.adapter._stop_service = record_service_stop
+                status_file.unlink(missing_ok=True)
+                # Shorter than the delivery grace plus its own reserve, as well.
+                with patch.dict(os.environ, {"HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT": "1.5"}):
+                    await h.stop_gracefully()
+                self.assertEqual(at_service_stop, ["leased"])
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                self.assertEqual(status["status"], "disconnected")
+            finally:
+                sidecar_back.set()
+                await h.close()
+
+        self.run_scenario(scenario)
+
 
 class PinnedHermesStoppedInboxTurnTests(GoalScenario):
-    """Round 13 F1: a turn that starts after a stop released an inbox turn must not disown it.
+    """A turn that starts after a stop released an inbox turn does not disown it.
 
     The stop interrupts the inbox turn and releases its entry; the base adapter
     then drains whatever was queued behind it, which the draining gateway
@@ -1495,9 +1622,14 @@ class PinnedHermesStoppedInboxTurnTests(GoalScenario):
         self.run_scenario(scenario)
 
     def test_a_goal_command_riding_an_unowned_turn_runs_once_across_a_stop(self):
-        """Round 13 F1(c) and Opus S1: the turn the /goal event rides has no inbox entry."""
+        """The turn the /goal event rides has no inbox entry of its own.
+
+        A stop hands the /goal command back, recording first that the inbox
+        owns the chat's recovery. Once /goal pause made the command final, the
+        stop acks it and leaves the stopped turn to Hermes's resume.
+        """
         for running in ("goal continuation", "internal notice"):
-            for ending in ("finish", "stop"):
+            for ending in ("finish", "stop", "pause, then stop"):
                 with self.subTest(running=running, ending=ending):
                     self.run_scenario(
                         lambda home, running=running, ending=ending: self.ride_unowned_turn(
@@ -1577,8 +1709,28 @@ class PinnedHermesStoppedInboxTurnTests(GoalScenario):
                 await h.runner.async_session_store.mark_resume_pending(
                     session_key, "shutdown_timeout"
                 )
+                owners_at_release: list[str | None] = []
+
+                async def note_owner_at_release(action: str, message_id: str) -> bool:
+                    if (action, message_id) == ("release", "msg-5"):
+                        owners_at_release.append(self.owner_named(h))
+                    return True
+
+                h.before_settle = note_owner_at_release
+                if ending == "pause, then stop":
+                    await h.deliver(raw_event(6, "/goal pause"))
+                    await h.wait_settled("msg-6")
                 await h.stop_gracefully()
+                if ending == "pause, then stop":
+                    # Nothing of the inbox reruns the stopped turn, so no
+                    # record declines Hermes's resume of it.
+                    self.assertEqual(h.state("msg-5"), "acked", h.timeline)
+                    self.assertIsNone(self.owner_named(h))
+                    return
                 self.assertEqual(h.state("msg-5"), "pending", h.timeline)
+                # Recorded before the release, so no crash between the two
+                # leaves the chat to Hermes's resume as well.
+                self.assertEqual(owners_at_release, ["msg-5"])
             finally:
                 first.set()
                 rider.set()
