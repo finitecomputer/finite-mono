@@ -47,7 +47,7 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
             timezone=timezone,
             logger=logging.getLogger("simplex-test"),
             _redact_id=lambda x: x,
-            _CORR_PREFIX="hermes_",
+            _CORR_PREFIX="hermes-",
             MessageEvent=lambda **kw: SimpleNamespace(**kw),
             MessageType=SimpleNamespace(
                 TEXT="text", VOICE="voice", PHOTO="photo", DOCUMENT="document"
@@ -177,6 +177,72 @@ class MediaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.adapter.delivered[0].message_type, "photo")
         self.assertEqual(self.adapter.delivered[0].text, "Use the attached photo")
         self.assertEqual(self.adapter.delivered[0].media_urls, [str(photo.resolve())])
+
+    async def test_failed_or_cancelled_photo_preserves_caption_once_and_clears_pending(self):
+        for event_type in ("rcvFileError", "rcvFileSndCancelled", "rcvFileAcceptedSndCancelled"):
+            for caption in ("Use this photo", ""):
+                with self.subTest(event_type=event_type, caption=caption):
+                    self.adapter.delivered.clear()
+                    self.adapter.commands.clear()
+                    self.item["chatItem"]["content"]["msgContent"] = {
+                        "type": "image",
+                        "text": caption,
+                    }
+                    self.item["chatItem"]["file"] = {"fileId": 1, "fileName": "photo.jpg"}
+                    await self.adapter._handle_event(
+                        {"resp": {"type": "newChatItems", "chatItems": [copy.deepcopy(self.item)]}}
+                    )
+                    self.assertEqual(self.adapter.delivered, [])
+                    failure = {
+                        "type": event_type,
+                        "rcvFileTransfer": {"fileId": 1},
+                    }
+                    if event_type == "rcvFileSndCancelled":
+                        failure["chatItem"] = copy.deepcopy(self.item)
+                    terminal = {"resp": failure}
+                    if event_type == "rcvFileAcceptedSndCancelled":
+                        terminal["corrId"] = "hermes-receive"
+                        self.adapter._pending_corr_ids.add("hermes-receive")
+                    await self.adapter._handle_event(terminal)
+                    self.assertEqual(self.adapter._pending_file_transfers, {})
+                    self.assertEqual(len(self.adapter.delivered), 1)
+                    event = self.adapter.delivered[0]
+                    self.assertEqual(event.message_type, "text")
+                    self.assertEqual(event.media_urls, [])
+                    self.assertIn(caption, event.text)
+                    self.assertIn("SimpleX attachment unavailable", event.text)
+                    self.assertEqual(self.adapter.commands, ["/freceive 1"])
+                    self.assertEqual(self.adapter._pending_corr_ids, set())
+                    await self.adapter._handle_event(terminal)
+                    complete = copy.deepcopy(self.item)
+                    complete["chatItem"]["file"]["fileSource"] = {"filePath": "photo.jpg"}
+                    await self.adapter._handle_event(
+                        {"resp": {"type": "rcvFileComplete", "chatItem": complete}}
+                    )
+                    self.assertEqual(len(self.adapter.delivered), 1)
+
+    async def test_warning_and_unrelated_failure_leave_photo_pending(self):
+        self.item["chatItem"]["content"]["msgContent"] = {"type": "image", "text": "Photo"}
+        self.item["chatItem"]["file"] = {"fileId": 1, "fileName": "photo.jpg"}
+        await self.adapter._handle_event(
+            {"resp": {"type": "newChatItems", "chatItems": [copy.deepcopy(self.item)]}}
+        )
+        for event_type, file_id in (("rcvFileWarning", 1), ("rcvFileError", 2)):
+            await self.adapter._handle_event(
+                {"resp": {"type": event_type, "rcvFileTransfer": {"fileId": file_id}}}
+            )
+        self.assertEqual(list(self.adapter._pending_file_transfers), [1])
+        self.assertEqual(self.adapter.delivered, [])
+        photo = self.root / "photo.jpg"
+        photo.write_bytes(b"synthetic image")
+        complete = copy.deepcopy(self.item)
+        complete["chatItem"]["file"]["fileSource"] = {"filePath": str(photo)}
+        await self.adapter._handle_event(
+            {"resp": {"type": "rcvFileComplete", "chatItem": complete}}
+        )
+        self.assertEqual(self.adapter._pending_file_transfers, {})
+        self.assertEqual(len(self.adapter.delivered), 1)
+        self.assertEqual(self.adapter.delivered[0].message_type, "photo")
 
     async def test_absolute_path_is_preserved(self):
         with patch.dict(os.environ, {"SIMPLEX_FILES_FOLDER": str(self.root)}):
