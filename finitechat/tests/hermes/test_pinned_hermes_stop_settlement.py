@@ -37,6 +37,7 @@ from unittest.mock import patch
 from gateway.config import GatewayConfig, PlatformConfig
 from gateway.platforms.base import MessageEvent, SendResult
 from gateway.run import _INTERRUPT_REASON_GATEWAY_SHUTDOWN, GatewayRunner
+from hermes_cli import goals as pinned_goals
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 ADAPTER_PATH = REPO_ROOT / "integrations" / "hermes" / "finitechat" / "adapter.py"
@@ -123,6 +124,30 @@ def offline_gateway(home: str) -> Iterator[None]:
         patch.object(GatewayRunner, "_launch_detached_restart_command", no_detached_restart),
     ):
         yield
+
+
+@contextlib.contextmanager
+def scratch_hermes_home(prefix: str) -> Iterator[str]:
+    """A temporary Hermes home whose /goal store is closed with it.
+
+    Pinned ``hermes_cli.goals`` caches one SessionDB per home for the
+    process lifetime. Each scenario has its own home, so without this every
+    one left its SQLite handles open; after this module and the child-work
+    module, a later module's pipes landed past descriptor 1023, where the
+    pinned terminal's ``select()`` drain returns empty output.
+    """
+    with tempfile.TemporaryDirectory(prefix=prefix) as home:
+        try:
+            yield home
+        finally:
+            with pinned_goals._DB_BOOTSTRAP_LOCK:
+                stores = [
+                    pinned_goals._DB_CACHE.pop(key)
+                    for key in list(pinned_goals._DB_CACHE)
+                    if os.path.realpath(key) == os.path.realpath(home)
+                ]
+            for store in stores:
+                store.close()
 
 
 def raw_photo(seq: int) -> dict[str, Any]:
@@ -517,7 +542,7 @@ class GatewayHarness(StopHarness):
 class PinnedHermesStopSettlementTests(unittest.TestCase):
     def run_scenario(self, scenario):
         with (
-            tempfile.TemporaryDirectory(prefix="finite-stop-") as home,
+            scratch_hermes_home("finite-stop-") as home,
             # Finite ships no drain override, so stop() interrupts running
             # turns at once (pinned default 0s); a developer config must not
             # change that here.
@@ -728,7 +753,7 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
 
     def run_scenario(self, scenario):
         with (
-            tempfile.TemporaryDirectory(prefix="finite-restart-") as home,
+            scratch_hermes_home("finite-restart-") as home,
             patch.dict(
                 os.environ,
                 {
@@ -907,7 +932,7 @@ class PinnedHermesRestartRecoveryTests(unittest.TestCase):
 class DrainScenario(unittest.TestCase):
     def run_scenario(self, scenario):
         with (
-            tempfile.TemporaryDirectory(prefix="finite-drain-") as home,
+            scratch_hermes_home("finite-drain-") as home,
             patch.dict(
                 os.environ,
                 {
