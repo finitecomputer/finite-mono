@@ -463,8 +463,10 @@ class _RequesterContextBroker:
 
     Every broker for one root shares that root's lease counts, so a broker
     from a reloaded plugin can finish a call an earlier one started. A broker
-    removes only expired files: any process that registers this plugin with
-    the same FINITE_HOME may construct one while a turn holds a lease. Leases
+    writes and removes only the files of calls this process holds: any process
+    that registers this plugin with the same FINITE_HOME may construct one
+    while a turn holds a lease, and a registration that fails takes the
+    terminal gate below with it. Readers refuse expired files. Leases
     left by a killed gateway are removed when the next gateway connects; see
     `_clear_requester_leases_at_gateway_start`. Until that cleanup completes,
     `before_tool_call` retries it and blocks terminal calls in the sessions it
@@ -546,17 +548,6 @@ class _RequesterContextBroker:
         for session_key in expired_keys:
             self._leases.pop(session_key, None)
             self._remove(session_key)
-        try:
-            for path in (*self.root.glob("*.json"), *self.root_v2.glob("*.json")):
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                    expires_at = int(payload.get("expires_at_unix") or 0)
-                except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                    expires_at = 0
-                if expires_at <= now:
-                    path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
     def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
         try:
