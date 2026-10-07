@@ -53,6 +53,46 @@ Notes:
   Runtime release and rollback use the usual digest-pinned image procedure;
   there is no data migration or manual lock cleanup for this fix.
 
+- The goal-judge patch keeps a `/goal` control sent while the judge runs in
+  force. The gateway judges a goal turn off the event loop, and the Finite
+  Chat adapter answers bare `/goal`, the `/goal` controls and `/subgoal`
+  meanwhile; the judge then wrote back the goal it had loaded, reviving a
+  paused or cleared goal and queueing another turn. The judge's writes are now
+  held and committed once, only while the stored goal is still the one judged
+  (under an in-process lock every goal write takes). The stored goal JSON is
+  unchanged. With the patch:
+  - A pause, clear, stop, done or `wait` sent while the judge runs drops the
+    verdict with its notice and continuation. No further turn runs, and the
+    judged turn is not counted. A `wait` parks the loop at once (sent between
+    turns, it parks after the turn already queued).
+  - A `gate` or `/subgoal` change that leaves the same goal active and not
+    parked has the turn judged once more against the stored goal. Every gate
+    runs again, the new one included, and if they pass the judge is asked a
+    second time; the loop goes on or ends on that verdict. A wait that the
+    judge found over does not count as parked.
+  - A control that lands after the commit drops the continuation and its
+    notice. A gate or subgoal change keeps a decision that continues the
+    loop, with its notice, as it would once the continuation is queued; a
+    pause or park that the judge decided loses its notice.
+  - If the goal store fails while the decision is saved or checked (a read
+    or a write raises), nothing is written over it, and the loop stops with
+    a notice to check `/goal status` and `/goal resume`. A goal that cannot
+    be read back may hide a control saved meanwhile, and going on could undo
+    it. The cost is that one store error ends the loop until the user resumes
+    it, and `/goal resume` resets the turn budget. With no session DB at all
+    there is nothing to write over, and the decision stands as it did before
+    the patch (the CLI keeps its goal in memory).
+  - Not covered: a second change during the re-judge (the loop then waits
+    for the next message or `/goal resume`), a control that loads the goal
+    just before the commit and saves just after it (it resets that turn's
+    count, and after a `done` verdict leaves the goal active and idle), and
+    goal writes from another process.
+
+  `PinnedHermesGoalJudgeTests` in
+  `finitechat/tests/hermes/test_pinned_hermes_stop_settlement.py` runs the
+  real runner's judge path against the packaged Python. Remove the patch when
+  the pinned upstream gateway passes them.
+
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.
   Their fixed native routes reuse Hermes authentication and existing CLI signer

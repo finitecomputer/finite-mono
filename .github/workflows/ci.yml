@@ -446,7 +446,7 @@ jobs:
         run: |
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
-          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p fsite-cli --bins
+          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p finite-brain-app -p fsite-cli --bins
           "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_product_inventory.py'
 
       - name: Chat reliability fast gate (Hermes adapter)
@@ -467,8 +467,14 @@ jobs:
 
       - name: Hermes platform adapter tests
         env:
+          # Built by the Packaged Brain and Sites step; the requester lease
+          # end-to-end tests skip without them, so require both here.
+          FBRAIN_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/fbrain
+          FINITE_BRAIN_SERVER_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/finite-brain
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
+          test -x "$FBRAIN_TEST_BINARY"
+          test -x "$FINITE_BRAIN_SERVER_TEST_BINARY"
           "$HERMES_AGENT_PYTHON" -m unittest discover -s tests -p '*test*.py'
 
   skills-check:

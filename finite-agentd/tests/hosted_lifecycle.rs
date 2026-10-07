@@ -9,15 +9,23 @@ use tokio::process::Command;
 
 #[tokio::test]
 async fn stop_during_bridge_warmup_joins_hosted_child() {
-    bridge_warmup_exit(true).await;
+    bridge_warmup_exit(true, false).await;
 }
 
 #[tokio::test]
 async fn bridge_deadline_failure_joins_hosted_child() {
-    bridge_warmup_exit(false).await;
+    bridge_warmup_exit(false, false).await;
 }
 
-async fn bridge_warmup_exit(signal: bool) {
+/// Hosted Hermes and the gateway both ignore SIGTERM, so each needs its full
+/// grace before SIGKILL. They stop concurrently, so agentd's exit stays
+/// within a 15s container stop window instead of summing the two graces.
+#[tokio::test]
+async fn stop_with_hung_children_stays_within_the_container_stop_window() {
+    bridge_warmup_exit(true, true).await;
+}
+
+async fn bridge_warmup_exit(signal: bool, hung: bool) {
     let directory = tempfile::tempdir().unwrap();
     let home = directory.path();
     std::fs::write(
@@ -25,7 +33,7 @@ async fn bridge_warmup_exit(signal: bool) {
         r#"{"account_id":"test-account","device_id":"test-device"}"#,
     )
     .unwrap();
-    let write_script = |name, source| {
+    let write_script = |name: &str, source: &str| {
         let path = home.join(name);
         std::fs::write(&path, source).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -34,10 +42,22 @@ async fn bridge_warmup_exit(signal: bool) {
     let sleeper = write_script("sleep-service", "#!/bin/sh\nexec sleep 60\n");
     let prepare = write_script("prepare", "#!/bin/sh\nexit 0\n");
     let bridge = write_script("bridge", "#!/bin/sh\nexit 1\n");
+    let ignore_term = if hung { "trap '' TERM\n" } else { "" };
     write_script(
         "hermes",
-        "#!/bin/sh\necho $$ > \"$HERMES_HOME/native.pid\"\nexec sleep 60\n",
+        &format!(
+            "#!/bin/sh\n{ignore_term}echo $$ > \"$HERMES_HOME/native.pid\"\n\
+             while :; do sleep 1; done\n"
+        ),
     );
+    let gateway = if hung {
+        write_script(
+            "gateway",
+            "#!/bin/sh\ntrap '' TERM\nwhile :; do sleep 1; done\n",
+        )
+    } else {
+        sleeper.clone()
+    };
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = reservation.local_addr().unwrap();
     drop(reservation);
@@ -74,7 +94,7 @@ async fn bridge_warmup_exit(signal: bool) {
         .env("HERMES_HOME", home)
         .env("FINITECHAT_BIN", bridge)
         .env("FINITE_AGENTD_PREPARE_COMMAND", prepare)
-        .env("FINITE_AGENTD_HERMES_COMMAND", &sleeper)
+        .env("FINITE_AGENTD_HERMES_COMMAND", &gateway)
         .env("FINITE_AGENTD_HEALTH_PYTHON", &sleeper)
         .env("FINITE_AGENTD_SIMPLEX_SCRIPT", &sleeper)
         .env("FINITE_AGENTD_BRIDGE_ADDR", address.to_string())
@@ -110,6 +130,7 @@ async fn bridge_warmup_exit(signal: bool) {
     })
     .await
     .unwrap();
+    let stopped_at = std::time::Instant::now();
     if signal {
         rustix::process::kill_process(
             rustix::process::Pid::from_raw(daemon.id().unwrap() as i32).unwrap(),
@@ -117,10 +138,16 @@ async fn bridge_warmup_exit(signal: bool) {
         )
         .unwrap();
     }
-    let exit = tokio::time::timeout(Duration::from_secs(5), daemon.wait())
+    let exit = tokio::time::timeout(Duration::from_secs(15), daemon.wait())
         .await
         .unwrap()
         .unwrap();
+    let elapsed = stopped_at.elapsed();
+    let bound = if hung { 13 } else { 5 };
+    assert!(
+        elapsed < Duration::from_secs(bound),
+        "agentd took {elapsed:?} to stop"
+    );
     core_server.abort();
     assert_eq!(exit.success(), signal);
     assert!(
