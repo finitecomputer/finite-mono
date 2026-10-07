@@ -1,0 +1,20 @@
+{
+  "generation_environment": "Immutable source Hermes modules and 0.14.0 metadata, isolated 0.20 dependency container; not the complete legacy image.",
+  "hermes_version": "0.14.0",
+  "library_sha256": {
+    "hermes_state": "09f72aed6a82fa73e071469a5adf520743c459c98255b7cc5fb68c12a744f1d7",
+    "memory_store": "83a22287802b655489f6f43bfce9c798113f57820e9e7d9f5c44c78ac3d03439"
+  },
+  "memory": {
+    "bytes": 65536,
+    "facts": 1,
+    "sha256": "aebff5865f1592a4b252bb102f51aee33ad4d1573432393c5797d04982e53ef5"
+  },
+  "sessions": {
+    "bytes": 1474,
+    "messages": 2,
+    "sessions": 1,
+    "sha256": "ac0f51922694855b08a61f0f13cf4ddf6238126bd919c9d26ec9321e0aa02515"
+  },
+  "source_image_manifest_digest": "sha256:d6e7b42a8044fbfee94edbce0884a3900678c580a23ea792f2d8aa8c2a5276f5"
+}
