@@ -19,13 +19,16 @@ evidence record. Product rollout work is tracked in [FIN-44](https://linear.app/
 ## Preconditions
 
 - The reviewed commit passed the migration unit tests and the real
-  v0.14-export-to-v0.20-import compatibility test.
+  v0.14 export/import compatibility test against the exact intended target
+  image. Supported target package versions are 0.20.0 and 0.21.0; a version
+  match alone does not prove an image.
 - Before capturing the rehearsal Recovery Set, the values-free storage check
   in step 3 passed against the live source pod. It proved a read-only root,
   the the selected bot PVC at `/home/node`, and no other writable durable mount. Repeat
   the check immediately before cutover.
 - The intended target uses an already published, digest-pinned canonical
-  Runtime image whose durable smoke proves Hermes v0.20. This migration does
+  Runtime image whose durable smoke proves the selected Hermes version. The
+  offline import receipt must record that version. This migration does
   not require publishing or rolling a new image.
 - `scripts/finite-status --json` is retained and green. If the installed
   shortcut is absent, stage `scripts/finite-status` and
