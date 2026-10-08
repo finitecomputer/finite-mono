@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+finite-mail = { path = "../../../finite-mail" }
 anyhow = "1.0"
 axum = "0.8"
 bech32 = "0.11"

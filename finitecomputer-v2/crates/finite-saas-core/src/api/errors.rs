@@ -10,6 +10,14 @@ pub(super) struct ApiError {
 }
 
 impl ApiError {
+    pub(super) fn too_many_requests(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message: message.into(),
+            correlation_id: None,
+        }
+    }
+
     pub(super) fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,

@@ -39,7 +39,9 @@ in
 
     # Non-secret config, ported from the k8s manifest env + ConfigMap
     # finite-computer-config (infra/hosts/lat1/k8s/).
-    environment = {
+    environment = (import ./support-contact.nix).environment // {
+      FINITE_SUPPORT_MAILER = "resend";
+      FINITE_SUPPORT_MAIL_FROM = "support@finite.chat";
       FC_CORE_BIND = "127.0.0.1:4200";
       # Parser/schema compatibility has been live since 2026-07-10. The
       # required active-operation preflight was clean before first use; see
@@ -107,7 +109,11 @@ in
       #   FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER  https://brain.finite.computer
       #   FC_CORE_BRAIN_OBSERVATION_TOKEN      shared only with the dashboard
       #   FC_CORE_BRAIN_DESCRIPTION_TOKEN      shared only with Brain
-      EnvironmentFile = "/etc/finite/core.env";
+      EnvironmentFile = [
+        "/etc/finite/core.env"
+        # Existing send-only Resend credential; optional so mail cannot stop Core.
+        "-/etc/finite-saas/sites.env"
+      ];
       Restart = "on-failure";
       RestartSec = 2;
       TimeoutStartSec = "75s";
