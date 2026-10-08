@@ -1,9 +1,10 @@
+import { workosBaseUrl } from "@/lib/workos-auth";
 import { CoreFetchError, submitCoreSupportReport } from "@/lib/core-client";
 
 export async function POST(request: Request) {
   const headers = { "cache-control": "no-store" };
   // A JSON-only same-origin browser mutation; the server forwards only its session token.
-  const origin = process.env.FC_DASHBOARD_BASE_URL || request.url;
+  const origin = process.env.FC_DASHBOARD_BASE_URL?.trim() || workosBaseUrl() || request.url;
   if (request.headers.get("origin") !== new URL(origin).origin
       || request.headers.get("content-type")?.split(";")[0] !== "application/json") {
     return Response.json({ error: "Invalid support request origin." }, { status: 403, headers });
