@@ -60,6 +60,8 @@ type VisibleProject = {
 };
 
 type CoreState = {
+  supportReports: unknown[];
+  supportAvailable: boolean;
   projects: VisibleProject[];
   requests: AgentCreationRequest[];
   creationPosts: unknown[];
@@ -2114,6 +2116,81 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
   }
 });
 
+test("dashboard support works without agent transport", { timeout: 120_000 }, async () => {
+  const hostedDevice = await startFakeHostedDevice();
+  const core = await startFakeCore();
+  const sites = await startFakeSites();
+  core.reset({
+    projects: [visibleProject("project_second", "Support Bot", hostedDevice.runtimeStatusUrl, "support-bot")],
+    requests: [agentCreationRequest({ id: "agent_request_second", projectId: "project_second", displayName: "Support Bot", status: "running", agentRuntimeId: "runtime_support-bot" })],
+  });
+  const port = await freePort();
+  const dashboard = startDashboard(port, core.url, hostedDevice.url, sites.apiUrl, { distDir: ".next-browser-test" });
+  const output = collectOutput(dashboard);
+  let browser: Browser | null = null;
+  try {
+    await waitForDashboard(port, output);
+    browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
+    await withSignedInPage(browser, port, async (page) => {
+      await page.goto(`http://127.0.0.1:${port}/dashboard/machines/runtime_support-bot/chat`);
+      await waitFor(() => page.getByLabel("Message your agent").isEnabled(), 15_000, () => pageText(page));
+      // Open the local command, then lose Agent transport before submission.
+      const sentBeforeSupport = hostedDevice.state.actions.filter((action) => actionName(action).startsWith("Send")).length;
+      await page.getByLabel("Message your agent").fill("/support My agent stopped responding");
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
+      const supportDialog = page.getByRole("dialog", { name: "Contact support" });
+      await supportDialog.waitFor();
+      assert.equal(await supportDialog.getByLabel("What happened?").inputValue(), "My agent stopped responding");
+      await supportDialog.getByLabel("What happened?").fill("Reviewed support report");
+      if (process.env.SUPPORT_SCREENSHOT_PATH) {
+        await page.screenshot({ path: process.env.SUPPORT_SCREENSHOT_PATH, animations: "disabled" });
+      }
+      hostedDevice.setAvailable(false);
+      const responsePromise = page.waitForResponse((response) => response.url().endsWith("/api/support") && response.request().method() === "POST");
+      await supportDialog.getByRole("button", { name: "Send report", exact: true }).click();
+      const supportResponse = await responsePromise;
+      assert.equal(supportResponse.status(), 202, await supportResponse.text());
+      await supportDialog.getByText("Your report is saved for email delivery.", { exact: true }).waitFor();
+      assert.equal(core.state.supportReports.length, 1);
+      const supportReport = core.state.supportReports[0] as Record<string, unknown>;
+      assert.equal(supportReport.message, "Reviewed support report");
+      assert.equal(supportReport.supportEmail, "it@example.org");
+      assert.equal(supportReport.replyTo, "browser@finite.vip");
+      assert.equal(supportReport.projectId, "project_second");
+      assert.deepEqual(Object.keys(supportReport).sort(), ["idempotencyKey", "message", "projectId", "replyTo", "supportEmail"]);
+      assert.equal(hostedDevice.state.actions.filter((action) => actionName(action).startsWith("Send")).length, sentBeforeSupport);
+      await supportDialog.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: "Contact support", exact: true }).click();
+      const offlineDialog = page.getByRole("dialog", { name: "Contact support" });
+      await offlineDialog.getByRole("link", { name: "it@example.org", exact: true }).waitFor();
+      assert.equal(await offlineDialog.getByRole("link", { name: "it@example.org", exact: true }).getAttribute("href"), "mailto:it%40example.org");
+      core.state.supportAvailable = false;
+      await offlineDialog.getByLabel("What happened?").fill("Report while Core is an older version");
+      await offlineDialog.getByRole("button", { name: "Send report", exact: true }).click();
+      await offlineDialog.getByRole("alert").filter({ hasText: "Support endpoint is not deployed." }).waitFor();
+      assert.equal(core.state.supportReports.length, 1, "old Core must not produce a success receipt");
+      core.state.supportAvailable = true;
+      await offlineDialog.getByRole("button", { name: "Retry report", exact: true }).click();
+      await offlineDialog.getByText("Your report is saved for email delivery.", { exact: true }).waitFor();
+      await offlineDialog.getByRole("button", { name: "Close", exact: true }).click();
+      hostedDevice.setAvailable(true);
+      const crossOrigin = await page.request.post(`http://127.0.0.1:${port}/api/support`, {
+        headers: { origin: "https://untrusted.example", "content-type": "application/json" }, data: {},
+      });
+      assert.equal(crossOrigin.status(), 403);
+
+
+    });
+  } finally {
+    await browser?.close().catch(() => {});
+    await stopChildProcess(dashboard);
+    hostedDevice.close();
+    core.server.close();
+    sites.server.close();
+    await rm(".next-browser-test", { recursive: true, force: true });
+  }
+});
+
 async function resetDashboardDevDirs() {
   await Promise.all([
     rm(".next-browser-test", { recursive: true, force: true }),
@@ -2163,6 +2240,7 @@ function startDashboard(
       cwd: process.cwd(),
       env: {
         ...process.env,
+        FINITE_SUPPORT_EMAIL: "it@example.org",
         FC_CORE_API_TOKEN: CORE_TOKEN,
         FC_CORE_BASE_URL: coreUrl,
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
@@ -3075,6 +3153,15 @@ async function handleCoreRequest(
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/core/v1/me/support") {
+    if (!state.supportAvailable) {
+      writeJson(response, 404, { error: "Support endpoint is not deployed." });
+      return;
+    }
+    state.supportReports.push(await readJson(request));
+    writeJson(response, 202, { id: "support-browser-receipt", status: "pending" });
+    return;
+  }
   if (request.method === "GET" && request.url === "/api/core/v1/me") {
     state.meGets += 1;
     if (state.meError) {
@@ -3294,6 +3381,8 @@ async function withSignedInPage(
 
 function emptyCoreState(): CoreState {
   return {
+    supportReports: [],
+    supportAvailable: true,
     projects: [],
     requests: [],
     creationPosts: [],

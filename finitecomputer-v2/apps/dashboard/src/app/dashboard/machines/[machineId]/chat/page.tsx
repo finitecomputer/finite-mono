@@ -1,5 +1,6 @@
 import { redirect } from "next/navigation";
 
+import { supportContact } from "@/lib/support-contact";
 import { HostedWebChat } from "@/components/hosted-web-chat";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 
@@ -30,6 +31,9 @@ export default async function HostedWebChatPage({
       initialDraft={initialDraft(query.prompt)}
       machineId={access.machineId}
       machineLabel={access.displayName}
+      supportEmail={supportContact(process.env.FINITE_SUPPORT_EMAIL)}
+      supportReplyTo={access.viewer.email}
+      supportProjectId={access.coreProject.project.id}
       runtimeStatus={access.coreProject.runtime?.runtime_status ?? "unknown"}
     />
   );

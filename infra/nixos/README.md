@@ -65,7 +65,7 @@ All root-owned, 0600 unless noted. Names only; values belong in the documented o
 | `/etc/finite/hosted-web-device.env` | `FINITECHAT_HOSTED_API_TOKEN` | generate for the Hosted Web Device internal service boundary; the service and dashboard read this same server-only value; store it in the team password manager |
 | `/etc/finite/sites-viewer-session.env` | `FINITE_SITES_VIEWER_SESSION_TOKEN` | generate exactly 32 random bytes as 64 lowercase hex characters (`openssl rand -hex 32`) for the Sites verified-email viewer-session boundary; systemd/Podman read this root:root 0600 file before dropping service privileges; Sites and the dashboard receive the same server-only value; store it in the team password manager |
 | `/var/lib/finitecomputer/backups/rsync-net/{id_ed25519,known_hosts,borg-passphrase}` | existing finitecomputer Borg SSH private key, pinned rsync.net host key, and repository passphrase | copy the established root-only credential bundle from an existing finitecomputer host; the off-host passphrase copy already lives in the ignored `../finitecomputer/workspaces/trf/secrets/` tree. Do not generate a parallel credential set or put values in this repo. Verify the destination restriction before claiming append-only protection. |
-| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | systemd reads the root:root 0600 file before dropping privileges, and Identity and Brain reuse the existing send-only Resend credential without copying its value; Sites receives its mail credential through Fly secrets |
+| `/etc/finite-saas/sites.env` | `RESEND_API_KEY` | systemd reads the root:root 0600 file before dropping privileges, and Identity, Brain, and Core support reuse the existing send-only Resend credential without copying its value; Sites receives its mail credential through Fly secrets |
 | `/etc/finite-saas/certs/finite-chat-origin.pem` (0644) / `.key` (0640 root:caddy) | — | Cloudflare Origin CA pair; host-agnostic, covers the zone |
 | `/etc/finite/litestream-latitude.env` | `LITESTREAM_ACCESS_KEY_ID`, `LITESTREAM_SECRET_ACCESS_KEY` | generate a scoped credential for the `finite-lat-2-litestream` bucket at Latitude.sh object storage; store a copy in the team password manager. If the file is absent, every per-database `finite-litestream-*` replicator unit is condition-skipped (chat and Brain keep serving) and `finite-litestream-health` fails loudly every five minutes until it exists (`infra/runbooks/litestream-chat-replication.md`). |
 | Postgres role password | — | `ALTER ROLE finite WITH PASSWORD '<POSTGRES_PASSWORD>';` before the restore (`modules/postgres.nix` header) |
@@ -187,5 +187,5 @@ vhosts import the reviewed private `/etc/finite/sites-redirects.caddy` mapping
 and return temporary redirects; unmapped content and retired API/Git routes
 return 410. The old data directory and recovery archives are retained; there
 is no Sites daemon or Sites listener on this host.
-`/etc/finite-saas/sites.env` remains an Identity and Brain mail credential input despite
+`/etc/finite-saas/sites.env` remains an Identity, Brain, and Core support mail credential input despite
 its historical filename; do not remove it with the daemon.

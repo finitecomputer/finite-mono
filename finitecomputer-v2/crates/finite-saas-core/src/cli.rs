@@ -36,13 +36,24 @@ pub(crate) async fn serve() -> Result<()> {
         };
     let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
-    let app = router_with_hosted_hermes_origins(
+    let support = match finite_saas_core::support::SupportService::from_env() {
+        Ok(service) => service,
+        Err(error) => {
+            tracing::warn!(%error, "support email disabled");
+            None
+        }
+    };
+    let mut app = router_with_hosted_hermes_origins(
         store.clone(),
         auth.clone(),
         agent_creation_placement,
         hosted_hermes_origins.clone(),
     )
     .layer(TraceLayer::new_for_http());
+    if let Some(service) = support {
+        service.start_worker(store.clone());
+        app = app.layer(axum::Extension(service));
+    }
     // Mandatory listeners bind first so an optional listener can never take
     // their address.
     let listener = TcpListener::bind(addr).await?;

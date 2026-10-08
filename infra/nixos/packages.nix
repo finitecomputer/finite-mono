@@ -225,13 +225,16 @@ let
     );
 
   finiteSaasCoreSourcePaths = [
+    "finite-mail"
     "finitecomputer-v2/crates/finite-saas-core"
   ];
   finiteSaasRunnerSourcePaths = [
+    "finite-mail"
     "finitecomputer-v2/crates/finite-saas-core"
     "finitecomputer-v2/crates/finite-saas-runner"
   ];
   finiteSaasLocalSourcePaths = [
+    "finite-mail"
     "finitecomputer-v2/crates/finite-private-limiter"
     "finitecomputer-v2/crates/finite-saas-core"
     "finitecomputer-v2/crates/finite-saas-local"
