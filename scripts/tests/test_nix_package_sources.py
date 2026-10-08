@@ -114,6 +114,12 @@ class NixPackageSourceTests(unittest.TestCase):
                     [],
                 )
 
+    def test_saas_packages_include_the_shared_support_mail_transport(self) -> None:
+        for name in ("finite-saas-core", "finite-saas-runner", "finite-saas-local"):
+            with self.subTest(package=name):
+                self.assertIn("finite-mail/src/lib.rs", self.source_files[name])
+                self.assertIn("finite-mail/Cargo.toml", self.source_files[name])
+
     def test_saas_packages_keep_every_migration(self) -> None:
         tracked = subprocess.run(
             ["git", "ls-files", SAAS_CORE_MIGRATIONS],

@@ -18,7 +18,7 @@
     # Non-secret config mirrored from finite-computer-config
     # (infra/hosts/lat1/k8s/configmap.yaml), with FC_CORE_BASE_URL rewritten
     # from the k8s service name to the local core bind.
-    environment = {
+    environment = (import ./support-contact.nix).environment // {
       HOSTNAME = "127.0.0.1"; # Next.js bind address (loopback-only)
       PORT = "3000";
       FC_WORKOS_AUTH_ENABLED = "true";

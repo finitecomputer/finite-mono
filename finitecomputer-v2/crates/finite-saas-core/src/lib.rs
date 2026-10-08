@@ -8,6 +8,7 @@ pub mod hosted_hermes;
 pub mod hosted_hermes_session;
 pub mod launch_codes;
 pub mod store;
+pub mod support;
 pub mod trials;
 
 #[cfg(test)]

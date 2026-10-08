@@ -1,6 +1,7 @@
 mod account_email;
 pub mod hosted_hermes;
 pub mod runtime_credentials;
+mod support;
 pub use account_email::{AccountEmailChangePreview, AccountEmailChangeRequest};
 
 use crate::billing;

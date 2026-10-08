@@ -1790,3 +1790,12 @@ export async function updateCoreTrialCode(id: string, input: { code: string; exp
     method: "POST", body: JSON.stringify(input),
   });
 }
+
+
+export async function submitCoreSupportReport(input: unknown) {
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) throw new CoreFetchError("Sign in again to send a support report.", 401);
+  return coreFetch<{ id: string; status: "pending" | "sent" | "failed" }>("/api/core/v1/me/support", account, {
+    method: "POST", body: JSON.stringify(input), signal: AbortSignal.timeout(15_000),
+  });
+}

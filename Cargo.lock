@@ -1114,6 +1114,7 @@ dependencies = [
  "bech32",
  "clap",
  "deadpool-postgres",
+ "finite-mail",
  "futures-util",
  "getrandom 0.2.17",
  "jsonwebtoken",

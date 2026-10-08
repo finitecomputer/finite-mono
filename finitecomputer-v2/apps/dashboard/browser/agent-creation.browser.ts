@@ -60,6 +60,7 @@ type VisibleProject = {
 };
 
 type CoreState = {
+  supportReports: unknown[];
   projects: VisibleProject[];
   requests: AgentCreationRequest[];
   creationPosts: unknown[];
@@ -1297,6 +1298,34 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         "only the explicit recovery action may grant Room-creation authority"
       );
 
+      // Open the local command, then lose Agent transport before submission.
+      const sentBeforeSupport = hostedDevice.state.actions.filter((action) => actionName(action).startsWith("Send")).length;
+      await page.getByLabel("Message your agent").fill("/support My agent stopped responding");
+      await page.getByRole("button", { name: "Send message", exact: true }).click();
+      const supportDialog = page.getByRole("dialog", { name: "Contact support" });
+      await supportDialog.waitFor();
+      assert.equal(await supportDialog.getByLabel("What happened?").inputValue(), "My agent stopped responding");
+      await supportDialog.getByLabel("What happened?").fill("Reviewed support report");
+      if (process.env.SUPPORT_SCREENSHOT_PATH) {
+        await page.screenshot({ path: process.env.SUPPORT_SCREENSHOT_PATH });
+      }
+      hostedDevice.setAvailable(false);
+      await supportDialog.getByRole("button", { name: "Send report", exact: true }).click();
+      await supportDialog.getByText("Your report is saved for email delivery.", { exact: true }).waitFor();
+      assert.equal(core.state.supportReports.length, 1);
+      const supportReport = core.state.supportReports[0] as Record<string, unknown>;
+      assert.equal(supportReport.message, "Reviewed support report");
+      assert.equal(supportReport.supportEmail, "it@example.org");
+      assert.equal(supportReport.replyTo, "browser@finite.vip");
+      assert.equal(supportReport.projectId, "project_running");
+      assert.deepEqual(Object.keys(supportReport).sort(), ["idempotencyKey", "message", "projectId", "replyTo", "supportEmail"]);
+      assert.equal(hostedDevice.state.actions.filter((action) => actionName(action).startsWith("Send")).length, sentBeforeSupport);
+      await supportDialog.getByRole("button", { name: "Close", exact: true }).click();
+      await page.getByRole("button", { name: "Contact support", exact: true }).click();
+      await page.getByRole("dialog").getByRole("link", { name: "it@example.org", exact: true }).waitFor();
+      await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).first().click();
+      hostedDevice.setAvailable(true);
+
       const message = "Keep the runtime boundary thin.";
       await page.getByLabel("Message your agent").fill(message);
       await page.getByRole("button", { name: "Send message" }).click();
@@ -2163,6 +2192,7 @@ function startDashboard(
       cwd: process.cwd(),
       env: {
         ...process.env,
+        FINITE_SUPPORT_EMAIL: "it@example.org",
         FC_CORE_API_TOKEN: CORE_TOKEN,
         FC_CORE_BASE_URL: coreUrl,
         FINITECHAT_HOSTED_API_TOKEN: HOSTED_DEVICE_TOKEN,
@@ -3075,6 +3105,11 @@ async function handleCoreRequest(
     return;
   }
 
+  if (request.method === "POST" && request.url === "/api/core/v1/me/support") {
+    state.supportReports.push(await readJson(request));
+    writeJson(response, 202, { id: "support-browser-receipt", status: "pending" });
+    return;
+  }
   if (request.method === "GET" && request.url === "/api/core/v1/me") {
     state.meGets += 1;
     if (state.meError) {
@@ -3294,6 +3329,7 @@ async function withSignedInPage(
 
 function emptyCoreState(): CoreState {
   return {
+    supportReports: [],
     projects: [],
     requests: [],
     creationPosts: [],

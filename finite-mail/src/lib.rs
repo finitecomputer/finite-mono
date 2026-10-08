@@ -54,6 +54,17 @@ pub trait MailTransport: Send + Sync {
         let _ = idempotency_key;
         self.send_text_email(email)
     }
+
+    /// Reply-address support is explicit: transports must not silently discard it.
+    fn send_text_email_with_reply_to(
+        &self,
+        idempotency_key: &str,
+        email: &TextEmail<'_>,
+        reply_to: &str,
+    ) -> Result<(), MailError> {
+        let _ = (idempotency_key, email, reply_to);
+        Err(MailError::Send("reply-to delivery is unsupported".into()))
+    }
 }
 
 // ---- Resend HTTP transport ---------------------------------------------------
@@ -82,8 +93,9 @@ impl ResendMailer {
         &self,
         idempotency_key: Option<&str>,
         email: &TextEmail<'_>,
+        reply_to: Option<&str>,
     ) -> Result<(), MailError> {
-        let payload = resend_payload(&self.from_address, email);
+        let payload = resend_payload(&self.from_address, email, reply_to);
         let mut request = self
             .agent
             .post(RESEND_ENDPOINT)
@@ -111,18 +123,26 @@ impl ResendMailer {
 }
 
 /// Build the Resend JSON payload. Split out for tests.
-fn resend_payload(from_address: &str, email: &TextEmail<'_>) -> serde_json::Value {
-    serde_json::json!({
+fn resend_payload(
+    from_address: &str,
+    email: &TextEmail<'_>,
+    reply_to: Option<&str>,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
         "from": from_address,
         "to": [email.to],
         "subject": email.subject,
         "text": email.text,
-    })
+    });
+    if let Some(reply_to) = reply_to {
+        payload["reply_to"] = serde_json::json!(reply_to);
+    }
+    payload
 }
 
 impl MailTransport for ResendMailer {
     fn send_text_email(&self, email: &TextEmail<'_>) -> Result<(), MailError> {
-        self.deliver(None, email)
+        self.deliver(None, email, None)
     }
 
     fn send_text_email_with_idempotency_key(
@@ -130,7 +150,16 @@ impl MailTransport for ResendMailer {
         idempotency_key: &str,
         email: &TextEmail<'_>,
     ) -> Result<(), MailError> {
-        self.deliver(Some(idempotency_key), email)
+        self.deliver(Some(idempotency_key), email, None)
+    }
+
+    fn send_text_email_with_reply_to(
+        &self,
+        idempotency_key: &str,
+        email: &TextEmail<'_>,
+        reply_to: &str,
+    ) -> Result<(), MailError> {
+        self.deliver(Some(idempotency_key), email, Some(reply_to))
     }
 }
 
@@ -152,6 +181,15 @@ impl FileOutboxMailer {
     /// yields `<nonce>-<safe-email>.txt`; otherwise
     /// `<nonce>-<safe-email>-<suffix>.txt`.
     pub fn write(&self, email: &TextEmail<'_>, suffix: &str) -> Result<PathBuf, MailError> {
+        self.write_with_reply_to(email, suffix, None)
+    }
+
+    fn write_with_reply_to(
+        &self,
+        email: &TextEmail<'_>,
+        suffix: &str,
+        reply_to: Option<&str>,
+    ) -> Result<PathBuf, MailError> {
         use std::io::Write as _;
 
         let nonce = outbox_nonce()?;
@@ -169,6 +207,9 @@ impl FileOutboxMailer {
         let mut file = std::fs::File::create(&path)?;
         writeln!(file, "To: {}", email.to)?;
         writeln!(file, "Subject: {}", email.subject)?;
+        if let Some(reply_to) = reply_to {
+            writeln!(file, "Reply-To: {reply_to}")?;
+        }
         writeln!(file)?;
         write!(file, "{}", email.text)?;
         eprintln!(
@@ -191,6 +232,16 @@ impl MailTransport for FileOutboxMailer {
     fn send_text_email(&self, email: &TextEmail<'_>) -> Result<(), MailError> {
         self.write(email, "email").map(|_| ())
     }
+
+    fn send_text_email_with_reply_to(
+        &self,
+        _idempotency_key: &str,
+        email: &TextEmail<'_>,
+        reply_to: &str,
+    ) -> Result<(), MailError> {
+        self.write_with_reply_to(email, "email", Some(reply_to))
+            .map(|_| ())
+    }
 }
 
 #[cfg(test)]
@@ -206,11 +257,41 @@ mod tests {
                 subject: "Your link to hello",
                 text: "https://hello.finite.chat/_finite/auth?token=abc",
             },
+            None,
         );
         assert_eq!(payload["from"], "Finite Sites <sites@finite.chat>");
         assert_eq!(payload["to"][0], "friend@example.com");
         assert_eq!(payload["subject"], "Your link to hello");
         assert!(payload["text"].as_str().unwrap().contains("token=abc"));
+    }
+
+    #[test]
+    fn support_reply_address_reaches_both_transports_without_changing_existing_mail() {
+        let email = TextEmail {
+            to: "it@example.org",
+            subject: "Support reference",
+            text: "Reviewed report",
+        };
+        let ordinary = resend_payload("sender@example.org", &email, None);
+        assert!(ordinary.get("reply_to").is_none());
+        let support = resend_payload("sender@example.org", &email, Some("user@example.org"));
+        assert_eq!(support["reply_to"], "user@example.org");
+        assert_eq!(support["to"], ordinary["to"]);
+        let dir = tempfile::tempdir().unwrap();
+        let outbox = FileOutboxMailer::new(dir.path().into()).unwrap();
+        outbox
+            .send_text_email_with_reply_to("support-1", &email, "user@example.org")
+            .unwrap();
+        let path = std::fs::read_dir(dir.path())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "To: it@example.org\nSubject: Support reference\nReply-To: user@example.org\n\nReviewed report"
+        );
     }
 
     #[test]

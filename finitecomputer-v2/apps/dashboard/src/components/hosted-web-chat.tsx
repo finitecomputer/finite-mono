@@ -1,5 +1,7 @@
 "use client";
 
+import { SupportContact, SupportReport } from "@/components/support-report";
+import { supportCommand } from "@/lib/support-contact";
 import type { ComponentProps } from "react";
 import {
   FormEvent,
@@ -150,11 +152,17 @@ export function HostedWebChat({
   machineId,
   machineLabel,
   runtimeStatus,
+  supportEmail = null,
+  supportReplyTo = null,
+  supportProjectId = null,
 }: {
   initialDraft?: string;
   machineId: string;
   machineLabel: string;
   runtimeStatus: CoreRuntimeStatus;
+  supportEmail?: string | null;
+  supportReplyTo?: string | null;
+  supportProjectId?: string | null;
 }) {
   const {
     state,
@@ -183,6 +191,13 @@ export function HostedWebChat({
   const [composerError, setComposerError] = useState<HostedChatComposerError | null>(null);
   const setActionError = (message: string | null) =>
     setComposerError(message === null ? null : { message, sentTo: null });
+  const [supportOpen, setSupportOpen] = useState(false);
+  const [supportDraft, setSupportDraft] = useState<{ id: string; message: string; source: string; accepted: boolean } | null>(null);
+  function openSupport(message = "", source = "") {
+    setSupportDraft((previous) => previous && !previous.accepted ? previous : { id: crypto.randomUUID(), message, source, accepted: false });
+    setSupportOpen(true);
+  }
+
   // Send feedback comes from this composer's action response. Stream and
   // view status/toast fields can describe another tab's action on the Device.
   const [sending, setSending] = useState(false);
@@ -585,7 +600,11 @@ export function HostedWebChat({
   );
 
   function noteTyping(value: string) {
-    if (!selectedRoom || selectedRoom.state !== "Connected") return;
+    if (!connected || !selectedRoom || selectedRoom.state !== "Connected") return;
+    if (supportCommand(value) !== null) {
+      stopTyping();
+      return;
+    }
     if (!value.trim()) {
       stopTyping(selectedRoom.room_id);
       return;
@@ -604,8 +623,15 @@ export function HostedWebChat({
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
+    const report = supportCommand(text);
+    if (report !== null && !sending && audioRecordingState === "idle") {
+      stopTyping(selectedRoom?.room_id);
+      openSupport(report, draft);
+      return;
+    }
     if (
       (!text && attachments.length === 0)
+      || !connected
       || !selectedRoom
       || !selectedTopic
       || !selectedChat
@@ -944,6 +970,24 @@ export function HostedWebChat({
 
   return (
     <div className="finite-chat finite-chat--embedded">
+      {supportDraft ? (
+        <SupportReport
+          key={supportDraft.id}
+          open={supportOpen}
+          onOpenChange={setSupportOpen}
+          initialMessage={supportDraft.message}
+          requestId={supportDraft.id}
+          projectId={supportProjectId}
+          machineLabel={machineLabel}
+          email={supportEmail}
+          replyTo={supportReplyTo}
+          onAccepted={() => {
+            setSupportDraft((previous) => previous ? { ...previous, accepted: true } : null);
+            if (draft === supportDraft.source) setDraft("");
+          }}
+        />
+      ) : null}
+
       <div className="finite-chat__workspace">
         <header className="finite-chat__topbar">
           <div className="finite-chat__breadcrumb">
@@ -974,6 +1018,7 @@ export function HostedWebChat({
           </div>
 
           <div className="finite-chat__topbar-actions">
+            <button type="button" className="ocean-pill-button" onClick={() => openSupport()}>Contact support</button>
             {showReconnectNotice ? (
               <span className="finite-chat__relay-warning">Reconnecting</span>
             ) : null}
@@ -1103,6 +1148,7 @@ export function HostedWebChat({
                 <div className="finite-chat__send-error" role="alert">
                   <strong>Chat needs attention</strong>
                   <span>{chatAlert.message}</span>
+                  <SupportContact email={supportEmail} />
                   <Button
                     type="button"
                     variant="outline"
@@ -1137,6 +1183,11 @@ export function HostedWebChat({
                 </div>
               ) : null}
 
+              {runtimeStatus === "offline" || runtimeStatus === "stale" ? (
+                <div className="finite-chat__notice" role="status">
+                  <span>Your agent is unavailable. <SupportContact email={supportEmail} /></span>
+                </div>
+              ) : null}
               <div className="finite-chat__composer-wrap">
                 <form
                   className={`finite-chat__composer ${isDragOver ? "is-drag-over" : ""}`}

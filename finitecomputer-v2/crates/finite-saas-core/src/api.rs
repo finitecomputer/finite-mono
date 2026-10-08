@@ -1,6 +1,7 @@
 mod hosted_access;
 #[cfg(test)]
 mod hosted_browser_proof;
+mod support;
 use crate::auth::{CoreAuth, VerifiedRunnerCredential, WorkosAuthError};
 use crate::hosted_hermes::{HostedHermesLocation, HostedHermesOrigins};
 use crate::launch_codes::{
@@ -207,6 +208,10 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
 
 fn router_from_state(state: CoreApiState) -> Router {
     Router::new()
+        .route(
+            "/api/core/v1/me/support",
+            post(support::submit_support).layer(axum::extract::DefaultBodyLimit::max(20 * 1024)),
+        )
         .route("/healthz", get(healthz))
         .route(
             "/api/core/v1/agent-creation-requests/{request_id}/runtime-credential",
