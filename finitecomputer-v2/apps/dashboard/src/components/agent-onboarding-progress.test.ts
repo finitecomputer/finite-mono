@@ -3,10 +3,10 @@ import { test } from "node:test";
 
 import { agentOnboardingStageFromSearchParams } from "./agent-onboarding-progress";
 
-test("new agent onboarding starts on Launch code", () => {
+test("new agent onboarding starts on Plan", () => {
   assert.equal(
     agentOnboardingStageFromSearchParams(new URLSearchParams({ new: "1" })),
-    "code"
+    "billing"
   );
 });
 
