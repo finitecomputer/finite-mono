@@ -15,7 +15,7 @@ import {
 } from "@/lib/agent-onboarding";
 
 test("agent access follows the explicitly submitted path", () => {
-  assert.equal(resolveAgentCreationAccessPath("launch-code", true), "launch-code");
+  assert.equal(resolveAgentCreationAccessPath("launch-code", true), "denied");
   assert.equal(resolveAgentCreationAccessPath("stripe", true), "stripe");
   assert.equal(resolveAgentCreationAccessPath("entitled", true), "entitlement");
   assert.equal(resolveAgentCreationAccessPath("entitled", true, false), "denied");
@@ -46,7 +46,7 @@ test("customer onboarding always places Access after Profile", () => {
       canCreateAgent: true,
       requiresBilling: false,
       recovery: agentCreationErrorRecovery(
-        "Choose payment or enter a Launch Code to continue."
+        "Continue to secure checkout to create your agent."
       ),
     }),
     true
@@ -59,7 +59,7 @@ test("billing rejection carries machine-readable Access recovery after friendly 
     "access"
   );
   assert.equal(
-    agentCreationErrorRecovery("Choose payment or enter a Launch Code to continue."),
+    agentCreationErrorRecovery("Continue to secure checkout to create your agent."),
     "access"
   );
   assert.equal(
@@ -103,16 +103,15 @@ test("agent creation exhaustion is explained in customer language", () => {
 });
 
 test("other agent creation errors remain useful", () => {
-  assert.equal(agentCreationErrorMessage(new Error("Enter your Launch Code.")), "Enter your Launch Code.");
   assert.equal(
     agentCreationErrorMessage(new Error("billing is required before creating an agent")),
-    "Choose payment or enter a Launch Code to continue."
+    "Continue to secure checkout to create your agent."
   );
   assert.equal(
     agentCreationErrorMessage(
       new Error("selected hosting tier is not authorized by this account or Launch Code")
     ),
-    "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code."
+    "This account does not have access to the selected hosting option. Continue with Standard hosting."
   );
   assert.equal(agentCreationErrorMessage(null), "Could not create agent.");
 });

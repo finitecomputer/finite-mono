@@ -2,9 +2,6 @@ import Image from "next/image";
 
 import styles from "./marketing-home.module.css";
 
-const CONTACT_FORM_URL =
-  "https://docs.google.com/forms/d/e/1FAIpQLSePGnux9EVHRGZf30q7MPEMdMmTb7djJxAPCM0hCf-wRTGv3w/viewform?usp=publish-editor";
-
 export function MarketingHome() {
   return (
     <main className={styles.scene}>
@@ -35,14 +32,11 @@ export function MarketingHome() {
         </div>
 
         <div className={styles.actions}>
-          <a href="/login?returnTo=/dashboard" className={styles.button}>
+          <a href="/signup?returnTo=/dashboard" className={styles.button}>
+            Sign up
+          </a>
+          <a href="/login?returnTo=/dashboard" className={styles.secondaryButton}>
             Sign in
-          </a>
-          <a href="/signup?returnTo=/dashboard" className={styles.secondaryButton}>
-            I have a Launch Code
-          </a>
-          <a href={CONTACT_FORM_URL} className={styles.requestAccess} target="_blank" rel="noopener noreferrer">
-            Request access
           </a>
         </div>
       </section>
