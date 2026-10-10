@@ -107,25 +107,9 @@ export async function POST(request: Request) {
       process.env.FC_DASHBOARD_RUNTIME_MODE !== "canary"
     );
 
-    if (accessPath === "launch-code") {
-      const launchCode = String(formData.get("launchCode") ?? "").trim();
-      if (!launchCode) {
-        throw new Error("Enter your Launch Code.");
-      }
-      const creation = await launchDraft(draft, account, launchCode);
-      const response = dashboardRedirect(
-        request,
-        undefined,
-        creation.request.id,
-        draft.returnMachineId
-      );
-      clearDraftCookie(response);
-      return response;
-    }
-
     if (accessPath === "stripe") {
       if (draft.hostingTier !== "standard") {
-        throw new Error("Confidential hosting currently requires a Confidential Launch Code.");
+        throw new Error("Confidential hosting is unavailable during signup. Continue with Standard hosting.");
       }
       if (!stripeCheckoutAvailable()) {
         throw new Error("Payment is unavailable right now.");
@@ -156,7 +140,7 @@ export async function POST(request: Request) {
       return response;
     }
 
-    throw new Error("Use a Launch Code or continue to payment.");
+    throw new Error("Continue to secure checkout to create your agent.");
   } catch (error) {
     const response = dashboardRedirect(request, error, undefined, returnMachineId);
     if (draft) {
@@ -172,8 +156,7 @@ export async function GET(request: Request) {
 
 async function launchDraft(
   draft: AgentOnboardingDraft,
-  account: Awaited<ReturnType<typeof getAccountAuthContext>>,
-  launchCode = ""
+  account: Awaited<ReturnType<typeof getAccountAuthContext>>
 ) {
   // Pre-mint the owner's hosted chat identity and hand its account id to Core
   // so the lease-time runtime spec can scope chat admission to the owner.
@@ -184,7 +167,7 @@ async function launchDraft(
   );
   const creation = await requestCoreAgentCreation({
     displayName: draft.displayName,
-    launchCode,
+    launchCode: "",
     idempotencyKey: draft.idempotencyKey,
     hostingTier: draft.hostingTier,
     profilePictureUrl: draft.profilePictureUrl,

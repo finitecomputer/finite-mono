@@ -321,7 +321,6 @@ export default async function DashboardPage({
                   name={draft.displayName}
                 />
               ) : <CoreAgentCreationPanel
-                allowConfidentialHosting={viewer.isAdmin}
                 error={agentCreationError}
                 draft={draft}
                 returnMachineId={returnProject?.runtime?.id ?? null}
@@ -1023,13 +1022,11 @@ function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: str
 }
 
 function CoreAgentCreationPanel({
-  allowConfidentialHosting,
   error,
   draft,
   returnMachineId,
   requiresAccess,
 }: {
-  allowConfidentialHosting: boolean;
   error: string | null;
   draft: AgentOnboardingDraft | null;
   returnMachineId: string | null;
@@ -1039,12 +1036,9 @@ function CoreAgentCreationPanel({
   const form = (
     <CoreAgentCreationForm
       trialsEnabled={process.env.FC_DASHBOARD_TRIALS_ENABLED === "true"}
-      allowConfidentialHosting={allowConfidentialHosting}
       error={error}
       idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
       initialName={draft?.displayName}
-      initialPictureUrl={draft?.profilePictureUrl}
-      initialHostingTier={draft?.hostingTier}
       returnMachineId={returnMachineId}
       requiresAccess={requiresAccess}
       stripeConfigured={stripeCheckoutAvailable()}
