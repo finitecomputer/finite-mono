@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import http.client
 import importlib.util
 import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HEALTH_SERVER = REPO_ROOT / "containers" / "agent" / "health_server.py"
@@ -40,6 +43,15 @@ def pipe_observation(buffered_bytes: int) -> dict[str, object]:
         "sample_count": 60,
         "observed_decrease_bytes": 0,
     }
+
+
+def named_observation(name: str, value: object) -> dict[str, object]:
+    """A stream observation whose `kind`, `file_type` or `error` is `value`."""
+    observed_at_ms = UPDATED_AT_MS - 1000
+    if name == "kind":
+        return {"kind": value, "observed_at_ms": observed_at_ms}
+    kind = "not_pipe" if name == "file_type" else "unavailable"
+    return {"kind": kind, "observed_at_ms": observed_at_ms, name: value}
 
 
 class AgentHealthServerTest(unittest.TestCase):
@@ -273,6 +285,142 @@ class AgentHealthServerTest(unittest.TestCase):
                     self.health.agentd_status()["container_output"],
                     {"state": "unknown", "reason": "malformed"},
                 )
+
+    def test_non_string_names_are_malformed_on_either_stream(self) -> None:
+        # JSON arrays and objects are unhashable, so they must be rejected
+        # before any vocabulary lookup instead of raising out of the handler.
+        for name, known in (
+            ("kind", "unsupported_platform"),
+            ("file_type", "regular_file"),
+            ("error", "EBADF"),
+        ):
+            for stream_name in ("stdout", "stderr"):
+                for value in (known, [], [known], {}, {known: known}, None, 1, True):
+                    with self.subTest(name=name, stream=stream_name, value=value):
+                        self.write_output_report(
+                            {
+                                "sample_interval_ms": 1000,
+                                "stdout": pipe_observation(0),
+                                "stderr": pipe_observation(0),
+                                stream_name: named_observation(name, value),
+                            }
+                        )
+                        projected = self.health.agentd_status()["container_output"]
+                        if value == known:
+                            self.assertEqual(projected["state"], "reported")
+                        else:
+                            self.assertEqual(projected, {"state": "unknown", "reason": "malformed"})
+
+    def serve_health(self) -> int:
+        server = self.health.ThreadingHTTPServer(("127.0.0.1", 0), self.health.Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_port
+
+    def fetch(self, port: int, path: str) -> tuple[int, dict[str, Any]]:
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            connection.close()
+
+    def arrange_runtime(
+        self,
+        *,
+        bridge: bool = True,
+        identity: bool = True,
+        age_secs: float = 0,
+        report: object = None,
+        **status: object,
+    ) -> None:
+        if bridge:
+            self.write_bridge({"status": "connected", "ok": True})
+        else:
+            (self.agent_home / "hermes-bridge-status.json").unlink(missing_ok=True)
+        config = self.agent_home / "config.json"
+        if identity:
+            config.write_text("{}", encoding="utf-8")
+        else:
+            config.unlink(missing_ok=True)
+        if report is not None:
+            status["container_output"] = report
+        self.write_agentd_status(age_secs, updated_at_ms=UPDATED_AT_MS, **status)
+
+    def test_malformed_output_reports_never_change_either_endpoint(self) -> None:
+        # The real handler over loopback HTTP, in ready and not-ready states:
+        # a malformed optional report must leave the status code, readiness,
+        # reason and identity exactly as they are without it.
+        processes_starting = {
+            "processes": {
+                "finitechat": {"state": "running"},
+                "health": {"state": "running"},
+                "hermes": {"state": "starting"},
+            }
+        }
+        conditions: dict[str, tuple[dict[str, Any], int, str | None]] = {
+            "ready": ({}, 200, None),
+            "bridge_starting": ({"bridge": False}, 503, "bridge_not_connected"),
+            "identity_starting": ({"identity": False}, 503, "identity_not_ready"),
+            "agentd_starting": (
+                {"processes": processes_starting},
+                503,
+                "agentd_not_running",
+            ),
+            "heartbeat_stale": ({"age_secs": 3600}, 503, "agentd_status_stale"),
+        }
+        # Each stream with each named field, as an array on one stream and an
+        # object on the other.
+        malformed = [
+            {
+                "sample_interval_ms": 1000,
+                "stdout": pipe_observation(0),
+                "stderr": pipe_observation(0),
+                stream_name: named_observation(name, value),
+            }
+            for name in ("kind", "file_type", "error")
+            for stream_name, value in (("stdout", []), ("stderr", {}))
+        ]
+        preserved = ("ready", "ready_reason", "npub", "agent_npub", "account_id", "bridge")
+        port = self.serve_health()
+        for condition, (arrangement, status, reason) in conditions.items():
+            self.arrange_runtime(**arrangement)
+            baseline = {path: self.fetch(port, path) for path in ("/healthz", "/contact")}
+            for path, (code, body) in baseline.items():
+                with self.subTest(condition=condition, path=path, report="absent"):
+                    self.assertEqual(code, status)
+                    self.assertIs(body["ready"], status == 200)
+                    self.assertEqual(body.get("ready_reason"), reason)
+                    self.assertEqual(
+                        body["agent_npub"],
+                        None if condition == "identity_starting" else "npub1agent",
+                    )
+                    self.assertEqual(
+                        body["agentd"]["container_output"],
+                        {"state": "unknown", "reason": "agentd_status_stale"}
+                        if condition == "heartbeat_stale"
+                        else {"state": "not_reported"},
+                    )
+            for report in malformed:
+                self.arrange_runtime(report=report, **arrangement)
+                for path, (code, body) in baseline.items():
+                    with self.subTest(condition=condition, path=path, report=report):
+                        got_code, got = self.fetch(port, path)
+                        self.assertEqual(got_code, code)
+                        for key in preserved:
+                            self.assertEqual(got.get(key), body.get(key), key)
+                        for key in ("ok", "status", "stale", "processes", "version"):
+                            self.assertEqual(got["agentd"].get(key), body["agentd"].get(key), key)
+                        self.assertEqual(
+                            got["agentd"]["container_output"],
+                            body["agentd"]["container_output"]
+                            if condition == "heartbeat_stale"
+                            else {"state": "unknown", "reason": "malformed"},
+                        )
 
     def test_samples_outside_the_heartbeat_limit_are_unknown(self) -> None:
         limit_ms = int(self.health.AGENTD_STATUS_STALE_SECS * 1000)

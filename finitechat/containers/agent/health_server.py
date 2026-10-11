@@ -178,10 +178,20 @@ def _reported_integer(value: object) -> int:
     raise _MalformedOutputReport
 
 
+def _reported_name(value: object, allowed: set[str]) -> str:
+    # Check the type first: a JSON array or object is unhashable, and a set
+    # membership test on it would raise out of the request handler.
+    if isinstance(value, str) and value in allowed:
+        return value
+    raise _MalformedOutputReport
+
+
 def _output_stream(value: object, name: str, updated_at_ms: int) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _MalformedOutputReport
     kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise _MalformedOutputReport
     if kind in CONTAINER_OUTPUT_FIXED_KINDS or (kind == "same_pipe_as_stdout" and name == "stderr"):
         return {"kind": kind}
     stream: dict[str, Any] = {
@@ -191,14 +201,16 @@ def _output_stream(value: object, name: str, updated_at_ms: int) -> dict[str, An
     if kind == "pipe":
         for field in CONTAINER_OUTPUT_PIPE_FIELDS:
             stream[field] = _reported_integer(value.get(field))
-    elif kind == "not_pipe" and value.get("file_type") in CONTAINER_OUTPUT_FILE_TYPES:
-        stream["file_type"] = value["file_type"]
-    elif kind == "unavailable" and value.get("error") in CONTAINER_OUTPUT_ERRORS:
-        stream["error"] = value["error"]
+    elif kind == "not_pipe":
+        stream["file_type"] = _reported_name(value.get("file_type"), CONTAINER_OUTPUT_FILE_TYPES)
+    elif kind == "unavailable":
+        stream["error"] = _reported_name(value.get("error"), CONTAINER_OUTPUT_ERRORS)
     else:
         raise _MalformedOutputReport
-    # Same clock as the heartbeat timestamp beside it: a sample that is older
-    # than the heartbeat limit, or newer than the heartbeat, is not current.
+    # Checked against the heartbeat timestamp beside it (same agentd clock),
+    # not against this response: a sample newer than the heartbeat, or older
+    # than it by more than the heartbeat limit, is not current. The heartbeat
+    # may itself be almost that limit old.
     age_ms = updated_at_ms - stream["observed_at_ms"]
     if not 0 <= age_ms <= AGENTD_STATUS_STALE_SECS * 1000:
         return {"kind": "unknown", "reason": "observation_stale"}
@@ -208,10 +220,13 @@ def _output_stream(value: object, name: str, updated_at_ms: int) -> dict[str, An
 def container_output(payload: dict[str, Any]) -> dict[str, Any]:
     """Project agentd's output observations through a fixed allowlist.
 
-    These are raw samples (bytes waiting in the inherited stdout/stderr pipes,
-    their capacity, and a lower bound on bytes read). They say nothing about
-    whether a collector, gateway or reply path is working, so they never feed
-    readiness. Older agentd builds report nothing.
+    These are timestamped raw samples: bytes waiting in the inherited
+    stdout/stderr pipes, their capacity, and the sum of observed drops in the
+    bytes waiting. That sum is not a count of bytes read, received or
+    delivered. "reported" means samples were present, not that output is
+    flowing now. They say nothing about whether a collector, gateway or reply
+    path is working, so they never feed readiness. Older agentd builds report
+    nothing.
     """
     report = payload.get("container_output")
     if report is None:

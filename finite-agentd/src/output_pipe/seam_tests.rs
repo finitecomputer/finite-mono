@@ -314,13 +314,16 @@ print(json.dumps(results))
         .unwrap();
         std::fs::set_permissions(&fake_finitechat, std::fs::Permissions::from_mode(0o755)).unwrap();
         let marker = home.path().join("writer-finished");
+        // Twice the pipe's actual capacity, whatever this kernel's default
+        // is: the first write fills the pipe and the second has to wait.
+        let capacity = rustix::pipe::fcntl_getpipe_size(std::io::stdout()).unwrap();
         let gateway = ProcessSpec {
             name: "hermes",
             program: PathBuf::from("/bin/sh"),
             args: vec![
                 "-c".to_owned(),
                 format!(
-                    "dd if=/dev/zero bs=65536 count=16 2>/dev/null; echo done > {}; exec sleep 30",
+                    "dd if=/dev/zero bs={capacity} count=2 2>/dev/null; echo done > {}; exec sleep 30",
                     marker.display()
                 ),
             ],

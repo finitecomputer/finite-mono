@@ -2,22 +2,32 @@
 //!
 //! In the Agent Runtime image agentd's stdout and stderr are the container
 //! output streams, and every supervised child inherits them
-//! (`supervisor::spawn_process`). Under Kata each one is an anonymous pipe that
-//! kata-agent reads only when the host shim asks for more output, so bytes
-//! waiting in it are output the host side has not collected yet.
+//! (`supervisor::spawn_process`). Traced from kata-agent 3.29.0 source, not
+//! observed in a booted guest: under Kata each one is an anonymous pipe that
+//! kata-agent reads only when the host shim asks for more output.
 //!
 //! A dedicated thread duplicates both descriptors once and samples them every
 //! [`SAMPLE_INTERVAL`]: `FIONREAD` (bytes waiting) and `F_GETPIPE_SZ`
-//! (capacity). They are two separate reads, not one atomic snapshot.
-//! `observed_decrease_bytes` sums the drops between consecutive samples. Only
-//! reads remove bytes from a pipe, so at least that many bytes were read, but
-//! output read and replaced between two samples is invisible.
+//! (capacity). They are two separate reads, not one atomic snapshot, so a
+//! concurrent resize can leave `buffered_bytes` above `capacity_bytes`.
+//! `observed_at_ms` is the wall-clock time after both reads returned; if the
+//! second read waited, the first value is older than that.
+//!
+//! `observed_decrease_bytes` is the saturating sum of drops in
+//! `buffered_bytes` between consecutive successful samples, and nothing more.
+//! It is not a count of bytes read. A writer in packet mode (`O_DIRECT`,
+//! which can be switched on with `F_SETFL` after sampling started) makes each
+//! write one packet; a read shorter than the packet returns part of it, the
+//! kernel discards the rest, and the discarded bytes count as a drop. Output
+//! written and removed between two samples does not show up at all.
 //!
 //! Nothing here is a verdict. A full pipe does not prove that a particular
 //! writer is waiting (small writes can still merge into the last page), that
-//! the reader stopped, or that a host collector is missing. An unchanged
-//! decrease total does not prove that nothing was read. None of it describes
-//! gateway, channel or reply progress, and readiness never reads it.
+//! the reader stopped, or that a host collector is missing. A growing
+//! decrease total does not prove that a collector received or delivered
+//! anything, and an unchanged one does not prove that nothing was read. None
+//! of it describes gateway, channel or reply progress, and readiness never
+//! reads it.
 //!
 //! The kernel takes the pipe lock for both reads, and a writer holds that lock
 //! while it copies, so sampling stays off the status heartbeat: the heartbeat
@@ -61,19 +71,22 @@ pub enum OutputStreamObservation {
     SamplerNotStarted,
 }
 
-/// Raw values from one sample, plus a lower bound accumulated across the
-/// samples of this same pipe since `first_observed_at_ms`.
+/// Raw values from one sample, plus the drops in `buffered_bytes` summed
+/// across the samples of this same pipe since `first_observed_at_ms`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PipeObservation {
+    /// Wall-clock time after both reads returned, not a capture instant.
     pub observed_at_ms: u64,
     /// `FIONREAD`: bytes waiting to be read at this sample.
     pub buffered_bytes: u64,
-    /// `F_GETPIPE_SZ`, read separately from `buffered_bytes`.
+    /// `F_GETPIPE_SZ`, read separately from `buffered_bytes`; a concurrent
+    /// resize can leave it below `buffered_bytes`.
     pub capacity_bytes: u64,
     pub first_observed_at_ms: u64,
     pub sample_count: u64,
-    /// Sum of drops in `buffered_bytes` between consecutive samples: a lower
-    /// bound on bytes read from the pipe, never a rate or a delivery count.
+    /// Saturating sum of drops in `buffered_bytes` between consecutive
+    /// successful samples. Not bytes read, received or delivered (packet-mode
+    /// discards count too), and not a rate.
     pub observed_decrease_bytes: u64,
 }
 
@@ -149,9 +162,9 @@ struct PipeTrack {
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl PipeTrack {
-    /// Bytes in a pipe change only by writes (up) and reads (down), so a drop
-    /// between two samples means a reader removed at least that many bytes.
-    /// A failed sample keeps the track: the next drop is still a lower bound.
+    /// Adds the drop, if any, since the previous successful sample; a rise
+    /// adds nothing. A failed sample leaves the track as it was, so the next
+    /// successful sample is compared with the last successful one.
     fn advance(previous: Option<Self>, buffered_bytes: u64, observed_at_ms: u64) -> Self {
         let Some(previous) = previous else {
             return Self {
@@ -412,7 +425,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decreases_accumulate_as_a_lower_bound_and_increases_do_not_count() {
+    fn drops_between_samples_accumulate_and_rises_do_not_count() {
         let mut track = None;
         for (at_ms, buffered) in [(10, 0), (20, 100), (30, 40), (40, 40), (50, 1000), (60, 0)] {
             track = Some(PipeTrack::advance(track, buffered, at_ms));
@@ -742,6 +755,62 @@ mod tests {
             let empty = pipe_sample(&mut sampler);
             assert_eq!(empty.buffered_bytes, 0);
             assert_eq!(empty.observed_decrease_bytes, 10_000 + drained);
+        }
+
+        /// Write 4 bytes, read 1, and return the bytes that read returned,
+        /// the decrease the sampler recorded across it, and the bytes left.
+        fn write_four_read_one(
+            sampler: &mut StreamSampler,
+            writer: &std::os::fd::OwnedFd,
+            reader: &std::os::fd::OwnedFd,
+        ) -> (usize, u64, usize) {
+            assert_eq!(rustix::io::write(writer, b"abcd").unwrap(), 4);
+            let before = pipe_sample(sampler);
+            assert_eq!(before.buffered_bytes, 4);
+            let returned = rustix::io::read(reader, &mut [0u8; 1]).unwrap();
+            let after = pipe_sample(sampler);
+            let left = match rustix::io::read(reader, &mut [0u8; 16]) {
+                Ok(left) => left,
+                Err(rustix::io::Errno::AGAIN) => 0,
+                Err(error) => panic!("unexpected read error {error}"),
+            };
+            let decrease = after.observed_decrease_bytes - before.observed_decrease_bytes;
+            (returned, decrease, left)
+        }
+
+        #[test]
+        fn a_short_read_of_a_packet_counts_the_discarded_rest_as_a_decrease() {
+            // A byte-stream pipe keeps what a short read leaves behind.
+            let (reader, writer) = nonblocking_pipe();
+            let mut stream = sampler(writer.as_fd());
+            assert_eq!(
+                write_four_read_one(&mut stream, &writer, &reader),
+                (1, 1, 3)
+            );
+
+            // In packet mode one write is one packet. The kernel discards the
+            // part a short read did not return, so the decrease exceeds the
+            // bytes any reader got: it is not a count of bytes read.
+            let (reader, writer) = rustix::pipe::pipe_with(
+                PipeFlags::CLOEXEC | PipeFlags::NONBLOCK | PipeFlags::DIRECT,
+            )
+            .unwrap();
+            let mut packets = sampler(writer.as_fd());
+            assert_eq!(
+                write_four_read_one(&mut packets, &writer, &reader),
+                (1, 4, 0)
+            );
+
+            // A writer can switch an ordinary pipe to packet mode after the
+            // observer started, as a child could on its inherited stdout.
+            let (reader, writer) = nonblocking_pipe();
+            let mut switched = sampler(writer.as_fd());
+            let flags = rustix::fs::fcntl_getfl(&writer).unwrap();
+            rustix::fs::fcntl_setfl(&writer, flags | rustix::fs::OFlags::DIRECT).unwrap();
+            assert_eq!(
+                write_four_read_one(&mut switched, &writer, &reader),
+                (1, 4, 0)
+            );
         }
 
         #[test]

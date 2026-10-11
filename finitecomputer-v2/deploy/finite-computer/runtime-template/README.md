@@ -85,17 +85,22 @@ body names the cause in `ready_reason` — one of `bootstrap_failed`,
 `agentd_status_stale`, `agentd_not_running`, `bridge_not_connected`,
 `identity_not_ready`, or `starting`.
 
-Both endpoints also carry `agentd.container_output`. It is a report-only,
-allowlisted copy of `finite-agentd`'s samples of the container output pipes
-(see [`finite-agentd/README.md`](../../../../finite-agentd/README.md)). It never
+Once agentd's `status.json` parses, both endpoints also carry
+`agentd.container_output`. It is a report-only, allowlisted copy of
+`finite-agentd`'s samples of the container output pipes (see
+[`finite-agentd/README.md`](../../../../finite-agentd/README.md)). It never
 changes `ready`, `ready_reason` or the HTTP status. Its `state` is one of:
 
-- `reported`;
-- `not_reported` (older agentd);
+- `reported`: timestamped samples were present. This is not a statement that
+  output is flowing now or that anything is healthy.
+- `not_reported` (older agentd).
 - `unknown`, with `reason` `malformed` or `agentd_status_stale`.
 
-A stream whose sample is older than the heartbeat limit reads `unknown` with
-`observation_stale`.
+A stream reads `unknown` with `observation_stale` when its sample is newer
+than agentd's heartbeat timestamp or older than it by more than the
+heartbeat limit (5 s by default). That check is against the heartbeat, not
+the response time. With the default, a heartbeat almost 5 s old can carry a
+sample almost 10 s older than the response.
 
 On a genuinely fresh Agent Home, the gateway launcher atomically seeds the
 image baseline into the durable managed-skills directory and exposes that path

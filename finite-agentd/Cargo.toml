@@ -31,8 +31,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [dev-dependencies]
-# `param` gives the Linux pipe tests the page size their kernel ground truth uses.
-rustix = { workspace = true, features = ["param", "pipe"] }
+# `param` gives the Linux pipe tests the page size their kernel ground truth
+# uses; `fs` lets them switch a pipe to packet mode with `F_SETFL`.
+rustix = { workspace = true, features = ["fs", "param", "pipe"] }
 tempfile.workspace = true
 
 [lints]
