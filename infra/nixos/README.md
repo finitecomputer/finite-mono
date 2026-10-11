@@ -47,6 +47,81 @@ import `modules/finite-saas-runner.nix` directly before
 module's own import changes definition merge order and rewrites rendered unit
 lines.
 
+## FIN-162 nerdctl log-collector candidate
+
+The Runner hosts and `scripts/proofs/hosted-hermes-lifecycle-tools.nix` run
+`nixpkgs-kata`'s nerdctl unpatched. `kata-nerdctl-candidate.nix` builds
+`packages.x86_64-linux.kata-nerdctl-candidate`: nerdctl 2.3.4 with
+`patches/nerdctl-logger-lifetime.patch`, which changes only its container log
+collector (`pkg/logging`, plus a non-blocking lock helper). The candidate
+exists to build and test that change. Its ownership policy, below, is not
+accepted, so nothing runs it and it does not prevent FIN-162.
+
+`just nixos kata-nerdctl-selection-contract`, run by CI's Nix static
+contracts, evaluates each Runner host's system packages, Runner `PATH` and
+whole system closure, and the fixture. It fails unless they select exactly the
+locked `nixpkgs-kata` nerdctl, none depends on the candidate or its patch, and
+no other environment Nix renders for the Runner sets `PATH` or
+`FC_RUNNER_KATA_NERDCTL_BIN`. The operator-owned `runner.env` and
+`identity-operator.env` load after those and are not evaluated, so either can
+still override the nerdctl the Runner runs.
+
+Building the candidate runs the `pkg/logging` tests, including the patch's
+tests against a synthetic containerd. The same contract fails if the candidate
+stops applying the patch, disables its tests, or stops testing the package the
+patch adds tests to. CI's candidate qualification job builds it when the
+candidate, its patches or the flake change. Evaluation asserts version 2.3.4:
+on a `nixpkgs-kata` bump, re-qualify the patch or drop it.
+
+Upstream stops reading container output on any result of its containerd wait,
+including the error reported when containerd stops or restarts. On Kata the
+Runtime's output pipe then fills and blocks the guest (FIN-162). The candidate:
+
+- Treats only a successful response to the wait established at start as an
+  exit. After any other outcome it reads until EOF or SIGTERM and does not
+  watch again, because containerd waits by container ID alone. That first
+  lookup and wait keep the upstream rules and are not atomic, so they can
+  still follow a later task under the same ID.
+- Signals readiness at once when another process holds the container's
+  `logger-lock`, then collects only after the holder releases it, with no exit
+  watch. Kata 3.29 waits for readiness without a deadline while holding its
+  task service lock, and takes a readiness pipe closed without a byte as
+  ready, so a collector cannot refuse its task.
+
+Why it is not adopted: a collector that outlives containerd's record of its
+task keeps the lock for as long as that task's output stays open, which has no
+bound. A later task under the same ID then starts with nothing reading its
+output:
+
+- Its guest blocks once its pipes fill. Kata reports its exit only after its
+  IO copy ends, so stopping or removing it waits too, and the Runner's stop
+  and destroy fail closed. containerd's restart monitor waits only when it
+  applies a stop change, or a start change whose kill waits on that task; a
+  parked task that reports RUNNING under `unless-stopped` causes neither.
+- Its queued output is collected only if it is still running when the owner
+  ends. A SIGTERM to the waiting collector ends it unread. Kata's own
+  teardown sends that SIGTERM only after the task's output ended. Any other
+  SIGTERM while the task runs leaves nothing to read its output again, since
+  Kata keeps its own reader copies: once its pipes fill, the guest blocks and
+  its exit is never reported, even after the owner ends.
+- Any exclusive holder at start, such as `nerdctl logs -f` waiting for the
+  logger, sends the collector down the same path.
+- Stopping the owning collector unparks the later task but ends collection of
+  output still being written. No stop is a safe recovery.
+
+Pending output sits in separate stdout and stderr pipes and in Kata's copy
+buffers, so no byte bound applies. Unchanged from upstream: a reported exit or
+SIGTERM stops reading at once, so unread output can be lost, and rotation and
+the log format are the same.
+
+Adopting a collector is a separate decision with its own rollout. A container
+records its nerdctl store path as its logger (`nerdctl/log-uri`), and
+`nerdctl start` and containerd's restart monitor reuse it, so every recorded
+path must stay in the store, through any rollback, while a container
+references it. This candidate is not a FIN-170 replacement: do not attach it to
+an existing Runtime's pipes, and it revives no dead collector. FIN-171's output
+observations report raw guest pipe state and do not identify collectors.
+
 ## Secrets bootstrap checklist (values NEVER in this repo)
 
 All root-owned, 0600 unless noted. Names only; values belong in the documented off-host custody and root-owned files.
