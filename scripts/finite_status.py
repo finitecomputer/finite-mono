@@ -879,7 +879,9 @@ def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
                       matches_core_principal=principal == assignment.get("expected_agent_npub"))
         if result["matches_core_principal"]:
             result["container_output"] = contact_output_observations(value)
-    except (ValueError, AttributeError):
+    # RecursionError: valid JSON nested past the parser's depth limit, which
+    # still fits the 64 KiB bound.
+    except (ValueError, AttributeError, RecursionError):
         pass
     return result
 
