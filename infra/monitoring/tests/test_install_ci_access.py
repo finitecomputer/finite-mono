@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 SPEC = importlib.util.spec_from_file_location(
     "install_ci_access", Path(__file__).resolve().parents[1] / "install_ci_access.py"
@@ -17,6 +18,26 @@ SPEC.loader.exec_module(installer)
 
 
 class AccessInstallationTest(unittest.TestCase):
+    def test_status_install_ships_every_declared_bundle_file(self):
+        root = Path(__file__).resolve().parents[3]
+        payloads = {}
+
+        def run(command, **kwargs):
+            if command[0] == "ssh":
+                payloads[command[-2]] = json.loads(kwargs["input"])
+            return subprocess.CompletedProcess(command, 0)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            key = Path(temporary) / "ci.pub"
+            key.write_text("ssh-ed25519 AAAAsynthetic finite-monitoring-ci\n")
+            with mock.patch.object(installer.subprocess, "run", side_effect=run), \
+                    mock.patch.object(sys, "argv", ["install_ci_access.py", str(key)]):
+                installer.main()
+        shipped = set(payloads["root@64.34.80.19"]["files"])
+        expected = {"scripts/" + name for name in installer.status_bundle_files(root)}
+        self.assertEqual(shipped, expected)
+        self.assertIn("scripts/kata_guest_probe.py", shipped)
+
     def test_preserves_operator_keys_replaces_only_ci_key_and_backs_up(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

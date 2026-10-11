@@ -3,9 +3,12 @@
 //! The fake provider layer lives in `tests/fixtures/lifecycle/bin/` and is
 //! deliberately reusable by later recovery work: state is one file per field
 //! under `fake-state/`, and both fakes record and reject any non-read verb so
-//! every scenario also proves the probe mutated nothing. The persist state
-//! fixtures mirror Kata's real Go-serialized `persistapi.SandboxState` shape
-//! (capitalized, tagless fields) under the real `/run/vc/sbs` layout.
+//! every scenario also proves the probe mutated nothing. The fake `ctr`
+//! follows containerd 2.3: `tasks list` omits a task whose shim State call
+//! fails, and `tasks ps` reports containerd's own absence text only for a task
+//! its task manager does not hold. The persist state fixtures mirror Kata's
+//! real Go-serialized `persistapi.SandboxState` shape (capitalized, tagless
+//! fields) under the real `/run/vc/sbs` layout.
 
 use finite_saas_runner::lifecycle_probe::{
     CheckStatus, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
@@ -102,6 +105,33 @@ impl ProbeFixture {
 
     fn fail_task_ps_with(&self, stderr: &str) {
         fs::write(self.state.join("tasks-ps-error"), stderr).unwrap();
+    }
+
+    /// The task manager holds the task, but its shim's State call failed, so
+    /// containerd 2.3's List omits it while still succeeding.
+    fn omit_task_from_list(&self, container_id: &str) {
+        fs::write(
+            self.state.join("tasks-unlisted"),
+            format!("{container_id}\n"),
+        )
+        .unwrap();
+    }
+
+    /// The named container is replaced while the probe reads its task.
+    fn replace_container_during_task_read(&self, name: &str, new_id: &str) {
+        fs::write(
+            self.state.join("tasks-ps-replaces"),
+            format!("{name} {new_id}\n"),
+        )
+        .unwrap();
+    }
+
+    fn task_reads(&self) -> usize {
+        fs::read_to_string(self.state.join("commands.log"))
+            .unwrap()
+            .lines()
+            .filter(|line| *line == "tasks ps")
+            .count()
     }
 
     /// Write Kata persist state in the real `persistapi.SandboxState` shape.
@@ -426,8 +456,9 @@ fn healthy_runtime_is_operable() {
 
 #[test]
 fn orphaned_vm_without_healthy_task_is_inoperable() {
-    // 2026-08-01 incident topology 1: the endpoint is live, the containerd
-    // task is orphaned, and a normal stop would time out.
+    // 2026-08-01 incident topology 1: the containerd task is orphaned and a
+    // normal stop would time out. Here the recorded VMM is gone too, so the
+    // retained sandbox and CNI records are stale.
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.write_persist(&container_id(), Some(4242));
@@ -436,9 +467,20 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
     let report = fixture.probe();
     assert_verdict(&report, LifecycleVerdict::Inoperable);
     assert_eq!(report.reason.as_deref(), Some("orphaned_task"));
+    let task = fixture.check(&report, "containerd_task");
+    assert_eq!(task.finding, Some("orphaned_task"));
+    // A missing row alone is never absence: the targeted read confirmed it.
+    assert_eq!(fixture.task_reads(), 1);
+    assert_eq!(task.evidence["task_manager_absence"], true);
     assert_eq!(
-        fixture.check(&report, "containerd_task").finding,
-        Some("orphaned_task")
+        task.evidence["stderr"].as_str(),
+        Some(
+            format!(
+                "ctr: no running task found: task {} not found",
+                container_id()
+            )
+            .as_str()
+        )
     );
     // The stale sandbox and CNI records are surfaced as evidence, not hidden.
     assert_eq!(
@@ -449,15 +491,151 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
         fixture.check(&report, "cni_namespace").finding,
         Some("stale_cni_namespace")
     );
+    assert_eq!(
+        fixture.check(&report, "vmm_process").status,
+        CheckStatus::Pass
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn task_manager_absence_with_a_visible_vmm_never_calls_its_state_stale() {
+    // Task-manager absence is not VM absence: containerd can lose its shim
+    // while the VM keeps serving and writing. The VMM check still runs, and
+    // nothing that VM may be using is called stale.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, ".qemu-system-x8");
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Inoperable);
+    assert_eq!(report.reason.as_deref(), Some("orphaned_task"));
+    let vmm = fixture.check(&report, "vmm_process");
+    assert_eq!(vmm.finding, Some("vmm_process_without_task"));
+    assert_eq!(vmm.evidence["pid"], 4242);
+    let sandbox = fixture.check(&report, "sandbox_state");
+    assert_eq!(sandbox.status, CheckStatus::Pass);
+    let cni = fixture.check(&report, "cni_namespace");
+    assert_eq!(cni.status, CheckStatus::Pass);
+    assert_eq!(cni.evidence["stale_evaluated"], false);
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn state_timeout_omitted_from_the_task_list_is_unknown_not_orphaned() {
+    // The Pancake topology (2026-10-10): the shim answers Pids and the guest
+    // serves, but State times out, so containerd 2.3's List drops the row
+    // and ctr's Get-before-Pids fails the same way. The VM is live; nothing
+    // here may read as absent or stale.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.omit_task_from_list(&container_id());
+    fixture.fail_task_ps_with("ctr: context deadline exceeded\n");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, ".qemu-system-x8");
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    assert_eq!(fixture.task_reads(), 1);
+    let task = fixture.check(&report, "containerd_task");
+    assert_eq!(
+        task.evidence["stderr"].as_str(),
+        Some("ctr: context deadline exceeded")
+    );
+    for name in ["sandbox_state", "cni_namespace", "vmm_process"] {
+        assert_eq!(
+            fixture.check(&report, name).status,
+            CheckStatus::Pass,
+            "{name} must not fail; full report:\n{}",
+            serde_json::to_string_pretty(&report).unwrap()
+        );
+    }
+    assert_eq!(
+        fixture.check(&report, "vmm_process").evidence["comm"].as_str(),
+        Some(".qemu-system-x8")
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn closed_shim_omitted_from_the_task_list_is_unknown_not_closed_or_orphaned() {
+    // containerd 2.3 maps a closed shim ttrpc connection to bare NotFound, so
+    // ctr prints only the shared `no running task found:` prefix. The text
+    // carries no task identity: it is neither absence nor a proven closed
+    // channel, and the stderr is kept as evidence.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.omit_task_from_list(&container_id());
+    fixture.fail_task_ps_with("ctr: no running task found: not found\n");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    let task = fixture.check(&report, "containerd_task");
+    assert_eq!(
+        task.evidence["stderr"].as_str(),
+        Some("ctr: no running task found: not found")
+    );
+    assert_eq!(
+        fixture.check(&report, "sandbox_state").status,
+        CheckStatus::Pass
+    );
+    assert_eq!(
+        fixture.check(&report, "cni_namespace").status,
+        CheckStatus::Pass
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn omitted_task_that_answers_a_targeted_read_is_an_incomplete_inventory() {
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.omit_task_from_list(&container_id());
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, "qemu-system-x86");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_list_incomplete"));
+    assert_eq!(
+        fixture.check(&report, "containerd_task").evidence["shim_process_count"],
+        1
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn replacement_racing_the_task_read_is_unknown_not_orphaned() {
+    // A stop or replacement between the two reads can make containerd
+    // truthfully report no task for the old id. Absence is only reported for
+    // the handle the probe started from.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.replace_container_during_task_read(MACHINE, "machine-a-replacement-id");
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    assert_eq!(
+        fixture.check(&report, "containerd_task").evidence["current_container_id"].as_str(),
+        Some("machine-a-replacement-id")
+    );
     fixture.assert_nothing_mutated();
 }
 
 #[test]
 fn ttrpc_closed_control_channel_is_inoperable() {
     // 2026-08-01 incident topology 2: old-VM shutdown repeatedly failed with
-    // `ttrpc: closed`. `tasks list` is answered from containerd metadata and
-    // still shows RUNNING for a dead-shim VM; only the shim-answered no-op
-    // read sees the closed channel.
+    // `ttrpc: closed`. A listed task passed one State call, yet its shim can
+    // still close the channel before the no-op read (older containerd also
+    // listed dead shims from metadata); only that read sees it.
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.add_task(&container_id(), "RUNNING");
@@ -630,10 +808,16 @@ fn inconclusive_evidence_is_unknown_not_operable() {
     let fixture = new_fixture();
     fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
     fixture.fail_tasks_with("connection refused\n");
+    fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
     assert_verdict(&report, LifecycleVerdict::Unknown);
     assert_eq!(report.reason.as_deref(), Some("task_list_error"));
+    // An unreadable inventory says nothing about whether records are stale.
+    assert_eq!(
+        fixture.check(&report, "cni_namespace").status,
+        CheckStatus::Pass
+    );
     fixture.assert_nothing_mutated();
 }
 

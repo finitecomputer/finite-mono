@@ -28,8 +28,8 @@ evidence record. Product rollout work is tracked in [FIN-44](https://linear.app/
   Runtime image whose durable smoke proves Hermes v0.20. This migration does
   not require publishing or rolling a new image.
 - `scripts/finite-status --json` is retained and green. If the installed
-  shortcut is absent, stage `scripts/finite-status` and
-  `scripts/finite_status.py` together as described in
+  shortcut is absent, stage every file named in `STATUS_BUNDLE_FILES`
+  (`scripts/finite_status.py`) into one directory, as described in
   [the runbook index](README.md#standing-boundaries); this is the canonical status
   check, not a product called “Finite Status.”
 - A fresh box1 off-host backup completed, and the Recovery Set can restore to
