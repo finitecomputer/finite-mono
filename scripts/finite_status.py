@@ -184,6 +184,8 @@ CONTRACT: dict[str, Any] = {
             "storage_health_unit": "finite-storage-health.service",
             "roles": ["runner"],
             "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.2",
         },
         # Emergency replacement app-plane host (ADR 0007, 2026-08-28): the
         # Recovery Authority role moves here with lat1's stack. It runs no
@@ -201,6 +203,8 @@ CONTRACT: dict[str, Any] = {
             "storage_health_unit": "finite-storage-health.service",
             "roles": ["runner"],
             "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.4",
         },
         "finite-lat-5": {
             "mounts": ["/", "/data", "/boot-a", "/boot-b"],
@@ -208,12 +212,26 @@ CONTRACT: dict[str, Any] = {
             "storage_health_unit": "finite-storage-health.service",
             "roles": ["runner"],
             "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.5",
         },
     },
     "thresholds": {
         "filesystem_red_percent": 90.0,
     },
 }
+
+# Everything an installed copy of finite-status needs: the entry point and
+# every sibling module it imports, including the lazily imported modes. Stage
+# exactly these files together; a partial copy fails only when a mode runs.
+STATUS_BUNDLE_FILES = (
+    "finite-status",
+    "finite_status.py",
+    "finite_status_brain_roster.py",
+    "finite_tinfoil_status.py",
+    "kata_guest_probe.py",
+    "kata_network_probe.py",
+)
 
 ARTIFACTS_QUERY = """select id, reference, version_label, source_git_sha, finitec_version,
        promoted_at, retired_at
@@ -753,14 +771,13 @@ def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
     """Observe the Core-bound published Principal even when shim State is unavailable."""
     result = {"status": "unknown", "repair_authority": False,
               "agent_principal_sha256": None, "matches_core_principal": False}
-    addresses = {"finite-lat-3": "10.254.3.2", "finite-lat-4": "10.254.3.3",
-                 "finite-lat-5": "10.254.3.5"}
+    profile = CONTRACT["hosts"].get(assignment.get("source_host_id"), {})
     endpoint = assignment.get("contact_endpoint")
-    if not isinstance(endpoint, str):
+    if not isinstance(endpoint, str) or "kata_host_address" not in profile:
         return result
     try:
         parsed = urlparse(endpoint)
-        if (parsed.scheme != "http" or parsed.hostname != addresses.get(assignment.get("source_host_id"))
+        if (parsed.scheme != "http" or parsed.hostname != profile["kata_host_address"]
                 or not parsed.port or not 49152 <= parsed.port <= 65535 or parsed.path != "/contact"
                 or parsed.username or parsed.password or parsed.query or parsed.fragment):
             return result
@@ -1685,6 +1702,11 @@ def collect_lifecycle_probe(
     return raw
 
 
+# Probe findings for a task containerd's task list omitted without confirming
+# its absence (containerd 2.3 drops tasks whose shim State call fails).
+UNCERTAIN_TASK_FINDINGS = ("task_list_incomplete", "task_state_unavailable")
+
+
 def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected_host: str,
                               guest_agent_probe: bool = False) -> dict[str, Any]:
     """Inspect one exact provider assignment without requiring Core credentials."""
@@ -1708,11 +1730,18 @@ def collect_runtime_lifecycle(project: str, runtime: str, machine: str, expected
     cleanup_layout = None
     network_probe = None
     shim_exit_log = None
+    task_finding = next((check.get("finding") for check in agent.get("report", {}).get("checks", [])
+                         if check.get("name") == "containerd_task"), None)
     if verdict == "inoperable" and agent.get("reason") == "orphaned_task":
         orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
         writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
         restart_fence = collect_runtime_restart_fence(agent.get("report", {}))
         cleanup_layout = collect_runtime_cleanup_layout(agent.get("report", {}))
+    elif task_finding in UNCERTAIN_TASK_FINDINGS:
+        # containerd could not report this task; the VM and its writers may
+        # still be live, so observe them rather than infer either way.
+        orphan_vmm = collect_orphan_vmm(agent.get("report", {}))
+        writer_topology = collect_runtime_writer_topology(agent.get("report", {}))
     if guest_agent_probe:
         if __package__:
             from .kata_guest_probe import collect_guest_agent_probe

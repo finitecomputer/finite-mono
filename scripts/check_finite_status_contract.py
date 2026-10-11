@@ -179,12 +179,17 @@ def main() -> None:
         raise SystemExit(
             "finite-lat-2 is the app-plane host (ADR 0007); no runner role"
         )
+    # Contact probes accept only the address the host publishes Agents on.
     for runner_host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
-        if "runner" not in contract["hosts"][runner_host]["roles"]:
+        profile = contract["hosts"][runner_host]
+        if "runner" not in profile["roles"]:
             raise SystemExit(f"{runner_host} must keep the runner role")
         require_all(
             ROOT / "infra" / "nixos" / "hosts" / runner_host / "default.nix",
-            ["finite-saas-runner.nix"],
+            [
+                "finite-saas-runner.nix",
+                f'kataHostAddress = "{profile["kata_host_address"]}";',
+            ],
         )
 
     print("finite status contract: ok")

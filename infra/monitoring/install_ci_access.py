@@ -2,6 +2,7 @@
 """Operator-only installation of restricted dashboard CI access on both hosts."""
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 import shlex
@@ -62,6 +63,16 @@ with open('/run/lock/finite-monitoring-dashboards.lock', 'w') as lock:
 """
 
 
+def status_bundle_files(root):
+    """finite-status declares the sibling files an installed copy needs."""
+    spec = importlib.util.spec_from_file_location(
+        "finite_status", root / "scripts" / "finite_status.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.STATUS_BUNDLE_FILES
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("public_key", type=Path)
@@ -92,7 +103,7 @@ def main():
             "/run/current-system/sw/bin/python3 /var/lib/finite-monitoring-ci/scripts/finite-status --json",
             {
                 "scripts/" + name: (root / "scripts" / name).read_text()
-                for name in ("finite-status", "finite_status.py")
+                for name in status_bundle_files(root)
             },
         ),
     ]

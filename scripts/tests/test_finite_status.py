@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import contextlib
 import hashlib
 import io
@@ -7,7 +8,10 @@ import json
 import os
 from datetime import timedelta
 from pathlib import Path
+import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -1209,6 +1213,93 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                     finite_status.parse_args(arguments)
                 self.assertEqual(failure.exception.code, 2)
 
+    def test_target_lifecycle_observes_vmm_and_writers_for_unconfirmed_task_absence(self) -> None:
+        # containerd 2.3 omits a task whose State fails; the probe reads it
+        # unknown. Its VM may still serve, so the read-only VMM and writer
+        # observations run, while recovery inputs stay reserved for a
+        # confirmed task-manager absence.
+        collectors = ["collect_orphan_vmm", "collect_runtime_writer_topology",
+                      "collect_runtime_restart_fence", "collect_runtime_cleanup_layout"]
+        for verdict, finding, expected in [
+            ("unknown", "task_state_unavailable", collectors[:2]),
+            ("unknown", "task_list_incomplete", collectors[:2]),
+            ("inoperable", "orphaned_task", collectors),
+            ("unknown", "task_list_error", []),
+        ]:
+            probe = json.loads(self.probe_report(verdict, finding))
+            probe["checks"][1].update(status="fail", finding=finding)
+            raw = {"agents": {"runtime-a": {"verdict": verdict, "reason": finding, "report": probe}},
+                   "errors": []}
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(self.subTest(finding=finding))
+                stack.enter_context(mock.patch.object(finite_status.socket, "gethostname",
+                                                      return_value="finite-lat-1"))
+                stack.enter_context(mock.patch.object(finite_status, "collect_lifecycle_probe",
+                                                      return_value=raw))
+                mocks = {name: stack.enter_context(mock.patch.object(
+                    finite_status, name, return_value={"status": "observed", "repair_authority": False}))
+                    for name in collectors}
+                result = finite_status.collect_runtime_lifecycle(
+                    "project-a", "runtime-a", "machine-a", "finite-lat-1")
+                self.assertEqual(result["overall_status"], "unknown" if verdict == "unknown" else "red")
+                self.assertEqual([name for name in collectors if mocks[name].called], expected)
+
+    def test_status_bundle_contains_every_sibling_module_it_imports(self) -> None:
+        scripts = ROOT / "scripts"
+        bundle = set(finite_status.STATUS_BUNDLE_FILES)
+        for name in bundle:
+            self.assertTrue((scripts / name).is_file(), name)
+        imported = set()
+        for name in bundle:
+            for node in ast.walk(ast.parse((scripts / name).read_text(), name)):
+                if isinstance(node, ast.Import):
+                    imported.update(alias.name for alias in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    if node.module:
+                        imported.add(node.module)
+                    if node.level:
+                        imported.update(alias.name for alias in node.names)
+        siblings = {f"{module}.py" for module in imported if (scripts / f"{module}.py").is_file()}
+        self.assertTrue(siblings, "the closure scan found no sibling imports")
+        self.assertLessEqual(siblings, bundle)
+
+    def test_staged_bundle_runs_guest_probe_mode_without_the_checkout(self) -> None:
+        # An installed copy is the manifest's files alone in one directory.
+        # Guest-probe mode imports its helpers lazily, so the omission only
+        # appears when that mode runs (lat4, 2026-10-10).
+        driver = (
+            "import json, sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import finite_status\n"
+            "finite_status.socket.gethostname = lambda: 'finite-lat-4'\n"
+            "finite_status.collect_lifecycle_probe = lambda *args, **kwargs: {'errors': [], 'agents': {\n"
+            "    'runtime-a': {'verdict': 'unknown', 'reason': 'task_state_unavailable', 'report': {}}}}\n"
+            "report = finite_status.collect_runtime_lifecycle(\n"
+            "    'project-a', 'runtime-a', 'machine-a', 'finite-lat-4', guest_agent_probe=True)\n"
+            "section = report['sections']['runtime_lifecycle']\n"
+            "print(json.dumps([section['guest_agent']['status'], section['network_probe']['read_only']]))\n"
+        )
+        documented_pair = ("finite-status", "finite_status.py")
+        for files in (finite_status.STATUS_BUNDLE_FILES, documented_pair):
+            with self.subTest(files=files), tempfile.TemporaryDirectory() as directory:
+                staged = Path(directory) / "installed"
+                staged.mkdir()
+                for name in files:
+                    shutil.copy2(ROOT / "scripts" / name, staged / name)
+                (Path(directory) / "driver.py").write_text(driver)
+                run = subprocess.run([sys.executable, "-I", str(Path(directory) / "driver.py"), str(staged)],
+                                     cwd=directory, capture_output=True, text=True, timeout=60)
+                if files == documented_pair:
+                    # The previously documented two-file staging reproduces the defect.
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertIn("ModuleNotFoundError: No module named 'kata_guest_probe'", run.stderr)
+                    continue
+                self.assertEqual(run.returncode, 0, run.stderr)
+                self.assertEqual(json.loads(run.stdout), ["unknown", True])
+                entry = subprocess.run([sys.executable, "-E", "-s", str(staged / "finite-status"), "--help"],
+                                       cwd=directory, capture_output=True, text=True, timeout=60)
+                self.assertEqual(entry.returncode, 0, entry.stderr)
+
     def test_operable_guest_probe_collects_direct_shim_exit_log_observation(self) -> None:
         probe = json.loads(self.probe_report("operable", None))
         observation = {"status": "observed", "repair_authority": False, "exited_children": []}
@@ -1246,6 +1337,33 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                         "http://user@10.254.3.2:49155/contact", "http://10.254.3.2:4200/contact",
                         "http://10.254.3.2:49155/contact?token=private"]:
                 result = finite_status.collect_assignment_contact({"source_host_id": "finite-lat-3", "contact_endpoint": url})
+                self.assertEqual(result["status"], "unknown")
+            run.assert_not_called()
+
+    def test_assignment_contact_targets_each_runner_hosts_published_address(self) -> None:
+        # Core publishes contact endpoints on the Nix-declared kataHostAddress.
+        # finite-lat-4 publishes .4; the old allowlist expected .3 and refused
+        # every lat4 Agent before trying the request.
+        principal = "npub1" + "q" * 58
+        for host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
+            nix = (ROOT / "infra" / "nixos" / "hosts" / host / "default.nix").read_text()
+            published = re.search(r'kataHostAddress = "([0-9.]+)";', nix)[1]
+            endpoint = f"http://{published}:49155/contact"
+            with self.subTest(host=host), mock.patch.object(
+                    finite_status, "run_read_only", return_value=subprocess.CompletedProcess(
+                        [], 0, json.dumps({"agent_npub": principal}), "")) as run:
+                result = finite_status.collect_assignment_contact({
+                    "source_host_id": host, "contact_endpoint": endpoint,
+                    "expected_agent_npub": principal})
+                self.assertEqual(result["status"], "observed")
+                self.assertTrue(result["matches_core_principal"])
+                self.assertEqual(run.call_args.args[0][-1], endpoint)
+        with mock.patch.object(finite_status, "run_read_only") as run:
+            for host, endpoint in [("finite-lat-4", "http://10.254.3.3:49155/contact"),
+                                   ("finite-lat-4", "http://10.254.3.2:49155/contact"),
+                                   ("finite-lat-2", "http://10.254.3.1:49155/contact")]:
+                result = finite_status.collect_assignment_contact({
+                    "source_host_id": host, "contact_endpoint": endpoint})
                 self.assertEqual(result["status"], "unknown")
             run.assert_not_called()
 
