@@ -1596,18 +1596,39 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertEqual(result["container_output"], largest)
         self.assertLess(len(json.dumps(result["container_output"])), 1024)
 
+    OUTPUT_ASSIGNMENT_ROW = {
+        "project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
+        "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
+        "source_machine_id": "machine-a", "expected_agent_npub": OUTPUT_PRINCIPAL,
+        "contact_endpoint": "http://10.254.3.4:49155/contact",
+        "runtime_artifact_id": "artifact-a", "image_reference": "image-a",
+        "state_schema_version": "runtime-state-v1", "retirement_snapshots": 0,
+        "creation_lineage": [{"id": "creation-a", "status": "running", "relocation": False,
+                              "agent_runtime_id": "runtime-a", "owner_user_id": "user-a"}],
+        "credentials": [{"agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
+                         "source_machine_id": "machine-a", "owner_user_id": "user-a",
+                         "activated": True, "revoked": False, "creation_request_id": "creation-a"}]}
+
+    def assignment_target_report(self, contact: str) -> tuple[int, str, int]:
+        """Run target mode on a synthetic Core row; return exit code, output and contact requests."""
+        requests = []
+
+        def read_only(command, **_):
+            if command[0] == "psql":
+                return subprocess.CompletedProcess(command, 0, json.dumps([self.OUTPUT_ASSIGNMENT_ROW]), "")
+            requests.append(command)
+            return subprocess.CompletedProcess(command, 0, contact, "")
+        output = io.StringIO()
+        with (
+            mock.patch.object(finite_status, "postgres_environment", return_value={}),
+            mock.patch.object(finite_status, "run_read_only", side_effect=read_only),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as exit_status,
+        ):
+            finite_status.main(["--runtime-assignment", "project-a"])
+        return exit_status.exception.code, output.getvalue(), len(requests)
+
     def test_runtime_assignment_output_observations_never_change_its_verdict(self) -> None:
-        row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
-               "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
-               "source_machine_id": "machine-a", "expected_agent_npub": self.OUTPUT_PRINCIPAL,
-               "contact_endpoint": "http://10.254.3.4:49155/contact",
-               "runtime_artifact_id": "artifact-a", "image_reference": "image-a",
-               "state_schema_version": "runtime-state-v1", "retirement_snapshots": 0,
-               "creation_lineage": [{"id": "creation-a", "status": "running", "relocation": False,
-                                     "agent_runtime_id": "runtime-a", "owner_user_id": "user-a"}],
-               "credentials": [{"agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
-                                "source_machine_id": "machine-a", "owner_user_id": "user-a",
-                                "activated": True, "revoked": False, "creation_request_id": "creation-a"}]}
         other = "npub1" + "p" * 58
         for name, principal, agentd, expected in [
             ("full pipe", self.OUTPUT_PRINCIPAL, {"container_output": self.REPORTED_OUTPUT}, self.REPORTED_OUTPUT),
@@ -1615,27 +1636,51 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
             ("older image", self.OUTPUT_PRINCIPAL, {"status": "running"}, {"state": "not_reported"}),
             ("another Agent", other, {"container_output": self.REPORTED_OUTPUT}, self.UNMATCHED_OUTPUT),
         ]:
-            def read_only(command, **_):
-                if command[0] == "psql":
-                    return subprocess.CompletedProcess(command, 0, json.dumps([row]), "")
-                return subprocess.CompletedProcess(command, 0, json.dumps({"agent_npub": principal, "agentd": agentd}), "")
-            output = io.StringIO()
-            with (
-                self.subTest(name),
-                mock.patch.object(finite_status, "postgres_environment", return_value={}),
-                mock.patch.object(finite_status, "run_read_only", side_effect=read_only),
-                contextlib.redirect_stdout(output),
-                self.assertRaises(SystemExit) as exit_status,
-            ):
-                finite_status.main(["--runtime-assignment", "project-a"])
-            report = json.loads(output.getvalue())
-            section = report["sections"]["runtime_assignment"]
-            self.assertEqual((exit_status.exception.code, report["exit_code"], report["overall_status"]),
-                             (0, 0, "green"))
-            self.assertEqual((section["status"], section["errors"], section["repair_authority"]), ("green", [], False))
-            self.assertFalse(section["live_contact"]["repair_authority"])
-            self.assertEqual(section["live_contact"]["matches_core_principal"], principal == self.OUTPUT_PRINCIPAL)
-            self.assertEqual(section["live_contact"]["container_output"], expected)
+            with self.subTest(name):
+                code, output, _ = self.assignment_target_report(json.dumps({"agent_npub": principal, "agentd": agentd}))
+                report = json.loads(output)
+                section = report["sections"]["runtime_assignment"]
+                self.assertEqual((code, report["exit_code"], report["overall_status"]), (0, 0, "green"))
+                self.assertEqual((section["status"], section["errors"], section["repair_authority"]),
+                                 ("green", [], False))
+                self.assertFalse(section["live_contact"]["repair_authority"])
+                self.assertEqual(section["live_contact"]["matches_core_principal"],
+                                 principal == self.OUTPUT_PRINCIPAL)
+                self.assertEqual(section["live_contact"]["container_output"], expected)
+
+    def test_runtime_assignment_reads_a_contact_nested_past_the_parser_limit_as_unknown(self) -> None:
+        # Valid JSON nested deeper than json.loads allows still fits the 64 KiB
+        # body bound. It must read as an unverified contact, not abort the report.
+        def contact(where: str, depth: int) -> str:
+            document = {"agent_npub": self.OUTPUT_PRINCIPAL, "ready": True,
+                        "agentd": {"status": "running", "container_output": {**self.REPORTED_OUTPUT}}}
+            parent = document if where == "contact" else document["agentd"]["container_output"]
+            parent["PRIVATE_extra"] = "NESTED"
+            return json.dumps(document).replace('"NESTED"', "[" * depth + '"PRIVATE"' + "]" * depth)
+        for where in ("contact", "container_output"):
+            with self.subTest(where):
+                # The same optional field at a shallow depth: a matched, reported Agent.
+                code, output, requests = self.assignment_target_report(contact(where, 8))
+                shallow = json.loads(output)
+                self.assertEqual((code, requests), (0, 1))
+                self.assertEqual(shallow["sections"]["runtime_assignment"]["live_contact"]["container_output"],
+                                 self.REPORTED_OUTPUT)
+                body = contact(where, 30000)
+                self.assertLessEqual(len(body), 65536)
+                with self.assertRaises(RecursionError):
+                    json.loads(body)
+                code, output, requests = self.assignment_target_report(body)
+                report = json.loads(output)
+                section = report["sections"]["runtime_assignment"]
+                self.assertEqual((code, report["exit_code"], report["overall_status"], requests), (0, 0, "green", 1))
+                self.assertEqual((section["status"], section["errors"], section["repair_authority"]),
+                                 ("green", [], False))
+                self.assertEqual(section["live_contact"], {
+                    "status": "unknown", "repair_authority": False,
+                    "agent_principal_sha256": None, "matches_core_principal": False,
+                    "container_output": self.UNMATCHED_OUTPUT,
+                })
+                self.assertNotIn("PRIVATE", output)
 
     def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
         row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
