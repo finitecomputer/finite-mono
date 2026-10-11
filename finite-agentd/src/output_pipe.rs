@@ -16,9 +16,10 @@
 //! `observed_decrease_bytes` is the saturating sum of drops in
 //! `buffered_bytes` between consecutive successful samples, and nothing more.
 //! It is not a count of bytes read. A writer in packet mode (`O_DIRECT`,
-//! which can be switched on with `F_SETFL` after sampling started) makes each
-//! write one packet; a read shorter than the packet returns part of it, the
-//! kernel discards the rest, and the discarded bytes count as a drop. Output
+//! which can be switched on with `F_SETFL` after sampling started) writes
+//! packets, and the kernel may split a large write across several. A read
+//! shorter than the packet it reads returns part of it, the kernel discards
+//! the rest of that packet, and the discarded bytes count as a drop. Output
 //! written and removed between two samples does not show up at all.
 //!
 //! Nothing here is a verdict. A full pipe does not prove that a particular
@@ -788,9 +789,9 @@ mod tests {
                 (1, 1, 3)
             );
 
-            // In packet mode one write is one packet. The kernel discards the
-            // part a short read did not return, so the decrease exceeds the
-            // bytes any reader got: it is not a count of bytes read.
+            // In packet mode this four-byte write is one packet. The kernel
+            // discards the part a short read did not return, so the decrease
+            // exceeds the bytes any reader got: it is not a count of bytes read.
             let (reader, writer) = rustix::pipe::pipe_with(
                 PipeFlags::CLOEXEC | PipeFlags::NONBLOCK | PipeFlags::DIRECT,
             )

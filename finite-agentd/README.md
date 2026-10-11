@@ -97,8 +97,9 @@ What the samples do not prove:
 
 - `observed_decrease_bytes` is not bytes read, received or delivered. A
   writer in packet mode (`O_DIRECT`, which `F_SETFL` can switch on at any
-  time) makes each write one packet. A read shorter than a packet returns
-  part of it, and the kernel discards the rest; the discarded bytes count as
+  time) writes packets, and the kernel may split a large write across
+  several. A read shorter than the packet it reads returns part of it, and
+  the kernel discards the rest of that packet; the discarded bytes count as
   a drop too.
 - An unchanged `observed_decrease_bytes` does not mean nothing was read.
   Output written and removed between two samples is invisible.
