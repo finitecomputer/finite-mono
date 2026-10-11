@@ -15,6 +15,11 @@
 //! over ttrpc, the same channel a stop would need. There is no code path
 //! here that can stop, signal, restart, remove, or otherwise mutate a
 //! runtime, its durable data, or any containerd/CNI/Kata state.
+//!
+//! Every read is a point-in-time observation. Nothing here fences a task
+//! generation: a task can stop, start, or be recreated under the same
+//! container id between any two reads, so a report never authorizes acting
+//! on what it observed.
 
 use crate::{sanitize_sandbox_name, wait_with_captured_output};
 use serde::Serialize;
@@ -24,6 +29,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 /// Versioned report schema consumed by `scripts/rollout-lat1-runtime-artifact`,
 /// `scripts/finite_status.py`, and eventually the provider-neutral lifecycle
@@ -344,11 +351,13 @@ struct CanonicalHandle {
 enum TaskState {
     Running,
     Other,
-    /// containerd's task manager holds no task for this container. That says
+    /// When read, containerd's task manager held no task for this container,
+    /// and nerdctl showed no task status before or after that read. That says
     /// nothing about whether its VM or durable-state writer is gone.
     Absent,
-    /// The task inventory could not say: the read failed, or the task was
-    /// omitted from the list without a confirmed absence.
+    /// The task inventory could not say: the read failed, the task was
+    /// listed as UNKNOWN, or it was omitted from the list without a
+    /// confirmed absence.
     Unknown,
 }
 
@@ -664,8 +673,14 @@ impl Probe<'_> {
         let Some(status) = status else {
             return self.check_unlisted_task(canonical);
         };
+        // containerd lists a task as UNKNOWN when its shim's State call
+        // failed with an error List does not drop, or returned a state it
+        // does not recognise (plugins/services/tasks/local.go
+        // `getProcessState`): the task exists, but its state is not known.
         let task_state = if status.eq_ignore_ascii_case("running") {
             TaskState::Running
+        } else if status.eq_ignore_ascii_case("unknown") {
+            TaskState::Unknown
         } else {
             TaskState::Other
         };
@@ -673,34 +688,31 @@ impl Probe<'_> {
         // shim answers over ttrpc, the same channel a stop would need.
         match self.task_ps(&canonical.container_id) {
             ChannelState::Live(process_count) => {
-                if matches!(task_state, TaskState::Running) {
-                    (
-                        LifecycleProbeCheck::pass(
-                            "containerd_task",
-                            "containerd task exists and the shim answers a no-op read",
-                            serde_json::json!({
-                                "container_id": canonical.container_id,
-                                "task_status": status,
-                                "shim_process_count": process_count,
-                            }),
-                        ),
-                        task_state,
-                    )
-                } else {
-                    (
-                        LifecycleProbeCheck::fail(
-                            "containerd_task",
-                            "task_not_running",
-                            format!("containerd task exists but its status is {status}"),
-                            serde_json::json!({
-                                "container_id": canonical.container_id,
-                                "task_status": status,
-                                "shim_process_count": process_count,
-                            }),
-                        ),
-                        task_state,
-                    )
-                }
+                let evidence = serde_json::json!({
+                    "container_id": canonical.container_id,
+                    "task_status": status,
+                    "shim_process_count": process_count,
+                });
+                let check = match task_state {
+                    TaskState::Running => LifecycleProbeCheck::pass(
+                        "containerd_task",
+                        "containerd task exists and the shim answers a no-op read",
+                        evidence,
+                    ),
+                    TaskState::Unknown => LifecycleProbeCheck::fail(
+                        "containerd_task",
+                        "task_state_unavailable",
+                        "containerd lists this task as UNKNOWN, so it could not read the task's state; the shim answered a no-op read",
+                        evidence,
+                    ),
+                    _ => LifecycleProbeCheck::fail(
+                        "containerd_task",
+                        "task_not_running",
+                        format!("containerd task exists but its status is {status}"),
+                        evidence,
+                    ),
+                };
+                (check, task_state)
             }
             ChannelState::Closed(detail) => (
                 LifecycleProbeCheck::fail(
@@ -736,10 +748,22 @@ impl Probe<'_> {
     /// whose State fails (NotFound, Unavailable or DeadlineExceeded) while
     /// the RPC itself succeeds (plugins/services/tasks/local.go `addTasks`).
     /// One targeted read of this task separates the cases. Only containerd's
-    /// own "task <id> not found", for a handle unchanged afterwards, is
-    /// reported as absence, and even that is task-manager absence only.
+    /// own "task <id> not found" is read as absence, and only when nerdctl
+    /// showed the same container with no task status both before and after
+    /// it. nerdctl 2.3 reports a status only after loading the container's
+    /// task and reading that task's status, and an empty status otherwise
+    /// (pkg/containerinspector `Inspect`, inspecttypes/dockercompat
+    /// `ContainerFromNative`). A non-empty status is therefore newer evidence
+    /// of a task, and a changed status is a stop, start or restart racing the
+    /// reads; both read unknown. Even a consistent result is task-manager
+    /// absence at one instant: rechecking the id and status narrows the race
+    /// but is no generation fence.
     fn check_unlisted_task(&self, canonical: &CanonicalHandle) -> (LifecycleProbeCheck, TaskState) {
-        let stderr = match self.task_ps(&canonical.container_id) {
+        let channel = self.task_ps(&canonical.container_id);
+        let task_read_at = OffsetDateTime::now_utc()
+            .format(&Rfc3339)
+            .unwrap_or_default();
+        let stderr = match channel {
             ChannelState::Live(process_count) => {
                 return (
                     LifecycleProbeCheck::fail(
@@ -750,6 +774,7 @@ impl Probe<'_> {
                             "container_id": canonical.container_id,
                             "container_status": canonical.status,
                             "shim_process_count": process_count,
+                            "task_read_at": task_read_at,
                         }),
                     ),
                     TaskState::Unknown,
@@ -757,7 +782,7 @@ impl Probe<'_> {
             }
             ChannelState::Closed(stderr) | ChannelState::Error(stderr) => stderr,
         };
-        let unavailable = |detail: &str, evidence: serde_json::Value| {
+        let unavailable = |detail: String, evidence: serde_json::Value| {
             (
                 LifecycleProbeCheck::fail(
                     "containerd_task",
@@ -770,54 +795,83 @@ impl Probe<'_> {
         };
         if !task_manager_reports_absence(&stderr, &canonical.container_id) {
             return unavailable(
-                "the containerd task inventory omitted this task and a targeted read failed; the task may still be running",
+                "the containerd task inventory omitted this task and a targeted read failed; the task may still be running".to_string(),
                 serde_json::json!({
                     "container_id": canonical.container_id,
                     "container_status": canonical.status,
                     "stderr": stderr,
+                    "task_read_at": task_read_at,
                 }),
             );
         }
-        // A stop or replacement can race the two reads, so absence is
-        // reported only for the handle the probe started from.
         let current = match self.inspect(&canonical.container_name) {
-            Ok(Some(current)) if current.id == canonical.container_id => current,
-            Ok(current) => {
+            Ok(Some(current)) => current,
+            Ok(None) => {
                 return unavailable(
-                    "the provider handle changed while the probe read its task",
+                    "the container vanished while the probe read its task".to_string(),
                     serde_json::json!({
                         "container_id": canonical.container_id,
-                        "current_container_id": current.map(|current| current.id),
+                        "current_container_id": null,
+                        "container_status": canonical.status,
                         "stderr": stderr,
+                        "task_read_at": task_read_at,
                     }),
                 );
             }
             Err(error) => {
                 return unavailable(
-                    "could not re-read the provider handle after its task read",
+                    "could not re-read the provider handle after its task read".to_string(),
                     serde_json::json!({
                         "container_id": canonical.container_id,
                         "error": error,
                         "stderr": stderr,
+                        "task_read_at": task_read_at,
                     }),
                 );
             }
         };
+        let mut evidence = serde_json::json!({
+            "container_id": canonical.container_id,
+            "current_container_id": current.id,
+            "container_status": canonical.status,
+            "container_status_after_task_read": current.state.status,
+            "stderr": stderr,
+            "task_read_at": task_read_at,
+        });
+        if current.id != canonical.container_id {
+            return unavailable(
+                "the container was replaced under a new container id while the probe read its task"
+                    .to_string(),
+                evidence,
+            );
+        }
+        if current.state.status != canonical.status {
+            return unavailable(
+                format!(
+                    "the container's status changed from {:?} to {:?} while the probe read its task; a stop, start or restart raced the read",
+                    canonical.status, current.state.status
+                ),
+                evidence,
+            );
+        }
+        if !current.state.status.is_empty() {
+            return unavailable(
+                format!(
+                    "containerd's task manager reported no task, but nerdctl reported task status {} for this container before and after that read; a task may have been recreated under the same id",
+                    current.state.status
+                ),
+                evidence,
+            );
+        }
+        evidence["task_manager_absence"] = serde_json::json!(true);
         (
             LifecycleProbeCheck::fail(
                 "containerd_task",
                 "orphaned_task",
                 format!(
-                    "container claims status {} but containerd's task manager holds no task for it; a normal stop would time out. This does not show that its VM or durable-state writer is gone",
-                    current.state.status
+                    "at {task_read_at} containerd's task manager held no task for this container, and nerdctl showed no task status before or after that read. This is a point-in-time observation, not a fence: a task can start under this id afterwards. It does not show that the VM or durable-state writer is gone"
                 ),
-                serde_json::json!({
-                    "container_id": canonical.container_id,
-                    "container_status": canonical.status,
-                    "container_status_after_task_read": current.state.status,
-                    "task_manager_absence": true,
-                    "stderr": stderr,
-                }),
+                evidence,
             ),
             TaskState::Absent,
         )
@@ -953,10 +1007,16 @@ impl Probe<'_> {
         (
             LifecycleProbeCheck::pass(
                 "sandbox_state",
-                if matches!(task_state, TaskState::Absent) {
-                    "Kata sandbox persist state names this container although containerd holds no task for it; the VMM check decides whether it is stale"
-                } else {
-                    "Kata sandbox persist state is readable and names the live sandbox"
+                match task_state {
+                    TaskState::Running => {
+                        "Kata sandbox persist state is readable and names the live sandbox"
+                    }
+                    TaskState::Absent => {
+                        "Kata sandbox persist state names this container although containerd held no task for it; the VMM check decides whether it is stale"
+                    }
+                    TaskState::Other | TaskState::Unknown => {
+                        "Kata sandbox persist state is readable and names this container; it does not show whether the sandbox is live"
+                    }
                 },
                 serde_json::json!({
                     "path": path,
@@ -969,9 +1029,9 @@ impl Probe<'_> {
         )
     }
 
-    /// The task is gone and so is the VMM its sandbox recorded, but the
-    /// sandbox state remains: exactly the stale Kata persist.json the
-    /// lifecycle-exception Agent carried.
+    /// containerd held no task and no process was found at the VMM pid its
+    /// sandbox recorded, but the sandbox state remains: the stale Kata
+    /// persist.json the lifecycle-exception Agent carried.
     fn stale_sandbox_check(
         &self,
         canonical: &CanonicalHandle,
@@ -980,7 +1040,7 @@ impl Probe<'_> {
         LifecycleProbeCheck::fail(
             "sandbox_state",
             "stale_sandbox_state",
-            "the containerd task and its recorded VMM process are gone but Kata sandbox persist state remains",
+            "containerd held no task and no process was found at the recorded VMM pid, but Kata sandbox persist state remains",
             serde_json::json!({
                 "path": self.sandbox_persist_path(canonical),
                 "persist_sandbox_container": persist.sandbox_container,
@@ -1115,12 +1175,12 @@ impl Probe<'_> {
                 records.push(name);
             }
         }
-        let stale = match task_state {
-            TaskState::Running => false,
-            TaskState::Other => true,
-            TaskState::Absent => vmm == VmmObservation::Gone,
-            TaskState::Unknown => false,
-        };
+        // A listed task that is paused, created or stopped can keep its VM and
+        // network namespace, and a task-manager absence says nothing about
+        // the VM either, so records are stale only once the recorded VMM
+        // process is observed gone.
+        let stale = matches!(task_state, TaskState::Other | TaskState::Absent)
+            && vmm == VmmObservation::Gone;
         if records.is_empty() || matches!(task_state, TaskState::Running) {
             LifecycleProbeCheck::pass(
                 "cni_namespace",
@@ -1134,14 +1194,14 @@ impl Probe<'_> {
         } else if !stale {
             LifecycleProbeCheck::pass(
                 "cni_namespace",
-                "CNI netns records remain; they are not stale while the task state is unknown or its VMM may still run",
+                "CNI netns records remain; they are not called stale unless the task is not running and its recorded VMM process was observed gone",
                 serde_json::json!({"records": records, "stale_evaluated": false}),
             )
         } else {
             LifecycleProbeCheck::fail(
                 "cni_namespace",
                 "stale_cni_namespace",
-                "CNI netns records remain although the containerd task is not running",
+                "CNI netns records remain although the containerd task is not running and no process was found at its recorded VMM pid",
                 serde_json::json!({
                     "records": records,
                     "container_id": canonical.container_id,
@@ -1205,7 +1265,9 @@ impl Probe<'_> {
                 return (
                     LifecycleProbeCheck::pass(
                         "vmm_process",
-                        format!("no VMM process {pid} remains"),
+                        format!(
+                            "no process was found at the sandbox's recorded VMM pid {pid}; this reads that pid once and does not show that no other VM serves this sandbox"
+                        ),
                         serde_json::json!({"pid": pid}),
                     ),
                     VmmObservation::Gone,
@@ -1241,7 +1303,7 @@ impl Probe<'_> {
                     "vmm_process",
                     "wrapped_vmm_process_name",
                     format!(
-                        "VMM process {pid} is visible only as {comm}, which is not a {expected} hypervisor process; name-based process matching would miss it"
+                        "the process at the sandbox's recorded VMM pid {pid} is visible as {comm}, which does not match a {expected} hypervisor process; it may be the VMM under a wrapped name or an unrelated process that reused the pid"
                     ),
                     evidence,
                 ),
@@ -1256,7 +1318,7 @@ impl Probe<'_> {
                     "vmm_process",
                     "vmm_process_without_task",
                     format!(
-                        "containerd holds no task, but a {expected} process {comm} is visible at the sandbox's recorded VMM pid {pid}; its VM may still be running and writing durable state"
+                        "containerd held no task, but a process named {comm} is visible at the sandbox's recorded VMM pid {pid}; a name cannot exclude pid reuse, so its VM may still be running and writing durable state"
                     ),
                     evidence,
                 ),
@@ -1266,7 +1328,9 @@ impl Probe<'_> {
         (
             LifecycleProbeCheck::pass(
                 "vmm_process",
-                format!("VMM process {pid} is visible as {comm}"),
+                format!(
+                    "a process named {comm} is visible at the sandbox's recorded VMM pid {pid}"
+                ),
                 evidence,
             ),
             VmmObservation::Visible,
@@ -1493,6 +1557,9 @@ mod tests {
             "ctr: no running task found: not found\n".to_string(),
             // State timeout while loading the task.
             "ctr: context deadline exceeded\n".to_string(),
+            // containerd 1.x clients print a second `: not found` suffix;
+            // the matcher is bound to the 2.3 wording and reads it unknown.
+            format!("ctr: no running task found: task {id} not found: not found\n"),
             // A different container's absence.
             format!(
                 "ctr: no running task found: task {} not found\n",

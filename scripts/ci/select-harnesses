@@ -103,6 +103,16 @@ FINITE_STATUS_PATHS = {
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
+# Nix inputs of finite-status's contact-address contract: the address each
+# Runner host publishes Agents on, and the module that renders it for the
+# Runner. They keep their Nix checks too.
+FINITE_STATUS_NIX_PATHS = {
+    "infra/nixos/hosts/finite-lat-3/default.nix",
+    "infra/nixos/hosts/finite-lat-4/default.nix",
+    "infra/nixos/hosts/finite-lat-5/default.nix",
+    "infra/nixos/modules/kata-runner-host.nix",
+}
+
 REMAINING_NIX_CHECK_PATHS = {
     "scripts/verify-hosted-snapshot",
     "infra/scripts/restore-hosted-web-chat-snapshot",
@@ -416,6 +426,12 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
 
     if path in REMAINING_NIX_CHECK_PATHS:
         selection.run_nix_checks = True
+        return
+
+    if path in FINITE_STATUS_NIX_PATHS:
+        selection.run_finite_status_contract = True
+        selection.run_nix_checks = True
+        selection.run_nix_service_packages = True
         return
 
     if path.startswith("infra/nixos/"):

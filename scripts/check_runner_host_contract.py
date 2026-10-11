@@ -188,6 +188,22 @@ def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
             )
 
 
+def check_contact_addresses(envs: dict[str, dict[str, str]]) -> None:
+    # finite-status probes Agent contact only at the address the evaluated
+    # host renders for its Runner. Imported here because runpy readers of
+    # this module's constants do not put scripts/ on sys.path.
+    import finite_status
+
+    for host in HOSTS:
+        expected = finite_status.CONTRACT["hosts"][host].get("kata_host_address")
+        rendered = envs[host].get("FC_RUNNER_KATA_HOST_ADDRESS")
+        if rendered != expected:
+            raise SystemExit(
+                f"{host}: FC_RUNNER_KATA_HOST_ADDRESS is {rendered!r}; "
+                f"finite-status expects {expected!r}"
+            )
+
+
 def check_operator_env_templates() -> None:
     for template in OPERATOR_ENV_TEMPLATES:
         keys = set(parse_env(template.read_text(encoding="utf-8")))
@@ -438,6 +454,7 @@ def main() -> None:
         for host in HOSTS
     }
     check_shared_env(envs)
+    check_contact_addresses(envs)
     core = json.loads(
         nix_eval("finite-lat-2", "systemd.services.finite-saas-core.environment")
     )

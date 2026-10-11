@@ -1702,8 +1702,9 @@ def collect_lifecycle_probe(
     return raw
 
 
-# Probe findings for a task containerd's task list omitted without confirming
-# its absence (containerd 2.3 drops tasks whose shim State call fails).
+# Probe findings for a task whose state containerd could not report: omitted
+# from its task list without a confirmed absence (containerd 2.3 drops tasks
+# whose shim State call fails), or listed as UNKNOWN.
 UNCERTAIN_TASK_FINDINGS = ("task_list_incomplete", "task_state_unavailable")
 
 

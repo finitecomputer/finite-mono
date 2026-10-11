@@ -16,8 +16,16 @@
 #   tasks-ps          pid list printed verbatim for `tasks ps`
 #   tasks-ps-error    printed to stderr with exit 1 for `tasks ps`, e.g. a
 #                     State timeout or a closed shim's bare NotFound
+#   tasks-ps-sleep    seconds `tasks ps` blocks before answering (exec, so
+#                     a killed read leaves no process holding its pipes)
 #   tasks-ps-replaces "<name> <new-id>": after `tasks ps`, the named
 #                     container is replaced (a race with the probe)
+#   tasks-ps-removes  "<name>": after `tasks ps`, the named container is
+#                     removed
+#   tasks-ps-stops    "<name>": after `tasks ps`, the named container's task
+#                     is gone and nerdctl shows its empty no-task status
+#   tasks-ps-starts   "<name>": after `tasks ps`, a new task runs under the
+#                     same container id (row added, nerdctl status running)
 # A `tasks ps` for an id the task manager does not hold prints containerd's
 # own `ctr: no running task found: task <id> not found` and exits 1.
 set -eu
@@ -44,6 +52,9 @@ case "$cmd" in
     ;;
   "tasks ps")
     id="${3:-}"
+    if [ -f "$state/tasks-ps-sleep" ]; then
+      exec sleep "$(cat "$state/tasks-ps-sleep")"
+    fi
     status=0
     if [ -f "$state/tasks-ps-error" ]; then
       cat "$state/tasks-ps-error" >&2
@@ -59,6 +70,16 @@ case "$cmd" in
     if [ -f "$state/tasks-ps-replaces" ]; then
       read -r name replacement <"$state/tasks-ps-replaces"
       printf '%s' "$replacement" >"$state/$name.id"
+    fi
+    if [ -f "$state/tasks-ps-removes" ]; then
+      rm -f "$state/$(cat "$state/tasks-ps-removes").image"
+    fi
+    if [ -f "$state/tasks-ps-stops" ]; then
+      : >"$state/$(cat "$state/tasks-ps-stops").status"
+    fi
+    if [ -f "$state/tasks-ps-starts" ]; then
+      printf '%s  5252      RUNNING\n' "$id" >>"$state/tasks"
+      printf 'running' >"$state/$(cat "$state/tasks-ps-starts").status"
     fi
     exit "$status"
     ;;

@@ -400,7 +400,9 @@ skip by fixing the underlying lifecycle-control finding, then re-executing
 the **same approved plan hash** — the skipped entry is the resume point and
 runs normally once the probe is green. If prepare-time or execute-time
 provider facts drifted instead, re-`--prepare` and approve the new hash;
-never edit retained evidence.
+never edit retained evidence. Only a returned report gates: if the probe
+cannot run at all, the wrapper records it as `unavailable` and proceeds on
+Core-state evidence.
 
 To investigate one skipped assignment on its Runner host, use
 `scripts/finite-status --runtime-lifecycle PROJECT_ID AGENT_RUNTIME_ID SOURCE_MACHINE_ID SOURCE_HOST_ID`.
@@ -421,17 +423,26 @@ established and recovery qualified.
 On containerd 2.3, task listing calls each shim and omits a task whose State
 call fails, so the probe reads an unlisted task directly. A read that answers
 is `task_list_incomplete`; any other failure, including a State timeout or a
-bare `no running task found: not found`, is `task_state_unavailable`. Both are
-unknown. `orphaned_task` requires containerd's exact `task <id> not found` for
-an unchanged container, and means only that containerd's task manager holds no
-task. The VMM check still runs. A `qemu` process at the recorded VMM pid reads
-`vmm_process_without_task`, and sandbox and CNI records are called stale only
-once that VMM is gone. None of these findings proves the VM or its writer
-absent; never use them to authorize an absent-compute relocation. Runner hosts
-that still run an older probe binary report every unlisted task as
-`orphaned_task`. The target mode also captures bounded process and mount
-observations, explicitly labelled as point-in-time evidence without repair
-authority.
+bare `no running task found: not found`, is `task_state_unavailable`, as is a
+task listed with status `UNKNOWN`. All are unknown. `orphaned_task` requires
+containerd's exact `task <id> not found`, with nerdctl showing the same
+container id and no task status before and after that read. A task status on
+either inspection, a changed status or id, or a vanished container reads
+`task_state_unavailable`, because a task may have stopped, started or been
+recreated under that id.
+`orphaned_task` means only that containerd's task manager held no task at
+`task_read_at`; the probe does not fence a new task under the same id. The VMM
+check still runs. A process with a `qemu` name at the recorded VMM pid reads
+`vmm_process_without_task`. For an absent or listed non-running task, CNI
+records are called stale only when no process is found at the recorded VMM
+pid; sandbox state is called stale that way only for an absent task. A persist
+record naming a different container id is `stale_sandbox_state` from that
+mismatch alone; the other container's VMM is not observed. None of these
+findings proves the VM or its writer absent; never use them to authorize an
+absent-compute relocation. Runner hosts that still run an older probe binary
+report every unlisted task as `orphaned_task`. The target mode also captures
+bounded process and mount observations, explicitly labelled as point-in-time
+evidence without repair authority.
 
 Use `scripts/finite-status --runtime-assignment PROJECT_ID` on Core to capture
 the active assignment, owner, Principal, image, creation lineage and credential
