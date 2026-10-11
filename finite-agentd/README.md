@@ -69,6 +69,40 @@ wrapper can still synthesize the passing report artifact when the richer
 in-test report hook is absent; that report is not independent live-runtime
 evidence.
 
+## Container output observations
+
+`finite-agentd serve` samples the stdout and stderr it inherited once a
+second on a dedicated thread. In the Runtime image these are the container
+output pipes that every supervised child writes to. `status.json`,
+`agent.status.inspect` and the `runtime.agentd` snapshot carry the latest
+sample as `container_output`. The health server projects an allowlisted copy
+as `agentd.container_output` in `/healthz` and `/contact`.
+
+Each stream has a `kind`: `pipe`, `not_pipe`, `same_pipe_as_stdout`,
+`unavailable`, `unsupported_platform` or `sampler_not_started`. A `pipe`
+sample carries:
+
+- `observed_at_ms`;
+- `buffered_bytes` (`FIONREAD`);
+- `capacity_bytes` (`F_GETPIPE_SZ`, a separate read);
+- `observed_decrease_bytes`: the sum of drops between consecutive samples
+  since `first_observed_at_ms`, over `sample_count` samples. Only reads remove
+  bytes from a pipe, so at least that many bytes were read.
+
+What the samples do not prove:
+
+- A full pipe means output is waiting for its reader. It does not prove that
+  a given writer is waiting (a small write can still merge into the last
+  page), that the host collector is gone, or that Hermes is stuck.
+- An unchanged `observed_decrease_bytes` does not mean nothing was read.
+  Output that is read and replaced between two samples is invisible.
+- Nothing here measures gateway, channel or reply progress. None of it feeds
+  readiness, supervision or restarts.
+
+Under Kata, kata-agent reads the guest pipes only when the host shim asks for
+output. A draining guest pipe therefore shows the local output path moving,
+not end-to-end delivery. Runtimes on older images report nothing.
+
 ## Optional hosted Hermes process
 
 `finite-agentd hosted-hermes` validates trusted launch settings and replaces

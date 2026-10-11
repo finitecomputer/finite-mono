@@ -25,6 +25,7 @@ use crate::connections::{
     TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger};
+use crate::output_pipe::{ContainerOutputStatus, OutputObserver};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
@@ -87,6 +88,10 @@ pub struct AgentdStatus {
     pub processes: SupervisorStatus,
     pub specialization: SpecializationBundleStatusV1,
     pub updated_at_ms: u64,
+    /// Report-only output pipe observations; see `output_pipe`. Absent from
+    /// older agentd builds and until the first sample is published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_output: Option<ContainerOutputStatus>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,6 +216,9 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     // Register before any optional child starts so a stop during bridge
     // warmup still reaches its awaited shutdown path.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Duplicates agentd's stdout/stderr before any child inherits them; the
+    // sampler thread never feeds readiness or supervision.
+    let output = OutputObserver::start();
     let supervisor = start_supervisor(
         sidecar_spec(&config),
         health_spec(&config),
@@ -224,6 +232,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         ledger.clone(),
         supervisor.clone(),
         hosted_hermes.clone(),
+        output.clone(),
     );
 
     let readiness = tokio::select! {
@@ -249,6 +258,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
         hosted_hermes: hosted_hermes.clone(),
+        output,
     };
 
     let delivery_worker =
@@ -377,6 +387,7 @@ struct CommandExecutor {
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
     hosted_hermes: Option<crate::hosted_hermes::HostedHermesHandle>,
+    output: OutputObserver,
 }
 
 impl CommandExecutor {
@@ -653,6 +664,7 @@ impl CommandExecutor {
                 .processes
                 .insert("hermes-serve".into(), hosted.status());
         }
+        let container_output = self.output.latest();
         AgentdStatus {
             service: "finite-agentd".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -662,6 +674,7 @@ impl CommandExecutor {
             processes: processes.clone(),
             specialization: inactive_specialization_status(),
             updated_at_ms: now_ms(),
+            container_output,
         }
     }
 
@@ -928,12 +941,13 @@ async fn wait_for_bridge(bridge: &BridgeClient, timeout: Duration) -> Result<(),
     }
 }
 
-fn spawn_status_writer(
+pub(crate) fn spawn_status_writer(
     path: PathBuf,
     identity: DeviceRef,
     ledger: Ledger,
     supervisor: SupervisorHandle,
     hosted_hermes: Option<crate::hosted_hermes::HostedHermesHandle>,
+    output: OutputObserver,
 ) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(1));
@@ -945,6 +959,9 @@ fn spawn_status_writer(
                     .processes
                     .insert("hermes-serve".into(), hosted.status());
             }
+            // Copy the latest published sample; never wait for a new one.
+            // Read before `updated_at_ms`, so a sample is never newer than it.
+            let container_output = output.latest();
             let status = AgentdStatus {
                 service: "finite-agentd".to_owned(),
                 version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -954,6 +971,7 @@ fn spawn_status_writer(
                 processes,
                 specialization: inactive_specialization_status(),
                 updated_at_ms: now_ms(),
+                container_output,
             };
             let _ = write_private_json(&path, &status);
         }
@@ -1144,6 +1162,7 @@ mod tests {
             processes: SupervisorStatus::default(),
             specialization: inactive_specialization_status(),
             updated_at_ms: 0,
+            container_output: None,
         })
         .unwrap();
         assert_eq!(json["specialization"]["desired"], false);
@@ -1152,6 +1171,89 @@ mod tests {
         assert_eq!(
             AgentdError::UnsupportedCommand("agent.retired.command".to_owned()).public_code(),
             "unsupported_command"
+        );
+    }
+
+    /// How agentd builds from before `container_output` read `AgentdStatus`.
+    #[derive(Debug, Deserialize)]
+    #[allow(dead_code)]
+    struct PreviousAgentdStatus {
+        service: String,
+        version: String,
+        account_id: String,
+        device_id: String,
+        authorized_principals: usize,
+        processes: SupervisorStatus,
+        specialization: SpecializationBundleStatusV1,
+        updated_at_ms: u64,
+    }
+
+    const PREVIOUS_STATUS_JSON: &str = r#"{
+  "service": "finite-agentd",
+  "version": "0.1.0",
+  "account_id": "acct",
+  "device_id": "dev",
+  "authorized_principals": 1,
+  "processes": {
+    "processes": {
+      "hermes": {"state":"running","pid":42,"restart_count":0,"last_exit":null,"updated_at_ms":7}
+    }
+  },
+  "specialization": {"bundle_id": null, "desired": false, "effective": false},
+  "updated_at_ms": 9
+}"#;
+
+    fn largest_output_report() -> ContainerOutputStatus {
+        use crate::output_pipe::{OutputStreamObservation, PipeObservation};
+        let pipe = OutputStreamObservation::Pipe(PipeObservation {
+            observed_at_ms: u64::MAX,
+            buffered_bytes: u64::MAX,
+            capacity_bytes: u64::MAX,
+            first_observed_at_ms: u64::MAX,
+            sample_count: u64::MAX,
+            observed_decrease_bytes: u64::MAX,
+        });
+        ContainerOutputStatus {
+            sample_interval_ms: u64::MAX,
+            stdout: pipe.clone(),
+            stderr: pipe,
+        }
+    }
+
+    #[test]
+    fn status_written_before_container_output_still_parses_and_reserializes_unchanged() {
+        let previous: AgentdStatus = serde_json::from_str(PREVIOUS_STATUS_JSON).unwrap();
+        assert_eq!(previous.container_output, None);
+        // Until a first sample exists the key is omitted, as older agentd did.
+        assert_eq!(
+            serde_json::to_value(&previous).unwrap(),
+            serde_json::from_str::<Value>(PREVIOUS_STATUS_JSON).unwrap()
+        );
+    }
+
+    #[test]
+    fn status_with_container_output_still_parses_for_previous_readers() {
+        let mut status: AgentdStatus = serde_json::from_str(PREVIOUS_STATUS_JSON).unwrap();
+        status.container_output = Some(largest_output_report());
+        let bytes = serde_json::to_vec(&status).unwrap();
+
+        let previous: PreviousAgentdStatus = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(previous.updated_at_ms, 9);
+        assert_eq!(
+            previous.processes.processes["hermes"].pid(),
+            Some(42),
+            "ProcessStatus keeps its wire shape"
+        );
+        assert_eq!(
+            serde_json::from_slice::<AgentdStatus>(&bytes).unwrap(),
+            status
+        );
+        // The snapshot carries this payload; the addition stays a small,
+        // fixed share of the 64 KiB limit.
+        let addition = serde_json::to_vec(&largest_output_report()).unwrap().len();
+        assert!(addition < 1024, "container_output grew to {addition} bytes");
+        assert!(
+            bytes.len() < finitechat_proto::MAX_RUNTIME_STATE_SNAPSHOT_PAYLOAD_BYTES as usize / 16
         );
     }
 
