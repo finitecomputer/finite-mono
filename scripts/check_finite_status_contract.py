@@ -22,6 +22,20 @@ def require_all(path: Path, values: list[str]) -> None:
         )
 
 
+KATA_HOST_ADDRESS = re.compile(r'^\s*kataHostAddress\s*=\s*"([^"]*)"\s*;', re.MULTILINE)
+NIX_BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+
+
+def declared_kata_host_address(text: str) -> str | None:
+    """The value of the one active `kataHostAddress = "...";` line.
+
+    This reads the literal host declaration, outside comments; it does not
+    evaluate Nix. Zero or several active assignments declare nothing.
+    """
+    active = KATA_HOST_ADDRESS.findall(NIX_BLOCK_COMMENT.sub("", text))
+    return active[0] if len(active) == 1 else None
+
+
 def main() -> None:
     contract = finite_status.CONTRACT
     health = contract["healthcheck"]
@@ -179,18 +193,25 @@ def main() -> None:
         raise SystemExit(
             "finite-lat-2 is the app-plane host (ADR 0007); no runner role"
         )
-    # Contact probes accept only the address the host publishes Agents on.
+    # Contact probes accept only the address the host publishes Agents on:
+    # the host's kataHostAddress, which the shared module renders for the
+    # Runner. The runner-host contract compares the evaluated value too.
+    require_all(
+        ROOT / "infra" / "nixos" / "modules" / "kata-runner-host.nix",
+        ["FC_RUNNER_KATA_HOST_ADDRESS = cfg.kataHostAddress;"],
+    )
     for runner_host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
         profile = contract["hosts"][runner_host]
         if "runner" not in profile["roles"]:
             raise SystemExit(f"{runner_host} must keep the runner role")
-        require_all(
-            ROOT / "infra" / "nixos" / "hosts" / runner_host / "default.nix",
-            [
-                "finite-saas-runner.nix",
-                f'kataHostAddress = "{profile["kata_host_address"]}";',
-            ],
-        )
+        host_file = ROOT / "infra" / "nixos" / "hosts" / runner_host / "default.nix"
+        require_all(host_file, ["finite-saas-runner.nix"])
+        declared = declared_kata_host_address(host_file.read_text(encoding="utf-8"))
+        if declared != profile["kata_host_address"]:
+            raise SystemExit(
+                f"{host_file.relative_to(ROOT)} declares kataHostAddress {declared!r}; "
+                f"finite-status expects {profile['kata_host_address']!r}"
+            )
 
     print("finite status contract: ok")
 

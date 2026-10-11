@@ -6,7 +6,9 @@
 //! every scenario also proves the probe mutated nothing. The fake `ctr`
 //! follows containerd 2.3: `tasks list` omits a task whose shim State call
 //! fails, and `tasks ps` reports containerd's own absence text only for a task
-//! its task manager does not hold. The persist state fixtures mirror Kata's
+//! its task manager does not hold. The fake `nerdctl` prints each container's
+//! status verbatim, so a container without a task uses nerdctl 2.3's empty
+//! status. The persist state fixtures mirror Kata's
 //! real Go-serialized `persistapi.SandboxState` shape (capitalized, tagless
 //! fields) under the real `/run/vc/sbs` layout.
 
@@ -25,6 +27,9 @@ const FAKE_CTR: &str = include_str!("fixtures/lifecycle/bin/ctr");
 const PROJECT: &str = "project-a";
 const RUNTIME: &str = "runtime-a";
 const MACHINE: &str = "machine-a";
+/// nerdctl 2.3 inspect reports a status only after loading the container's
+/// task; a container whose task it cannot load has this empty status.
+const NO_TASK_STATUS: &str = "";
 
 struct ProbeFixture {
     _root: tempfile::TempDir,
@@ -87,6 +92,17 @@ impl ProbeFixture {
         field("mount", mount.to_str().unwrap());
     }
 
+    /// The runtime's container exists, but nerdctl can load no task for it.
+    fn add_runtime_without_task(&self) {
+        self.add_container(
+            MACHINE,
+            NO_TASK_STATUS,
+            PROJECT,
+            MACHINE,
+            &self.state_root(),
+        );
+    }
+
     fn set_container_id(&self, name: &str, id: &str) {
         fs::write(self.state.join(format!("{name}.id")), id).unwrap();
     }
@@ -124,6 +140,22 @@ impl ProbeFixture {
             format!("{name} {new_id}\n"),
         )
         .unwrap();
+    }
+
+    /// The named container's task stops while the probe reads it.
+    fn stop_task_during_task_read(&self, name: &str) {
+        fs::write(self.state.join("tasks-ps-stops"), name).unwrap();
+    }
+
+    /// A new task starts under the named container's id while the probe
+    /// reads its task.
+    fn start_task_during_task_read(&self, name: &str) {
+        fs::write(self.state.join("tasks-ps-starts"), name).unwrap();
+    }
+
+    /// The named container is removed while the probe reads its task.
+    fn remove_container_during_task_read(&self, name: &str) {
+        fs::write(self.state.join("tasks-ps-removes"), name).unwrap();
     }
 
     fn task_reads(&self) -> usize {
@@ -456,11 +488,12 @@ fn healthy_runtime_is_operable() {
 
 #[test]
 fn orphaned_vm_without_healthy_task_is_inoperable() {
-    // 2026-08-01 incident topology 1: the containerd task is orphaned and a
-    // normal stop would time out. Here the recorded VMM is gone too, so the
-    // retained sandbox and CNI records are stale.
+    // 2026-08-01 incident topology 1: the container has no containerd task.
+    // nerdctl shows it without a task status before and after the targeted
+    // read. Here the recorded VMM is gone too, so the retained sandbox and
+    // CNI records are stale.
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_runtime_without_task();
     fixture.write_persist(&container_id(), Some(4242));
     fixture.add_netns_record(&container_id());
 
@@ -472,6 +505,10 @@ fn orphaned_vm_without_healthy_task_is_inoperable() {
     // A missing row alone is never absence: the targeted read confirmed it.
     assert_eq!(fixture.task_reads(), 1);
     assert_eq!(task.evidence["task_manager_absence"], true);
+    // The absence is an observation at one instant, and predicts nothing.
+    let read_at = task.evidence["task_read_at"].as_str().unwrap();
+    assert!(!read_at.is_empty() && task.detail.contains(read_at));
+    assert!(!task.detail.contains("would time out"), "{}", task.detail);
     assert_eq!(
         task.evidence["stderr"].as_str(),
         Some(
@@ -504,7 +541,7 @@ fn task_manager_absence_with_a_visible_vmm_never_calls_its_state_stale() {
     // while the VM keeps serving and writing. The VMM check still runs, and
     // nothing that VM may be using is called stale.
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_runtime_without_task();
     fixture.write_persist(&container_id(), Some(4242));
     fixture.add_vmm_comm(4242, ".qemu-system-x8");
     fixture.add_netns_record(&container_id());
@@ -527,10 +564,11 @@ fn task_manager_absence_with_a_visible_vmm_never_calls_its_state_stale() {
 fn state_timeout_omitted_from_the_task_list_is_unknown_not_orphaned() {
     // The Pancake topology (2026-10-10): the shim answers Pids and the guest
     // serves, but State times out, so containerd 2.3's List drops the row
-    // and ctr's Get-before-Pids fails the same way. The VM is live; nothing
-    // here may read as absent or stale.
+    // and ctr's Get-before-Pids fails the same way, as does nerdctl's task
+    // load, so its status is empty. The VM is live; nothing here may read as
+    // absent or stale.
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_runtime_without_task();
     fixture.omit_task_from_list(&container_id());
     fixture.fail_task_ps_with("ctr: context deadline exceeded\n");
     fixture.write_persist(&container_id(), Some(4242));
@@ -566,9 +604,10 @@ fn closed_shim_omitted_from_the_task_list_is_unknown_not_closed_or_orphaned() {
     // containerd 2.3 maps a closed shim ttrpc connection to bare NotFound, so
     // ctr prints only the shared `no running task found:` prefix. The text
     // carries no task identity: it is neither absence nor a proven closed
-    // channel, and the stderr is kept as evidence.
+    // channel, and the stderr is kept as evidence. nerdctl's task load gets
+    // the same NotFound, so it shows no task status.
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_runtime_without_task();
     fixture.omit_task_from_list(&container_id());
     fixture.fail_task_ps_with("ctr: no running task found: not found\n");
     fixture.write_persist(&container_id(), Some(4242));
@@ -631,6 +670,166 @@ fn replacement_racing_the_task_read_is_unknown_not_orphaned() {
 }
 
 #[test]
+fn new_task_under_the_same_id_after_the_absence_read_is_unknown() {
+    // A task can start under the same container id after containerd reported
+    // none, whether the container showed a task before (a restart) or not (a
+    // start). nerdctl's running status after the read is newer evidence of a
+    // task, so the earlier absence is not reported, and nothing the new VM
+    // may use is called stale or orphaned.
+    for before in ["running", NO_TASK_STATUS] {
+        let fixture = new_fixture();
+        fixture.add_container(MACHINE, before, PROJECT, MACHINE, &fixture.state_root());
+        fixture.start_task_during_task_read(MACHINE);
+        fixture.write_persist(&container_id(), Some(5252));
+        fixture.add_vmm_comm(5252, ".qemu-system-x8");
+        fixture.add_netns_record(&container_id());
+
+        let report = fixture.probe();
+        assert_verdict(&report, LifecycleVerdict::Unknown);
+        assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+        let task = fixture.check(&report, "containerd_task");
+        assert_eq!(task.evidence["container_status"].as_str(), Some(before));
+        assert_eq!(
+            task.evidence["container_status_after_task_read"].as_str(),
+            Some("running")
+        );
+        assert!(task.evidence.get("task_manager_absence").is_none());
+        assert!(task.evidence["task_read_at"].as_str().is_some());
+        assert_eq!(
+            fixture.check(&report, "vmm_process").status,
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            fixture.check(&report, "cni_namespace").evidence["stale_evaluated"],
+            false
+        );
+        fixture.assert_nothing_mutated();
+    }
+}
+
+#[test]
+fn same_id_stop_racing_the_task_read_is_unknown_not_orphaned() {
+    // A normal stop between the probe's first inspect and its targeted read
+    // makes containerd truthfully report no task, and nerdctl then shows the
+    // empty no-task status. That is a stop in progress, not an orphan.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
+    fixture.stop_task_during_task_read(MACHINE);
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    let task = fixture.check(&report, "containerd_task");
+    assert_eq!(task.evidence["container_status"].as_str(), Some("running"));
+    assert_eq!(
+        task.evidence["container_status_after_task_read"].as_str(),
+        Some(NO_TASK_STATUS)
+    );
+    assert!(task.evidence.get("task_manager_absence").is_none());
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn container_removed_racing_the_task_read_is_unknown_and_named_vanished() {
+    let fixture = new_fixture();
+    fixture.add_runtime_without_task();
+    fixture.remove_container_during_task_read(MACHINE);
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    let task = fixture.check(&report, "containerd_task");
+    assert!(task.evidence["current_container_id"].is_null());
+    assert!(task.detail.contains("vanished"), "{}", task.detail);
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn absence_without_an_observed_gone_vmm_never_calls_records_stale() {
+    // Task-manager absence for an unchanged task-less container, where the
+    // recorded VMM pid is unreadable, held by an unrelated process, missing
+    // from persist state, or has no persist state at all: none of these show
+    // the VMM gone, so neither sandbox nor CNI records are called stale.
+    for mode in ["unreadable", "reused", "no-pid", "no-persist"] {
+        let fixture = new_fixture();
+        fixture.add_runtime_without_task();
+        fixture.add_netns_record(&container_id());
+        match mode {
+            "unreadable" => {
+                fixture.write_persist(&container_id(), Some(4242));
+                // A directory at the comm path fails the read with an error
+                // other than NotFound.
+                fs::create_dir_all(fixture.config.proc_root.join("4242/comm")).unwrap();
+            }
+            "reused" => {
+                fixture.write_persist(&container_id(), Some(4242));
+                fixture.add_vmm_comm(4242, "bash");
+            }
+            "no-pid" => fixture.write_persist(&container_id(), None),
+            _ => {}
+        }
+
+        let report = fixture.probe();
+        assert_verdict(&report, LifecycleVerdict::Inoperable);
+        assert_eq!(report.reason.as_deref(), Some("orphaned_task"), "{mode}");
+        assert_eq!(
+            fixture.check(&report, "sandbox_state").status,
+            CheckStatus::Pass,
+            "{mode}"
+        );
+        let cni = fixture.check(&report, "cni_namespace");
+        assert_eq!(cni.status, CheckStatus::Pass, "{mode}");
+        assert_eq!(cni.evidence["stale_evaluated"], false, "{mode}");
+        if mode == "reused" {
+            // An unrelated process at the recorded pid is not named the VMM.
+            let vmm = fixture.check(&report, "vmm_process");
+            assert!(vmm.detail.contains("reused the pid"), "{}", vmm.detail);
+        }
+        fixture.assert_nothing_mutated();
+    }
+}
+
+#[test]
+fn targeted_task_read_timeout_is_unknown() {
+    let mut fixture = new_fixture();
+    // Long enough for the fixture's other reads on a contended runner; the
+    // blocked read is killed at this bound.
+    fixture.config.command_timeout = Duration::from_secs(5);
+    fixture.add_runtime_without_task();
+    fixture.omit_task_from_list(&container_id());
+    fs::write(fixture.state.join("tasks-ps-sleep"), "120").unwrap();
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    assert_eq!(
+        fixture.check(&report, "cni_namespace").evidence["stale_evaluated"],
+        false
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn oversized_task_inventory_is_unknown_without_a_targeted_read() {
+    let fixture = new_fixture();
+    fixture.add_runtime_without_task();
+    fs::write(fixture.state.join("tasks"), "x".repeat(256 * 1024 + 1)).unwrap();
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_list_error"));
+    assert_eq!(fixture.task_reads(), 0);
+    assert_eq!(
+        fixture.check(&report, "cni_namespace").evidence["stale_evaluated"],
+        false
+    );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
 fn ttrpc_closed_control_channel_is_inoperable() {
     // 2026-08-01 incident topology 2: old-VM shutdown repeatedly failed with
     // `ttrpc: closed`. A listed task passed one State call, yet its shim can
@@ -653,10 +852,12 @@ fn ttrpc_closed_control_channel_is_inoperable() {
 
 #[test]
 fn stale_cni_namespace_is_detected() {
+    // A stopped task whose recorded VMM process is gone leaves its CNI netns
+    // records behind.
     let fixture = new_fixture();
-    fixture.add_container(MACHINE, "running", PROJECT, MACHINE, &fixture.state_root());
-    fixture.add_task(&container_id(), "PAUSED");
-    fixture.write_persist(&container_id(), None);
+    fixture.add_container(MACHINE, "exited", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "STOPPED");
+    fixture.write_persist(&container_id(), Some(4242));
     fixture.add_netns_record(&container_id());
 
     let report = fixture.probe();
@@ -666,6 +867,49 @@ fn stale_cni_namespace_is_detected() {
         fixture.check(&report, "cni_namespace").finding,
         Some("stale_cni_namespace")
     );
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn listed_paused_task_with_a_live_vmm_keeps_its_cni_records() {
+    // A paused Kata task keeps its VM and network namespace. Its records are
+    // not stale, and the paused task still never reads operable.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "paused", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "PAUSED");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_vmm_comm(4242, ".qemu-system-x8");
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Degraded);
+    assert_eq!(report.reason.as_deref(), Some("task_not_running"));
+    let cni = fixture.check(&report, "cni_namespace");
+    assert_eq!(cni.status, CheckStatus::Pass);
+    assert_eq!(cni.evidence["stale_evaluated"], false);
+    fixture.assert_nothing_mutated();
+}
+
+#[test]
+fn listed_unknown_task_status_is_unknown_not_degraded() {
+    // containerd 2.3 lists a task as UNKNOWN when its shim's State call fails
+    // with an error List does not drop. Its state is unknown, not stopped:
+    // the verdict is unknown and nothing it may still use is called stale.
+    let fixture = new_fixture();
+    fixture.add_container(MACHINE, "unknown", PROJECT, MACHINE, &fixture.state_root());
+    fixture.add_task(&container_id(), "UNKNOWN");
+    fixture.write_persist(&container_id(), Some(4242));
+    fixture.add_netns_record(&container_id());
+
+    let report = fixture.probe();
+    assert_verdict(&report, LifecycleVerdict::Unknown);
+    assert_eq!(report.reason.as_deref(), Some("task_state_unavailable"));
+    let task = fixture.check(&report, "containerd_task");
+    assert_eq!(task.evidence["task_status"].as_str(), Some("UNKNOWN"));
+    assert_eq!(task.evidence["shim_process_count"], 1);
+    let cni = fixture.check(&report, "cni_namespace");
+    assert_eq!(cni.status, CheckStatus::Pass);
+    assert_eq!(cni.evidence["stale_evaluated"], false);
     fixture.assert_nothing_mutated();
 }
 

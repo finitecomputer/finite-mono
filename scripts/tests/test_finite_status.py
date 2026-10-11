@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -1366,6 +1367,40 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                     "source_host_id": host, "contact_endpoint": endpoint})
                 self.assertEqual(result["status"], "unknown")
             run.assert_not_called()
+
+    def test_status_contract_reads_only_the_active_kata_host_address(self) -> None:
+        # A commented copy of the expected declaration once satisfied the
+        # contract while the active line published another address.
+        spec = importlib.util.spec_from_file_location(
+            "check_finite_status_contract", ROOT / "scripts" / "check_finite_status_contract.py")
+        checker = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(sys.modules, {"finite_status": finite_status}):
+            spec.loader.exec_module(checker)
+        declared = 'kataHostAddress = "10.254.3.4";'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copytree(ROOT / "infra", root / "infra", symlinks=True)
+            for name in ("finitecomputer-v2", "finitechat"):
+                (root / name).symlink_to(ROOT / name)
+            lat4 = root / "infra" / "nixos" / "hosts" / "finite-lat-4" / "default.nix"
+            original = lat4.read_text()
+            self.assertEqual(original.count(declared), 1)
+            with mock.patch.object(checker, "ROOT", root), \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                checker.main()
+            self.assertIn("finite status contract: ok", output.getvalue())
+            for drift in (
+                'kataHostAddress = "10.254.3.3"; # was: ' + declared,
+                "# " + declared,
+                "/*\n    " + declared + "\n    */",
+                declared + '\n    kataHostAddress = "10.254.3.3";',
+            ):
+                lat4.write_text(original.replace(declared, drift))
+                with self.subTest(drift=drift), mock.patch.object(checker, "ROOT", root):
+                    with self.assertRaises(SystemExit) as failure:
+                        checker.main()
+                    self.assertIn("finite-lat-4/default.nix declares kataHostAddress",
+                                  str(failure.exception))
 
     def test_assignment_contact_reports_principal_mismatch_without_echoing_document(self) -> None:
         principal = "npub1" + "q" * 58
