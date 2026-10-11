@@ -448,10 +448,23 @@ Use `scripts/finite-status --runtime-assignment PROJECT_ID` on Core to capture
 the active assignment, owner, Principal, image, creation lineage and credential
 state without credential values. Missing or ambiguous assignment, active
 controls, retirement state or a mismatched credential returns unknown. It does
-not select a recovery target or authorize mutation. For an isolated Kata
-rehearsal, `scripts/finite-status --kata-recovery-host` reads installed versions,
-cached image references, configuration and capacity; its observations do not
-qualify containment or a production repair.
+not select a recovery target or authorize mutation.
+
+Its `live_contact.container_output` copies the Agent's report-only stdout and
+stderr pipe samples (`agentd.container_output`) through a fixed allowlist, and
+only from a contact whose Principal matches Core's. `curl --fail` drops a
+not-ready 503 body, so only a ready Agent's samples appear. A not-ready,
+unreachable or mismatched contact reads `principal_not_matched`. Images without
+the observer read `not_reported`, and a value outside the allowlist reads
+`unrecognized`. `reported` means timestamped guest samples, possibly seconds
+older than the request, not current health, a collector or delivery. Buffered
+bytes can exceed capacity (separate reads), and `observed_decrease_bytes` sums
+observed drops, which can include discarded packet bytes. These samples never
+change the assignment status or exit code.
+
+For an isolated Kata rehearsal, `scripts/finite-status --kata-recovery-host`
+reads installed versions, cached image references, configuration and capacity;
+its observations do not qualify containment or a production repair.
 
 For an exactly-one-agent emergency where the probe verdict is understood and
 the upgrade must proceed anyway, add `--probe-override` to the execute

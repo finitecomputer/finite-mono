@@ -767,10 +767,95 @@ def collect_runtime_assignment(project: str) -> dict[str, Any]:
         raise CollectionError("Core Runtime assignment query returned invalid JSON") from error
 
 
+# Report-only output pipe observations that finite-agentd samples in the guest
+# and health_server.py projects as the contact body's agentd.container_output.
+# This keeps its own copy of that fixed vocabulary instead of importing guest
+# code; anything outside it, including a newer vocabulary, reads unknown.
+CONTACT_OUTPUT_PIPE_FIELDS = ("observed_at_ms", "buffered_bytes", "capacity_bytes",
+                              "first_observed_at_ms", "sample_count", "observed_decrease_bytes")
+CONTACT_OUTPUT_FILE_TYPES = frozenset({"block_device", "character_device", "directory", "other",
+                                       "regular_file", "socket", "symlink"})
+CONTACT_OUTPUT_ERRORS = frozenset({"EBADF", "EINTR", "EINVAL", "EIO", "EMFILE", "ENFILE", "ENOMEM",
+                                   "ENOTTY", "other"})
+CONTACT_OUTPUT_UNKNOWN_REASONS = frozenset({"malformed", "agentd_status_stale"})
+
+
+class _UnrecognizedOutput(ValueError):
+    pass
+
+
+def _output_integer(value: object) -> int:
+    if type(value) is int and 0 <= value <= 2**53 - 1:
+        return value
+    raise _UnrecognizedOutput
+
+
+def _output_name(value: object, vocabulary: frozenset[str]) -> str:
+    # A JSON array or object is unhashable: test the type before membership.
+    if isinstance(value, str) and value in vocabulary:
+        return value
+    raise _UnrecognizedOutput
+
+
+def _output_stream(value: object, name: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not isinstance(value.get("kind"), str):
+        raise _UnrecognizedOutput
+    kind = value["kind"]
+    if kind in ("sampler_not_started", "unsupported_platform") or (kind == "same_pipe_as_stdout" and name == "stderr"):
+        return {"kind": kind}
+    if kind == "unknown" and value.get("reason") == "observation_stale":
+        return {"kind": kind, "reason": "observation_stale"}
+    if kind == "pipe":
+        return {"kind": kind, **{field: _output_integer(value.get(field)) for field in CONTACT_OUTPUT_PIPE_FIELDS}}
+    stream = {"kind": kind, "observed_at_ms": _output_integer(value.get("observed_at_ms"))}
+    if kind == "not_pipe":
+        return {**stream, "file_type": _output_name(value.get("file_type"), CONTACT_OUTPUT_FILE_TYPES)}
+    if kind == "unavailable":
+        return {**stream, "error": _output_name(value.get("error"), CONTACT_OUTPUT_ERRORS)}
+    raise _UnrecognizedOutput
+
+
+def contact_output_observations(contact: dict[str, Any]) -> dict[str, Any]:
+    """Copy agentd's projected output observations through a fixed allowlist.
+
+    Call only for a contact whose Principal matches Core's. These are guest
+    samples, not a verdict: `reported` means timestamped readings (possibly
+    seconds older than the response), never current health, collector
+    presence or delivery. Values pass through unchanged, including buffered
+    above capacity (two separate reads) and observed_decrease_bytes, a sum of
+    observed drops that can include discarded packet bytes.
+    """
+    agentd = contact.get("agentd")
+    # A non-object agentd falls through below as an unrecognized report.
+    report = agentd.get("container_output") if isinstance(agentd, dict) else agentd
+    if report is None:
+        # Images before the output observer, or before agentd's first sample.
+        return {"state": "not_reported"}
+    try:
+        if not isinstance(report, dict) or not isinstance(report.get("state"), str):
+            raise _UnrecognizedOutput
+        if report["state"] == "reported":
+            return {"state": "reported", "sample_interval_ms": _output_integer(report.get("sample_interval_ms")),
+                    "stdout": _output_stream(report.get("stdout"), "stdout"),
+                    "stderr": _output_stream(report.get("stderr"), "stderr")}
+        if report["state"] == "not_reported":
+            return {"state": "not_reported"}
+        if report["state"] == "unknown":
+            return {"state": "unknown", "reason": _output_name(report.get("reason"), CONTACT_OUTPUT_UNKNOWN_REASONS)}
+    except _UnrecognizedOutput:
+        pass
+    return {"state": "unknown", "reason": "unrecognized"}
+
+
 def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
-    """Observe the Core-bound published Principal even when shim State is unavailable."""
+    """Observe the Core-bound published Principal even when shim State is unavailable.
+
+    `curl --fail` refuses a not-ready 503 body, so output observations come
+    only from a ready contact, and only once its Principal matches Core's.
+    """
     result = {"status": "unknown", "repair_authority": False,
-              "agent_principal_sha256": None, "matches_core_principal": False}
+              "agent_principal_sha256": None, "matches_core_principal": False,
+              "container_output": {"state": "unknown", "reason": "principal_not_matched"}}
     profile = CONTRACT["hosts"].get(assignment.get("source_host_id"), {})
     endpoint = assignment.get("contact_endpoint")
     if not isinstance(endpoint, str) or "kata_host_address" not in profile:
@@ -792,6 +877,8 @@ def collect_assignment_contact(assignment: dict[str, Any]) -> dict[str, Any]:
             return result
         result.update(status="observed", agent_principal_sha256=hashlib.sha256(principal.encode()).hexdigest(),
                       matches_core_principal=principal == assignment.get("expected_agent_npub"))
+        if result["matches_core_principal"]:
+            result["container_output"] = contact_output_observations(value)
     except (ValueError, AttributeError):
         pass
     return result
