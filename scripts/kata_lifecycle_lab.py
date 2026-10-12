@@ -71,6 +71,7 @@ class Interrupted(BaseException):
 @dataclass
 class _CliInterrupts:
     signum: int | None = None
+    ignore: bool = False
 
     def check(self) -> None:
         if self.signum is not None:
@@ -83,15 +84,16 @@ _active_cli_interrupts: list[_CliInterrupts] = []
 def handle_interrupt(signum: int, _frame: Any) -> None:
     """Defer configured signals while an owned CLI is being cleaned up."""
     if _active_cli_interrupts:
-        _active_cli_interrupts[-1].signum = signum
+        if not any(frame.ignore for frame in _active_cli_interrupts):
+            _active_cli_interrupts[-1].signum = signum
     else:
         raise Interrupted(signum)
 
 
 @contextmanager
-def _cli_interrupts():
-    """The canonical handler cannot preempt acquisition or final cleanup."""
-    interrupts = _CliInterrupts()
+def _cli_interrupts(*, ignore: bool = False):
+    """Protect ownership transitions; final teardown keeps its ignore policy."""
+    interrupts = _CliInterrupts(ignore=ignore)
     main = threading.current_thread() is threading.main_thread()
     if main:
         _active_cli_interrupts.append(interrupts)
@@ -613,25 +615,26 @@ class LabRun:
         except Exception as error:  # noqa: BLE001 - a runner defect is INCONCLUSIVE, never exit 1 (FAIL)
             self.state['internal_error'] = type(error).__name__
         finally:
-            ignored = {}
-            if threading.current_thread() is threading.main_thread():
-                ignored = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
-            try:
+            with _cli_interrupts(ignore=True):
+                ignored = {}
                 try:
-                    if self.owned is not None and not (self.out / 'diagnostics').exists():
-                        try:
-                            self.collect()
-                        except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
-                            self.state['diagnostics_error'] = str(error)
-                    self.teardown()
-                except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
-                    self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
-                                                               error=str(error))
+                    if threading.current_thread() is threading.main_thread():
+                        ignored = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
+                    try:
+                        if self.owned is not None and not (self.out / 'diagnostics').exists():
+                            try:
+                                self.collect()
+                            except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                                self.state['diagnostics_error'] = str(error)
+                        self.teardown()
+                    except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
+                        self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
+                                                                   error=str(error))
+                    finally:
+                        self.write()
                 finally:
-                    self.write()
-            finally:
-                for s, handler in ignored.items():
-                    signal.signal(s, handler)
+                    for s, handler in ignored.items():
+                        signal.signal(s, handler)
         if not self.cleanup_clean():
             return 3
         try:

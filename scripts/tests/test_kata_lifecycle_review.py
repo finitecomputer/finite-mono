@@ -335,6 +335,61 @@ class OwnedCliTests(unittest.TestCase):
         self.assertTrue(result.timed_out)
         self.assertIn('local CLI reader failed (ValueError)', result.stderr)
 
+    def test_outer_teardown_transition_preserves_cleanup_and_evidence(self) -> None:
+        for stage in ('admission', 'restoration'):
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                out = Path(directory)
+                runner = lab.LabRun(fx.stop_arm('idle'), out / 'helper', out, mock.Mock())
+                runner.preflight = mock.Mock(side_effect=lab.Interrupted(signal.SIGTERM))
+                runner.cleanup_clean = mock.Mock(return_value=False)
+                processes, sent = [], []
+                set_signal, popen = signal.signal, lab._OwnedPopen
+
+                def capture(*args, **kwargs):
+                    proc = popen(*args, **kwargs)
+                    processes.append(proc)
+                    os.kill(os.getpid(), signal.SIGINT)
+                    return proc
+
+                def nested_cleanup():
+                    result = lab.Engine(sys.executable).run(['-c', 'print("synthetic teardown")'], 5)
+                    self.assertEqual(result.code, 0)
+
+                runner.teardown = mock.Mock(side_effect=nested_cleanup)
+
+                def interrupt_transition(signum, handler):
+                    previous = set_signal(signum, handler)
+                    target = signal.SIG_IGN if stage == 'admission' else lab.handle_interrupt
+                    if signum == signal.SIGTERM and handler is target and not sent:
+                        sent.append(signal.SIGINT if stage == 'admission' else signal.SIGTERM)
+                        os.kill(os.getpid(), sent[-1])
+                    return previous
+
+                previous = {s: set_signal(s, lab.handle_interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
+                try:
+                    with mock.patch.object(lab.signal, 'signal', side_effect=interrupt_transition), \
+                            mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
+                        code = runner.execute()
+                    self.assertEqual(code, 3, 'Unresolved synthetic remote cleanup must remain unqualified')
+                    self.assertEqual(len(sent), 1, 'Exercise the actual outer signal transition')
+                    runner.teardown.assert_called_once()
+                    self.assertEqual(json.loads((out / 'run.json').read_text())['runner_status'], 'interrupted')
+                    self.assertTrue((out / 'records.jsonl').is_file())
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNotNone(processes[0].returncode)
+                    self.assertTrue(processes[0].stdout.closed)
+                    self.assertTrue(processes[0].stderr.closed)
+                    self.assertEqual(lab._active_cli_interrupts, [])
+                finally:
+                    for s, handler in previous.items():
+                        set_signal(s, handler)
+                    for proc in processes:
+                        if proc.poll() is None:
+                            proc.kill()
+                        proc.wait(timeout=2)
+                        proc.stdout.close()
+                        proc.stderr.close()
+
 
 class EvidenceReviewTests(unittest.TestCase):
     def setUp(self) -> None:
