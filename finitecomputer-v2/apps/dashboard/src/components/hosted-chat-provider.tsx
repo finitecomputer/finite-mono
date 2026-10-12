@@ -98,7 +98,7 @@ type HostedChatContextValue = {
   }) => string;
 };
 
-const HostedChatContext = createContext<HostedChatContextValue | null>(null);
+export const HostedChatContext = createContext<HostedChatContextValue | null>(null);
 
 export function HostedChatProvider({
   children,

@@ -10,7 +10,9 @@ import {
   isAgentBindingAuthorizationRequired,
   isCanonicalNewChatTarget,
   parseHostedChatAction,
+  refuseRestrictedUploadCaption,
   selectOriginalAgentCreationRequest,
+  uploadHostedWebChatAttachments,
 } from "@/lib/hosted-web-chat";
 import type { CoreAgentCreationRequestSummary } from "@/lib/core-client";
 import { CHAT_UNAVAILABLE_MESSAGE } from "@/lib/chat-product-copy";
@@ -423,6 +425,82 @@ test("parseHostedChatAction accepts the bounded message operations used by web c
       RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" },
     }),
     { RevokeDevice: { account_id: "account-1", device_id: "electron-alpha" } }
+  );
+});
+
+test("parseHostedChatAction refuses restricted slash commands on every send operation", () => {
+  const restricted = (error: unknown) =>
+    error instanceof HostedWebChatError
+    && error.status === 400
+    && error.message
+      === "/update isn't available in Finite. Finite manages your agent's software and restarts.";
+  const target = { room_id: "room-1", topic_id: "topic-1", chat_id: "chat-1" };
+  for (const text of ["/update", "  /UPDATE now", "/update@finite_bot"]) {
+    assert.throws(() => parseHostedChatAction({ SendChatMessage: { ...target, text } }), restricted);
+    assert.throws(() => parseHostedChatAction({ SendTopicMessage: { ...target, text } }), restricted);
+    assert.throws(() => parseHostedChatAction({ SendMessage: { room_id: "room-1", text } }), restricted);
+  }
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/codex_runtime auto" } }),
+    /\/codex-runtime isn't available in Finite/
+  );
+
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/help" } }),
+    /\/help isn't available in Finite\. Type \/ in the message box/
+  );
+  assert.throws(
+    () => parseHostedChatAction({ SendChatMessage: { ...target, text: "/proactive 5m ping" } }),
+    /\/loop isn't available in Finite/
+  );
+
+  for (const text of ["\u001c/debug", "/debug\u0085anything", "\u2029/update"]) {
+    assert.throws(
+      () => parseHostedChatAction({ SendChatMessage: { ...target, text } }),
+      /isn't available in Finite/,
+      JSON.stringify(text)
+    );
+  }
+
+  for (const text of ["/new trip", "/pause", "/approve", "/yes", "please /update", "https://x.test/update"]) {
+    assert.deepEqual(parseHostedChatAction({ SendChatMessage: { ...target, text } }), {
+      SendChatMessage: { ...target, text, metadata_json: null },
+    });
+  }
+});
+
+test("attachment captions refuse restricted commands and non-text values", () => {
+  const form = (caption?: string | Blob) => {
+    const formData = new FormData();
+    formData.set("room_id", "room-1");
+    if (typeof caption === "string") formData.set("caption", caption);
+    else if (caption) formData.set("caption", caption, "caption.txt");
+    return formData;
+  };
+  const refused = (pattern: RegExp) => (error: unknown) =>
+    error instanceof HostedWebChatError && error.status === 400 && pattern.test(error.message);
+
+  assert.throws(() => refuseRestrictedUploadCaption(form("/debug")), refused(/^\/debug isn't available in Finite\./));
+  assert.throws(
+    () => refuseRestrictedUploadCaption(form("/debug\u0085anything")),
+    refused(/^\/debug isn't available in Finite\./)
+  );
+  assert.throws(
+    () => refuseRestrictedUploadCaption(form(new Blob(["/debug"], { type: "text/plain" }))),
+    refused(/^Invalid caption\.$/)
+  );
+
+  for (const caption of [undefined, "", "Here is the report", "/new trip", "https://x.test/update"]) {
+    assert.doesNotThrow(() => refuseRestrictedUploadCaption(form(caption)), String(caption));
+  }
+});
+
+test("attachment uploads authenticate before validating the caption", async () => {
+  const formData = new FormData();
+  formData.set("caption", "/debug");
+  await assert.rejects(
+    uploadHostedWebChatAttachments("machine-1", formData),
+    (error: unknown) => !(error instanceof HostedWebChatError && error.status === 400)
   );
 });
 

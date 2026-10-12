@@ -5,6 +5,7 @@ import {
   FormEvent,
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -76,6 +77,22 @@ import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
 import { restoreHostedChatComposerDraft } from "@/lib/hosted-chat-session";
 import {
+  SlashCommandPicker,
+  slashOptionId,
+} from "@/components/slash-command-picker";
+import {
+  isPastedInput,
+  keepSlashDismissed,
+  matchSlashCommands,
+  restrictedSlashCommand,
+  slashArgsHint,
+  slashEnterInserts,
+  slashPickerKeyAction,
+  slashPickerVisible,
+  slashQuery,
+  type SlashCommand,
+} from "@/lib/slash-commands";
+import {
   BrainApprovalCards,
   BrainInvitationCards,
   useBrainApprovalDetails,
@@ -145,6 +162,8 @@ type PreviewSite = {
   url: string;
 };
 
+const SLASH_HIGHLIGHT_RESET = { query: "", index: 0, moved: false };
+
 export function HostedWebChat({
   initialDraft,
   machineId,
@@ -193,6 +212,32 @@ export function HostedWebChat({
   useEffect(() => {
     setDraft(restoreHostedChatComposerDraft(machineId, initialDraft ?? ""));
   }, [initialDraft, machineId]);
+  // Slash picker: open while the draft is a bare `/token`. Esc closes it
+  // while the same query grows; restricted commands always explain the
+  // block. A draft that is exactly what a paste produced stays closed so
+  // Enter still sends.
+  const slashListboxId = useId();
+  const slashText = slashQuery(draft);
+  const slashBlocked = restrictedSlashCommand(draft);
+  const slashMatches = useMemo(
+    () => (slashText === null ? [] : matchSlashCommands(slashText)),
+    [slashText]
+  );
+  const [slashDismissed, setSlashDismissed] = useState(false);
+  const [pastedDraft, setPastedDraft] = useState<string | null>(null);
+  const [slashHighlight, setSlashHighlight] = useState(SLASH_HIGHLIGHT_RESET);
+  const slashHighlightCurrent = slashHighlight.query === slashText;
+  const slashIndex = slashHighlightCurrent
+    ? Math.min(slashHighlight.index, Math.max(0, slashMatches.length - 1))
+    : 0;
+  const slashPickerOpen = slashPickerVisible(draft, { dismissed: slashDismissed, pastedDraft });
+  const slashNavigable = slashPickerOpen && !slashBlocked && slashMatches.length > 0;
+  const slashEnterInsertsHighlight = slashNavigable && slashEnterInserts(
+    slashText ?? "",
+    slashMatches[slashIndex],
+    slashHighlightCurrent && slashHighlight.moved
+  );
+  const slashHint = slashArgsHint(draft);
   const [pendingAgentTurns, setPendingAgentTurns] = useState<PendingChatTurn[]>([]);
   const [activityObservedAtMs, setActivityObservedAtMs] = useState<number | null>(null);
   const [leaseNowMs, setLeaseNowMs] = useState(() => Date.now());
@@ -596,11 +641,24 @@ export function HostedWebChat({
     );
   }
 
+  function insertSlashCommand(command: SlashCommand) {
+    const next = `/${command.name} `;
+    setSlashHighlight(SLASH_HIGHLIGHT_RESET);
+    setDraft(next);
+    noteTyping(next);
+    requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      textarea?.focus();
+      textarea?.setSelectionRange(next.length, next.length);
+    });
+  }
+
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
     if (
       (!text && attachments.length === 0)
+      || restrictedSlashCommand(text)
       || !selectedRoom
       || !selectedTopic
       || !selectedChat
@@ -638,6 +696,7 @@ export function HostedWebChat({
       }
       const refusal = sendError(next);
       if (refusal) throw new Error(refusal);
+      setSlashHighlight(SLASH_HIGHLIGHT_RESET);
       setDraft("");
       setAttachments((current) => {
         current.forEach(revokeAttachmentPreview);
@@ -1082,6 +1141,26 @@ export function HostedWebChat({
                 ) : null}
               </div>
 
+              {/* Opens upward from above the chat alert, so it never covers it. */}
+              {slashPickerOpen ? (
+                <div className="finite-chat__slash-anchor">
+                  <SlashCommandPicker
+                    listboxId={slashListboxId}
+                    query={slashText ?? ""}
+                    commands={slashMatches}
+                    highlighted={slashIndex}
+                    enterInserts={slashEnterInsertsHighlight}
+                    blocked={slashBlocked}
+                    onHighlight={(index) => setSlashHighlight({
+                      query: slashText ?? "",
+                      index,
+                      moved: slashHighlightCurrent && slashHighlight.moved,
+                    })}
+                    onInsert={insertSlashCommand}
+                  />
+                </div>
+              ) : null}
+
               {showLatest ? (
                 <button
                   type="button"
@@ -1170,28 +1249,82 @@ export function HostedWebChat({
                       ))}
                     </div>
                   ) : null}
-                  <textarea
-                    ref={textareaRef}
-                    aria-label="Message your agent"
-                    placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
-                    value={draft}
-                    disabled={!connected || sending}
-                    rows={1}
-                    onBlur={() => stopTyping(selectedRoom?.room_id)}
-                    onChange={(event) => {
-                      setDraft(event.target.value);
-                      noteTyping(event.target.value);
-                    }}
-                    onPaste={(event) => {
-                      if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && !event.shiftKey) {
-                        event.preventDefault();
-                        event.currentTarget.form?.requestSubmit();
+                  <div className="finite-chat__composer-input">
+                    <textarea
+                      ref={textareaRef}
+                      aria-label="Message your agent"
+                      aria-controls={slashNavigable ? slashListboxId : undefined}
+                      aria-autocomplete={slashNavigable ? "list" : undefined}
+                      aria-activedescendant={
+                        slashNavigable ? slashOptionId(slashListboxId, slashIndex) : undefined
                       }
-                    }}
-                  />
+                      placeholder={connected ? `Ask ${machineLabel} anything` : CHAT_WAITING_FOR_AGENT_MESSAGE}
+                      value={draft}
+                      disabled={!connected || sending}
+                      rows={1}
+                      onBlur={() => stopTyping(selectedRoom?.room_id)}
+                      onInput={(event) => {
+                        const { inputType } = event.nativeEvent as InputEvent;
+                        setPastedDraft(isPastedInput(inputType) ? event.currentTarget.value : null);
+                        if (slashDismissed && !keepSlashDismissed(draft, event.currentTarget.value)) {
+                          setSlashDismissed(false);
+                        }
+                        // Input also fires when pasted text equals the selection;
+                        // React's change event skips that unchanged value.
+                        setSlashHighlight(SLASH_HIGHLIGHT_RESET);
+                      }}
+                      onChange={(event) => {
+                        setDraft(event.target.value);
+                        noteTyping(event.target.value);
+                      }}
+                      onPaste={(event) => {
+                        if (event.clipboardData.files.length > 0) addFiles(event.clipboardData.files);
+                      }}
+                      onKeyDown={(event) => {
+                        const action = slashPickerKeyAction(
+                          {
+                            key: event.key,
+                            shiftKey: event.shiftKey,
+                            isComposing: event.nativeEvent.isComposing,
+                            keyCode: event.nativeEvent.keyCode,
+                          },
+                          {
+                            open: slashPickerOpen,
+                            navigable: slashNavigable,
+                            blocked: slashBlocked !== null,
+                            enterInserts: slashEnterInsertsHighlight,
+                          }
+                        );
+                        if (action) {
+                          event.preventDefault();
+                          if (action === "dismiss") {
+                            setSlashDismissed(true);
+                          } else if (action === "insert") {
+                            insertSlashCommand(slashMatches[slashIndex]);
+                          } else {
+                            const step = action === "next" ? 1 : -1;
+                            setSlashHighlight({
+                              query: slashText ?? "",
+                              index: (slashIndex + step + slashMatches.length) % slashMatches.length,
+                              moved: true,
+                            });
+                          }
+                          return;
+                        }
+                        if (event.key === "Enter" && !event.shiftKey) {
+                          event.preventDefault();
+                          if (slashBlocked) return;
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                    />
+                    {slashHint ? (
+                      <div className="finite-chat__slash-ghost" aria-hidden>
+                        <span>{draft}</span>
+                        {slashHint}
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="finite-chat__composer-actions">
                     <div className="finite-chat__composer-left">
                       <input
@@ -1261,6 +1394,7 @@ export function HostedWebChat({
                       disabled={
                         !connected
                         || (!draft.trim() && attachments.length === 0)
+                        || slashBlocked !== null
                         || sending
                         || audioRecordingState !== "idle"
                       }
