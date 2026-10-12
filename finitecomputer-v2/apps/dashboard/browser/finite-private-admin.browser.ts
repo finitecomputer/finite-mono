@@ -34,7 +34,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     page.setDefaultNavigationTimeout(90_000);
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
-    await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("heading", { name: "Your own Finite Agent.", exact: true }).waitFor({ state: "visible" });
     await page.getByRole("link", { name: "Finite.Computer" }).waitFor({ state: "visible" });
     await page.getByRole("list", { name: "Agent setup progress" }).waitFor({
       state: "visible",
