@@ -91,9 +91,9 @@ def handle_interrupt(signum: int, _frame: Any) -> None:
 
 
 @contextmanager
-def _cli_interrupts(*, ignore: bool = False):
+def _cli_interrupts():
     """Protect ownership transitions; final teardown keeps its ignore policy."""
-    interrupts = _CliInterrupts(ignore=ignore)
+    interrupts = _CliInterrupts()
     main = threading.current_thread() is threading.main_thread()
     if main:
         _active_cli_interrupts.append(interrupts)
@@ -102,7 +102,15 @@ def _cli_interrupts(*, ignore: bool = False):
     finally:
         if main:
             _active_cli_interrupts.pop()
+            if interrupts.signum is not None and _active_cli_interrupts:
+                _active_cli_interrupts[-1].signum = interrupts.signum
         interrupts.check()
+
+
+def _check_interrupts() -> None:
+    if not any(frame.ignore for frame in _active_cli_interrupts):
+        for frame in _active_cli_interrupts:
+            frame.check()
 
 
 def _poll_cli(operation: Callable[..., Any], deadline: float, interrupts: _CliInterrupts) -> Any:
@@ -288,6 +296,7 @@ class LabRun:
     # -- bookkeeping -------------------------------------------------------
     def remaining(self, bound: float, phase: str = 'experiment') -> float:
         if phase == 'experiment':
+            _check_interrupts()
             deadline = self.deadline
         else:
             allocation = 'cleanup' if phase == 'reconciliation' else phase
@@ -304,6 +313,8 @@ class LabRun:
             return
         left = self.remaining(seconds, phase)
         self.sleep(left)
+        if phase == 'experiment':
+            _check_interrupts()
         if left < seconds:
             raise Refused(phase + ' budget exhausted during settle/readiness')
         self.remaining(1, phase)
@@ -591,59 +602,58 @@ class LabRun:
                                                '-label', 'final'])
 
     def execute(self) -> int:
-        try:
-            self.preflight()
-            self.create()
-            self.require('start', self.engine.run(['start', self.owned], self.remaining(self.bounds['create_s'])))
-            self.wait_ready()
-            self.install()
-            failure: Refused | None = None
+        # Establish cancellation protection before any resource is submitted;
+        # reuse this frame when finalization starts, without an acquisition gap.
+        with _cli_interrupts() as interrupts:
             try:
-                self.run_inner()
-                if self.arm['kind'] == 'agent-stop':
-                    self.final_observation()
-            except Refused as reason:
-                failure = reason
-            self.collect()
-            if failure is not None:
-                raise failure
-            self.state['runner_status'] = 'complete'
-        except Refused as reason:
-            self.state['refused'] = str(reason)
-        except Interrupted:
-            self.state['runner_status'] = 'interrupted'
-        except Exception as error:  # noqa: BLE001 - a runner defect is INCONCLUSIVE, never exit 1 (FAIL)
-            self.state['internal_error'] = type(error).__name__
-        finally:
-            with _cli_interrupts(ignore=True):
-                ignored = {}
+                self.preflight()
+                self.create()
+                self.require('start', self.engine.run(['start', self.owned], self.remaining(self.bounds['create_s'])))
+                self.wait_ready()
+                self.install()
+                failure: Refused | None = None
                 try:
-                    if threading.current_thread() is threading.main_thread():
-                        ignored = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
-                    try:
-                        if self.owned is not None and not (self.out / 'diagnostics').exists():
-                            try:
-                                self.collect()
-                            except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
-                                self.state['diagnostics_error'] = str(error)
-                        self.teardown()
-                    except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
-                        self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
-                                                                   error=str(error))
-                    finally:
-                        self.write()
+                    self.run_inner()
+                    if self.arm['kind'] == 'agent-stop':
+                        self.final_observation()
+                except Refused as reason:
+                    failure = reason
+                self.collect()
+                if failure is not None:
+                    raise failure
+                self.state['runner_status'] = 'complete'
+            except Refused as reason:
+                self.state['refused'] = str(reason)
+            except Interrupted:
+                self.state['runner_status'] = 'interrupted'
+            except Exception as error:  # noqa: BLE001 - a runner defect is INCONCLUSIVE, never exit 1 (FAIL)
+                self.state['internal_error'] = type(error).__name__
+            finally:
+                interrupts.ignore = True
+                if interrupts.signum is not None:
+                    self.state['runner_status'] = 'interrupted'
+                    interrupts.signum = None
+                try:
+                    if self.owned is not None and not (self.out / 'diagnostics').exists():
+                        try:
+                            self.collect()
+                        except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                            self.state['diagnostics_error'] = str(error)
+                    self.teardown()
+                except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
+                    self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
+                                                               error=str(error))
                 finally:
-                    for s, handler in ignored.items():
-                        signal.signal(s, handler)
-        if not self.cleanup_clean():
-            return 3
-        try:
-            result = verdict_module.classify(self.out)
-        except Exception as error:  # noqa: BLE001 - a classifier defect must never read as PASS or FAIL
-            result = {'schema': verdict_module.VERDICT_SCHEMA, 'verdict': 'INCONCLUSIVE',
-                      'reason': f'classifier error ({type(error).__name__})'}
-        (self.out / 'verdict.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
-        return verdict_module.EXIT[result['verdict']]
+                    self.write()
+            if not self.cleanup_clean():
+                return 3
+            try:
+                result = verdict_module.classify(self.out)
+            except Exception as error:  # noqa: BLE001 - a classifier defect must never read as PASS or FAIL
+                result = {'schema': verdict_module.VERDICT_SCHEMA, 'verdict': 'INCONCLUSIVE',
+                          'reason': f'classifier error ({type(error).__name__})'}
+            (self.out / 'verdict.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+            return verdict_module.EXIT[result['verdict']]
 
     def write(self) -> None:
         (self.out / 'run.json').write_text(json.dumps(self.state, indent=2, sort_keys=True) + '\n')

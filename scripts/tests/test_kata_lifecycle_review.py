@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import contextlib
+import ast
+import inspect
 import io
 import json
 import os
@@ -9,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import unittest
@@ -336,60 +339,67 @@ class OwnedCliTests(unittest.TestCase):
         self.assertIn('local CLI reader failed (ValueError)', result.stderr)
 
     def test_outer_teardown_transition_preserves_cleanup_and_evidence(self) -> None:
-        for stage in ('admission', 'restoration'):
-            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
-                out = Path(directory)
-                runner = lab.LabRun(fx.stop_arm('idle'), out / 'helper', out, mock.Mock())
-                runner.preflight = mock.Mock(side_effect=lab.Interrupted(signal.SIGTERM))
-                runner.cleanup_clean = mock.Mock(return_value=False)
-                processes, sent = [], []
-                set_signal, popen = signal.signal, lab._OwnedPopen
+        with tempfile.TemporaryDirectory() as directory:
+            out = Path(directory)
+            runner = lab.LabRun(fx.stop_arm('idle'), out / 'helper', out, mock.Mock())
+            runner.preflight = mock.Mock(side_effect=lab.Interrupted(signal.SIGTERM))
+            runner.cleanup_clean = mock.Mock(return_value=False)
+            processes, sent = [], []
+            set_signal, popen = signal.signal, lab._OwnedPopen
+            source, start = inspect.getsourcelines(lab.LabRun.execute)
+            tree = ast.parse(textwrap.dedent(''.join(source)))
+            arm_try = next(node for node in ast.walk(tree) if isinstance(node, ast.Try)
+                           and any(isinstance(handler.type, ast.Name) and handler.type.id == 'Interrupted'
+                                   for handler in node.handlers))
+            admission = start + arm_try.finalbody[0].lineno - 1
 
-                def capture(*args, **kwargs):
-                    proc = popen(*args, **kwargs)
-                    processes.append(proc)
+            def capture(*args, **kwargs):
+                proc = popen(*args, **kwargs)
+                processes.append(proc)
+                os.kill(os.getpid(), signal.SIGINT)
+                return proc
+
+            def nested_cleanup():
+                result = lab.Engine(sys.executable).run(['-c', 'print("synthetic teardown")'], 5)
+                self.assertEqual(result.code, 0)
+
+            runner.teardown = mock.Mock(side_effect=nested_cleanup)
+
+            def interrupt_admission(frame, event, _arg):
+                # Deliver before even the first finalizer instruction. A
+                # guard acquired inside the finalizer is already too late.
+                if frame.f_code is lab.LabRun.execute.__code__ and event == 'line' and frame.f_lineno == admission and not sent:
+                    sent.append(signal.SIGINT)
                     os.kill(os.getpid(), signal.SIGINT)
-                    return proc
+                return interrupt_admission
 
-                def nested_cleanup():
-                    result = lab.Engine(sys.executable).run(['-c', 'print("synthetic teardown")'], 5)
-                    self.assertEqual(result.code, 0)
-
-                runner.teardown = mock.Mock(side_effect=nested_cleanup)
-
-                def interrupt_transition(signum, handler):
-                    previous = set_signal(signum, handler)
-                    target = signal.SIG_IGN if stage == 'admission' else lab.handle_interrupt
-                    if signum == signal.SIGTERM and handler is target and not sent:
-                        sent.append(signal.SIGINT if stage == 'admission' else signal.SIGTERM)
-                        os.kill(os.getpid(), sent[-1])
-                    return previous
-
-                previous = {s: set_signal(s, lab.handle_interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
-                try:
-                    with mock.patch.object(lab.signal, 'signal', side_effect=interrupt_transition), \
-                            mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
-                        code = runner.execute()
-                    self.assertEqual(code, 3, 'Unresolved synthetic remote cleanup must remain unqualified')
-                    self.assertEqual(len(sent), 1, 'Exercise the actual outer signal transition')
-                    runner.teardown.assert_called_once()
-                    self.assertEqual(json.loads((out / 'run.json').read_text())['runner_status'], 'interrupted')
-                    self.assertTrue((out / 'records.jsonl').is_file())
-                    self.assertEqual(len(processes), 1)
-                    self.assertIsNotNone(processes[0].returncode)
-                    self.assertTrue(processes[0].stdout.closed)
-                    self.assertTrue(processes[0].stderr.closed)
-                    self.assertEqual(lab._active_cli_interrupts, [])
-                finally:
-                    for s, handler in previous.items():
-                        set_signal(s, handler)
-                    for proc in processes:
-                        if proc.poll() is None:
-                            proc.kill()
-                        proc.wait(timeout=2)
-                        proc.stdout.close()
-                        proc.stderr.close()
-
+            previous = {s: set_signal(s, lab.handle_interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
+            previous_trace = sys.gettrace()
+            try:
+                sys.settrace(interrupt_admission)
+                with mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
+                    code = runner.execute()
+                sys.settrace(previous_trace)
+                self.assertEqual(code, 3, 'Unresolved synthetic remote cleanup must remain unqualified')
+                self.assertEqual(len(sent), 1, 'Exercise cancellation before outer finalizer admission')
+                runner.teardown.assert_called_once()
+                self.assertEqual(json.loads((out / 'run.json').read_text())['runner_status'], 'interrupted')
+                self.assertTrue((out / 'records.jsonl').is_file())
+                self.assertEqual(len(processes), 1)
+                self.assertIsNotNone(processes[0].returncode)
+                self.assertTrue(processes[0].stdout.closed)
+                self.assertTrue(processes[0].stderr.closed)
+                self.assertEqual(lab._active_cli_interrupts, [])
+            finally:
+                sys.settrace(previous_trace)
+                for s, handler in previous.items():
+                    set_signal(s, handler)
+                for proc in processes:
+                    if proc.poll() is None:
+                        proc.kill()
+                    proc.wait(timeout=2)
+                    proc.stdout.close()
+                    proc.stderr.close()
 
 class EvidenceReviewTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -402,6 +412,31 @@ class EvidenceReviewTests(unittest.TestCase):
         arm = fx.stop_arm(scenario)
         return fx.write_run(Path(self.tmp.name) / str(self.count), arm, fx.run_state(RUN, arm, CID),
                             fx.stop_records(RUN, CID, scenario).lines())
+
+    def test_queued_cancellation_stops_the_next_experiment_submission(self) -> None:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum):
+                out = Path(self.tmp.name) / str(signum)
+                out.mkdir()
+                runner = lab.LabRun(fx.stop_arm('idle'), out / 'helper', out, mock.Mock())
+
+                def interrupt_preflight():
+                    os.kill(os.getpid(), signum)
+                    runner.remaining(1)
+
+                runner.preflight = mock.Mock(side_effect=interrupt_preflight)
+                runner.create = mock.Mock()
+                runner.teardown = mock.Mock()
+                runner.cleanup_clean = mock.Mock(return_value=False)
+                previous = signal.signal(signum, lab.handle_interrupt)
+                try:
+                    self.assertEqual(runner.execute(), 3)
+                    runner.create.assert_not_called()
+                    runner.teardown.assert_called_once()
+                    self.assertEqual(json.loads((out / 'run.json').read_text())['runner_status'], 'interrupted')
+                    self.assertEqual(lab._active_cli_interrupts, [])
+                finally:
+                    signal.signal(signum, previous)
 
     def test_duplicate_keys_in_all_input_files_are_inconclusive(self) -> None:
         cases = [
