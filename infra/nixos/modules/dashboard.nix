@@ -4,10 +4,11 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # October 12 signup/support candidate, built from isolated source 2fce4900.
-    # Core migration 0042 must precede these dashboard actions; excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/38254603242
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:92fe3d3c1803eada80b4b9349ee577009ded9195392493b24814c569a862cb3d";
+    # PR1060: Persistent editable trial codes and account/agent identities.
+    # Roll out Core from this source before enabling the new dashboard actions.
+    # Source b3fd86b6eca34370bf1a593759f8379312c9760c; excludes PR1055.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/37386098344
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:7943a8732e31fad1083474f901f0bee8d5a7eae5efd7ff9b3a4a284df33ac593";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -17,7 +18,7 @@
     # Non-secret config mirrored from finite-computer-config
     # (infra/hosts/lat1/k8s/configmap.yaml), with FC_CORE_BASE_URL rewritten
     # from the k8s service name to the local core bind.
-    environment = (import ./support-contact.nix).environment // {
+    environment = {
       HOSTNAME = "127.0.0.1"; # Next.js bind address (loopback-only)
       PORT = "3000";
       FC_WORKOS_AUTH_ENABLED = "true";
