@@ -309,10 +309,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await page.locator('input[name="trialCode"]').inputValue(), "WORKSHOP-TRIAL");
 
       // Reject a form left open on the previous dashboard, without redeeming its code.
-      await page.locator('input[name="access"]').evaluate((input) => {
-        (input as HTMLInputElement).value = "launch-code";
-      });
+      // Submit the retained form in one browser task so a React render cannot
+      // restore the current access value between fixture mutation and capture.
       await page.locator('form[action="/dashboard/agent-creation-requests"]').evaluate((form) => {
+        const access = form.querySelector<HTMLInputElement>('input[name="access"]');
+        if (!access) throw new Error("legacy form fixture is missing access");
+        access.value = "launch-code";
         (form as HTMLFormElement).submit();
       });
       await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
