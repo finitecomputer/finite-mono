@@ -1577,6 +1577,10 @@ wait "$postgres_pid"
         ];
         if self.workos_mode.is_fixture() {
             core_environment.extend([
+                (
+                    "FC_CORE_STANDARD_STRIPE_PRICE_ID",
+                    "price_devfinity_smoke_standard".to_string(),
+                ),
                 ("WORKOS_API_BASE_URL", self.workos_fixture_url()),
                 (
                     "WORKOS_JWKS_URL",

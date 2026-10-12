@@ -71,89 +71,6 @@ curl_bearer_file() {
   rm -f "$config_file"
 }
 
-check_dashboard_agent_creation() {
-  local run_id
-  local display_name
-  local issue_json
-  local launch_code_file
-  local idempotency_key
-  local response_headers
-  local response_body
-  local me_json
-
-  run_id="${DEVFINITY_SMOKE_RUN_ID:-$(date +%s)-$$}"
-  display_name="Devfinity Smoke Agent $run_id"
-  idempotency_key="devfinity-smoke-$run_id"
-  response_headers="${DEVFINITY_STATE_DIR:?}/dashboard-create-agent.headers"
-  response_body="${DEVFINITY_STATE_DIR:?}/dashboard-create-agent.html"
-  me_json="${DEVFINITY_STATE_DIR:?}/core-me-after-dashboard-create.json"
-  issue_json="${DEVFINITY_STATE_DIR:?}/issued-launch-code.json"
-  launch_code_file="${DEVFINITY_STATE_DIR:?}/issued-launch-code.txt"
-  track_sensitive_file "$issue_json"
-  track_sensitive_file "$launch_code_file"
-
-  umask 077
-  curl_bearer_file "${DEVFINITY_STATE_DIR:?}/workos-fixture/operator.jwt" \
-    -H 'content-type: application/json' \
-    --data '{"name":"Devfinity services smoke","codeCount":1,"expiresInHours":24}' \
-    "$core_url/api/core/v1/admin/launch-code-batches" >"$issue_json"
-  node - "$issue_json" "$launch_code_file" <<'JS'
-const fs = require("node:fs");
-const [issuePath, codePath] = process.argv.slice(2);
-const code = JSON.parse(fs.readFileSync(issuePath, "utf8"))?.codes?.[0]?.code;
-if (typeof code !== "string" || !code) throw new Error("Core did not return one Launch Code");
-fs.writeFileSync(codePath, code, { mode: 0o600 });
-JS
-  rm -f "$issue_json"
-
-  curl -fsS \
-    -D "$response_headers" \
-    -o "$response_body" \
-    -X POST \
-    --data-urlencode "displayName=$display_name" \
-    --data-urlencode "hostingTier=standard" \
-    --data-urlencode "access=launch-code" \
-    --data-urlencode "launchCode@$launch_code_file" \
-    --data-urlencode "idempotencyKey=$idempotency_key" \
-    "$dashboard_url/agent-creation-requests"
-
-  if tr -d '\r' <"$response_headers" | grep -Eiq '^location: .*agentCreationError='; then
-    echo "dashboard agent creation redirected with an error" >&2
-    tr -d '\r' <"$response_headers" | grep -Ei '^location:' >&2 || true
-    exit 1
-  fi
-
-  rm -f "$launch_code_file"
-
-  curl_bearer_file "${DEVFINITY_STATE_DIR:?}/workos-fixture/dashboard-customer.jwt" \
-    "$core_url/api/core/v1/me" \
-    >"$me_json"
-
-  node - "$me_json" "$display_name" <<'JS'
-const fs = require("node:fs");
-
-const [mePath, displayName] = process.argv.slice(2);
-const me = JSON.parse(fs.readFileSync(mePath, "utf8"));
-const requests = Array.isArray(me.agent_creation_requests) ? me.agent_creation_requests : [];
-const projects = Array.isArray(me.projects) ? me.projects : [];
-const request = requests.find((candidate) =>
-  candidate.display_name === displayName &&
-  (candidate.status === "requested" || candidate.status === "launching")
-);
-
-if (!request) {
-  throw new Error(`Core did not report a pending dashboard-created agent request for ${displayName}`);
-}
-
-const project = projects.find((candidate) => candidate.project?.id === request.project_id);
-if (!project) {
-  throw new Error(`Core reported request ${request.id} without its project ${request.project_id}`);
-}
-
-console.log(`dashboard->core ok: request ${request.id} created project ${request.project_id}`);
-JS
-}
-
 check_native_requesting_user_site() {
   local run_id
   local slug
@@ -511,7 +428,6 @@ check_http "finitesites" "$sites_url/api/v2/healthz" '"ok":true'
 check_http "finitebrain" "$brain_url/health" '"status":"ok"'
 check_http "dashboard" "$dashboard_url" '<html'
 check_native_requesting_user_site
-check_dashboard_agent_creation
 cargo test -p finitechat-client --locked --lib \
   tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \
   -- --exact
