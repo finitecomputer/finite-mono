@@ -69,6 +69,7 @@ NEGATIVE_VALUES = {'deadline-exceeded', 'starved', 'not-exited', 'incomplete', '
 OUTCOMES = {'ok', 'deadline', 'rpc-error', 'transport-error', 'not-serving', 'cancelled', 'malformed-response', 'pending', 'censored'}
 DEFAULT_BOUNDS = {'total_s': 300, 'create_s': 60, 'ready_s': 60, 'exec_s': 30, 'client_margin_s': 60,
                   'release_s': 15, 'cleanup_s': 60, 'diagnostics_s': 60, 'settle_s': 2, 'order_s': 120}
+DEFAULT_RELEASE_AFTER_S = 12
 RUN_STEPS = {'helper-identity', 'image-identity', 'name-free', 'label-free', 'create', 'start',
              'ready-agent-socket', 'ready-systemd', 'install-helper', 'helper-in-container', 'identity',
              'prepare', 'start-fused', 'ready-fuse', 'inner', 'collect fused.jsonl', 'collect ctr.jsonl',
@@ -135,7 +136,7 @@ def validate_bounds(arm: dict[str, Any]) -> dict[str, float]:
     for key, value in bounds.items():
         need(finite(value, low=0 if key == 'settle_s' else 0.001, high=3600), f'arm-invalid: {key}')
     need(bounds['settle_s'] <= min(30, bounds['total_s']), 'arm-invalid: settle_s')
-    for key, default in {'client_max_s': 120, 'window_s': 20, 'hold_max_s': 90, 'release_after_s': 12}.items():
+    for key, default in {'client_max_s': 120, 'window_s': 20, 'hold_max_s': 90, 'release_after_s': DEFAULT_RELEASE_AFTER_S}.items():
         need(finite(arm.get(key, default), low=0 if key == 'release_after_s' else 0.001, high=3600), f'arm-invalid: {key}')
     thresholds = arm.get('thresholds', {})
     need(isinstance(thresholds, dict) and set(thresholds) <= set(THRESHOLDS), 'arm-invalid: thresholds')
@@ -157,10 +158,21 @@ def parse_time(value: Any) -> float:
     return stamp.timestamp() + (int(fraction[:9].ljust(9, '0')) / 1e9 if fraction else 0.0)
 
 
+def parse_json(text: str) -> Any:
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            need(key not in value, 'duplicate JSON key')
+            value[key] = item
+        return value
+
+    return json.loads(text, object_pairs_hook=unique_object)
+
+
 def load_json(path: Path) -> dict[str, Any]:
     need(path.is_file(), f'missing {path.name}')
     try:
-        value = json.loads(path.read_text())
+        value = parse_json(path.read_text())
     except (OSError, ValueError) as error:
         raise Inconclusive(f'malformed {path.name}') from error
     need(isinstance(value, dict), f'malformed {path.name}')
@@ -212,7 +224,7 @@ def load_records(path: Path, run: str) -> list[dict[str, Any]]:
     last_time: dict[str, float] = {}
     for number, line in enumerate(path.read_text().splitlines(), 1):
         try:
-            record = json.loads(line)
+            record = parse_json(line)
         except ValueError as error:
             raise Inconclusive(f'malformed record line {number}') from error
         need(isinstance(record, dict), f'malformed record line {number}')
@@ -811,7 +823,13 @@ def classify(run_dir: Path) -> dict[str, Any]:
         verdict['identity'] = check_identity(records, arm, run)
         observed = observe_order(records, run) if arm['kind'] == 'systemd-freezer-order' else observe_stop(records, arm, run)
         verdict['observed'] = observed
-        mismatches = {k: {'expected': v, 'observed': observed.get(k)} for k, v in arm['expect'].items() if observed.get(k) != v}
+        mismatches = {}
+        for key, expected in arm['expect'].items():
+            actual = observed.get(key)
+            matches = actual == expected or (key == 'independent_connection' and expected == 'either'
+                                             and actual in {'responsive', 'starved'})
+            if not matches:
+                mismatches[key] = {'expected': expected, 'observed': actual}
         verdict['mismatches'] = mismatches
         verdict['verdict'] = 'FAIL' if mismatches else 'PASS'
         if arm['kind'] == 'agent-stop':

@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -68,6 +69,65 @@ class Interrupted(BaseException):
 
 
 @dataclass
+class _CliInterrupts:
+    signum: int | None = None
+    ignore: bool = False
+
+    def check(self) -> None:
+        if self.signum is not None:
+            raise Interrupted(self.signum)
+
+
+_active_cli_interrupts: list[_CliInterrupts] = []
+
+
+def handle_interrupt(signum: int, _frame: Any) -> None:
+    """Defer configured signals while an owned CLI is being cleaned up."""
+    if _active_cli_interrupts:
+        if not any(frame.ignore for frame in _active_cli_interrupts):
+            _active_cli_interrupts[-1].signum = signum
+    else:
+        raise Interrupted(signum)
+
+
+@contextmanager
+def _cli_interrupts(*, ignore: bool = False):
+    """Protect ownership transitions; final teardown keeps its ignore policy."""
+    interrupts = _CliInterrupts(ignore=ignore)
+    main = threading.current_thread() is threading.main_thread()
+    if main:
+        _active_cli_interrupts.append(interrupts)
+    try:
+        yield interrupts
+    finally:
+        if main:
+            _active_cli_interrupts.pop()
+        interrupts.check()
+
+
+def _poll_cli(operation: Callable[..., Any], deadline: float, interrupts: _CliInterrupts) -> Any:
+    while True:
+        interrupts.check()
+        try:
+            return operation(timeout=min(0.1, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+
+
+class _OwnedPopen(subprocess.Popen):
+    """Retain the local child handle even when its constructor raises."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            if getattr(self, 'pid', None) is not None:
+                _cleanup_cli(self)
+            raise
+
+
+@dataclass
 class Result:
     code: int | None
     stdout: str
@@ -76,7 +136,7 @@ class Result:
 
 
 class Engine:
-    """Docker CLI; every call is bounded and killed on expiry."""
+    """Owned Docker CLI; bounded local cleanup does not cancel remote work."""
 
     def __init__(self, binary: str = 'docker') -> None:
         self.binary = binary
@@ -84,42 +144,105 @@ class Engine:
     def run(self, args: list[str], timeout: float) -> Result:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
-        proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as expired:
-            proc.kill()
+        with _cli_interrupts() as interrupts:
+            proc = None
             try:
-                stdout, stderr = proc.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
-            return Result(proc.poll(), stdout, stderr, True)
-        return Result(proc.returncode, stdout, stderr)
+                proc = _OwnedPopen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                try:
+                    stdout, stderr = _poll_cli(proc.communicate, time.monotonic() + timeout, interrupts)
+                    result = Result(proc.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired as expired:
+                    proc.kill()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
+                    result = Result(proc.poll(), stdout, stderr, True)
+            finally:
+                cleaned = proc is None or _cleanup_cli(proc)
+            if not cleaned:
+                result.timed_out = True
+                result.stderr += '\nlocal CLI cleanup unresolved'
+            return result
 
     def stream(self, args: list[str], timeout: float, on_line: Callable[[str], None]) -> Result:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
         deadline = time.monotonic() + timeout
-        proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        errors: list[str] = []
-        reader = threading.Thread(target=lambda: [on_line(line) for line in proc.stdout], daemon=True)
-        drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
-        reader.start()
-        drain.start()
-        try:
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        with _cli_interrupts() as interrupts:
+            proc = None
+            readers: list[threading.Thread] = []
+            errors: list[str] = []
             try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                errors.append('local CLI drain unresolved')
-            reader.join(1)
-            drain.join(1)
-            return Result(None, '', ''.join(errors), True)
-        reader.join(max(0, deadline - time.monotonic()))
-        drain.join(max(0, deadline - time.monotonic()))
-        return Result(code, '', ''.join(errors), reader.is_alive() or drain.is_alive())
+                proc = _OwnedPopen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                interrupts.check()
+                reader_failed = threading.Event()
+
+                def read_lines() -> None:
+                    try:
+                        for line in proc.stdout:
+                            on_line(line)
+                    except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
+                        reader_failed.set()
+                        errors.append(f'local CLI reader failed ({type(error).__name__})')
+
+                reader = threading.Thread(target=read_lines, daemon=True)
+                readers.append(reader)
+                drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
+                readers.append(drain)
+                reader.start()
+                drain.start()
+                try:
+                    code = _poll_cli(proc.wait, deadline, interrupts)
+                    for thread in readers:
+                        while thread.is_alive() and time.monotonic() < deadline:
+                            interrupts.check()
+                            thread.join(min(0.1, max(0, deadline - time.monotonic())))
+                    result = Result(code, '', '', reader.is_alive() or drain.is_alive() or reader_failed.is_set())
+                except subprocess.TimeoutExpired:
+                    result = Result(None, '', '', True)
+            finally:
+                cleaned = proc is None or _cleanup_cli(proc, tuple(readers))
+            if not cleaned:
+                result.timed_out = True
+                errors.append('local CLI cleanup unresolved')
+            result.stderr = ''.join(errors)
+            return result
+
+
+def _cleanup_cli(proc: subprocess.Popen, readers: tuple[threading.Thread, ...] = ()) -> bool:
+    """Reap only this local CLI and close pipes within one two-second budget."""
+    deadline = time.monotonic() + 2
+    close_errors: list[OSError] = []
+
+    def close_pipes() -> None:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError as error:
+                    close_errors.append(error)
+
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        pass
+    for reader in readers:
+        if reader.ident is not None:
+            reader.join(max(0, deadline - time.monotonic()))
+    # An inherited pipe can outlive the CLI. Closing a TextIO wrapper while
+    # a reader holds its lock can block; retain a bounded unresolved result.
+    if any(reader.is_alive() for reader in readers):
+        closer = threading.Thread(target=close_pipes, daemon=True)
+        closer.start()
+        closer.join(max(0, deadline - time.monotonic()))
+        closed = not closer.is_alive()
+    else:
+        close_pipes()
+        closed = True
+    return proc.returncode is not None and closed and not close_errors and not any(r.is_alive() for r in readers)
 
 
 def _text(value: Any) -> str:
@@ -353,7 +476,7 @@ class LabRun:
         digest = self.exec_(['sha256sum', HELPER])
         self.require('helper-in-container', digest, digest.code == 0 and digest.stdout.split()[:1] == [self.state['inputs']['helper_sha256']])
         identity = self.helper_exec('identity', ['identity', '-sock', AGENT_SOCKET])
-        found = [json.loads(line) for line in identity.stdout.splitlines() if line.strip()]
+        found = [verdict_module.parse_json(line) for line in identity.stdout.splitlines() if line.strip()]
         try:
             verdict_module.need(len(found) == 1, 'identity record count')
             verdict_module.validate_identity(found[0], self.arm, self.state)
@@ -412,11 +535,11 @@ class LabRun:
             nonlocal timer
             self.add_records(line)
             try:
-                record = json.loads(line)
-            except ValueError:
+                record = verdict_module.parse_json(line)
+            except (ValueError, verdict_module.Inconclusive):
                 return
             if record.get('kind') == 'signal-sent' and self.arm.get('reader') and timer is None:
-                timer = threading.Timer(float(self.arm['release_after_s']), release_once)
+                timer = threading.Timer(float(self.arm.get('release_after_s', verdict_module.DEFAULT_RELEASE_AFTER_S)), release_once)
                 timer.daemon = True
                 timer.start()
 
@@ -458,8 +581,8 @@ class LabRun:
         seen: list[int] = []
         for line in self.records:
             try:
-                record = json.loads(line)
-            except ValueError:
+                record = verdict_module.parse_json(line)
+            except (ValueError, verdict_module.Inconclusive):
                 continue
             if record.get('kind') == 'client-end':
                 seen = record.get('seen_pids', [])
@@ -492,25 +615,26 @@ class LabRun:
         except Exception as error:  # noqa: BLE001 - a runner defect is INCONCLUSIVE, never exit 1 (FAIL)
             self.state['internal_error'] = type(error).__name__
         finally:
-            ignored = {}
-            if threading.current_thread() is threading.main_thread():
-                ignored = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
-            try:
+            with _cli_interrupts(ignore=True):
+                ignored = {}
                 try:
-                    if self.owned is not None and not (self.out / 'diagnostics').exists():
-                        try:
-                            self.collect()
-                        except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
-                            self.state['diagnostics_error'] = str(error)
-                    self.teardown()
-                except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
-                    self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
-                                                               error=str(error))
+                    if threading.current_thread() is threading.main_thread():
+                        ignored = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
+                    try:
+                        if self.owned is not None and not (self.out / 'diagnostics').exists():
+                            try:
+                                self.collect()
+                            except Exception as error:  # noqa: BLE001 - diagnostics cannot suppress cleanup
+                                self.state['diagnostics_error'] = str(error)
+                        self.teardown()
+                    except Exception as error:  # noqa: BLE001 - preserve unresolved cleanup
+                        self.state.setdefault('cleanup', {}).update(guard='cleanup-unresolved', removed=False,
+                                                                   error=str(error))
+                    finally:
+                        self.write()
                 finally:
-                    self.write()
-            finally:
-                for s, handler in ignored.items():
-                    signal.signal(s, handler)
+                    for s, handler in ignored.items():
+                        signal.signal(s, handler)
         if not self.cleanup_clean():
             return 3
         try:
@@ -532,7 +656,7 @@ def main(argv: list[str], engine: Engine | None = None) -> int:
         return 2
     arm_path, helper, out = Path(argv[1]), Path(argv[2]), Path(argv[3])
     try:
-        arm = json.loads(arm_path.read_text())
+        arm = verdict_module.load_json(arm_path)
         verdict_module.validate_arm(arm)
     except (OSError, ValueError, verdict_module.Inconclusive) as error:
         print(f'refused: arm invalid: {error}', file=sys.stderr)
@@ -544,10 +668,7 @@ def main(argv: list[str], engine: Engine | None = None) -> int:
         return 2
     (out / 'arm.json').write_text(json.dumps(arm, indent=2, sort_keys=True) + '\n')
 
-    def interrupt(signum: int, _frame: Any) -> None:
-        raise Interrupted(signum)
-
-    previous = {s: signal.signal(s, interrupt) for s in (signal.SIGTERM, signal.SIGINT)}
+    previous = {s: signal.signal(s, handle_interrupt) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
         code = LabRun(arm, helper, out, engine or Engine()).execute()
     finally:
