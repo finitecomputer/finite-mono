@@ -10,7 +10,6 @@ import {
 } from "react";
 
 const AGENT_ONBOARDING_STAGES = [
-  "code",
   "billing",
   "profile",
   "launch",
@@ -28,7 +27,6 @@ const AgentOnboardingStageContext =
   createContext<AgentOnboardingStageContextValue | null>(null);
 
 const AGENT_ONBOARDING_STAGE_LABELS: Record<AgentOnboardingStage, string> = {
-  code: "Launch code",
   billing: "Plan",
   profile: "Name",
   launch: "Launch",
@@ -73,12 +71,12 @@ export function AgentOnboardingStageSync({
 
 export function AgentOnboardingProgress() {
   const context = useAgentOnboardingStage();
-  const stage = context?.stage ?? "code";
+  const stage = context?.stage ?? "billing";
   const stageIndex = AGENT_ONBOARDING_STAGES.indexOf(stage);
 
   return (
     <ol
-      className="grid w-20 shrink-0 grid-cols-5 gap-1 sm:w-40"
+      className="grid w-20 shrink-0 grid-cols-4 gap-1 sm:w-40"
       aria-label="Agent setup progress"
     >
       {AGENT_ONBOARDING_STAGES.map((item, index) => (
@@ -112,5 +110,5 @@ export function agentOnboardingStageFromSearchParams(
   if (searchParams.get("billing")) {
     return "billing";
   }
-  return "code";
+  return "billing";
 }

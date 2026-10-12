@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Stand in for a completed Stripe checkout only in the local WorkOS fixture.
+# Core still checks the customer/service credentials and grants one real
+# entitlement; no Stripe request or payment is made.
+if [[ "${DEVFINITY_WORKOS_MODE:-}" != fixture ]]; then
+  echo "smoke billing requires the local WorkOS fixture" >&2
+  exit 64
+fi
+case "${DEVFINITY_PROFILE:-}" in
+  services-only|apple-saas|docker-saas) ;;
+  *) echo "smoke billing requires a devfinity service profile" >&2; exit 64 ;;
+esac
+core_url="${FC_CORE_URL:?}"
+node - "$core_url" <<'JS'
+const url = new URL(process.argv[2]);
+if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || url.username || url.password) {
+  throw new Error("smoke billing requires a loopback Core URL");
+}
+JS
+
+state_dir="${DEVFINITY_STATE_DIR:?}"
+umask 077
+auth_dir="$(mktemp -d "$state_dir/smoke-billing-auth.XXXXXX")"
+trap 'rm -rf -- "$auth_dir"' EXIT
+printf 'header = "authorization: Bearer %s"\n' \
+  "$(tr -d '\n' <"$state_dir/workos-fixture/dashboard-customer.jwt")" \
+  >"$auth_dir/customer.conf"
+(
+  source "$state_dir/secrets/dashboard-auth.sh"
+  printf 'header = "authorization: Bearer %s"\n' "$FC_CORE_API_TOKEN"
+) >"$auth_dir/service.conf"
+
+curl -fsS --config "$auth_dir/customer.conf" \
+  -H 'content-type: application/json' \
+  --data '{"stripeCustomerId":"cus_devfinity_smoke"}' \
+  "$core_url/api/core/v1/me/billing/stripe-customer" >/dev/null
+curl -fsS --config "$auth_dir/service.conf" \
+  -H 'content-type: application/json' \
+  --data '{"stripeCustomerId":"cus_devfinity_smoke","stripeSubscriptionId":"sub_devfinity_smoke","stripePriceId":"price_devfinity_smoke_standard","subscriptionStatus":"active","cancelAtPeriodEnd":false}' \
+  "$core_url/api/core/v1/billing/stripe/subscription" >/dev/null
+echo "local fixture billing ready; no Stripe checkout or payment performed"

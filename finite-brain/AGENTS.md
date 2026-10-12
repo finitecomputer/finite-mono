@@ -2,7 +2,7 @@
 
 ## Agent skills
 
-Follow the product-authority, issue-tracker, and retained-documentation
+Follow the product-authority, planned-work, and retained-documentation
 guidance in the root `../AGENTS.md`.
 
 ### FiniteBrain agent skill

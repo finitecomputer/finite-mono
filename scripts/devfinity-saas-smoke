@@ -1043,37 +1043,15 @@ JS
     echo "waiting for the existing real agent launch"
   else
     run_id="$(date +%s)-$$"
-    issue_json="$state_dir/saas-smoke-issued-launch-code.json"
-    launch_code_file="$state_dir/saas-smoke-launch-code.txt"
-    track_sensitive_file "$issue_json"
-    track_sensitive_file "$launch_code_file"
-    umask 077
-    operator_config="$state_dir/saas-smoke-operator-auth-$$-$RANDOM.conf"
-    track_sensitive_file "$operator_config"
-    printf 'header = "authorization: Bearer %s"\n' \
-      "$(tr -d '\n' <"$state_dir/workos-fixture/operator.jwt")" >"$operator_config"
-    curl -fsS --config "$operator_config" \
-      -H 'content-type: application/json' \
-      --data '{"name":"Devfinity Apple smoke","codeCount":1,"expiresInHours":24}' \
-      "$core_url/api/core/v1/admin/launch-code-batches" >"$issue_json"
-    rm -f "$operator_config"
-    node - "$issue_json" "$launch_code_file" <<'JS'
-const fs = require("node:fs");
-const code = JSON.parse(fs.readFileSync(process.argv[2], "utf8"))?.codes?.[0]?.code;
-if (typeof code !== "string" || !code) throw new Error("Core did not return a smoke Launch Code");
-fs.writeFileSync(process.argv[3], code, { mode: 0o600 });
-JS
-    rm -f "$issue_json"
+    bash "$repo_root/scripts/lib/devfinity-smoke-billing"
     curl -fsS \
       -o /dev/null \
       -X POST \
       --data-urlencode "displayName=Devfinity Apple Agent $run_id" \
       --data-urlencode "hostingTier=standard" \
-      --data-urlencode "access=launch-code" \
-      --data-urlencode "launchCode@$launch_code_file" \
+      --data-urlencode "access=entitled" \
       --data-urlencode "idempotencyKey=devfinity-apple-$run_id" \
       "$dashboard_url/agent-creation-requests"
-    rm -f "$launch_code_file"
     echo "submitted the dashboard agent form"
   fi
 fi

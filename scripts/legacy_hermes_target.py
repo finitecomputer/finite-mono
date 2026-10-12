@@ -18,7 +18,7 @@ from legacy_hermes_contract import (
     PROTECTED_RELATIVE_PATHS,
     RECEIPT_RELATIVE_PATH,
     SCHEMA,
-    SUPPORTED_TARGET_HERMES_VERSION,
+    SUPPORTED_TARGET_HERMES_VERSIONS,
     MigrationError,
     _copy_sqlite,
     _fresh_target_memory_fact_count,
@@ -181,10 +181,10 @@ def install_bundle(
     if receipt_path.exists():
         raise MigrationError(f"bundle is already installed: {receipt_path}")
     target_hermes_version = _installed_hermes_version()
-    if target_hermes_version != SUPPORTED_TARGET_HERMES_VERSION:
+    if target_hermes_version not in SUPPORTED_TARGET_HERMES_VERSIONS:
         raise MigrationError(
-            "target Hermes version must be "
-            f"{SUPPORTED_TARGET_HERMES_VERSION}, got {target_hermes_version}"
+            f"unsupported target Hermes version {target_hermes_version}; "
+            f"supported: {sorted(SUPPORTED_TARGET_HERMES_VERSIONS)}"
         )
     _validate_sha256(expected_manifest_sha256, "expected manifest sha256")
     _validate_sha256(expected_identity_sha256, "expected target identity sha256")
@@ -313,6 +313,7 @@ def install_bundle(
             "sites": manifest["sites"],
             "integrations": manifest["integrations"],
             "manifest_sha256": manifest_sha256,
+            "target_hermes_version": target_hermes_version,
             "sessions": sessions_result,
             "cron": manifest["cron"],
             "memory": {
