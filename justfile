@@ -114,6 +114,9 @@ finite-status-contract:
 hosted-recovery-contract:
     just infra hosted-recovery-contract
 
+kata-lifecycle-lab-contract:
+    just infra kata-lifecycle-lab-contract
+
 sites-backup-contract:
     just infra sites-backup-contract
 

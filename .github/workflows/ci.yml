@@ -535,6 +535,8 @@ jobs:
           skipPush: true
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
+      - name: Kata lifecycle lab contract
+        run: nix develop --command just kata-lifecycle-lab-contract
 
   nix-checks:
     name: Nix static contracts
