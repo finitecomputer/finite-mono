@@ -1,0 +1,22 @@
+{
+  "description": "First device login: singleton tokens only",
+  "auth": {
+    "version": 1,
+    "providers": {
+      "openai-codex": {
+        "tokens": {
+          "access_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsInN1YiI6InNpbmdsZS1zaW5nbGV0b24ifQ.fixture-signature",
+          "refresh_token": "fixture-refresh-single-singleton"
+        },
+        "last_refresh": "2026-09-27T00:00:00Z",
+        "auth_mode": "chatgpt"
+      }
+    }
+  },
+  "expected": {
+    "state": "signed_in",
+    "quota_reset_at": null,
+    "reported_quota_reset_at": null,
+    "resolver": "resolved"
+  }
+}

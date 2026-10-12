@@ -287,7 +287,16 @@ class FinitePlatformAdapterTests(unittest.TestCase):
             self.module.register(ctx)
 
         self.assertEqual(len(ctx.registered), 1)
-        self.assertEqual(set(ctx.registered_hooks), {"pre_tool_call", "post_tool_call"})
+        self.assertEqual(
+            set(ctx.registered_hooks),
+            {
+                "pre_tool_call",
+                "post_tool_call",
+                "pre_api_request",
+                "api_request_error",
+                "post_api_request",
+            },
+        )
         entry = ctx.registered[0]
         self.assertEqual(entry["name"], "finitechat")
         self.assertEqual(entry["label"], "Finite Chat")

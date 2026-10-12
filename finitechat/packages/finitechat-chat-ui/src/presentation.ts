@@ -27,11 +27,17 @@ export type PendingChatTurn = {
 
 export type TranscriptItem =
   | { type: "message"; message: ChatMessage }
+  | { type: "notice"; id: string; message: ChatMessage }
   | { type: "tools"; id: string; messages: ChatMessage[] };
 
 const TOOL_LINE_RE = /^(?:⚙️?|🔧|🛠️?|🔍|🔎|📖|💻|🌐|⚡)\s+/u;
 const REMOTE_WORKING_STATUS_RE = /^⏳\s+Working\s+—/u;
 const ASK_FOR_INPUT_TOOL_RE = /^❓\s+Asking\b/u;
+const FINITE_NOTICE_TYPES = new Set([
+  "inference_fallback",
+  "inference_backup",
+  "inference_fallback_failed",
+]);
 
 export const LIVE_ACTIVITY_LEASE_MS = 15_000;
 export const PENDING_TURN_RECOVERY_WINDOW_MS = 5 * 60_000;
@@ -99,7 +105,8 @@ export function roomDetailsForSelection(
 /**
  * Project the durable message stream into the product transcript. Agent
  * status records are activity, not prose; adjacent tool records form one
- * inspectable work group; and edits replace the message they target.
+ * inspectable work group; agent Finite notices render as notes; and edits
+ * replace the message they target.
  */
 export function transcriptItems(
   messages: ChatMessage[],
@@ -131,7 +138,11 @@ export function transcriptItems(
         status: "complete",
       }));
     }
-    items.push({ type: "message", message });
+    items.push(
+      !fromUserPrincipal && isFiniteNoticeMessage(message)
+        ? { type: "notice", id: `notice-${message.message_id}`, message }
+        : { type: "message", message }
+    );
   }
   return items;
 }
@@ -195,6 +206,27 @@ function collapseMessageEdits(messages: ChatMessage[]) {
     result.push(message);
   }
   return result;
+}
+
+/**
+ * A Finite notice is an ordinary message whose untrusted metadata carries
+ * `finite_notice`. Its body is already the readable text, so any metadata
+ * this doesn't recognize leaves it a plain message.
+ */
+function isFiniteNoticeMessage(message: ChatMessage) {
+  if (messageKind(message) !== "message") return false;
+  if (typeof message.metadata_json !== "string") return false;
+  let metadata: unknown;
+  try {
+    metadata = JSON.parse(message.metadata_json);
+  } catch {
+    return false;
+  }
+  if (typeof metadata !== "object" || metadata === null) return false;
+  const notice = (metadata as Record<string, unknown>).finite_notice;
+  if (typeof notice !== "object" || notice === null) return false;
+  const { v, type } = notice as Record<string, unknown>;
+  return v === 1 && typeof type === "string" && FINITE_NOTICE_TYPES.has(type);
 }
 
 function messageKind(message: ChatMessage) {

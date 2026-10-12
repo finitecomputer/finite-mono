@@ -64,6 +64,13 @@ RETIRED_AEON_SPECIALIZATION_KEYS = frozenset(
     {"capabilities", "normalization_limits", "prompt_versions"}
 )
 AEON_VISION_RETIREMENT_BACKUP_SUFFIX = ".pre-aeon-vision-retirement"
+# The named Finite Private route and its canonical fallback entry. The image
+# owns `providers.finite-private` and fallback entries naming it; everything
+# else in `model`, `providers`, and the fallback chain is user-owned.
+FINITE_PRIVATE_NAMED_PROVIDER = "finite-private"
+FINITE_PRIVATE_NAMED_PROVIDERS = (FINITE_PRIVATE_NAMED_PROVIDER, "custom:finite-private")
+FINITE_PRIVATE_KEY_ENV = "FINITE_PRIVATE_API_KEY"
+FINITE_PRIVATE_VISION_MODEL = "glm-5-3-flash"
 
 
 def _mapping(parent: dict[str, Any], key: str) -> dict[str, Any]:
@@ -208,11 +215,170 @@ def _has_provider_vision_override(config: dict[str, Any], model: dict[str, Any])
     return False
 
 
+def _warn(message: str) -> None:
+    print(f"FINITE_AGENT_START_WARNING {message}", file=sys.stderr)
+
+
+def _finite_private_provider(
+    model_id: str, base_url: str, context_length: int | None
+) -> dict[str, Any]:
+    # Finite Private serves no model list, so the model and its capabilities
+    # are declared. Vision is scoped like agentd's Finite Private block.
+    # The helper's `_canonical_provider` must equal this entry key for key.
+    capabilities: dict[str, Any] = {}
+    if context_length is not None:
+        capabilities["context_length"] = context_length
+    if model_id == FINITE_PRIVATE_VISION_MODEL and base_url in FINITE_PRIVATE_BASE_URLS:
+        capabilities["supports_vision"] = True
+    return {
+        "name": "Finite Private",
+        "base_url": base_url,
+        "key_env": FINITE_PRIVATE_KEY_ENV,
+        "api_mode": "chat_completions",
+        "models": {model_id: capabilities},
+        # The declared models are the whole list. The image's Hermes patch then
+        # validates `/model` against them, so a model this route does not
+        # serve is refused, not saved; unpatched Hermes only skips probing a
+        # listing that Finite Private does not serve.
+        "discover_models": False,
+    }
+
+
+def _finite_private_fallback_entry(model_id: str, base_url: str) -> dict[str, Any]:
+    # The literal base_url lets Hermes skip this entry against a bare Finite
+    # Private primary; key_env never consults OPENAI_API_KEY.
+    return {
+        "provider": FINITE_PRIVATE_NAMED_PROVIDER,
+        "model": model_id,
+        "base_url": base_url,
+        "key_env": FINITE_PRIVATE_KEY_ENV,
+        "api_mode": "chat_completions",
+    }
+
+
+def _finite_private_key_present(settings: dict[str, str], hermes_home: Path | None) -> bool:
+    """Resolve the key the way Hermes will: `$HERMES_HOME/.env` overrides the process env."""
+    env_file = hermes_home / ".env" if hermes_home is not None else None
+    if env_file is not None and env_file.exists():
+        try:
+            from dotenv import dotenv_values
+
+            value = dotenv_values(env_file, encoding="utf-8-sig").get(FINITE_PRIVATE_KEY_ENV)
+        except Exception as exc:
+            _warn(f"finite-private fallback not seeded: .env unreadable ({type(exc).__name__})")
+            return False
+        # python-dotenv leaves the process value in place for a bare name.
+        if value is not None:
+            value = value.strip()
+            return bool(value) and not value.startswith("${")
+    return settings.get("FINITE_CONFIG_FP_KEY_PRESENT") == "1"
+
+
+def _reconcile_finite_private_route(
+    config: dict[str, Any], settings: dict[str, str], hermes_home: Path | None
+) -> None:
+    """Keep the image-owned Finite Private provider and fallback entries current.
+
+    `model` stays user-owned apart from the exact named-route model migration.
+    The chain is seeded only when neither fallback key exists, so a user chain,
+    an explicit `[]`, or a legacy `fallback_model` always wins. Owned chain
+    entries are refreshed where they are and never moved.
+    """
+
+    chain = config.get("fallback_providers")
+    if settings.get("FINITE_CONFIG_FP_FALLBACK_MODE") == "remove":
+        if isinstance(chain, list):
+            kept = [
+                item
+                for item in chain
+                if not (
+                    isinstance(item, dict) and item.get("provider") == FINITE_PRIVATE_NAMED_PROVIDER
+                )
+            ]
+            if len(kept) != len(chain):
+                if kept:
+                    chain[:] = kept
+                else:
+                    del config["fallback_providers"]
+        return
+
+    model_id = settings.get("FINITE_CONFIG_FP_MODEL", "")
+    base_url = settings.get("FINITE_CONFIG_FP_BASE_URL", "")
+    if not model_id or not base_url:
+        return
+    try:
+        url = urllib.parse.urlsplit(base_url)
+    except ValueError:
+        return
+    if url.scheme not in ("http", "https") or not url.netloc:
+        return
+    context_length: int | None = None
+    if raw_context_length := settings.get("FINITE_CONFIG_FP_CONTEXT_LENGTH", ""):
+        try:
+            context_length = int(raw_context_length)
+        except ValueError:
+            context_length = 0
+        if context_length < 1:
+            _warn("finite-private route not reconciled: context length is not a positive integer")
+            return
+
+    providers = config.get("providers")
+    if providers is None:
+        providers = config["providers"] = {}
+    elif not isinstance(providers, dict):
+        _warn("finite-private route not reconciled: providers is not a mapping")
+        return
+    providers[FINITE_PRIVATE_NAMED_PROVIDER] = _finite_private_provider(
+        model_id, base_url, context_length
+    )
+
+    model = config.get("model")
+    if (
+        isinstance(model, dict)
+        and model.get("provider") in FINITE_PRIVATE_NAMED_PROVIDERS
+        and model.get("default") in LEGACY_FINITE_PRIVATE_MODELS
+    ):
+        model["default"] = model_id
+
+    if "fallback_providers" not in config and "fallback_model" not in config:
+        if not _finite_private_key_present(settings, hermes_home):
+            return
+        try:
+            from hermes_cli.fallback_config import get_fallback_chain
+        except ImportError:
+            _warn("finite-private fallback not seeded: hermes_cli.fallback_config unavailable")
+            return
+        entry = _finite_private_fallback_entry(model_id, base_url)
+        config["fallback_providers"] = [entry]
+        if get_fallback_chain(config) != [entry]:
+            del config["fallback_providers"]
+            _warn("finite-private fallback not seeded: Hermes reads a different chain")
+    elif isinstance(chain, list):
+        for index, item in enumerate(chain):
+            if isinstance(item, dict) and item.get("provider") == FINITE_PRIVATE_NAMED_PROVIDER:
+                chain[index] = _finite_private_fallback_entry(model_id, base_url)
+
+
+def _with_finite_private_route(
+    config: dict[str, Any], settings: dict[str, str], hermes_home: Path | None
+) -> dict[str, Any]:
+    # Every agent boots through here: an unexpected failure in these additive
+    # leaves must never cost the agent its gateway, so keep the input instead.
+    candidate = copy.deepcopy(config)
+    try:
+        _reconcile_finite_private_route(candidate, settings, hermes_home)
+    except Exception as exc:
+        _warn(f"finite-private route not reconciled ({type(exc).__name__})")
+        return config
+    return candidate
+
+
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
     *,
     recover_known_good: bool = False,
+    hermes_home: Path | None = None,
 ) -> dict[str, Any]:
     """Return first-boot defaults plus the narrow Finite-owned config merge.
 
@@ -222,7 +388,9 @@ def reconcile_config(
     migrations (including removal of the deleted AEON auxiliary vision backend)
     and the missing capability default of the known Finite Private profile.
     Deleting that declaration restores the product default on boot; an
-    explicit capability or routing override remains user-owned.
+    explicit capability or routing override remains user-owned. Normal boots
+    also keep the image-owned Finite Private provider and backup entries
+    current; recovery boots leave them alone.
     """
 
     first_seed = existing is None
@@ -272,6 +440,9 @@ def reconcile_config(
         _migrate_historical_finite_private_route(config)
         _migrate_legacy_finite_private_model(config, settings)
         _migrate_retired_aeon_vision_override(config)
+
+    if not recover_known_good:
+        config = _with_finite_private_route(config, settings, hermes_home)
 
     # Hermes cannot discover capabilities for our generic custom provider.
     # Declare only the known Finite Private GLM model, including existing
@@ -444,7 +615,7 @@ def main() -> None:
 
     try:
         existing = _load(path) if path.exists() else None
-        reconciled = reconcile_config(existing, dict(os.environ))
+        reconciled = reconcile_config(existing, dict(os.environ), hermes_home=path.parent)
         if existing is None or reconciled != existing:
             _preserve_pre_aeon_retirement_config(path, existing)
             _atomic_write(path, _dump(reconciled))

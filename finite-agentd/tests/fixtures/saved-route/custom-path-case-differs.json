@@ -1,0 +1,11 @@
+{
+  "description": "Path differs from the Finite Private URL only in case",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "custom",
+    "base_url": "https://finite-private.finite.containers.tinfoil.dev/V1",
+    "api_mode": "chat_completions"
+  },
+  "expected": "other"
+}

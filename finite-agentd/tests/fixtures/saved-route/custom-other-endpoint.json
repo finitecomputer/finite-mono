@@ -1,0 +1,11 @@
+{
+  "description": "A user's own custom endpoint",
+  "fp_base_url": "https://fp.example.invalid/v1",
+  "model": {
+    "default": "local-model",
+    "provider": "custom",
+    "base_url": "https://llm.example.invalid/v1",
+    "api_mode": "chat_completions"
+  },
+  "expected": "other"
+}

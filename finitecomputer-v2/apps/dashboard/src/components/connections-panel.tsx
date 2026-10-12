@@ -3,7 +3,6 @@
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
   BriefcaseBusinessIcon,
-  CpuIcon,
   ExternalLinkIcon,
   RefreshCwIcon,
   SendIcon,
@@ -13,9 +12,14 @@ import {
 import { SimplexConnection } from "@/components/simplex-connection";
 import { ConnectionCard } from "@/components/connection-card";
 import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
+import { InferenceConnections, type InferenceOutcome } from "@/components/inference-connections";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import type { AgentConnectionAction, AgentConnectionsStatus } from "@/lib/hosted-agent-controls";
+import type {
+  AgentConnectionAction,
+  AgentConnectionActionResult,
+  AgentConnectionsStatus,
+} from "@/lib/hosted-agent-controls";
 
 export const CONNECTIONS_REQUEST_TIMEOUT_MS = 20_000;
 export const CONNECTIONS_MUTATION_TIMEOUT_MS = 60_000;
@@ -94,6 +98,37 @@ export function ConnectionsPanel({
     }
   }
 
+  // Inference results are shown next to the action that produced them, with agentd's code.
+  async function sendInference(action: AgentConnectionAction): Promise<InferenceOutcome> {
+    setBusy("inference");
+    setError(null);
+    try {
+      const payload = await connectionRequest<AgentConnectionsStatus | AgentConnectionActionResult>(
+        endpoint,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(action),
+        },
+        CONNECTIONS_MUTATION_TIMEOUT_MS
+      );
+      if ("result" in payload) {
+        setStatus(payload.status);
+        return { ok: true, result: payload.result };
+      }
+      setStatus(payload);
+      return { ok: true, result: null };
+    } catch (requestError) {
+      return {
+        ok: false,
+        code: requestError instanceof ConnectionRequestError ? requestError.code : null,
+        message: connectionErrorMessage(requestError),
+      };
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
       {status && error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
@@ -111,15 +146,7 @@ export function ConnectionsPanel({
         </div>
       ) : null}
 
-      <ConnectionCard
-        name="Inference"
-        state={status ? "connected" : "unavailable"}
-        account={status ? inferenceLabel(status) : null}
-        description="Choose the service your agent uses to think."
-        icon={<CpuIcon className="size-5" />}
-      >
-        <InferenceControls status={status} busy={busy} mutate={mutate} />
-      </ConnectionCard>
+      <InferenceConnections status={status} busy={Boolean(busy)} send={sendInference} refresh={refresh} />
 
       <SimplexConnection status={status?.simplex} loaded={Boolean(status)} busy={Boolean(busy)} mutate={mutate} refresh={refresh} />
 
@@ -216,72 +243,6 @@ export function ConnectionsPanel({
           </div>
         </section>
       ) : null}
-    </div>
-  );
-}
-
-function InferenceControls({
-  status,
-  busy,
-  mutate,
-}: {
-  status: AgentConnectionsStatus | null;
-  busy: string | null;
-  mutate: (label: string, action: AgentConnectionAction) => Promise<void>;
-}) {
-  const [showOpenRouter, setShowOpenRouter] = useState(false);
-  return (
-    <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
-      {status?.inference.profile !== "finite_private" ? (
-        <Button
-          variant="outline"
-          disabled={Boolean(busy) || !status}
-          onClick={() => void mutate("inference", { action: "inference", profile: "finite_private" })}
-        >
-          {busy === "inference" ? "Switching…" : "Use Finite Private"}
-        </Button>
-      ) : null}
-      {showOpenRouter ? (
-        <form
-          className="flex min-w-0 flex-wrap justify-end gap-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            void mutate("inference", {
-              action: "inference",
-              profile: "openrouter",
-              apiKey: String(form.get("apiKey") ?? ""),
-              model: String(form.get("model") ?? ""),
-            });
-          }}
-        >
-          <Input
-            name="apiKey"
-            type="password"
-            autoComplete="off"
-            placeholder={status?.inference.profile === "openrouter" ? "New key (optional)" : "Your key (optional)"}
-            aria-label="OpenRouter key"
-            className="w-52"
-          />
-          <Input
-            name="model"
-            defaultValue={
-              status?.inference.profile === "openrouter"
-                ? status.inference.model
-                : "anthropic/claude-sonnet-4.6"
-            }
-            aria-label="OpenRouter model"
-            className="w-60"
-          />
-          <Button type="submit" disabled={Boolean(busy)}>
-            {busy === "inference" ? "Saving…" : "Save"}
-          </Button>
-        </form>
-      ) : (
-        <Button variant="outline" disabled={!status} onClick={() => setShowOpenRouter(true)}>
-          Use OpenRouter
-        </Button>
-      )}
     </div>
   );
 }
@@ -434,21 +395,25 @@ function submitTelegramToken(
   });
 }
 
-function inferenceLabel(status: AgentConnectionsStatus) {
-  const service =
-    status.inference.profile === "openrouter" ? "OpenRouter" : "Finite Private";
-  return `${service} · ${status.inference.model}`;
-}
-
 function yesNo(value: boolean) {
   return value ? "Yes" : "No";
 }
 
-export async function connectionRequest(
+/** A failed Connections request, with the agentd or dashboard error code when the server sent one. */
+export class ConnectionRequestError extends Error {
+  constructor(
+    message: string,
+    readonly code: string | null
+  ) {
+    super(message);
+  }
+}
+
+export async function connectionRequest<T = AgentConnectionsStatus>(
   endpoint: string,
   init?: RequestInit,
   timeoutMs = CONNECTIONS_REQUEST_TIMEOUT_MS
-) {
+): Promise<T> {
   const response = await fetch(endpoint, {
     ...init,
     cache: "no-store",
@@ -456,15 +421,17 @@ export async function connectionRequest(
   });
   const payload = (await response.json().catch(() => ({}))) as {
     error?: unknown;
-  } & Partial<AgentConnectionsStatus>;
+    code?: unknown;
+  };
   if (!response.ok) {
-    throw new Error(
+    throw new ConnectionRequestError(
       typeof payload.error === "string" && payload.error.trim()
         ? payload.error
-        : "Connections are unavailable right now."
+        : "Connections are unavailable right now.",
+      typeof payload.code === "string" ? payload.code : null
     );
   }
-  return payload as AgentConnectionsStatus;
+  return payload as T;
 }
 
 export function connectionErrorMessage(error: unknown) {

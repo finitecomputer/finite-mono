@@ -5,7 +5,8 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use finitechat_proto::{
     DeviceRef, RuntimeCommandDeliveryV1, RuntimeCommandErrorV1, RuntimeCommandInboundPayloadV1,
@@ -19,21 +20,24 @@ use tempfile::NamedTempFile;
 use tokio::sync::mpsc;
 
 use crate::AgentdError;
-use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
+use crate::config::{ConfigManager, HermesConfigOfferV1};
 use crate::connections::{
-    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, PairingApproveRequest,
-    TelegramConnectRequest, TelegramHomeRequest,
+    ConnectionManager, GoogleApplyRequest, PairingApproveRequest, TelegramConnectRequest,
+    TelegramHomeRequest,
 };
+use crate::hosted_hermes::{HostedHermesHandle, ServeGate};
+use crate::inference::finite_private_env;
+use crate::inference_commands::{AgentdHost, Inference, resume_intent_after_hermes_starts};
+use crate::intent;
 use crate::ledger::{CommandDecision, Ledger};
 use crate::supervisor::{ProcessSpec, SupervisorHandle, SupervisorStatus, start_supervisor};
 use crate::transport::BridgeClient;
 
 const STATUS_SCHEMA: &str = "finite.agent.status.v1";
 const STATUS_REQUEST_SCHEMA: &str = "finite.agent.status.request.v1";
-const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
+pub(crate) const EMPTY_REQUEST_SCHEMA: &str = "finite.agent.empty.request.v1";
 const RESULT_SCHEMA: &str = "finite.agent.command.result.v1";
 const OWNER_CLAIM_COMMAND: &str = "agent.owner.claim";
-const INFERENCE_APPLY_SCHEMA: &str = "finite.agent.inference.apply.v1";
 const TELEGRAM_CONNECT_SCHEMA: &str = "finite.agent.telegram.connect.v1";
 const TELEGRAM_APPROVE_SCHEMA: &str = "finite.agent.telegram.approve.v1";
 const TELEGRAM_HOME_SCHEMA: &str = "finite.agent.telegram.home.v1";
@@ -96,7 +100,7 @@ struct AgentConfigFile {
 }
 
 #[derive(Debug, Deserialize)]
-struct EmptyRequest {}
+pub(crate) struct EmptyRequest {}
 
 impl DaemonConfig {
     pub fn from_env() -> Result<Self, AgentdError> {
@@ -208,16 +212,37 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         config_manager.clone(),
     );
     let bridge = BridgeClient::new(config.bridge_url.clone())?;
+    let intent_path = intent::intent_path(&config.agent_home);
     // Register before any optional child starts so a stop during bridge
     // warmup still reaches its awaited shutdown path.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    // Hermes starts first, exactly as before any inference intent existed.
     let supervisor = start_supervisor(
         sidecar_spec(&config),
         health_spec(&config),
-        hermes_spec(&config),
+        hermes_spec(&config, &intent_path),
         simplex_spec(&config),
     );
-    let hosted_hermes = crate::hosted_hermes::HostedHermesHandle::start(&config.hermes_home)?;
+    let hosted_hermes =
+        HostedHermesHandle::start_gated(&config.hermes_home, ServeGate::new(intent_path.clone()))?;
+    let inference = Arc::new(Inference::new(
+        AgentdHost {
+            hermes_home: config.hermes_home.clone(),
+            connections: connection_manager.clone(),
+            supervisor: supervisor.clone(),
+            hosted_hermes: hosted_hermes.clone(),
+        },
+        connection_manager.clone(),
+        config_manager.clone(),
+        config.hermes_home.clone(),
+        intent_path,
+        finite_private_env(),
+    ));
+    // Only after Hermes has started; a bad intent never delays chat. Detached.
+    drop(resume_intent_after_hermes_starts(
+        Arc::clone(&inference.executor),
+        supervisor.clone(),
+    ));
     spawn_status_writer(
         config.status_path(),
         identity.clone(),
@@ -249,6 +274,7 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
         bridge: bridge.clone(),
         supervisor: supervisor.clone(),
         hosted_hermes: hosted_hermes.clone(),
+        inference,
     };
 
     let delivery_worker =
@@ -376,7 +402,8 @@ struct CommandExecutor {
     hermes_home: PathBuf,
     bridge: BridgeClient,
     supervisor: SupervisorHandle,
-    hosted_hermes: Option<crate::hosted_hermes::HostedHermesHandle>,
+    hosted_hermes: Option<HostedHermesHandle>,
+    inference: Arc<Inference<AgentdHost>>,
 }
 
 impl CommandExecutor {
@@ -443,6 +470,9 @@ impl CommandExecutor {
     }
 
     async fn execute(&self, request: &RuntimeCommandRequestV1) -> Result<Value, AgentdError> {
+        if let Some(result) = self.inference.execute(request).await {
+            return result;
+        }
         match request.command.as_str() {
             "agent.status.inspect" => {
                 parse_body::<EmptyRequest>(request, STATUS_REQUEST_SCHEMA)?;
@@ -451,21 +481,6 @@ impl CommandExecutor {
             OWNER_CLAIM_COMMAND => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
                 Ok(json!({ "connected": true }))
-            }
-            "agent.connections.status" => {
-                parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
-                let manager = self.connection_manager.clone();
-                let status = tokio::task::spawn_blocking(move || manager.status())
-                    .await
-                    .map_err(|error| AgentdError::Config(error.to_string()))??;
-                Ok(serde_json::to_value(status)?)
-            }
-            "agent.inference.apply" => {
-                let body = parse_body::<InferenceApplyRequest>(request, INFERENCE_APPLY_SCHEMA)?;
-                let plan = self
-                    .connection_manager
-                    .inference_plan(&request.request_id, body)?;
-                self.apply_inference_plan(plan).await
             }
             "agent.simplex.connect" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
@@ -487,7 +502,9 @@ impl CommandExecutor {
                 let home = self.hermes_home.clone();
                 let connections = self.connection_manager.clone();
                 tokio::task::spawn_blocking(move || {
-                    config.apply(&offer, || validate_hermes_config(&home))?;
+                    config.apply(&offer, || {
+                        validate_hermes_config(&home, crate::executor::CONFIG_CHECK_DEADLINE)
+                    })?;
                     connections.prepare_simplex_reset()
                 })
                 .await
@@ -564,84 +581,14 @@ impl CommandExecutor {
         let manager = self.config_manager.clone();
         let hermes_home = self.hermes_home.clone();
         let result = tokio::task::spawn_blocking(move || {
-            manager.apply(&offer, || validate_hermes_config(&hermes_home))
+            manager.apply(&offer, || {
+                validate_hermes_config(&hermes_home, crate::executor::CONFIG_CHECK_DEADLINE)
+            })
         })
         .await
         .map_err(|error| AgentdError::Config(error.to_string()))??;
         if result.restart_required {
             self.supervisor.restart_hermes().await?;
-        }
-        Ok(serde_json::to_value(result)?)
-    }
-
-    async fn apply_inference_plan(
-        &self,
-        plan: crate::connections::InferenceApplyPlan,
-    ) -> Result<Value, AgentdError> {
-        let credential_snapshot = self.connection_manager.stage_inference_credential(&plan)?;
-        let proposal_id = plan.offer.proposal_id.clone();
-        let manager = self.config_manager.clone();
-        let hermes_home = self.hermes_home.clone();
-        let apply = tokio::task::spawn_blocking(move || {
-            manager.apply(&plan.offer, || validate_hermes_config(&hermes_home))
-        })
-        .await;
-        let apply = match apply {
-            Ok(apply) => apply,
-            Err(error) => {
-                self.connection_manager
-                    .restore_inference_credential(credential_snapshot)
-                    .map_err(|restore_error| {
-                        AgentdError::Config(format!(
-                            "inference apply task failed ({error}); previous credential could not be restored ({restore_error})"
-                        ))
-                    })?;
-                return Err(AgentdError::Config(error.to_string()));
-            }
-        };
-        let result = match apply {
-            Ok(result) => result,
-            Err(error) => {
-                self.connection_manager
-                    .restore_inference_credential(credential_snapshot)?;
-                return Err(error);
-            }
-        };
-        if !result.restart_required {
-            return Ok(serde_json::to_value(result)?);
-        }
-        if let Err(restart_error) = self.supervisor.restart_hermes().await {
-            let rollback = HermesConfigRollbackV1 { proposal_id };
-            let manager = self.config_manager.clone();
-            let hermes_home = self.hermes_home.clone();
-            let rollback_result = tokio::task::spawn_blocking(move || {
-                manager.rollback(&rollback, || validate_hermes_config(&hermes_home))
-            })
-            .await;
-            let credential_restore = self
-                .connection_manager
-                .restore_inference_credential(credential_snapshot);
-            let rollback_result = rollback_result.map_err(|rollback_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); configuration rollback task failed ({rollback_error})"
-                ))
-            })?;
-            rollback_result.map_err(|rollback_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous configuration could not be restored ({rollback_error})"
-                ))
-            })?;
-            credential_restore.map_err(|restore_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous credential could not be restored ({restore_error})"
-                ))
-            })?;
-            self.supervisor.restart_hermes().await.map_err(|restore_error| {
-                AgentdError::Supervisor(format!(
-                    "Hermes inference activation failed ({restart_error}); previous configuration was restored but Hermes could not be reactivated ({restore_error})"
-                ))
-            })?;
-            return Err(restart_error);
         }
         Ok(serde_json::to_value(result)?)
     }
@@ -689,7 +636,7 @@ impl CommandExecutor {
     }
 }
 
-fn parse_body<T: DeserializeOwned>(
+pub(crate) fn parse_body<T: DeserializeOwned>(
     request: &RuntimeCommandRequestV1,
     expected_schema: &str,
 ) -> Result<T, AgentdError> {
@@ -724,7 +671,10 @@ fn success_result(
     Ok(result)
 }
 
-fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> RuntimeCommandResultV1 {
+pub(crate) fn failure_result(
+    request: &RuntimeCommandRequestV1,
+    error: AgentdError,
+) -> RuntimeCommandResultV1 {
     RuntimeCommandResultV1 {
         payload_kind: RuntimeCommandPayloadKindV1::Result,
         request_id: request.request_id.clone(),
@@ -738,15 +688,46 @@ fn failure_result(request: &RuntimeCommandRequestV1, error: AgentdError) -> Runt
     }
 }
 
-fn validate_hermes_config(hermes_home: &Path) -> Result<(), AgentdError> {
-    let status = StdCommand::new("hermes")
+pub(crate) fn validate_hermes_config(
+    hermes_home: &Path,
+    deadline: Duration,
+) -> Result<(), AgentdError> {
+    run_config_check("hermes".as_ref(), hermes_home, deadline)
+}
+
+/// `<program> config check` for `hermes_home`, blocking. Past `deadline` the
+/// check is killed with its process group and counts as a rejection.
+pub(crate) fn run_config_check(
+    program: &std::ffi::OsStr,
+    hermes_home: &Path,
+    deadline: Duration,
+) -> Result<(), AgentdError> {
+    use std::os::unix::process::CommandExt;
+
+    let mut child = StdCommand::new(program)
         .arg("config")
         .arg("check")
         .env("HERMES_HOME", hermes_home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()?;
+        .process_group(0)
+        .spawn()?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() >= deadline {
+            crate::supervisor::signal_group(child.id(), rustix::process::Signal::KILL);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(AgentdError::Config(
+                "Hermes did not finish checking the proposed configuration in time; previous bytes were restored".to_owned(),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
     if status.success() {
         Ok(())
     } else {
@@ -859,7 +840,7 @@ fn health_spec(config: &DaemonConfig) -> ProcessSpec {
     }
 }
 
-fn hermes_spec(config: &DaemonConfig) -> ProcessSpec {
+fn hermes_spec(config: &DaemonConfig, intent_path: &Path) -> ProcessSpec {
     ProcessSpec {
         name: "hermes",
         program: config.hermes_command.clone(),
@@ -869,6 +850,11 @@ fn hermes_spec(config: &DaemonConfig) -> ProcessSpec {
             (
                 "FINITECHAT_HERMES_SERVICE_URL".to_owned(),
                 config.bridge_url.clone(),
+            ),
+            // The launcher's pending-disconnect step reads, never writes, it.
+            (
+                "FINITE_AGENTD_INTENT_PATH".to_owned(),
+                intent_path.display().to_string(),
             ),
         ]),
     }
@@ -982,7 +968,7 @@ pub fn read_status(path: &Path) -> Result<AgentdStatus, AgentdError> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
@@ -1225,5 +1211,29 @@ mod tests {
             ["delivery-later", "delivery-failed"],
             "the later item completes before durable redelivery retries the failed item"
         );
+    }
+
+    #[test]
+    fn the_hermes_process_is_told_where_the_intent_is() {
+        let config = DaemonConfig {
+            agent_home: PathBuf::from("/data/agent"),
+            hermes_home: PathBuf::from("/data/agent/hermes-home"),
+            bridge_url: "http://127.0.0.1:37633".to_owned(),
+            bridge_addr: "127.0.0.1:37633".to_owned(),
+            finitechat_bin: PathBuf::from("/usr/local/bin/finitechat"),
+            prepare_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
+            hermes_command: PathBuf::from("/opt/run_hermes_gateway.sh"),
+            health_python: PathBuf::from("python"),
+            health_script: PathBuf::from("/opt/health_server.py"),
+            authorized_accounts: BTreeSet::new(),
+            sidecar_admission_default: None,
+            bridge_ready_timeout: Duration::from_secs(1),
+        };
+        let spec = hermes_spec(&config, &intent::intent_path(&config.agent_home));
+        assert_eq!(
+            spec.environment["FINITE_AGENTD_INTENT_PATH"],
+            "/data/agent/agentd/inference-intent.json"
+        );
+        assert_eq!(spec.environment["FINITE_AGENTD_SUPERVISED"], "1");
     }
 }

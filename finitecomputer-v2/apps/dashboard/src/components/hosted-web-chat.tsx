@@ -24,6 +24,7 @@ import {
   ExternalLinkIcon,
   FileTextIcon,
   ImageIcon,
+  InfoIcon,
   Loader2Icon,
   LogInIcon,
   MicIcon,
@@ -1049,6 +1050,8 @@ export function HostedWebChat({
                             />
                           ) : null}
                         </div>
+                      ) : item.type === "notice" ? (
+                        <TranscriptNotice key={item.id} message={item.message} />
                       ) : (
                         <ToolRollup
                           key={item.id}
@@ -1345,6 +1348,16 @@ function LiveActivity({ label }: { label: string }) {
     <div className="finite-chat__live-activity" aria-live="polite">
       <span className="finite-chat__live-dots" aria-hidden><i /><i /><i /></span>
       <span>{label}</span>
+    </div>
+  );
+}
+
+/** A Finite notice's body is plain text; its metadata is never rendered. */
+export function TranscriptNotice({ message }: { message: HostedChatMessage }) {
+  return (
+    <div className="finite-chat__live-activity justify-center text-center" role="note">
+      <InfoIcon className="size-4 shrink-0" aria-hidden />
+      <span>{messageContent(message)}</span>
     </div>
   );
 }

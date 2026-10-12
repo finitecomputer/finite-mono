@@ -1,0 +1,9 @@
+{
+  "description": "A provider of spaces only is no provider",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "   "
+  },
+  "expected": "other"
+}

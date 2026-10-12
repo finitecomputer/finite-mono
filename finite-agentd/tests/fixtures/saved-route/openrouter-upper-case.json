@@ -1,0 +1,9 @@
+{
+  "description": "Hermes lowercases the provider, so this is OpenRouter",
+  "fp_base_url": null,
+  "model": {
+    "default": "anthropic/claude-sonnet-4.6",
+    "provider": "OpenRouter"
+  },
+  "expected": "openrouter"
+}

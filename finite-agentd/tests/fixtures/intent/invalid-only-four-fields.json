@@ -1,0 +1,10 @@
+{
+  "description": "The fragment from review finding B2: id, state, attempts, and both times are missing.",
+  "valid": false,
+  "record": {
+    "v": 1,
+    "kind": "disconnect",
+    "route": "openrouter",
+    "phase": "cleanup"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "description": "custom with no base_url",
+  "fp_base_url": null,
+  "model": {
+    "default": "local-model",
+    "provider": "custom"
+  },
+  "expected": "other"
+}

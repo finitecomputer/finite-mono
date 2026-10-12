@@ -1,0 +1,9 @@
+{
+  "description": "Named Finite Private provider in mixed case",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "Finite-Private"
+  },
+  "expected": "finite_private"
+}

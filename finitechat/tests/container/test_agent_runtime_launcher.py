@@ -10,6 +10,7 @@ run by `.github/workflows/hermes-runtime-smoke.yml` and `runtime-image.yml`.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import runpy
@@ -17,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -159,45 +161,27 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             captured = model_capture.read_text(encoding="utf-8").splitlines()
             return captured[0], captured[1]
 
-    def test_gateway_rewrites_historical_route_and_legacy_model(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-2",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+    def test_gateway_normalizes_only_the_managed_finite_private_route(self) -> None:
+        product = "https://finite-private.finite.containers.tinfoil.dev/v1"
+        historical = "https://kimi-k2-6.finite.containers.tinfoil.dev/v1"
+        cases = (
+            ("glm-5-2", historical, "glm-5-3-flash", product),
+            ("deepseek-v4-flash-0731", historical, "glm-5-3-flash", product),
+            ("glm-5.3-flash", product, "glm-5-3-flash", product),
+            ("glm-5-3-flash", historical, "glm-5-3-flash", product),
+            (
+                "glm-5-2",
+                "https://inference.example.com/v1",
+                "glm-5-2",
+                "https://inference.example.com/v1",
+            ),
         )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_deepseek_label_on_the_historical_route(self) -> None:
-        model, base_url = self._gateway_model(
-            model="deepseek-v4-flash-0731",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_dotted_glm_name_on_the_live_route(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5.3-flash",
-            base_url="https://finite-private.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_rewrites_historical_url_when_model_is_already_canonical(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-3-flash",
-            base_url="https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
-        )
-        self.assertEqual(model, "glm-5-3-flash")
-        self.assertEqual(base_url, "https://finite-private.finite.containers.tinfoil.dev/v1")
-
-    def test_gateway_preserves_legacy_name_for_a_custom_endpoint(self) -> None:
-        model, base_url = self._gateway_model(
-            model="glm-5-2",
-            base_url="https://inference.example.com/v1",
-        )
-        self.assertEqual(model, "glm-5-2")
-        self.assertEqual(base_url, "https://inference.example.com/v1")
+        for model, base_url, expected_model, expected_url in cases:
+            with self.subTest(model=model, base_url=base_url):
+                self.assertEqual(
+                    self._gateway_model(model=model, base_url=base_url),
+                    (expected_model, expected_url),
+                )
 
     def test_reconciler_seeds_current_finite_private_model_and_context(self) -> None:
         reconciled = self._reconcile_config(None, self._reconciler_settings())
@@ -986,6 +970,416 @@ exec {sys.executable!s} "$@"
             self.assertEqual(result.returncode, 64)
             self.assertIn("unsafe Hermes config", result.stderr)
             self.assertEqual(config_path.read_text(encoding="utf-8"), invalid)
+
+
+FAKE_FP_KEY = "fp-FAKE-finite-private-key"
+FP_PRODUCT_URL = "https://finite-private.finite.containers.tinfoil.dev/v1"
+NEUTRAL_CODEX_HOME = "/dev/null/finite-codex-home-disabled"
+RECORDED_ENV = (
+    "OPENAI_API_KEY",
+    "CODEX_HOME",
+    "HERMES_HOME",
+    "FINITE_CONFIG_FP_MODEL",
+    "FINITE_CONFIG_FP_BASE_URL",
+    "FINITE_CONFIG_FP_CONTEXT_LENGTH",
+    "FINITE_CONFIG_FP_KEY_PRESENT",
+    "FINITE_CONFIG_FP_FALLBACK_MODE",
+)
+
+
+def _helper_module_available() -> bool:
+    try:
+        return importlib.util.find_spec("hermes_cli.finite_inference_helper") is not None
+    except ImportError:
+        return False
+
+
+class AgentRuntimeLauncherInferenceTest(unittest.TestCase):
+    """Finite Private settings, the credential isolation rule, and the pending-disconnect step.
+
+    The launcher runs for real against the real reconciler; `python -m
+    hermes_cli.finite_inference_helper`, `timeout`, `hermes`, and `finitechat`
+    are stubs that record what they saw into one ordered event log.
+    """
+
+    def _launch(
+        self,
+        tmp: Path,
+        *,
+        env: Mapping[str, str | None] | None = None,
+        args: tuple[str, ...] = (),
+        intent: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        helper_status: int = 0,
+        timeout_status: int | None = None,
+        real_helper: bool = False,
+    ) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, dict[str, str]]]:
+        fake_bin = tmp / "bin"
+        fake_bin.mkdir()
+        events = tmp / "events.log"
+        records = tmp / "records"
+        records.mkdir()
+        record_env = (
+            f"for key in {' '.join(RECORDED_ENV)}; do\n"
+            '  if [[ -v $key ]]; then printf \'%s=%s\\n\' "$key" "${!key}"; fi\n'
+            f'done >"{records}/$1.env"\n'
+        )
+        stubs = {
+            "finitechat": "exit 0\n",
+            "hermes": (
+                f"record() {{\n{record_env}}}\n"
+                "record hermes\n"
+                f'printf "hermes %s\\n" "$*" >>"{events}"\n'
+            ),
+            "timeout": (
+                f'printf "timeout %s\\n" "$*" >>"{events}"\n'
+                'if [[ -n "${FAKE_TIMEOUT_STATUS:-}" ]]; then exit "$FAKE_TIMEOUT_STATUS"; fi\n'
+                'while [[ "${1:-}" == -* ]]; do shift 2; done\n'
+                "shift\n"
+                'exec "$@"\n'
+            ),
+            "python": (
+                f"record() {{\n{record_env}}}\n"
+                'if [[ "${1:-}" == "-m" && "${2:-}" == "hermes_cli.finite_inference_helper" ]]; then\n'
+                "  record helper\n"
+                f'  printf "helper %s\\n" "${{*:3}}" >>"{events}"\n'
+                f'  cp "$HERMES_HOME/config.yaml" "{records}/helper-config.yaml"\n'
+                '  if [[ "${FAKE_REAL_HELPER:-0}" != "1" ]]; then\n'
+                '    printf \'{"applied": "skipped", "reason": "stub"}\\n\'\n'
+                '    exit "${FAKE_HELPER_STATUS:-0}"\n'
+                "  fi\n"
+                'elif [[ "${1:-}" == "$FINITE_HERMES_CONFIG_RECONCILER" ]]; then\n'
+                "  record reconciler\n"
+                f'  printf "reconciler\\n" >>"{events}"\n'
+                'elif [[ "${1:-}" == "$FINITE_RECOVER_CHAT_BOOT" ]]; then\n'
+                "  record recover\n"
+                f'  printf "recover\\n" >>"{events}"\n'
+                "  exit 0\n"
+                "fi\n"
+                f'exec {sys.executable!s} "$@"\n'
+            ),
+        }
+        for name, body in stubs.items():
+            stub = fake_bin / name
+            stub.write_text(f"#!/usr/bin/env bash\n{body}", encoding="utf-8")
+            stub.chmod(0o755)
+
+        agent_home = tmp / "agent"
+        hermes_home = agent_home / "hermes-home"
+        hermes_home.mkdir(parents=True)
+        (agent_home / "config.json").write_text("{}\n", encoding="utf-8")
+        if config is not None:
+            (hermes_home / "config.yaml").write_text(json.dumps(config) + "\n", encoding="utf-8")
+        intent_path = agent_home / "agentd/inference-intent.json"
+        if intent is not None:
+            intent_path.parent.mkdir()
+            intent_path.write_text(json.dumps(intent), encoding="utf-8")
+
+        launch_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("FINITE", "HERMES", "OPENAI", "OPENROUTER", "CODEX"))
+        }
+        launch_env.update(
+            {
+                "PATH": f"{fake_bin}:{os.environ['PATH']}",
+                "HOME": str(tmp),
+                "FINITECHAT_BIN": str(fake_bin / "finitechat"),
+                "FINITECHAT_HOME": str(agent_home),
+                "HERMES_HOME": str(hermes_home),
+                "FINITECHAT_WORKSPACE": str(tmp / "workspace"),
+                "FINITE_AGENTD_SUPERVISED": "1",
+                "FINITE_HERMES_CONFIG_RECONCILER": str(RECONCILER),
+                "FINITE_RECOVER_CHAT_BOOT": str(tmp / "recover_chat_boot.py"),
+                "FINITE_DEFAULT_INFERENCE_PROFILE": "finite-private",
+                "FINITE_PRIVATE_API_KEY": FAKE_FP_KEY,
+                "FINITE_PRIVATE_MODEL": "glm-5-3-flash",
+                "FINITE_PRIVATE_BASE_URL": FP_PRODUCT_URL,
+                "FINITE_PRIVATE_CONTEXT_LENGTH": "393216",
+                "FINITE_AGENTD_INTENT_PATH": str(intent_path),
+                "FAKE_HELPER_STATUS": str(helper_status),
+                "FAKE_REAL_HELPER": "1" if real_helper else "0",
+            }
+        )
+        if timeout_status is not None:
+            launch_env["FAKE_TIMEOUT_STATUS"] = str(timeout_status)
+        for key, value in (env or {}).items():
+            if value is None:
+                launch_env.pop(key, None)
+            else:
+                launch_env[key] = value
+
+        result = subprocess.run(
+            ["bash", str(REPO_ROOT / "containers/agent/run_hermes_gateway.sh"), *args],
+            env=launch_env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        logged = events.read_text(encoding="utf-8").splitlines() if events.exists() else []
+        recorded: dict[str, dict[str, str]] = {}
+        for path in records.glob("*.env"):
+            recorded[path.stem] = dict(
+                line.split("=", 1) for line in path.read_text(encoding="utf-8").splitlines()
+            )
+        return result, logged, recorded
+
+    @staticmethod
+    def _intent(phase: str, route: str = "openrouter") -> dict[str, Any]:
+        return {
+            "v": 1,
+            "id": "op_" + "0" * 32,
+            "kind": "disconnect",
+            "route": route,
+            "model": None,
+            "phase": phase,
+            "state": "running",
+            "error_code": None,
+            "attempts": 0,
+            "created_at_ms": 0,
+            "updated_at_ms": 0,
+        }
+
+    def test_launch_rule_unsets_only_the_finite_private_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            result, _, recorded = self._launch(
+                Path(raw_tmp),
+                env={"OPENAI_API_KEY": FAKE_FP_KEY, "CODEX_HOME": "/root/.codex"},
+                intent=self._intent("cleanup"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            for process in ("reconciler", "helper", "hermes"):
+                with self.subTest(process):
+                    self.assertNotIn("OPENAI_API_KEY", recorded[process])
+                    self.assertEqual(recorded[process]["CODEX_HOME"], NEUTRAL_CODEX_HOME)
+
+    def test_launch_rule_keeps_a_users_own_openai_key(self) -> None:
+        cases = (
+            ("different_value", {"OPENAI_API_KEY": "sk-user-FAKE-openai"}),
+            (
+                "no_finite_private_key",
+                {
+                    "OPENAI_API_KEY": "sk-user-FAKE-openai",
+                    "FINITE_PRIVATE_API_KEY": None,
+                    "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
+                },
+            ),
+        )
+        for name, env in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as raw_tmp:
+                result, _, recorded = self._launch(
+                    Path(raw_tmp), env=env, intent=self._intent("cleanup")
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for process in ("reconciler", "helper", "hermes"):
+                    self.assertEqual(recorded[process]["OPENAI_API_KEY"], "sk-user-FAKE-openai")
+                    self.assertEqual(recorded[process]["CODEX_HOME"], NEUTRAL_CODEX_HOME)
+
+    def _finite_private_settings(self, env: Mapping[str, str | None]) -> dict[str, str]:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            result, _, recorded = self._launch(Path(raw_tmp), env=env, args=("--prepare-only",))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return {
+                key: value
+                for key, value in recorded["reconciler"].items()
+                if key.startswith("FINITE_CONFIG_FP_")
+            }
+
+    def test_launcher_passes_finite_private_settings_for_every_profile(self) -> None:
+        expected = {
+            "FINITE_CONFIG_FP_MODEL": "glm-5-3-flash",
+            "FINITE_CONFIG_FP_BASE_URL": FP_PRODUCT_URL,
+            "FINITE_CONFIG_FP_CONTEXT_LENGTH": "393216",
+            "FINITE_CONFIG_FP_KEY_PRESENT": "1",
+            "FINITE_CONFIG_FP_FALLBACK_MODE": "seed",
+        }
+        for profile in ("finite-private", "openrouter", None):
+            with self.subTest(profile=profile):
+                settings = self._finite_private_settings(
+                    {
+                        "FINITE_DEFAULT_INFERENCE_PROFILE": profile,
+                        # The primary's overrides never leak into the backup route.
+                        "FINITECHAT_HERMES_MODEL": "anthropic/claude-sonnet-4.6",
+                        "FINITECHAT_HERMES_BASE_URL": "https://openrouter.ai/api/v1",
+                    }
+                )
+                self.assertEqual(settings, expected)
+
+    def test_launcher_finite_private_settings_rewrites_and_absence(self) -> None:
+        cases = (
+            (
+                "historical_route_and_legacy_model",
+                {
+                    "FINITE_PRIVATE_MODEL": "glm-5-2",
+                    "FINITE_PRIVATE_BASE_URL": "https://kimi-k2-6.finite.containers.tinfoil.dev/v1",
+                },
+                {
+                    "FINITE_CONFIG_FP_MODEL": "glm-5-3-flash",
+                    "FINITE_CONFIG_FP_BASE_URL": FP_PRODUCT_URL,
+                },
+            ),
+            (
+                "legacy_name_on_another_endpoint",
+                {
+                    "FINITE_PRIVATE_MODEL": "glm-5-2",
+                    "FINITE_PRIVATE_BASE_URL": "http://127.0.0.1:8787/v1",
+                },
+                {
+                    "FINITE_CONFIG_FP_MODEL": "glm-5-2",
+                    "FINITE_CONFIG_FP_BASE_URL": "http://127.0.0.1:8787/v1",
+                },
+            ),
+            (
+                "no_runner_settings",
+                {
+                    "FINITE_DEFAULT_INFERENCE_PROFILE": "openrouter",
+                    "FINITE_PRIVATE_MODEL": None,
+                    "FINITE_PRIVATE_BASE_URL": None,
+                    "FINITE_PRIVATE_CONTEXT_LENGTH": None,
+                    "FINITE_PRIVATE_API_KEY": None,
+                },
+                {
+                    "FINITE_CONFIG_FP_MODEL": "",
+                    "FINITE_CONFIG_FP_BASE_URL": "",
+                    "FINITE_CONFIG_FP_CONTEXT_LENGTH": "",
+                    "FINITE_CONFIG_FP_KEY_PRESENT": "0",
+                },
+            ),
+            (
+                "kill_switch",
+                {"FINITE_PRIVATE_FALLBACK_MODE": "remove"},
+                {"FINITE_CONFIG_FP_FALLBACK_MODE": "remove"},
+            ),
+        )
+        for name, env, expected in cases:
+            with self.subTest(name):
+                settings = self._finite_private_settings(env)
+                self.assertEqual({key: settings[key] for key in expected}, expected)
+
+    def test_pending_disconnect_step_runs_after_the_reconciler_and_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            result, events, recorded = self._launch(tmp, intent=self._intent("cleanup"))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            intent_path = tmp / "agent/agentd/inference-intent.json"
+            self.assertEqual(
+                events,
+                [
+                    "reconciler",
+                    "timeout -k 5 20 python -m hermes_cli.finite_inference_helper "
+                    f"apply-pending-disconnect --intent {intent_path}",
+                    f"helper apply-pending-disconnect --intent {intent_path}",
+                    "hermes gateway run --replace",
+                ],
+            )
+            # The helper decides on config.yaml as the reconciler left it on disk.
+            helper_config = AgentRuntimeLauncherConfigTest._load_config_text(
+                (tmp / "records/helper-config.yaml").read_text(encoding="utf-8")
+            )
+            self.assertIn("finite-private", helper_config["providers"])
+            self.assertEqual(recorded["helper"]["HERMES_HOME"], str(tmp / "agent/hermes-home"))
+            self.assertEqual(recorded["helper"]["FINITE_CONFIG_FP_BASE_URL"], FP_PRODUCT_URL)
+            # Its log line goes to the launcher's log, not its stdout.
+            self.assertIn('"applied": "skipped"', result.stderr)
+            self.assertNotIn("applied", result.stdout)
+
+    def test_pending_disconnect_step_needs_an_existing_intent_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            tmp = Path(raw_tmp)
+            result, events, _ = self._launch(tmp)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(events, ["reconciler", "hermes gateway run --replace"])
+
+    def test_pending_disconnect_step_failure_never_blocks_the_gateway(self) -> None:
+        # A helper error and a deadline both leave startup available.
+        cases = (
+            ("helper_error", 2, None, 2),
+            ("deadline", 0, 124, 124),
+        )
+        for name, helper_status, timeout_status, status in cases:
+            with self.subTest(name), tempfile.TemporaryDirectory() as raw_tmp:
+                result, events, _ = self._launch(
+                    Path(raw_tmp),
+                    intent=self._intent("cleanup"),
+                    helper_status=helper_status,
+                    timeout_status=timeout_status,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(events[-1], "hermes gateway run --replace")
+                self.assertIn(
+                    f"pending-disconnect step failed (status {status}); "
+                    "starting Hermes on the existing route",
+                    result.stderr,
+                )
+
+    def test_pending_disconnect_step_is_skipped_on_recover_boot_and_prepare(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            result, events, recorded = self._launch(
+                Path(raw_tmp),
+                env={
+                    "FINITE_AGENT_BOOT_INTENT_JSON": '{"kind": "recover_known_good"}',
+                    "OPENAI_API_KEY": FAKE_FP_KEY,
+                    "CODEX_HOME": "/root/.codex",
+                },
+                intent=self._intent("cleanup"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(events, ["recover", "hermes gateway run --replace"])
+            self.assertNotIn("OPENAI_API_KEY", recorded["recover"])
+            self.assertEqual(recorded["recover"]["CODEX_HOME"], NEUTRAL_CODEX_HOME)
+
+        with tempfile.TemporaryDirectory() as raw_tmp:
+            result, events, _ = self._launch(
+                Path(raw_tmp), args=("--prepare-only",), intent=self._intent("cleanup")
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(events, ["reconciler"])
+
+    @unittest.skipUnless(
+        _helper_module_available(),
+        "hermes_cli.finite_inference_helper ships in slice P1; rebuild the Hermes env after it lands",
+    )
+    def test_real_helper_clears_only_after_cleanup_and_route_switch(self) -> None:
+        """Disconnect cleanup through the real launcher and helper."""
+        openrouter = {
+            "default": "anthropic/claude-sonnet-4.6",
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_mode": "chat_completions",
+        }
+        finite_private = {
+            "default": "glm-5-3-flash",
+            "provider": "custom",
+            "base_url": FP_PRODUCT_URL,
+            "api_key": "${FINITE_PRIVATE_API_KEY}",
+            "api_mode": "chat_completions",
+        }
+        cases = (
+            ("accepted", openrouter, "skipped"),
+            ("route_switched", finite_private, "skipped"),
+            ("cleanup", openrouter, "skipped"),
+            ("cleanup", {"default": "openai/gpt-5", "provider": "openrouter"}, "skipped"),
+            ("cleanup", finite_private, "yes"),
+            ("verifying", {"default": "glm-5-3-flash", "provider": "finite-private"}, "yes"),
+        )
+        for phase, model, applied in cases:
+            with self.subTest(phase=phase, model=model), tempfile.TemporaryDirectory() as raw_tmp:
+                result, events, _ = self._launch(
+                    Path(raw_tmp),
+                    intent=self._intent(phase),
+                    config={"model": model},
+                    real_helper=True,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(events[-1], "hermes gateway run --replace")
+                outcomes = [
+                    json.loads(line)["applied"]
+                    for line in result.stderr.splitlines()
+                    if line.startswith("{") and '"applied"' in line
+                ]
+                self.assertEqual(outcomes, [applied])
 
 
 if __name__ == "__main__":

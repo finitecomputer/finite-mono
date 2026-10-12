@@ -1,0 +1,6 @@
+{
+  "description": "model is a list",
+  "fp_base_url": null,
+  "model": [],
+  "expected": "other"
+}

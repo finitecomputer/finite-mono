@@ -1,0 +1,11 @@
+{
+  "description": "Trailing slash on the path is normalized",
+  "fp_base_url": null,
+  "model": {
+    "default": "glm-5-3-flash",
+    "provider": "custom",
+    "base_url": "https://finite-private.finite.containers.tinfoil.dev/v1/",
+    "api_mode": "chat_completions"
+  },
+  "expected": "finite_private"
+}

@@ -51,6 +51,29 @@ elif [[ -n "${FINITE_PRIVATE_API_KEY:-}" ]]; then
     # shellcheck disable=SC2016 # Hermes expands this reference, not the shell.
     api_key_reference='${FINITE_PRIVATE_API_KEY}'
 fi
+# The Finite Private route behind the image-owned provider and backup entries,
+# whatever the default profile is. There are no defaults: like agentd's status,
+# the reconciler leaves the route alone without the Runner's settings.
+finite_private_model="${FINITE_PRIVATE_MODEL:-}"
+finite_private_base_url="${FINITE_PRIVATE_BASE_URL:-}"
+if [[ "$finite_private_base_url" == "$HISTORICAL_FINITE_PRIVATE_BASE_URL" ]]; then
+    finite_private_base_url="$FINITE_PRIVATE_PRODUCT_BASE_URL"
+fi
+if is_legacy_finite_private_model "$finite_private_model" \
+    && [[ "$finite_private_base_url" == "$FINITE_PRIVATE_PRODUCT_BASE_URL" ]]; then
+    finite_private_model="$CANONICAL_FINITE_PRIVATE_MODEL"
+fi
+finite_private_key_present=0
+if [[ -n "${FINITE_PRIVATE_API_KEY:-}" ]]; then
+    finite_private_key_present=1
+fi
+# The Runner also passes the Finite Private key as OPENAI_API_KEY. Drop only
+# that alias, so no Hermes consumer borrows it and a user's own OpenAI key
+# keeps working, and keep Hermes away from any desktop Codex store.
+if [[ -n "${FINITE_PRIVATE_API_KEY:-}" && "${OPENAI_API_KEY:-}" == "$FINITE_PRIVATE_API_KEY" ]]; then
+    unset OPENAI_API_KEY
+fi
+export CODEX_HOME=/dev/null/finite-codex-home-disabled
 service_addr="${FINITECHAT_HERMES_SERVICE_ADDR:-127.0.0.1:0}"
 poll_timeout_secs="${FINITECHAT_HERMES_POLL_TIMEOUT_SECS:-1}"
 poll_limit="${FINITECHAT_HERMES_POLL_LIMIT:-10}"
@@ -125,6 +148,11 @@ run_with_config_environment() {
     FINITE_CONFIG_HOME_CHANNEL="${FINITECHAT_HOME_CHANNEL:-}" \
     FINITE_CONFIG_MANAGED_SKILLS_DIR="$managed_skills_config_dir" \
     FINITE_CONFIG_WORKSPACE="$workspace" \
+    FINITE_CONFIG_FP_MODEL="$finite_private_model" \
+    FINITE_CONFIG_FP_BASE_URL="$finite_private_base_url" \
+    FINITE_CONFIG_FP_CONTEXT_LENGTH="${FINITE_PRIVATE_CONTEXT_LENGTH:-}" \
+    FINITE_CONFIG_FP_KEY_PRESENT="$finite_private_key_present" \
+    FINITE_CONFIG_FP_FALLBACK_MODE="${FINITE_PRIVATE_FALLBACK_MODE:-seed}" \
     "$@"
 }
 
@@ -136,6 +164,26 @@ run_config_reconciler() {
 run_recover_chat_boot() {
     run_with_config_environment \
         python "$recover_chat_boot" --config "${hermes_home}/config.yaml"
+}
+
+# A disconnect clears Hermes-held credentials and conversation overrides here,
+# while no gateway process exists. The helper re-reads the intent and
+# config.yaml and clears only once the intent reached cleanup and the saved
+# default is no longer the disconnected route. It must never block the launch:
+# any failure or timeout is logged and Hermes starts on the existing route.
+run_pending_disconnect_step() {
+    local intent_path="${FINITE_AGENTD_INTENT_PATH:-}"
+    if [[ -z "$intent_path" || ! -f "$intent_path" ]]; then
+        return 0
+    fi
+    local status=0
+    run_with_config_environment \
+        timeout -k 5 20 python -m hermes_cli.finite_inference_helper \
+        apply-pending-disconnect --intent "$intent_path" \
+        </dev/null >&2 || status=$?
+    if [[ "$status" -ne 0 ]]; then
+        echo "run_hermes_gateway: pending-disconnect step failed (status ${status}); starting Hermes on the existing route" >&2
+    fi
 }
 
 recover_boot=0
@@ -218,6 +266,10 @@ fi
 if [[ "${1:-}" == "--prepare-only" ]]; then
     echo "FINITE_AGENT_RUNTIME_PREPARED hermes_home=${hermes_home} agent_home=${agent_home}"
     exit 0
+fi
+
+if [[ "$recover_boot" -ne 1 ]]; then
+    run_pending_disconnect_step
 fi
 
 if [[ "${FINITE_AGENTD_SUPERVISED:-0}" != "1" ]]; then

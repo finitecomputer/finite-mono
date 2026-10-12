@@ -1,0 +1,9 @@
+{
+  "description": "A provider Finite does not manage",
+  "fp_base_url": null,
+  "model": {
+    "default": "claude-sonnet-4.6",
+    "provider": "anthropic"
+  },
+  "expected": "other"
+}

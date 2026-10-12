@@ -1,0 +1,9 @@
+{
+  "description": "Codex primary; also the shape /model --global writes",
+  "fp_base_url": null,
+  "model": {
+    "default": "gpt-5.5",
+    "provider": "openai-codex"
+  },
+  "expected": "openai_codex"
+}

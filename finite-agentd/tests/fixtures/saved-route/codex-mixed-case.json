@@ -1,0 +1,9 @@
+{
+  "description": "Provider openai-codex in mixed case",
+  "fp_base_url": null,
+  "model": {
+    "default": "gpt-5.5",
+    "provider": "OpenAI-Codex"
+  },
+  "expected": "openai_codex"
+}

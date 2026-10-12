@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 
 use crate::AgentdError;
-use crate::hosted_hermes::{HostedHermesHandle, configured_spec};
+use crate::hosted_hermes::{HostedHermesHandle, ServeGate, configured_spec};
 use crate::supervisor::{ProcessState, ProcessStatus, now_ms};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -211,6 +211,8 @@ fn valid_native_identity(identity: &serde_json::Value, username: Option<&str>, n
 
 #[derive(Default)]
 struct Applied {
+    /// Closed while a disconnect intent exists.
+    gate: ServeGate,
     runtime_id: Option<String>,
     generation: Option<u64>,
     child: Option<HostedHermesHandle>,
@@ -226,6 +228,13 @@ impl Applied {
         self.child = None;
         self.verified_pid = None;
         self.reported = None;
+    }
+
+    /// Stops the child and forgets the applied generation, so the next
+    /// reconcile starts a fresh child once the gate allows it.
+    async fn restart(&mut self) {
+        self.stop().await;
+        self.generation = None;
     }
 
     async fn reconcile(
@@ -262,10 +271,25 @@ impl Applied {
         }
         if self.generation != Some(desired.generation) {
             self.stop().await;
+            if desired.enabled && self.gate.blocked() {
+                // Not applied yet: the next reconcile after the disconnect
+                // record is deleted starts the child.
+                status.send_replace(ProcessStatus {
+                    state: ProcessState::Stopped,
+                    restart_count: 0,
+                    updated_at_ms: now_ms(),
+                });
+                return;
+            }
             self.generation = Some(desired.generation);
             if desired.enabled {
                 match desired.spec(home) {
-                    Ok(spec) => self.child = Some(HostedHermesHandle::start_spec(spec)),
+                    Ok(spec) => {
+                        self.child = Some(HostedHermesHandle::start_spec_gated(
+                            spec,
+                            self.gate.clone(),
+                        ))
+                    }
                     Err(_) => {
                         status.send_replace(unavailable("Core native configuration was invalid"));
                     }
@@ -326,19 +350,40 @@ fn unavailable(error: &str) -> ProcessStatus {
     }
 }
 
-pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
+pub(super) fn start(home: PathBuf, gate: ServeGate) -> HostedHermesHandle {
+    start_with(home, gate, CoreConnection::from_env)
+}
+
+/// The worker answers every restart request in every state: at once
+/// when no child can run, after the stop otherwise. When it ends it drops the
+/// receiver, so a later request returns at once too.
+fn start_with(
+    home: PathBuf,
+    gate: ServeGate,
+    core: impl FnOnce() -> Result<CoreConnection, AgentdError> + Send + 'static,
+) -> HostedHermesHandle {
     let (stop, mut stop_rx) = mpsc::channel(1);
+    let (restart, mut restart_rx) = mpsc::channel::<oneshot::Sender<()>>(1);
     let (status_tx, status) = watch::channel(ProcessStatus::default());
     let task = tokio::spawn(async move {
-        let core = match CoreConnection::from_env() {
+        let core = match core() {
             Ok(core) => core,
             Err(_) => {
                 status_tx.send_replace(unavailable("Core assignment configuration was invalid"));
-                stop_rx.recv().await;
-                return;
+                loop {
+                    tokio::select! {
+                        Some(done) = restart_rx.recv() => {
+                            let _ = done.send(());
+                        }
+                        _ = stop_rx.recv() => return,
+                    }
+                }
             }
         };
-        let mut applied = Applied::default();
+        let mut applied = Applied {
+            gate,
+            ..Applied::default()
+        };
         loop {
             tokio::select! {
                 _ = applied.reconcile(&core, &home, &status_tx) => {},
@@ -349,9 +394,14 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
             }
             tokio::select! {
                 _ = tokio::time::sleep(POLL_INTERVAL) => {},
+                Some(done) = restart_rx.recv() => {
+                    applied.restart().await;
+                    let _ = done.send(());
+                }
                 _ = stop_rx.recv() => break,
             }
         }
+        drop(restart_rx);
         applied.stop().await;
         status_tx.send_replace(ProcessStatus {
             state: ProcessState::Stopped,
@@ -363,6 +413,7 @@ pub(super) fn start(home: PathBuf) -> HostedHermesHandle {
         stop,
         status,
         task: Arc::new(Mutex::new(Some(task))),
+        restart: Some(restart),
     }
 }
 
@@ -559,9 +610,10 @@ mod tests {
             name: "hermes-serve",
             program: "/bin/sh".into(),
             args: vec!["-c".into(), "exec sleep 60".into()],
-            environment: BTreeMap::new(),
+            // The system directories only, never the host's PATH.
+            environment: BTreeMap::from([("PATH".into(), "/usr/bin:/bin".into())]),
         });
-        let pid = tokio::time::timeout(Duration::from_secs(5), async {
+        let pid = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(pid) = child.status().pid() {
                     break pid;
@@ -640,6 +692,128 @@ mod tests {
         assert_eq!(applied.reported, Some(true));
         assert!(matches!(status.borrow().state, ProcessState::Stopped));
         requests.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn core_pull_does_not_start_hermes_serve_during_a_disconnect() {
+        let temp = tempfile::tempdir().unwrap();
+        let intent_path = crate::intent::intent_path(temp.path());
+        let record = crate::intent::IntentRecord::new(
+            crate::intent::IntentKind::Disconnect,
+            crate::intent::IntentRoute::OpenaiCodex,
+            None,
+        )
+        .unwrap();
+        crate::intent::store(&intent_path, &record).unwrap();
+        let enabled = serde_json::json!({"runtimeId":"runtime_test","generation":2,"enabled":true,
+            "publicUrl":"https://agents.example.test/runtimes/runtime_test/","username":"test-user",
+            "password":"test-password","signingSecret":"test-signing-secret","accessTtlSeconds":30})
+        .to_string();
+        // accessTtlSeconds 30 makes `spec()` refuse right after the gate, so the
+        // start path runs without spawning a child or probing the native port.
+        let (origin, requests) = server(3, move |index, request| match index {
+            0 | 1 => (200, enabled.clone(), String::new()),
+            _ => {
+                assert!(request.head.starts_with("POST "));
+                (204, String::new(), String::new())
+            }
+        })
+        .await;
+        let core = CoreConnection::new(origin, "a".repeat(64)).unwrap();
+        let (status, _) = watch::channel(ProcessStatus::default());
+        let mut applied = Applied {
+            gate: ServeGate::new(intent_path.clone()),
+            ..Applied::default()
+        };
+        applied.reconcile(&core, temp.path(), &status).await;
+        assert!(applied.child.is_none(), "started during a disconnect");
+        assert_eq!(applied.generation, None, "not applied yet");
+        assert!(matches!(status.borrow().state, ProcessState::Stopped));
+
+        crate::intent::clear(&intent_path).unwrap();
+        applied.reconcile(&core, temp.path(), &status).await;
+        // The gate passed: the generation was applied and the child's spec was
+        // built (and refused), which happens only on the start path.
+        assert_eq!(
+            applied.generation,
+            Some(2),
+            "starts once the record is gone"
+        );
+        assert!(matches!(
+            &status.borrow().state,
+            ProcessState::Unavailable { error } if error == "Core native configuration was invalid"
+        ));
+        assert!(applied.child.is_none());
+        assert_eq!(requests.await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn restart_stops_the_child_and_forgets_the_generation() {
+        let (child, pid) = child().await;
+        let mut applied = Applied {
+            runtime_id: Some("runtime_test".into()),
+            generation: Some(1),
+            child: Some(child),
+            ..Applied::default()
+        };
+        applied.restart().await;
+        assert!(applied.child.is_none());
+        assert_eq!(applied.generation, None);
+        assert!(
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid as i32).unwrap())
+                .is_err()
+        );
+    }
+
+    /// Waits for the worker to report `Unavailable` with `error`.
+    async fn unavailable_with(handle: &HostedHermesHandle, error: &str) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if matches!(&handle.status().state, ProcessState::Unavailable { error: found } if found == error)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the worker reports unavailable");
+    }
+
+    #[tokio::test]
+    async fn restart_returns_while_core_configuration_is_invalid() {
+        // Review B's probe: only one of the two Core variables, or an invalid
+        // one, leaves the worker with no child to stop.
+        let temp = tempfile::tempdir().unwrap();
+        let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), || {
+            CoreConnection::new("https://core.example.invalid/".into(), String::new())
+        });
+        unavailable_with(&handle, "Core assignment configuration was invalid").await;
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(30), handle.restart())
+                .await
+                .expect("restart waited forever although no child exists");
+        }
+        handle.shutdown().await;
+        // A worker that has ended answers at once as well.
+        tokio::time::timeout(Duration::from_secs(30), handle.restart())
+            .await
+            .expect("restart of an ended worker returns");
+    }
+
+    #[tokio::test]
+    async fn restart_returns_after_a_revoked_assignment() {
+        let (origin, requests) = server(1, |_, _| (401, "{}".into(), String::new())).await;
+        let temp = tempfile::tempdir().unwrap();
+        let handle = start_with(temp.path().to_path_buf(), ServeGate::default(), move || {
+            CoreConnection::new(origin, "a".repeat(64))
+        });
+        unavailable_with(&handle, "Core assignment authorization was revoked").await;
+        tokio::time::timeout(Duration::from_secs(30), handle.restart())
+            .await
+            .expect("restart after a revoked assignment returns");
+        handle.shutdown().await;
+        assert_eq!(requests.await.unwrap().len(), 1);
     }
 
     #[test]

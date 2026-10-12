@@ -413,22 +413,56 @@ pub(crate) fn now_ms() -> u64 {
 mod tests {
     use super::*;
 
+    /// How long a test waits for another process before it fails.
+    const WAIT: Duration = Duration::from_secs(30);
+
+    /// Children see the system directories only, never the host's PATH.
+    fn system_path() -> BTreeMap<String, String> {
+        BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())])
+    }
+
+    /// Kills the process groups it tracked if the test fails before it
+    /// stopped them, so no grandchild outlives a failed test.
+    #[derive(Default)]
+    struct Reap(std::sync::Mutex<Vec<u32>>);
+
+    impl Reap {
+        fn track(&self, pid: Option<u32>) {
+            self.0.lock().unwrap().extend(pid);
+        }
+    }
+
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            if std::thread::panicking() {
+                for pid in self.0.lock().unwrap().iter() {
+                    signal_group(*pid, rustix::process::Signal::KILL);
+                }
+            }
+        }
+    }
+
     #[tokio::test]
     async fn hermes_restart_leaves_simplex_running_and_shutdown_stops_it() {
+        let reap = Reap::default();
         let handle = start_supervisor(
             sleeping_process("sidecar"),
             sleeping_process("health"),
             sleeping_process("hermes"),
             Some(sleeping_process("simplex")),
         );
-        let simplex_pid = wait_for_running(&handle, "simplex").await.pid();
+        let simplex_pid = wait_for_running(&handle, "simplex", &reap).await.pid();
+        let hermes_pid = wait_for_running(&handle, "hermes", &reap).await.pid();
         handle.restart_hermes().await.unwrap();
-        assert_eq!(
-            handle.status().await.processes["simplex"].pid(),
-            simplex_pid
-        );
+        let status = handle.status().await;
+        let restarted = &status.processes["hermes"];
+        reap.track(restarted.pid());
+        assert!(matches!(restarted.state, ProcessState::Running { .. }));
+        assert_eq!(restarted.restart_count, 1);
+        assert_ne!(restarted.pid(), hermes_pid);
+        assert_eq!(status.processes["simplex"].pid(), simplex_pid);
         handle.shutdown().await;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             loop {
                 if matches!(
                     handle.status().await.processes["simplex"].state,
@@ -441,25 +475,6 @@ mod tests {
         })
         .await
         .unwrap();
-    }
-
-    #[tokio::test]
-    async fn restart_hermes_waits_for_a_new_running_process() {
-        let handle = start_supervisor(
-            sleeping_process("sidecar"),
-            sleeping_process("health"),
-            sleeping_process("hermes"),
-            None,
-        );
-        let original_pid = wait_for_running(&handle, "hermes").await.pid().unwrap();
-
-        handle.restart_hermes().await.unwrap();
-
-        let restarted = handle.status().await.processes["hermes"].clone();
-        assert!(matches!(restarted.state, ProcessState::Running { .. }));
-        assert_eq!(restarted.restart_count, 1);
-        assert_ne!(restarted.pid(), Some(original_pid));
-        handle.shutdown().await;
     }
 
     #[tokio::test]
@@ -485,20 +500,21 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let reap = Reap::default();
         let handle = start_supervisor(
             ProcessSpec {
                 name: "finitechat",
                 program: script.clone(),
                 args: Vec::new(),
-                environment: BTreeMap::new(),
+                environment: system_path(),
             },
             sleeping_process("health"),
             sleeping_process("hermes"),
             None,
         );
-        wait_for_running(&handle, "finitechat").await;
+        wait_for_running(&handle, "finitechat", &reap).await;
         // Let the script arm its trap before signalling.
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             while !armed.exists() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
@@ -508,7 +524,7 @@ mod tests {
 
         handle.shutdown().await;
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             while !marker.exists() {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
@@ -538,6 +554,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        let reap = Reap::default();
         let handle = start_supervisor(
             sleeping_process("finitechat"),
             sleeping_process("health"),
@@ -545,15 +562,17 @@ mod tests {
                 name: "hermes",
                 program: script.clone(),
                 args: Vec::new(),
-                environment: BTreeMap::new(),
+                environment: system_path(),
             },
             None,
         );
-        wait_for_running(&handle, "hermes").await;
-        let grandchild = tokio::time::timeout(Duration::from_secs(5), async {
+        wait_for_running(&handle, "hermes", &reap).await;
+        let grandchild = tokio::time::timeout(WAIT, async {
             loop {
+                // Only a complete line: the write may still be in progress.
                 if let Ok(raw) = std::fs::read_to_string(&pidfile)
-                    && let Ok(pid) = raw.trim().parse::<i32>()
+                    && let Some(line) = raw.strip_suffix('\n')
+                    && let Ok(pid) = line.trim().parse::<i32>()
                 {
                     break rustix::process::Pid::from_raw(pid).expect("nonzero pid");
                 }
@@ -565,7 +584,7 @@ mod tests {
 
         handle.shutdown().await;
 
-        tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::time::timeout(WAIT, async {
             loop {
                 // A just-killed grandchild can linger as a zombie until init
                 // reaps it; ESRCH is the only accepted terminal state.
@@ -584,16 +603,18 @@ mod tests {
             name,
             program: PathBuf::from("/bin/sh"),
             args: vec!["-c".to_owned(), "exec sleep 30".to_owned()],
-            environment: BTreeMap::new(),
+            environment: system_path(),
         }
     }
 
-    async fn wait_for_running(handle: &SupervisorHandle, name: &str) -> ProcessStatus {
-        tokio::time::timeout(Duration::from_secs(5), async {
+    /// Waits (bounded) for `name` to run, and tracks its process group.
+    async fn wait_for_running(handle: &SupervisorHandle, name: &str, reap: &Reap) -> ProcessStatus {
+        tokio::time::timeout(WAIT, async {
             loop {
                 if let Some(status) = handle.status().await.processes.get(name)
                     && matches!(status.state, ProcessState::Running { .. })
                 {
+                    reap.track(status.pid());
                     return status.clone();
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -613,79 +634,54 @@ mod tests {
     }
 
     #[test]
-    fn starting_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Starting,
-                restart_count: 0,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn restarting_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Restarting,
-                restart_count: 1,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn running_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Running { pid: 4242 },
-                restart_count: 1,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn unavailable_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Unavailable {
+    fn process_status_keeps_the_published_wire_shapes() {
+        let at = 1_700_000_000_000;
+        let cases = [
+            (
+                ProcessState::Starting,
+                0,
+                r#"{"state":"starting","pid":null,"restart_count":0,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Restarting,
+                1,
+                r#"{"state":"restarting","pid":null,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Running { pid: 4242 },
+                1,
+                r#"{"state":"running","pid":4242,"restart_count":1,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Unavailable {
                     error: "program not found".to_owned(),
                 },
-                restart_count: 2,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn exited_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Exited {
+                2,
+                r#"{"state":"unavailable","pid":null,"restart_count":2,"last_exit":"program not found","updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Exited {
                     exit: "exit status: 1".to_owned(),
                 },
-                restart_count: 3,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
-        );
-    }
-
-    #[test]
-    fn stopped_process_status_keeps_the_published_wire_shape() {
-        assert_wire_shape(
-            ProcessStatus {
-                state: ProcessState::Stopped,
-                restart_count: 4,
-                updated_at_ms: 1_700_000_000_000,
-            },
-            r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
-        );
+                3,
+                r#"{"state":"exited","pid":null,"restart_count":3,"last_exit":"exit status: 1","updated_at_ms":1700000000000}"#,
+            ),
+            (
+                ProcessState::Stopped,
+                4,
+                r#"{"state":"stopped","pid":null,"restart_count":4,"last_exit":null,"updated_at_ms":1700000000000}"#,
+            ),
+        ];
+        for (state, restart_count, json) in cases {
+            assert_wire_shape(
+                ProcessStatus {
+                    state,
+                    restart_count,
+                    updated_at_ms: at,
+                },
+                json,
+            );
+        }
     }
 
     #[test]

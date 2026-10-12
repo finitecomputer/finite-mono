@@ -1,0 +1,9 @@
+{
+  "description": "Provider alias codex",
+  "fp_base_url": null,
+  "model": {
+    "default": "gpt-5.5",
+    "provider": "codex"
+  },
+  "expected": "openai_codex"
+}

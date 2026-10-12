@@ -129,6 +129,76 @@ from the Rust service's durable cursor. They never fall into Python timer
 polling or CLI-per-message subprocess calls. One-shot polling and CLI fallback
 remain available only when inbound streaming is disabled.
 
+## Inference routes, backup, and notices
+
+The [runtime control contract](../../../finitecomputer-v2/docs/runtime-control-contract.md#inference-connections)
+owns dashboard commands, Saved Default semantics, disconnect guarantees and
+rollback. This section covers Hermes integration.
+
+### Finite Private route and backup
+
+On normal startup, `containers/agent/reconcile_hermes_config.py` replaces
+`providers.finite-private`. It seeds a Finite Private fallback only when no
+fallback is configured and the key is present; user chains, explicit `[]` and
+legacy `fallback_model` win. Later starts refresh only Finite-owned entries in
+place. `FINITE_PRIVATE_FALLBACK_MODE=remove` deletes those entries on the next
+start; the Runner does not set it.
+
+The fallback names its credential with `key_env` and carries a literal
+`base_url`, preventing credential borrowing and duplicate fallback when the
+primary is already the bare Finite Private endpoint. The provider declares its
+complete `models` map (including context length and vision support) with
+`discover_models: false`; it needs no `/v1/models` endpoint.
+
+Use `/model <model> --provider finite-private`. Declared models need no discovery
+request; invalid models and `provider:model` syntax are refused without changing
+the conversation or Saved Default. `--global` writes only `{default, provider}`;
+the reconciler preserves that user choice. Connections writes the full block
+when the owner chooses Finite Private there.
+
+The launcher, agentd's `hermes serve`, and the helper remove `OPENAI_API_KEY`
+only when it equals `FINITE_PRIVATE_API_KEY` (the Runner's inherited alias),
+preserving a user's separate OpenAI key. They force neutral `CODEX_HOME` to
+prevent desktop token import.
+
+### The session-route safety patch
+
+`infra/images/patches/hermes-session-route-safety.patch` prevents OpenRouter
+from borrowing `OPENAI_API_KEY` and resolves each session override with its own
+provider, model-dependent endpoint and credential. Failed resolution or an
+unproven endpoint uses the fallback chain or fails the turn; it preserves the
+saved override. Without a usable fallback, chat shows a generic authentication
+failure and leaves provider details in gateway logs.
+
+The patch also makes `discover_models: false` authoritative for named providers
+and matching custom endpoints. A future model-list service needs old-image
+verification: unpatched Hermes can accept unsupported models on unnamed endpoints
+when discovery succeeds.
+
+Re-port on every Hermes pin bump. Packaging applies the patch with `--fuzz=0`;
+`infra/images/test_hermes_session_route_safety.py` verifies the routing and model
+contracts. The helper and notice suites also qualify upstream symbols and status
+wording. Passing patch application alone is insufficient.
+
+### Backup notices
+
+The plugin attributes main-agent request hooks to each conversation and turn,
+then emits at most one note: which route failed and which backup answered, or
+that both failed. Only the configured Finite Private endpoint gets that name.
+Task/session IDs exclude delegated agents and review forks, including cached
+main-agent turns whose gateway session variable is empty.
+
+Notices are ordinary `kind: message` events with `metadata.finite_notice` and no
+`notify`, so old clients retain readable text. Hermes's own "Model fallback" and
+"Primary model restored" lines are suppressed to avoid duplicates.
+
+**Pre-request fallback is silent:** signed-out or quota-frozen Codex, keyless
+OpenRouter, an unproven override endpoint, and cached-provider cooldown do not
+produce a failed-request hook. Hermes keeps a fallback agent cached only when
+its model ID matches the primary; otherwise eviction retries the primary next
+turn. Cached agents retry after cooldown. Recovery itself sends no notice.
+Closing the pre-request gap remains [FIN-129](https://linear.app/finitecomputer/issue/FIN-129).
+
 ## Inbox in-flight state and reply routing live in Rust
 
 The Rust sidecar owns the chat delivery contract end to end (ownership audit

@@ -26,6 +26,7 @@ upstream.override {
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-skills-inventory.patch}
             rm -f "$site/hermes_cli/web_routers/__pycache__/skills."*.pyc
             cp ${../../finite-agentd/integrations/hermes/finite_dashboard_reads.py} "$site/hermes_cli/finite_dashboard_reads.py"
+            cp ${../../finite-agentd/integrations/hermes/finite_inference_helper.py} "$site/hermes_cli/finite_inference_helper.py"
 
             test -L "$site/gateway"
             cp -RL "$site/gateway" "$site/gateway-patched"
@@ -34,6 +35,9 @@ upstream.override {
             chmod -R u+w "$site/gateway"
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-stop-generation.patch}
             rm -f "$site/gateway/__pycache__/run."*.pyc
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-session-route-safety.patch}
+            rm -f "$site/gateway/__pycache__/run."*.pyc "$site/hermes_cli/__pycache__/runtime_provider."*.pyc \
+              "$site/hermes_cli/__pycache__/model_switch."*.pyc
           '';
         });
       }

@@ -1,0 +1,41 @@
+{
+  "description": "Stripped singleton; dead pool entry that still holds a token Hermes would use",
+  "auth": {
+    "version": 1,
+    "providers": {
+      "openai-codex": {
+        "tokens": {},
+        "last_refresh": "2026-09-27T00:00:00Z",
+        "auth_mode": "chatgpt"
+      }
+    },
+    "credential_pool": {
+      "openai-codex": [
+        {
+          "id": "fxdead",
+          "label": "fixture-deadtok",
+          "auth_type": "oauth",
+          "priority": 0,
+          "source": "device_code",
+          "access_token": "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJleHAiOjQxMDI0NDQ4MDAsInN1YiI6ImRlYWR0b2stcG9vbCJ9.fixture-signature",
+          "refresh_token": "fixture-refresh-deadtok-pool",
+          "last_status": "dead",
+          "last_status_at": 1700000000.0,
+          "last_error_code": null,
+          "last_error_reason": null,
+          "last_error_message": null,
+          "last_error_reset_at": null,
+          "base_url": "https://chatgpt.com/backend-api/codex",
+          "last_refresh": "2026-09-27T00:00:00Z",
+          "request_count": 0
+        }
+      ]
+    }
+  },
+  "expected": {
+    "state": "signed_in",
+    "quota_reset_at": null,
+    "reported_quota_reset_at": null,
+    "resolver": "resolved"
+  }
+}

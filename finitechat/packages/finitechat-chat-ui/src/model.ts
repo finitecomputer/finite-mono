@@ -177,6 +177,8 @@ export type ChatMessage = {
   text: string;
   display_content: string;
   rich_text_json?: string;
+  /** Untrusted JSON object string; renderers read the keys they know. */
+  metadata_json?: string;
   kind: ChatMessageKind;
   status: ChatMessageStatus;
   final_delivery: boolean;

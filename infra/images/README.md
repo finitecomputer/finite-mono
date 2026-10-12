@@ -53,6 +53,10 @@ Notes:
   Runtime release and rollback use the usual digest-pinned image procedure;
   there is no data migration or manual lock cleanup for this fix.
 
+- On a Hermes pin bump or a re-port of `hermes-session-route-safety.patch`, run `RegistrySweepTests` and
+  `MatrixTests` from `git show 4ebf8df6:infra/images/test_hermes_session_route_safety.py` against the new
+  package before promotion.
+
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.
   Their fixed native routes reuse Hermes authentication and existing CLI signer
