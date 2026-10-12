@@ -7,7 +7,7 @@
     # October 12 signup and saved-draft recovery, built from a9c75de0.
     # Core remains the qualified a3cbda97 source; excludes PR1055.
     # https://github.com/finitecomputer/finite-mono/actions/runs/38301081794
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:a59029cec4cc53015fb2cddb6df879474252e50852f94de623e6f1d1b4c0798f";
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ca15806f1a87dd5e3e4e945396e547053cc3223f16472853282dbb1f7a7ad815";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
