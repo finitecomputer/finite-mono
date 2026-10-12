@@ -8,7 +8,7 @@
     # Roll out Core from this source before enabling the new dashboard actions.
     # Source b3fd86b6eca34370bf1a593759f8379312c9760c; excludes PR1055.
     # https://github.com/finitecomputer/finite-mono/actions/runs/37386098344
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:79bda4c3060cf4aa66a623c72b61bcd8b097666fd4e5a3929e737d8afa245066";
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:7943a8732e31fad1083474f901f0bee8d5a7eae5efd7ff9b3a4a284df33ac593";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
