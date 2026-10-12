@@ -6,6 +6,7 @@ import { test } from "node:test";
 
 import { chromium, type Browser } from "playwright";
 
+import { readLaunchInvitation } from "../src/lib/launch-invitations";
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
 const CORE_TOKEN = "browser-core-token";
@@ -34,6 +35,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     page.setDefaultNavigationTimeout(90_000);
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+    await page.getByRole("button", { name: "Have an organization launch code?" }).click();
     await page.getByLabel("Launch Code", { exact: true }).waitFor({ state: "visible" });
     await page.getByRole("link", { name: "Finite.Computer" }).waitFor({ state: "visible" });
     await page.getByRole("list", { name: "Agent setup progress" }).waitFor({
@@ -129,6 +131,31 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
       state: "visible",
     });
 
+    await page.getByLabel("Batch name").fill("Example enterprise");
+    await page.getByLabel("Hosting tier").click();
+    await page.getByRole("option", { name: "Confidential" }).click();
+    await page.getByLabel("Recipient emails (optional)").fill("invited@example.com");
+    await page.getByRole("button", { name: "Issue codes" }).click();
+    const links = page.getByLabel("Issued invitation links");
+    await links.waitFor({ state: "visible" });
+    assert.equal(core.state.issuancePosts.length, 3);
+    const [recipient, link] = (await links.inputValue()).trim().split("\t");
+    assert.equal(recipient, "invited@example.com");
+    const invitation = await readLaunchInvitation(new URL(link).searchParams.get("token"), {
+      WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
+    });
+    assert.equal(invitation?.email, recipient);
+    assert.equal(invitation?.launchCode, "finite_browser_3_0");
+    assert.equal(invitation?.hostingTier, "confidential");
+    assert.equal(new URL(link).origin, `http://127.0.0.1:${dashboardPort}`);
+    assert(!(await links.inputValue()).includes("finite_browser_3_0"));
+
+    await page.getByLabel("Batch name").fill("Invalid recipient count");
+    await page.getByLabel("Recipient emails (optional)").fill("one@example.com\ntwo@example.com");
+    await page.getByRole("button", { name: "Issue codes" }).click();
+    await page.getByText("Enter one different recipient email for each code in the batch.").waitFor();
+    assert.equal(core.state.issuancePosts.length, 3, "invalid recipient count must fail before issuing codes");
+
     await context.close();
   } finally {
     await browser?.close().catch(() => {});
@@ -171,6 +198,8 @@ function startDashboard(port: number, coreUrl: string) {
         FC_WORKOS_OPERATOR_ORG_ID: OPERATOR_ORG_ID,
         FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT: "1",
         FC_WORKOS_AUTH_ENABLED: "0",
+        WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
+        NEXT_PUBLIC_WORKOS_REDIRECT_URI: `http://127.0.0.1:${port}/callback`,
         NEXT_DIST_DIR: ".next-browser-test",
       },
       stdio: "pipe",
@@ -265,7 +294,7 @@ async function handleCoreRequest(
         name: String(body.name),
         hosting_tier: String(body.hostingTier),
         code_count: codeCount,
-        expires_at: "2026-07-18T12:00:00Z",
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
         revoked_at: null,
         revoked_by_workos_user_id: null,
         created_by_workos_user_id: "user_admin",
@@ -345,7 +374,7 @@ function launchCodeBatches() {
         id: "launch_batch_legacy",
         name: "Legacy Standard batch",
         code_count: 1,
-        expires_at: "2026-07-18T12:00:00Z",
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
         revoked_at: null,
         created_by_workos_user_id: "user_admin",
         created_at: "2026-07-11T12:00:00Z",
@@ -358,7 +387,7 @@ function launchCodeBatches() {
         name: "Confidential batch",
         hosting_tier: "confidential",
         code_count: 2,
-        expires_at: "2026-07-18T12:00:00Z",
+        expires_at: new Date(Date.now() + 86_400_000).toISOString(),
         revoked_at: null,
         created_by_workos_user_id: "user_admin",
         created_at: "2026-07-11T12:00:00Z",

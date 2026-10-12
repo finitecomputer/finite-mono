@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 const headingClass =
   "outline-none text-balance font-sans text-3xl leading-tight font-medium tracking-[-0.02em] sm:text-5xl";
 type Step = "billing" | "profile";
-type Access = "stripe" | "entitled";
+type Access = "stripe" | "entitled" | "launch-code" | "invitation";
 
 export function CoreAgentCreationForm({
   error,
@@ -28,6 +28,7 @@ export function CoreAgentCreationForm({
   requiresAccess,
   stripeConfigured,
   trialsEnabled = false,
+  invitation,
 }: {
   error: string | null;
   idempotencyKey: string;
@@ -36,9 +37,12 @@ export function CoreAgentCreationForm({
   requiresAccess: boolean;
   stripeConfigured: boolean;
   trialsEnabled?: boolean;
+  invitation?: { organization: string; email: string; token: string };
 }) {
-  const [step, setStep] = useState<Step>("billing");
-  const access: Access = requiresAccess ? "stripe" : "entitled";
+  const [step, setStep] = useState<Step>(invitation ? "profile" : "billing");
+  const [organizationAccess, setOrganizationAccess] = useState(false);
+  const [launchCode, setLaunchCode] = useState("");
+  const access: Access = invitation ? "invitation" : organizationAccess ? "launch-code" : requiresAccess ? "stripe" : "entitled";
   const [trialCode, setTrialCode] = useState("");
   const [displayName, setDisplayName] = useState(initialName ?? "");
   const [submitting, setSubmitting] = useState(false);
@@ -52,7 +56,7 @@ export function CoreAgentCreationForm({
     Boolean(displayName.trim()) &&
     displayName.trim().length <= 80 &&
     !nameError;
-  const canContinue = access === "entitled" || stripeConfigured;
+  const canContinue = access === "launch-code" ? Boolean(launchCode.trim()) : access !== "stripe" || stripeConfigured;
 
   useEffect(() => {
     heading.current?.focus();
@@ -102,7 +106,7 @@ export function CoreAgentCreationForm({
       encType="multipart/form-data"
       className="grid w-full justify-items-center gap-7 text-center"
       onSubmit={(event) => {
-        // Enter advances the plan only when checkout or account access is available.
+        // Enter advances only when the selected access path is available.
         if (step !== "profile") {
           event.preventDefault();
           if (canContinue) setStep("profile");
@@ -120,6 +124,8 @@ export function CoreAgentCreationForm({
     >
       <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
       <input type="hidden" name="access" value={access} />
+      {invitation ? <input type="hidden" name="invitationToken" value={invitation.token} /> : null}
+      <input type="hidden" name="launchCode" value={access === "launch-code" ? launchCode.trim() : ""} />
       <input type="hidden" name="trialCode" value={access === "stripe" ? trialCode.trim() : ""} />
       <input type="hidden" name="hostingTier" value="standard" />
       {returnMachineId ? (
@@ -137,7 +143,7 @@ export function CoreAgentCreationForm({
       {step === "billing" ? (
         <>
           <h1 ref={heading} tabIndex={-1} className={headingClass}>
-            {access === "entitled"
+            {access === "launch-code" ? "Organization access." : access === "entitled"
               ? "Use your account’s access."
               : "Your own Finite Agent."}
           </h1>
@@ -171,7 +177,7 @@ export function CoreAgentCreationForm({
                     <span className="text-3xl font-semibold tracking-tight tabular-nums">
                       {access === "stripe"
                         ? "$200 USD"
-                        : "Account access"}
+                        : access === "launch-code" ? "Organization access" : "Account access"}
                     </span>
                     {access === "stripe" ? (
                       <span className="text-sm text-muted-foreground">
@@ -182,13 +188,18 @@ export function CoreAgentCreationForm({
                   <p className="text-sm text-muted-foreground">
                     {access === "stripe"
                       ? "Billed monthly. Cancel anytime."
-                      : "Your available agent allowance will be checked when you launch."}
+                      : access === "launch-code" ? "Use a launch code from your organization. No card or trial required." : "Your available agent allowance will be checked when you launch."}
                   </p>
                 </div>
                 {access === "stripe" && trialsEnabled ? <div className="grid gap-2">
                   <Label htmlFor="event-trial-code">Event trial code (optional)</Label>
                   <Input id="event-trial-code" value={trialCode} onChange={event => setTrialCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} placeholder="ABCD-EFGH-JKLM-NPQR" />
                   <p className="text-sm text-muted-foreground">A valid event code starts a free trial, normally seven days. Stripe will show your exact first billing date. A card is required; then $200/month plus applicable tax.</p>
+                </div> : null}
+                {access === "launch-code" ? <div className="grid gap-2">
+                  <Label htmlFor="organization-launch-code">Launch Code</Label>
+                  <Input id="organization-launch-code" value={launchCode} onChange={event => setLaunchCode(event.target.value)} autoComplete="off" spellCheck={false} maxLength={128} />
+                  <p className="text-sm text-muted-foreground">We’ll check your code when you launch.</p>
                 </div> : null}
                 <Button
                   type="button"
@@ -224,7 +235,10 @@ export function CoreAgentCreationForm({
               </p>
             ) : null}
           </div>
-          {!canContinue ? (
+          {!invitation ? <Button type="button" variant="ghost" onClick={() => setOrganizationAccess(!organizationAccess)}>
+            {organizationAccess ? (requiresAccess ? "Use a monthly plan or trial" : "Use account access") : "Have an organization launch code?"}
+          </Button> : null}
+          {access === "stripe" && !stripeConfigured ? (
             <p role="status" className="max-w-md text-sm text-muted-foreground">
               Signup is temporarily unavailable. Please try again later.
             </p>
@@ -247,6 +261,7 @@ export function CoreAgentCreationForm({
         >
           Name your agent
         </h1>
+        {invitation ? <p className="max-w-md text-muted-foreground">Your seat is provided by {invitation.organization} for {invitation.email}. No card or trial required.</p> : null}
         <div className="grid w-full max-w-md gap-2 text-left">
           <Label htmlFor="coreAgentDisplayName">Agent name</Label>
           <Input
@@ -276,14 +291,14 @@ export function CoreAgentCreationForm({
           Continue
           <ArrowRightIcon />
         </Button>
-        <Button
+        {!invitation ? <Button
           type="button"
           variant="ghost"
           onClick={() => setStep("billing")}
         >
           <ArrowLeftIcon />
           Back
-        </Button>
+        </Button> : null}
       </div>
     </form>
   );

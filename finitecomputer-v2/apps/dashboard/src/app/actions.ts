@@ -1,4 +1,7 @@
 "use server";
+
+import { workosBaseUrl } from "@/lib/workos-auth";
+import { invitationRecipients, invitationPassword, sealLaunchInvitation } from "@/lib/launch-invitations";
 import { trialCheckoutDestination } from "@/lib/trial-checkout";
 import { billingManagementResult, type BillingManagementState } from "@/lib/billing-management";
 import { randomUUID } from "node:crypto";
@@ -475,7 +478,22 @@ export async function adminOpsIssueLaunchCodeBatchAction(
 ): Promise<OneTimeLaunchCodeActionState> {
   try {
     await requireAdminViewer("issue Launch Code batches");
-    const issued = await adminIssueCoreLaunchCodeBatch(launchCodeBatchFormInput(formData));
+    const input = launchCodeBatchFormInput(formData);
+    const recipients = invitationRecipients(formData.get("recipientEmails"), input.codeCount);
+    if (recipients.length) invitationPassword();
+    const inviteOrigin = workosBaseUrl();
+    if (recipients.length && !inviteOrigin) throw new Error("Configure the public dashboard URL before issuing invitation links.");
+    const issued = await adminIssueCoreLaunchCodeBatch(input);
+    const invitations = await Promise.all(recipients.map(async (email, index) => {
+      const token = await sealLaunchInvitation({
+        purpose: "organization-seat-v1", email, organization: issued.batch.name,
+        launchCode: issued.codes[index].code, hostingTier: issued.batch.hosting_tier ?? "standard",
+        expiresAtMs: Date.parse(issued.batch.expires_at),
+      });
+      const url = new URL("/invite", inviteOrigin);
+      url.searchParams.set("token", token);
+      return { email, url: url.toString() };
+    }));
     revalidatePath("/dashboard/admin");
     return {
       status: "issued",
@@ -487,6 +505,7 @@ export async function adminOpsIssueLaunchCodeBatchAction(
         hostingTier: issued.batch.hosting_tier ?? "standard",
       },
       codes: issued.codes.map((code) => ({ id: code.id, code: code.code })),
+      invitations,
     };
   } catch (error) {
     return {

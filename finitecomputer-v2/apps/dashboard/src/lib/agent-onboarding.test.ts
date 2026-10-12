@@ -15,7 +15,9 @@ import {
 } from "@/lib/agent-onboarding";
 
 test("agent access follows the explicitly submitted path", () => {
-  assert.equal(resolveAgentCreationAccessPath("launch-code", true), "denied");
+  assert.equal(resolveAgentCreationAccessPath("launch-code", true), "launch-code");
+  assert.equal(resolveAgentCreationAccessPath("launch-code", false, false), "launch-code");
+  assert.equal(resolveAgentCreationAccessPath("invitation", true), "denied");
   assert.equal(resolveAgentCreationAccessPath("stripe", true), "stripe");
   assert.equal(resolveAgentCreationAccessPath("entitled", true), "entitlement");
   assert.equal(resolveAgentCreationAccessPath("entitled", true, false), "denied");

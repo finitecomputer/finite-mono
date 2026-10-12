@@ -32,6 +32,7 @@ export type AgentOnboardingDraft = {
 
 export type AgentCreationAccessPath =
   | "stripe"
+  | "launch-code"
   | "entitlement"
   | "denied";
 
@@ -41,6 +42,7 @@ export function resolveAgentCreationAccessPath(
   canCreateAgent: boolean,
   allowExistingEntitlement = true
 ): AgentCreationAccessPath {
+  if (access === "launch-code") return "launch-code";
   if (access === "stripe") return "stripe";
   if (access === "entitled" && canCreateAgent && allowExistingEntitlement) {
     return "entitlement";

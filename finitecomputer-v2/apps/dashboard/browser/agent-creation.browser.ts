@@ -8,6 +8,7 @@ import { test } from "node:test";
 import { chromium, type Browser, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import { sealLaunchInvitation } from "../src/lib/launch-invitations";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
 
 const CORE_TOKEN = "browser-core-token";
@@ -246,7 +247,7 @@ type FakeSitesState = {
   privateContentRequests: number;
 };
 
-test("dashboard agent creation browser states", { timeout: 300_000 }, async () => {
+test("dashboard agent creation browser states", { timeout: 420_000 }, async () => {
   await resetDashboardDevDirs();
   const hostedDevice = await startFakeHostedDevice();
   const core = await startFakeCore(() => hostedDevice.setAvailable(true));
@@ -308,18 +309,67 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.getByRole("button", { name: "Continue", exact: true }).click();
       assert.equal(await page.locator('input[name="trialCode"]').inputValue(), "WORKSHOP-TRIAL");
 
-      // Reject a form left open on the previous dashboard, without redeeming its code.
-      await page.locator('input[name="access"]').evaluate((input) => {
-        (input as HTMLInputElement).value = "launch-code";
-      });
+      await page.getByRole("button", { name: "Back", exact: true }).click();
+      await page.getByRole("button", { name: "Have an organization launch code?" }).click();
+      assert.equal(await page.getByRole("button", { name: "Continue", exact: true }).isEnabled(), false);
+      await page.getByLabel("Launch Code", { exact: true }).fill("fixture-enterprise-code");
+      assert.equal(await page.locator('input[name="trialCode"]').inputValue(), "");
+      assert.equal(await page.getByLabel("Event trial code (optional)").count(), 0);
+      await onboardingScreenshots(page, "organization-code");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      // A native form from the previous dashboard still redeems through Core.
+
       await page.locator('form[action="/dashboard/agent-creation-requests"]').evaluate((form) => {
         (form as HTMLFormElement).submit();
       });
-      await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
-      await expectVisibleText(page, "Continue to secure checkout to create your agent.");
-      assert.equal(core.state.creationPosts.length, 0);
+      await page.waitForURL((url) => url.searchParams.has("creation"));
+      assert.equal(core.state.creationPosts.length, 1);
+      assert.equal((core.state.creationPosts[0] as Record<string, unknown>).launchCode, "fixture-enterprise-code");
 
     });
+
+    for (const email of ["other@example.com", "browser@finite.vip"]) {
+      core.reset({ billingClass: "standard", requiresBilling: true });
+      await withSignedInPage(browser, paidDashboardPort, async (page) => {
+        const token = await sealLaunchInvitation({
+          purpose: "organization-seat-v1", email, organization: "Example enterprise",
+          launchCode: "fixture-personal-invite", hostingTier: "confidential", expiresAtMs: Date.now() + 600_000,
+        }, { WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum" });
+        await page.goto(`http://127.0.0.1:${paidDashboardPort}/invite?token=${encodeURIComponent(token)}`);
+        assert(!page.url().includes(token), "authentication and onboarding URLs must not retain the token");
+        assert.equal(core.state.creationPosts.length, 0, "visiting an invite must not redeem a seat");
+        if (email !== "browser@finite.vip") {
+          await expectVisibleText(page, `Sign in with the verified email ${email} to use this invitation.`);
+          const result = await page.request.post(`http://127.0.0.1:${paidDashboardPort}/dashboard/agent-creation-requests`, {
+            form: { access: "invitation", invitationToken: token, displayName: "Wrong Email", hostingTier: "standard", idempotencyKey: "wrong-email-test" },
+          });
+          assert.equal(result.ok(), true);
+          assert.equal(core.state.creationPosts.length, 0, "forged form must not bypass the verified recipient");
+          return;
+        }
+        await page.getByRole("heading", { name: "Name your agent" }).waitFor();
+        assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
+        assert.equal(await page.getByText("$200 USD", { exact: true }).count(), 0);
+        assert.equal(await page.locator('input[name="launchCode"]').inputValue(), "");
+        await page.getByLabel("Agent name").fill("Invited Agent");
+        await waitFor(async () => page.getByRole("button", { name: "Continue", exact: true }).isEnabled());
+        await onboardingScreenshots(page, "invitation-name");
+        await page.reload();
+        await page.getByLabel("Agent name").fill("Invited Agent");
+        hostedDevice.failNextBindingAuthorization();
+        await page.getByRole("button", { name: "Continue", exact: true }).click();
+        await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
+        await expectVisibleText(page, "binding authorization is temporarily unavailable");
+        assert((await page.context().cookies()).some(cookie => cookie.name === "finite-launch-invitation"));
+        await page.getByRole("button", { name: "Continue", exact: true }).click();
+        await page.waitForURL((url) => url.searchParams.has("creation"));
+        assert.equal(core.state.creationPosts.length, 2);
+        assert.equal((core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey, (core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey);
+        assert.equal((core.state.creationPosts[0] as Record<string, unknown>).launchCode, "fixture-personal-invite");
+        assert.equal((core.state.creationPosts[0] as Record<string, unknown>).hostingTier, "confidential");
+        assert(!(await page.context().cookies()).some(cookie => cookie.name === "finite-launch-invitation"));
+      });
+    }
 
     // A new dashboard must resume a signed draft written by the previous
     // dashboard release. Core's billing state remains the payment authority.
@@ -449,6 +499,28 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     dashboardOutput = collectOutput(dashboard);
     await waitForDashboard(dashboardPort, dashboardOutput);
 
+    // Organization seats work even when Stripe is unavailable; Core still
+    // rejects an expired/revoked code instead of falling back to account access.
+    core.reset({ creationError: "Launch Code is invalid or expired" });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard?new=1`);
+      await page.getByRole("button", { name: "Have an organization launch code?" }).click();
+      await page.getByLabel("Launch Code", { exact: true }).fill("expired-synthetic-code");
+      await prepareAgentLaunch(page, "Organization Seat");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
+      await expectVisibleText(page, "Launch Code is invalid or expired");
+      assert.equal(core.state.creationPosts.length, 1);
+      core.state.creationError = null;
+      await page.getByRole("button", { name: "Have an organization launch code?" }).click();
+      await page.getByLabel("Launch Code", { exact: true }).fill("fresh-synthetic-code");
+      await prepareAgentLaunch(page, "Organization Seat");
+      await page.getByRole("button", { name: "Continue", exact: true }).click();
+      await page.waitForURL((url) => url.searchParams.has("creation"));
+      assert.equal(core.state.creationPosts.length, 2);
+      assert.equal((core.state.creationPosts[1] as Record<string, unknown>).launchCode, "fresh-synthetic-code");
+    });
+
     // Synthetic Core recovery states; no live WorkOS or Stripe calls.
     const recovering = visibleProject("project_payment", "Paid Agent", hostedDevice.runtimeStatusUrl, "payment-agent");
     recovering.runtime_recovery = "restarting";
@@ -481,7 +553,9 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       core.state.projects[0].runtime_recovery = "restart_pending";
       core.state.projects[0].runtime!.runtime_status = "unknown";
       await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_payment-agent`);
-      await expectVisibleText(page, "Waiting for your agent to be ready. Your home, data, and history are retained.");
+      await expectVisibleText(page, "Waiting for your agent to be ready. Your home, data, and history are retained.").catch(async error => {
+        throw new Error(`Recovery screen did not render: ${String(error)}\n${await pageText(page)}\n${dashboardOutput()}`);
+      });
       core.state.projects[0].runtime!.runtime_status = "offline";
       await page.getByText("Waiting for your agent to be ready. This page updates automatically.", { exact: true }).waitFor({ timeout: 40_000 });
       const healthRefreshCount = core.state.meGets;
@@ -3288,11 +3362,14 @@ async function withSignedInPage(
   dashboardPort: number,
   fn: (page: Page) => Promise<void>
 ) {
+  console.log("Browser scenario:", new Error().stack?.split("\n")[2]?.trim());
   const context = await browser.newContext();
   try {
     const page = await context.newPage();
     page.setDefaultNavigationTimeout(90_000);
-    await fn(page);
+    await fn(page).catch(async error => {
+      throw new Error(`${String(error)}\n${await pageText(page)}`, { cause: error });
+    });
   } finally {
     await context.close();
   }

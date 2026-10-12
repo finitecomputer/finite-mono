@@ -238,6 +238,7 @@ export function AdminLaunchCodeBatchIssueForm() {
     IDLE_LAUNCH_CODE_STATE
   );
   const [expiryHours, setExpiryHours] = useState("168");
+  const [hostingTier, setHostingTier] = useState("standard");
 
   return (
     <form
@@ -249,12 +250,12 @@ export function AdminLaunchCodeBatchIssueForm() {
         Issue Launch Code batch
       </div>
       <p className="text-sm text-muted-foreground">
-        Choose a named, exact-size batch. Codes are shown once after issuance and are never available in later views.
+        One code per organization seat, with no trial or individual checkout. Codes and invitation links are shown once; copy or download them after issuance.
       </p>
       <div className="grid gap-3 md:grid-cols-4">
         <div className="grid gap-2 md:col-span-1">
           <Label htmlFor="launchCodeBatchName">Batch name</Label>
-          <Input id="launchCodeBatchName" name="name" maxLength={120} required placeholder="July training" />
+          <Input id="launchCodeBatchName" name="name" maxLength={120} required placeholder="HRF" />
         </div>
         <div className="grid gap-2">
           <Label htmlFor="launchCodeBatchCount">Exact code count</Label>
@@ -262,7 +263,8 @@ export function AdminLaunchCodeBatchIssueForm() {
         </div>
         <div className="grid gap-2">
           <Label htmlFor="launchCodeBatchHostingTier">Hosting tier</Label>
-          <Select name="hostingTier" defaultValue="standard">
+          <input type="hidden" name="hostingTier" value={hostingTier} />
+          <Select value={hostingTier} onValueChange={setHostingTier}>
             <SelectTrigger id="launchCodeBatchHostingTier" className="w-full">
               <SelectValue />
             </SelectTrigger>
@@ -290,7 +292,12 @@ export function AdminLaunchCodeBatchIssueForm() {
           </div>
         </div>
       </div>
-      <p className="text-xs text-muted-foreground">Maximum expiry is 30 days. Use 1 code for the canary or 12 for a training group.</p>
+      <div className="grid gap-2">
+        <Label htmlFor="launchCodeRecipients">Recipient emails (optional)</Label>
+        <textarea id="launchCodeRecipients" name="recipientEmails" className="min-h-24 rounded-md border border-input bg-transparent p-3 text-sm" placeholder="One email per seat" />
+        <p className="text-xs text-muted-foreground">Enter one email for each code to generate personal invitation links. Each recipient must sign in with that verified email.</p>
+      </div>
+      <p className="text-xs text-muted-foreground">Maximum redemption window is 30 days. This is the deadline to claim a seat, not a trial or seat expiry.</p>
       <FormActionButton className="w-fit" pendingLabel="Issuing...">
         <KeyRoundIcon />
         Issue codes
@@ -311,24 +318,25 @@ function OneTimeLaunchCodePanel({ state }: { state: OneTimeLaunchCodeActionState
   if (state.status !== "issued") {
     return null;
   }
-  const text = launchCodeDownloadText(state.codes);
+  const hasInvitations = Boolean(state.invitations?.length);
+  const text = hasInvitations ? state.invitations!.map(invite => `${invite.email}\t${invite.url}`).join("\n") + "\n" : launchCodeDownloadText(state.codes);
 
   return (
     <div className="grid gap-3 rounded-[var(--radius-card-inner)] border border-amber-500/40 bg-amber-500/10 p-3">
       <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
         <TriangleAlertIcon className="size-4" aria-hidden />
-        These {state.codes.length} Launch Code{state.codes.length === 1 ? "" : "s"} are shown once. Copy or download them now.
+        These {state.codes.length} {hasInvitations ? "invitation links" : "Launch Codes"} are shown once. Copy or download them now.
       </div>
       <textarea
         readOnly
         value={text}
-        aria-label="Issued Launch Codes"
+        aria-label={hasInvitations ? "Issued invitation links" : "Issued Launch Codes"}
         className="min-h-28 w-full rounded bg-black/20 p-2 font-mono text-sm text-foreground"
       />
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         <Button type="button" variant="outline" size="sm" onClick={() => void copyLaunchCodes(text)}>
           <CopyIcon />
-          Copy codes
+          {hasInvitations ? "Copy invitation links" : "Copy codes"}
         </Button>
         <Button
           type="button"
@@ -337,7 +345,7 @@ function OneTimeLaunchCodePanel({ state }: { state: OneTimeLaunchCodeActionState
           onClick={() => downloadLaunchCodes(text, launchCodeDownloadFilename(state.batch.name))}
         >
           <DownloadIcon />
-          Download codes
+          {hasInvitations ? "Download invitation links" : "Download codes"}
         </Button>
         <span>
           {state.batch.name} · {launchCodeHostingTierLabel(state.batch.hostingTier)} · expires{" "}

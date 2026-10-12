@@ -14,6 +14,29 @@ Brain invitation and approval routes use bounded server-side signed requests.
 WorkOS authentication does not replace Brain membership or Folder Key Grants.
 The removed `/client` browser UI is not a current dashboard surface.
 
+## Organization seat invitations
+
+Admin → Invites can issue one launch code per seat, optionally paired with one
+recipient email per code. The one-time output contains personal `/invite` links.
+Their encrypted payload binds the code, verified email, batch name, hosting tier,
+and redemption deadline using `WORKOS_COOKIE_PASSWORD`. Raw codes remain bearer
+credentials for manual entry; they are never exposed to invited recipients.
+
+The public invite route places the encrypted token in an HttpOnly cookie before
+WorkOS signup/sign-in. Onboarding submits the token displayed with that form and
+checks the verified WorkOS email again server-side. Core remains the authority
+for code expiry, revocation, one-time redemption, sponsored allowance, and exact
+idempotent retries. No subscription or trial is created by this path. The cookie
+survives launch failures and is cleared after chat binding succeeds; an opened
+invitation can retry an already redeemed code after its batch deadline, as Core
+already permits. Unredeemed expired codes still fail in Core.
+
+This adds no Core schema or wire changes. Existing codes, signed profile/payment
+drafts and hosted-device binding keep their contracts. Deploy this dashboard
+before sharing new links; an older dashboard cannot open them. Rollback retains
+Core seat/redemption state. Browser coverage uses synthetic Core, Hosted Device
+and signed-in accounts; it does not call live WorkOS or Stripe.
+
 ## Agent Skills inventory
 
 The Skills page reads the selected agent's `GET /api/skills?inventory=true`

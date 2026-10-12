@@ -76,6 +76,7 @@ test("WorkOS proxy protects app surfaces but leaves entry and callback routes pu
   assert.equal(workosProtectedPath("/"), false);
   assert.equal(workosProtectedPath("/login"), false);
   assert.equal(workosProtectedPath("/signup"), false);
+  assert.equal(workosProtectedPath("/invite"), false);
   assert.equal(workosProtectedPath("/callback"), false);
   assert.equal(workosProtectedPath("/health"), false);
   assert.equal(workosProtectedPath("/api/finite/v1/heartbeat"), true);

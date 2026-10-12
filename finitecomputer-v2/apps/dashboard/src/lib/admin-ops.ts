@@ -472,6 +472,7 @@ export type OneTimeLaunchCodeActionState =
         hostingTier: LaunchCodeHostingTier;
       };
       codes: Array<{ id: string; code: string }>;
+      invitations?: Array<{ email: string; url: string }>;
     };
 
 /** Plaintext values only, one per line, for the client-created one-time file. */
