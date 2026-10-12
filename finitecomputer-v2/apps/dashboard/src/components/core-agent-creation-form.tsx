@@ -261,7 +261,6 @@ export function CoreAgentCreationForm({
         >
           Name your agent
         </h1>
-        {invitation ? <p className="max-w-md text-muted-foreground">Your seat is provided by {invitation.organization} for {invitation.email}. No card or trial required.</p> : null}
         <div className="grid w-full max-w-md gap-2 text-left">
           <Label htmlFor="coreAgentDisplayName">Agent name</Label>
           <Input
