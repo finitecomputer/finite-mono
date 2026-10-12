@@ -18,7 +18,7 @@ satellite and publish a measured release. Authorized relaunch requires
 readiness, streaming, mixed-version model aliases, negative authentication and
 usage settlement afterward, plus `scripts/finite-status` before and after.
 
-If the pinned CLI's `container relaunch` returns HTTP 404, use the Tinfoil
+If an older operator CLI's `container relaunch` returns HTTP 404, use the Tinfoil
 dashboard's **Deploy** action on the existing instance, selecting the exact
 approved measured tag. Preserve its secrets, confidential-computing settings
 and identity. This uses the same production authorization boundary; do not
