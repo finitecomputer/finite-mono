@@ -76,7 +76,7 @@ class Result:
 
 
 class Engine:
-    """Docker CLI; every call is bounded and killed on expiry."""
+    """Owned Docker CLI; bounded local cleanup does not cancel remote work."""
 
     def __init__(self, binary: str = 'docker') -> None:
         self.binary = binary
@@ -86,15 +86,22 @@ class Engine:
             raise Refused('expired CLI submission budget')
         proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         try:
-            stdout, stderr = proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as expired:
-            proc.kill()
             try:
-                stdout, stderr = proc.communicate(timeout=1)
-            except subprocess.TimeoutExpired:
-                stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
-            return Result(proc.poll(), stdout, stderr, True)
-        return Result(proc.returncode, stdout, stderr)
+                stdout, stderr = proc.communicate(timeout=timeout)
+                result = Result(proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired as expired:
+                proc.kill()
+                try:
+                    stdout, stderr = proc.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
+                result = Result(proc.poll(), stdout, stderr, True)
+        finally:
+            cleaned = _cleanup_cli(proc)
+        if not cleaned:
+            result.timed_out = True
+            result.stderr += '\nlocal CLI cleanup unresolved'
+        return result
 
     def stream(self, args: list[str], timeout: float, on_line: Callable[[str], None]) -> Result:
         if timeout <= 0:
@@ -102,24 +109,77 @@ class Engine:
         deadline = time.monotonic() + timeout
         proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         errors: list[str] = []
-        reader = threading.Thread(target=lambda: [on_line(line) for line in proc.stdout], daemon=True)
-        drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
-        reader.start()
-        drain.start()
-        try:
-            code = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        reader_failed = threading.Event()
+
+        def read_lines() -> None:
             try:
-                proc.wait(timeout=1)
+                for line in proc.stdout:
+                    on_line(line)
+            except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
+                reader_failed.set()
+                errors.append(f'local CLI reader failed ({type(error).__name__})')
+
+        reader = threading.Thread(target=read_lines, daemon=True)
+        drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
+        try:
+            reader.start()
+            drain.start()
+            try:
+                code = proc.wait(timeout=timeout)
+                reader.join(max(0, deadline - time.monotonic()))
+                drain.join(max(0, deadline - time.monotonic()))
+                result = Result(code, '', '', reader.is_alive() or drain.is_alive() or reader_failed.is_set())
             except subprocess.TimeoutExpired:
-                errors.append('local CLI drain unresolved')
-            reader.join(1)
-            drain.join(1)
-            return Result(None, '', ''.join(errors), True)
-        reader.join(max(0, deadline - time.monotonic()))
-        drain.join(max(0, deadline - time.monotonic()))
-        return Result(code, '', ''.join(errors), reader.is_alive() or drain.is_alive())
+                result = Result(None, '', '', True)
+        finally:
+            cleaned = _cleanup_cli(proc, (reader, drain))
+        if not cleaned:
+            result.timed_out = True
+            errors.append('local CLI cleanup unresolved')
+        result.stderr = ''.join(errors)
+        return result
+
+
+def _cleanup_cli(proc: subprocess.Popen, readers: tuple[threading.Thread, ...] = ()) -> bool:
+    """Reap only this local CLI and close pipes within one two-second budget."""
+    previous = {}
+    if threading.current_thread() is threading.main_thread():
+        previous = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
+    deadline = time.monotonic() + 2
+    close_errors: list[OSError] = []
+
+    def close_pipes() -> None:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except OSError as error:
+                    close_errors.append(error)
+
+    try:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        for reader in readers:
+            if reader.ident is not None:
+                reader.join(max(0, deadline - time.monotonic()))
+        # An inherited pipe can outlive the CLI. Closing a TextIO wrapper while
+        # a reader holds its lock can block; retain a bounded unresolved result.
+        if any(reader.is_alive() for reader in readers):
+            closer = threading.Thread(target=close_pipes, daemon=True)
+            closer.start()
+            closer.join(max(0, deadline - time.monotonic()))
+            closed = not closer.is_alive()
+        else:
+            close_pipes()
+            closed = True
+        return proc.returncode is not None and closed and not close_errors and not any(r.is_alive() for r in readers)
+    finally:
+        for s, handler in previous.items():
+            signal.signal(s, handler)
 
 
 def _text(value: Any) -> str:
@@ -353,7 +413,7 @@ class LabRun:
         digest = self.exec_(['sha256sum', HELPER])
         self.require('helper-in-container', digest, digest.code == 0 and digest.stdout.split()[:1] == [self.state['inputs']['helper_sha256']])
         identity = self.helper_exec('identity', ['identity', '-sock', AGENT_SOCKET])
-        found = [json.loads(line) for line in identity.stdout.splitlines() if line.strip()]
+        found = [verdict_module.parse_json(line) for line in identity.stdout.splitlines() if line.strip()]
         try:
             verdict_module.need(len(found) == 1, 'identity record count')
             verdict_module.validate_identity(found[0], self.arm, self.state)
@@ -412,11 +472,11 @@ class LabRun:
             nonlocal timer
             self.add_records(line)
             try:
-                record = json.loads(line)
-            except ValueError:
+                record = verdict_module.parse_json(line)
+            except (ValueError, verdict_module.Inconclusive):
                 return
             if record.get('kind') == 'signal-sent' and self.arm.get('reader') and timer is None:
-                timer = threading.Timer(float(self.arm['release_after_s']), release_once)
+                timer = threading.Timer(float(self.arm.get('release_after_s', verdict_module.DEFAULT_RELEASE_AFTER_S)), release_once)
                 timer.daemon = True
                 timer.start()
 
@@ -458,8 +518,8 @@ class LabRun:
         seen: list[int] = []
         for line in self.records:
             try:
-                record = json.loads(line)
-            except ValueError:
+                record = verdict_module.parse_json(line)
+            except (ValueError, verdict_module.Inconclusive):
                 continue
             if record.get('kind') == 'client-end':
                 seen = record.get('seen_pids', [])
@@ -532,7 +592,7 @@ def main(argv: list[str], engine: Engine | None = None) -> int:
         return 2
     arm_path, helper, out = Path(argv[1]), Path(argv[2]), Path(argv[3])
     try:
-        arm = json.loads(arm_path.read_text())
+        arm = verdict_module.load_json(arm_path)
         verdict_module.validate_arm(arm)
     except (OSError, ValueError, verdict_module.Inconclusive) as error:
         print(f'refused: arm invalid: {error}', file=sys.stderr)
