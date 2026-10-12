@@ -2,6 +2,9 @@
 # Read-only fake nerdctl for lifecycle-probe fixtures. State is one file per
 # field under ./fake-state next to this script, mirroring the kata.rs test
 # fakes: <name>.image/.status/.project/.source/.host/.mount/.id/.artifact/.schema
+# `.status` is printed as State.Status verbatim. nerdctl 2.3 reports a status
+# only after loading the container's task; a container whose task it cannot
+# load has an empty status, so fixtures for a task-less container use "".
 #
 # The ONLY supported verbs are the probe's read paths: `inspect` and `ps`.
 # Any other verb is a mutating or unsupported provider call: the attempt is

@@ -378,6 +378,30 @@ class CiHarnessSelectionTests(unittest.TestCase):
             {"run_finite_status_contract"},
         )
 
+    def test_runner_host_address_inputs_run_finite_status_and_nix_contracts(self) -> None:
+        # finite-status probes Agent contact only at the address each Runner
+        # host publishes, so a Nix-only edit there must run its contract job.
+        for path in (
+            "infra/nixos/hosts/finite-lat-3/default.nix",
+            "infra/nixos/hosts/finite-lat-4/default.nix",
+            "infra/nixos/hosts/finite-lat-5/default.nix",
+            "infra/nixos/modules/kata-runner-host.nix",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    selected(path),
+                    {
+                        "run_finite_status_contract",
+                        "run_nix_checks",
+                        "run_nix_service_packages",
+                    },
+                )
+        job = ci_job_block("finite-status-contract")
+        self.assertIn(
+            "needs.changes.outputs.run_finite_status_contract == 'true'", job
+        )
+        self.assertIn("just finite-status-contract", job)
+
     def test_devfinity_smoke_depends_on_nix_service_packages(self) -> None:
         selection = select_harnesses.HarnessSelection(run_devfinity_smoke=True)
 
