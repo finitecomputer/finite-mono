@@ -69,6 +69,51 @@ wrapper can still synthesize the passing report artifact when the richer
 in-test report hook is absent; that report is not independent live-runtime
 evidence.
 
+## Container output observations
+
+`finite-agentd serve` samples the stdout and stderr it inherited once a
+second on a dedicated thread. In the Runtime image these are the container
+output pipes that every supervised child writes to. `status.json`,
+`agent.status.inspect` and the `runtime.agentd` snapshot carry the latest
+sample as `container_output`. Once `status.json` parses, the health server
+projects an allowlisted copy as `agentd.container_output` in `/healthz` and
+`/contact`.
+
+Each stream has a `kind`: `pipe`, `not_pipe`, `same_pipe_as_stdout`,
+`unavailable`, `unsupported_platform` or `sampler_not_started`. A `pipe`
+sample carries:
+
+- `observed_at_ms`: wall-clock time after both reads returned. It is not the
+  instant either value was captured; if the second read waited, the first
+  value is older.
+- `buffered_bytes` (`FIONREAD`).
+- `capacity_bytes` (`F_GETPIPE_SZ`). This is a separate read, so a concurrent
+  resize can leave `buffered_bytes` above it in one sample.
+- `observed_decrease_bytes`: the saturating sum of drops in `buffered_bytes`
+  between consecutive successful samples since `first_observed_at_ms`, over
+  `sample_count` samples. It is only that sum.
+
+What the samples do not prove:
+
+- `observed_decrease_bytes` is not bytes read, received or delivered. A
+  writer in packet mode (`O_DIRECT`, which `F_SETFL` can switch on at any
+  time) writes packets, and the kernel may split a large write across
+  several. A read shorter than the packet it reads returns part of it, and
+  the kernel discards the rest of that packet; the discarded bytes count as
+  a drop too.
+- An unchanged `observed_decrease_bytes` does not mean nothing was read.
+  Output written and removed between two samples is invisible.
+- A full pipe means output is waiting for its reader. It does not prove that
+  a given writer is waiting (a small write can still merge into the last
+  page), that the host collector is gone, or that Hermes is stuck.
+- Nothing here measures gateway, channel or reply progress. None of it feeds
+  readiness, supervision or restarts.
+
+From kata-agent 3.29.0 source (not observed in a booted guest), kata-agent
+reads the guest pipes only when the host shim asks for output. A draining
+guest pipe would therefore show the local output path moving, not end-to-end
+delivery. Runtimes on older images report nothing.
+
 ## Optional hosted Hermes process
 
 `finite-agentd hosted-hermes` validates trusted launch settings and replaces

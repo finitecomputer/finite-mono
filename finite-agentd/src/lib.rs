@@ -4,6 +4,7 @@ mod daemon;
 mod hosted_hermes;
 mod hosted_hermes_pull;
 mod ledger;
+mod output_pipe;
 mod simplex;
 mod supervisor;
 mod transport;
@@ -19,6 +20,10 @@ pub use daemon::{
 };
 pub use hosted_hermes::run_hosted_hermes;
 pub use ledger::{CommandDecision, Ledger};
+pub use output_pipe::{
+    ContainerOutputStatus, ObservationError, OutputFileType, OutputStreamObservation,
+    PipeObservation,
+};
 pub use supervisor::{ProcessState, ProcessStatus, SupervisorStatus};
 
 #[derive(Debug, Error)]

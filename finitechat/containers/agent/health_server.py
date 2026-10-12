@@ -93,6 +93,37 @@ RECOVERY_REMEDIATIONS = {
     "restore_or_escalate",
     "upgrade_runtime_image",
 }
+# Report-only output pipe observations from finite-agentd (output_pipe.rs).
+# They pass through this allowlist and never feed ok, ready or ready_reason.
+CONTAINER_OUTPUT_PIPE_FIELDS = (
+    "buffered_bytes",
+    "capacity_bytes",
+    "first_observed_at_ms",
+    "sample_count",
+    "observed_decrease_bytes",
+)
+CONTAINER_OUTPUT_FILE_TYPES = {
+    "block_device",
+    "character_device",
+    "directory",
+    "other",
+    "regular_file",
+    "socket",
+    "symlink",
+}
+CONTAINER_OUTPUT_ERRORS = {
+    "EBADF",
+    "EINTR",
+    "EINVAL",
+    "EIO",
+    "EMFILE",
+    "ENFILE",
+    "ENOMEM",
+    "ENOTTY",
+    "other",
+}
+CONTAINER_OUTPUT_FIXED_KINDS = {"sampler_not_started", "unsupported_platform"}
+MAX_REPORTED_INTEGER = 2**53 - 1
 
 
 def identity() -> dict[str, Any]:
@@ -133,6 +164,87 @@ def bridge_status() -> dict[str, Any]:
     return payload
 
 
+class _MalformedOutputReport(ValueError):
+    pass
+
+
+def _reported_integer(value: object) -> int:
+    if (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= MAX_REPORTED_INTEGER
+    ):
+        return value
+    raise _MalformedOutputReport
+
+
+def _reported_name(value: object, allowed: set[str]) -> str:
+    # Check the type first: a JSON array or object is unhashable, and a set
+    # membership test on it would raise out of the request handler.
+    if isinstance(value, str) and value in allowed:
+        return value
+    raise _MalformedOutputReport
+
+
+def _output_stream(value: object, name: str, updated_at_ms: int) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _MalformedOutputReport
+    kind = value.get("kind")
+    if not isinstance(kind, str):
+        raise _MalformedOutputReport
+    if kind in CONTAINER_OUTPUT_FIXED_KINDS or (kind == "same_pipe_as_stdout" and name == "stderr"):
+        return {"kind": kind}
+    stream: dict[str, Any] = {
+        "kind": kind,
+        "observed_at_ms": _reported_integer(value.get("observed_at_ms")),
+    }
+    if kind == "pipe":
+        for field in CONTAINER_OUTPUT_PIPE_FIELDS:
+            stream[field] = _reported_integer(value.get(field))
+    elif kind == "not_pipe":
+        stream["file_type"] = _reported_name(value.get("file_type"), CONTAINER_OUTPUT_FILE_TYPES)
+    elif kind == "unavailable":
+        stream["error"] = _reported_name(value.get("error"), CONTAINER_OUTPUT_ERRORS)
+    else:
+        raise _MalformedOutputReport
+    # Checked against the heartbeat timestamp beside it (same agentd clock),
+    # not against this response: a sample newer than the heartbeat, or older
+    # than it by more than the heartbeat limit, is not current. The heartbeat
+    # may itself be almost that limit old.
+    age_ms = updated_at_ms - stream["observed_at_ms"]
+    if not 0 <= age_ms <= AGENTD_STATUS_STALE_SECS * 1000:
+        return {"kind": "unknown", "reason": "observation_stale"}
+    return stream
+
+
+def container_output(payload: dict[str, Any]) -> dict[str, Any]:
+    """Project agentd's output observations through a fixed allowlist.
+
+    These are timestamped raw samples: bytes waiting in the inherited
+    stdout/stderr pipes, their capacity, and the sum of observed drops in the
+    bytes waiting. That sum is not a count of bytes read, received or
+    delivered. "reported" means samples were present, not that output is
+    flowing now. They say nothing about whether a collector, gateway or reply
+    path is working, so they never feed readiness. Older agentd builds report
+    nothing.
+    """
+    report = payload.get("container_output")
+    if report is None:
+        return {"state": "not_reported"}
+    try:
+        if not isinstance(report, dict):
+            raise _MalformedOutputReport
+        updated_at_ms = _reported_integer(payload.get("updated_at_ms"))
+        return {
+            "state": "reported",
+            "sample_interval_ms": _reported_integer(report.get("sample_interval_ms")),
+            "stdout": _output_stream(report.get("stdout"), "stdout", updated_at_ms),
+            "stderr": _output_stream(report.get("stderr"), "stderr", updated_at_ms),
+        }
+    except _MalformedOutputReport:
+        return {"state": "unknown", "reason": "malformed"}
+
+
 def agentd_status() -> dict[str, Any]:
     try:
         # stat before reading: if the file is replaced in between, the
@@ -151,6 +263,7 @@ def agentd_status() -> dict[str, Any]:
         "ok": ok,
         "version": payload.get("version"),
         "processes": {name: processes.get(name, {}).get("state", "starting") for name in required},
+        "container_output": container_output(payload),
     }
     # Liveness-gated ready: green contents a dead agentd left behind must not
     # pass. A frozen file means the supervisor is gone (SIGKILL, wedge), so
@@ -166,6 +279,7 @@ def agentd_status() -> dict[str, Any]:
                     "agentd status heartbeat stopped "
                     f"{int(age_secs)}s ago (limit {int(AGENTD_STATUS_STALE_SECS)}s)"
                 ),
+                "container_output": {"state": "unknown", "reason": "agentd_status_stale"},
             }
         )
     return status
@@ -312,9 +426,10 @@ def runtime_health() -> dict[str, Any]:
     # The top-level "ready" is the same verdict as the HTTP status code
     # (truthful-readiness backport from PR 440): the runner reads only this
     # field, so it must not stay true on a 503 while a dead bridge or a
-    # frozen agentd heartbeat sits underneath a live identity. The 200 body
-    # is byte-identical to before; 503 bodies may now carry "ready": false
-    # where they previously claimed true, plus the additive "ready_reason".
+    # frozen agentd heartbeat sits underneath a live identity. 503 bodies may
+    # carry "ready": false plus the additive "ready_reason". Once agentd's
+    # status parses, both bodies also carry the additive, report-only
+    # "agentd.container_output"; it never changes "ready" or the status code.
     ready = runtime_ready(payload)
     if not ready:
         payload["ready_reason"] = ready_reason(payload)
