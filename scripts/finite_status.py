@@ -3336,9 +3336,10 @@ def guest_memory_backing_evidence(record: Any) -> dict[str, Any]:
         return invalid("not an object")
     if not all(isinstance(record.get(key), str) for key in ("path", "path_basis", "observed_at")):
         return invalid("no path, basis or observation time")
-    # JSON input can carry lone surrogates, which cannot be printed as UTF-8:
-    # one in rendered text would stop the whole human report.
-    for key in ("path", "path_basis", "error", "mount_error"):
+    # JSON input can carry lone surrogates, which cannot be encoded as UTF-8:
+    # one in rendered text would stop the whole human report. observed_at is only
+    # echoed to JSON, but parse_time accepts a surrogate as its date/time separator.
+    for key in ("path", "path_basis", "observed_at", "error", "mount_error"):
         if isinstance(record.get(key), str) and re.search(r"[\ud800-\udfff]", record[key]):
             return invalid(f"{key} is not well-formed Unicode")
     try:

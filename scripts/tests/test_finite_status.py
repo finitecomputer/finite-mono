@@ -2036,12 +2036,22 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         cases["tmpfs type without mount state"] = ({**identity, **sizes, "filesystem_type": "tmpfs"}, "invalid",
                                                    invalid + "missing or malformed mount evidence")
         # Lone surrogates parse from JSON but cannot be printed as UTF-8; valid Unicode stays.
-        for branch in ("reserved blocks", "unreadable", "mount metadata unreadable"):
+        for branch in ("reserved blocks", "no block limit", "unreadable", "mount metadata unreadable"):
             record = cases[branch][0]
             for key in ("path", "path_basis", "error", "mount_error"):
                 for surrogate in ("\ud800", "\udfff") if key in record else ():
                     cases[f"{branch} {key} {surrogate!a}"] = (
                         {**record, key: record[key] + surrogate}, "invalid", invalid + f"{key} is not well-formed Unicode")
+            # A trailing surrogate fails to parse; one replacing the date/time separator parses.
+            for surrogate in ("\ud800", "\udfff"):
+                cases[f"{branch} observed_at separator {surrogate!a}"] = (
+                    {**record, "observed_at": record["observed_at"].replace("T", surrogate)}, "invalid",
+                    invalid + "observed_at is not well-formed Unicode")
+        cases["basic observed_at separator"] = ({**tmpfs, **sizes, "observed_at": "20261011\ud800225533Z"}, "invalid",
+                                                invalid + "observed_at is not well-formed Unicode")
+        cases["unicode beyond latin-1"] = ({**tmpfs, **sizes, "path": "/dev/shm/\U0001f600\ue000"}, "measured",
+                                           "guest memory backing /dev/shm/\U0001f600\ue000 (assumed-kata-default): "
+                                           "tmpfs 96.0% used, 122880 bytes available")
         cases["unicode measured"] = ({**tmpfs, **sizes, "path": "/dev/shm/gäst", "path_basis": "assumed-kata-défaut"},
                                      "measured", "guest memory backing /dev/shm/gäst (assumed-kata-défaut): "
                                                  "tmpfs 96.0% used, 122880 bytes available")
@@ -2116,7 +2126,19 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
              "guest memory backing /dev/shm (assumed-kata-default): capacity unknown, "
              "mount metadata unavailable (verweigert ü)"),
         ]
-        self.assertEqual(len(cases), 11)
+        # observed_at is not rendered, but a surrogate replacing its date/time separator parses.
+        no_limit = {**branches["measured"], "total_bytes": 0, "used_bytes": 0, "available_bytes": 0}
+        for record, surrogate in ((branches["measured"], "\ud800"), (no_limit, "\udfff"),
+                                  (branches["unreadable"], "\udfff"), (branches["unverified"], "\ud800")):
+            cases.append(({**record, "observed_at": f"2026-10-11{surrogate}22:55:33Z"},
+                          {"state": "invalid", "error": "observed_at is not well-formed Unicode"},
+                          "guest memory backing: invalid record: observed_at is not well-formed Unicode"))
+        valid = {**identity, "path": "/dev/shm/\U0001f600\ue000", "observed_at": "2026-10-12T00:55:33+02:00"}
+        cases.append(({**branches["measured"], **valid},
+                      {**valid, "state": "measured", "filesystem_type": "tmpfs", **sizes},
+                      "guest memory backing /dev/shm/\U0001f600\ue000 (assumed-kata-default): "
+                      "tmpfs 96.0% used, 122880 bytes available"))
+        self.assertEqual(len(cases), 16)
         for record, evidence, line in cases:
             with self.subTest(ascii(record)):
                 human, machine = run(record), run(record, "--json")
@@ -2127,6 +2149,8 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 lines.remove(f"  {line} (evidence only, unscored)")
                 self.assertEqual(lines, before_lines)
                 payload = json.loads(machine.stdout.decode("utf-8"))
+                # The wire escapes a lone surrogate as ASCII; a consumer re-encoding the decoded report would fail.
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
                 self.assertEqual(payload["sections"]["host_health"]["capacity"].pop("guest_memory_backing"), evidence)
                 self.assertEqual(payload, before)
 
