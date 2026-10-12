@@ -827,10 +827,11 @@ if (
 process.stdout.write([
   site.url,
   response.git_remote_url,
+  response.requesting_user_npub,
 ].join("\t"));
 JS
 )"
-  IFS=$'\t' read -r sites_url sites_git_remote <<<"$init_fields"
+  IFS=$'\t' read -r sites_url sites_git_remote requesting_user_id <<<"$init_fields"
 
   runtime_exec \
     -e GIT_CONFIG_GLOBAL=/data/agent/gitconfig \
@@ -888,10 +889,12 @@ const original = new URL(process.argv[3]).toString();
 const redeem = new URL(String(response.url || ""));
 if (
   redeem.origin !== new URL(original).origin ||
+  redeem.username || redeem.password ||
   redeem.pathname !== "/_finite/auth" ||
-  !/^[0-9a-f]{64}$/u.test(redeem.searchParams.get("native_token") || "")
+  redeem.searchParams.getAll("session_token").length !== 1 ||
+  !/^[0-9a-f]{64}$/u.test(redeem.searchParams.get("session_token") || "")
 ) {
-  throw new Error(`Dashboard did not return a native Sites redemption URL: ${JSON.stringify(response)}`);
+  throw new Error("Dashboard did not return a same-origin Sites session redemption URL");
 }
 process.stdout.write(redeem.toString());
 JS
@@ -963,7 +966,7 @@ JS
 const fs = require("node:fs");
 const response = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (new URL(String(response.url || "")).toString() !== new URL(process.argv[3]).toString()) {
-  throw new Error(`Dashboard unexpectedly minted a Sites viewer session after revocation: ${JSON.stringify(response)}`);
+  throw new Error("Dashboard unexpectedly minted a Sites viewer session after revocation");
 }
 JS
   echo "requesting-user Share revocation invalidated live and future Sites sessions"
