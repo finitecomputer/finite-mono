@@ -26,8 +26,8 @@ SGLANG_IMAGE_PATTERN = re.compile(
     r'[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}"'
 )
 LIMITER_IMAGE_PATTERN = re.compile(
-    r'image: "ghcr\.io/finitecomputer/(?:finite-)?private-limiter:'
-    r'[a-zA-Z0-9._-]+@sha256:[0-9a-f]{64}"'
+    r'image: "ghcr\.io/finitecomputer/(?:finite-)?private-limiter'
+    r'(?::[a-zA-Z0-9._-]+)?@sha256:[0-9a-f]{64}"'
 )
 MPK_PATTERN = re.compile(
     r'mpk: "(?P<root>[0-9a-f]{64})_(?P<offset>[0-9]+)_'
@@ -62,7 +62,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
     violations = _require(
         text,
         (
-            "cvm-version: 0.10.8",
+            "cvm-version: 0.14.13",
             "cpus: 32",
             "memory: 524288",
             "gpus: 8",
@@ -98,7 +98,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         _require_once(
             text,
             (
-                "cvm-version: 0.10.8",
+                "cvm-version: 0.14.13",
                 "cpus: 32",
                 "memory: 524288",
                 "gpus: 8",
@@ -119,13 +119,30 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         r"^(?:cvm-version|cpus|memory|gpus):.*$", text, re.MULTILINE
     )
     if top_level_resources != [
-        "cvm-version: 0.10.8",
+        "cvm-version: 0.14.13",
         "cpus: 32",
         "memory: 524288",
         "gpus: 8",
     ]:
         violations.append(
             "GLM candidate has duplicate, reordered, or conflicting top-level resources"
+        )
+    # The current CVM rejects host IPC. Scope shared-memory settings to the
+    # model container so declarations on the limiter cannot satisfy this gate.
+    containers = text.partition("\ncontainers:\n")[2]
+    model_container = re.search(
+        r'^  - name: "glm-5-3-flash"\n.*?(?=^  - |^\S|\Z)',
+        containers,
+        re.MULTILINE | re.DOTALL,
+    )
+    model_ipc = re.findall(
+        r"^    (?:ipc|shm_size):.*$",
+        model_container.group() if model_container else "",
+        re.MULTILINE,
+    )
+    if model_ipc != ["    ipc: private", "    shm_size: 256g"]:
+        violations.append(
+            "GLM model container must declare private IPC and 256g shared memory exactly once"
         )
     image_lines = re.findall(r'^\s+image: "([^"]+)"$', text, re.MULTILINE)
     if len(image_lines) != 2:
