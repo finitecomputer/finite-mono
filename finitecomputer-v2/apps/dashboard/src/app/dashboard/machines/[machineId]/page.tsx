@@ -55,9 +55,9 @@ export default async function MachineDetailPage({
   const { machineId } = await params;
   const query = await searchParams;
   const [access, finitePrivateUsage] = await Promise.all([
-    loadDashboardMachineAccess(machineId, {
-      coreCacheMode: "swr",
-    }),
+    // This overview owns recovery status and Runtime controls. A stale online
+    // snapshot can hide pending recovery and prevent its refresh loop mounting.
+    loadDashboardMachineAccess(machineId, { coreCacheMode: "fresh" }),
     loadCoreFinitePrivateUsageStatus(),
   ]);
 
