@@ -2116,6 +2116,312 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertEqual(result["pressure"]["memory"]["some"]["avg10"], 0.1)
         self.assertNotIn("qualified_slots", result)
 
+    def collect_backing(self, rows=None, *, mountinfo=None, stats=None, path_kind="directory"):
+        """Collect from a temporary path; `rows` take {device} and {path}."""
+        stats = stats or mock.Mock(f_blocks=1000, f_bfree=40, f_bavail=30, f_frsize=4096)
+        with tempfile.TemporaryDirectory() as directory:
+            path, proc = Path(directory) / "shm root", Path(directory) / "proc"
+            if path_kind == "directory":
+                path.mkdir()
+            elif path_kind == "file":
+                path.write_text("not a directory")
+            if path.exists():
+                device = os.stat(path).st_dev
+                (proc / "self").mkdir(parents=True)
+                if mountinfo is not None:
+                    (proc / "self" / "mountinfo").write_bytes(mountinfo)
+                elif rows is not None:
+                    (proc / "self" / "mountinfo").write_text("".join(
+                        row.format(device=f"{os.major(device)}:{os.minor(device)}",
+                                   path=str(path).replace(" ", "\\040")) + "\n"
+                        for row in rows))
+            with (
+                mock.patch.object(finite_status, "utc_now", return_value=finite_status.parse_time("2026-10-11T22:55:33Z")),
+                mock.patch.object(finite_status.os, "fstatvfs", return_value=stats) as fstatvfs,
+            ):
+                return finite_status.collect_guest_memory_backing(path, proc), str(path), fstatvfs
+
+    def test_guest_memory_backing_records_statfs_of_the_measured_mount(self) -> None:
+        # The measured tmpfs row comes first: identity follows the device, not row order.
+        result, path, fstatvfs = self.collect_backing([
+            "1 0 8:1 / / rw - ext4 /dev/root rw",
+            "30 1 {device} / {path} rw,nosuid shared:4 - tmpfs tmpfs rw,size=4000k",
+            "31 30 99999:7 / {path} rw shared:5 - ext4 /dev/other rw",
+        ])
+        self.assertEqual(result, {
+            "path": path, "path_basis": "assumed-kata-default", "observed_at": "2026-10-11T22:55:33Z",
+            "mount_state": "mounted", "filesystem_type": "tmpfs",
+            # f_bfree=40 and f_bavail=30 differ, as reserved blocks legitimately do.
+            "total_bytes": 4096000, "used_bytes": 3932160, "available_bytes": 122880,
+        })
+        self.assertIsInstance(fstatvfs.call_args.args[0], int)
+
+    def test_guest_memory_backing_mount_identity_fails_closed(self) -> None:
+        tmpfs = "30 1 {device} / {path} rw shared:4 - tmpfs tmpfs rw"
+        cases = {
+            "ordinary directory": (["1 0 8:1 / / rw - ext4 /dev/root rw"], None,
+                                   {"mount_state": "not-mounted"}),
+            "wrong filesystem": (["30 1 {device} / {path} rw - ext4 /dev/x rw"], None,
+                                 {"mount_state": "mounted", "filesystem_type": "ext4"}),
+            "other device": (["30 1 99999:7 / {path} rw - tmpfs tmpfs rw"], None,
+                             {"mount_state": "ambiguous"}),
+            "device twice": ([tmpfs, tmpfs], None, {"mount_state": "ambiguous"}),
+            "unreadable": (None, None, {"mount_state": "unavailable"}),
+            "malformed": ([tmpfs, "garbage"], None,
+                          {"mount_state": "unavailable", "mount_error": "mount metadata is malformed"}),
+            "oversized": (None, b"x" * (4 * 1024 * 1024 + 1),
+                          {"mount_state": "unavailable", "mount_error": "mount metadata exceeds read bound"}),
+        }
+        for name, (rows, mountinfo, expected) in cases.items():
+            with self.subTest(name):
+                result, _, _ = self.collect_backing(rows, mountinfo=mountinfo)
+                mount = {key: result[key] for key in ("mount_state", "filesystem_type", "mount_error") if key in result}
+                if name == "unreadable":
+                    self.assertIn("No such file", mount.pop("mount_error"))
+                self.assertEqual(mount, expected)
+                self.assertEqual(result["used_bytes"], 3932160)
+
+    def test_guest_memory_backing_unreadable_path_is_recorded(self) -> None:
+        for kind in ("missing", "file"):
+            with self.subTest(kind):
+                result, _, fstatvfs = self.collect_backing([], path_kind=kind)
+                self.assertEqual(set(result), {"path", "path_basis", "observed_at", "error"})
+                self.assertIn("directory", result["error"])
+                fstatvfs.assert_not_called()
+
+    def test_collect_host_health_observes_guest_memory_backing_on_runner_hosts_only(self) -> None:
+        with (
+            mock.patch.object(finite_status, "systemd_properties", return_value={"LoadState": "loaded"}),
+            mock.patch.object(finite_status, "collect_hosted_hermes", return_value={"status": "green"}),
+            mock.patch.object(finite_status, "collect_healthcheck_journal", return_value={}),
+            mock.patch.object(finite_status, "collect_service_executable", return_value={"status": "green"}),
+            mock.patch.object(finite_status, "collect_host_capacity", side_effect=lambda: {}),
+            mock.patch.object(finite_status, "collect_guest_memory_backing", return_value={"observed": True}) as backing,
+            mock.patch.object(finite_status.os, "statvfs", return_value=mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)),
+            mock.patch.object(finite_status, "run_read_only", return_value=mock.Mock(returncode=0, stdout="")),
+            mock.patch.object(finite_status, "line_count", return_value=0),
+            mock.patch.object(finite_status, "read_environment_values", return_value={}),
+        ):
+            runner = finite_status.collect_host_health("finite-lat-3")
+            app = finite_status.collect_host_health("finite-lat-2")
+        self.assertEqual(runner["capacity"]["guest_memory_backing"], {"observed": True})
+        self.assertNotIn("guest_memory_backing", app["capacity"])
+        backing.assert_called_once_with()
+
+    def green_runner_report(self, capacity: dict[str, object]) -> dict[str, object]:
+        """A report whose Runner host health and every other section are green, so any scoring shows."""
+        runner = finite_status.CONTRACT["runner"]
+        host_health = {
+            "hostname": "finite-lat-3", "roles": ["runner"], "errors": [],
+            "units": {runner["timer"]: {"LoadState": "loaded", "ActiveState": "active"},
+                      finite_status.CONTRACT["hosts"]["finite-lat-3"]["storage_health_unit"]:
+                          {"LoadState": "loaded", "Result": "success", "ExecMainStatus": "0"}},
+            "hosted_hermes": {"status": "green", "state": "ok"},
+            "filesystems": [{"mount": "/", "total_bytes": 100, "available_bytes": 50, "used_percent": 50.0}],
+            "storage": {"mode": "raid"},
+            "containers": {"kata_running": 1, "kata_total": 1, "podman_running": 0, "podman_total": 0},
+            "runner_environment": {runner["drain_variable"]: "false", runner["artifact_variable"]: "artifact-1",
+                                   runner["base_url_variable"]: runner["expected_base_url"],
+                                   runner["model_variable"]: runner["expected_model"]},
+            "runner_shared_environment": {runner["model_variable"]: runner["expected_model"]},
+            "runner_environment_files_read": ["runner_shared_environment"],
+            "capacity": capacity,
+        }
+        green = {"status": "green"}
+        with (
+            mock.patch.object(finite_status, "build_fleet", return_value={**green, "target_artifact": {"id": "artifact-1"}}),
+            mock.patch.object(finite_status, "build_recovery", return_value=green),
+            mock.patch.object(finite_status, "build_rollout", return_value=green),
+            mock.patch.object(finite_status, "build_chat_plane", return_value=green),
+        ):
+            return finite_status.build_report({"host_health": host_health}, finite_status.parse_time("2026-10-11T23:00:00Z"))
+
+    def test_guest_memory_backing_report_is_unscored_and_never_guesses(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        before = finite_status.build_report(raw, now)
+        self.assertNotIn("guest_memory_backing", before["sections"]["host_health"]["capacity"])
+        self.assertNotIn("guest memory backing", finite_status.render_human(before))
+        identity = {"path": "/dev/shm", "path_basis": "assumed-kata-default", "observed_at": "2026-10-11T22:55:33Z"}
+        tmpfs = {**identity, "mount_state": "mounted", "filesystem_type": "tmpfs"}
+        sizes = {"total_bytes": 4096000, "used_bytes": 3932160, "available_bytes": 122880}
+        where = "guest memory backing /dev/shm (assumed-kata-default): "
+        invalid = "guest memory backing: invalid record: "
+        cases = {
+            "reserved blocks": ({**tmpfs, **sizes}, "measured", where + "tmpfs 96.0% used, 122880 bytes available"),
+            "full": ({**tmpfs, "total_bytes": 1000, "used_bytes": 1000, "available_bytes": 0},
+                     "measured", where + "tmpfs 100.0% used, 0 bytes available"),
+            "no block limit": ({**tmpfs, "total_bytes": 0, "used_bytes": 0, "available_bytes": 0},
+                               "no-block-limit", where + "tmpfs reports no block limit"),
+            "zero unverified": ({**identity, "mount_state": "not-mounted", "total_bytes": 0, "used_bytes": 0,
+                                 "available_bytes": 0}, "unverified", where + "capacity unknown, path is not a mount point"),
+            "zero on another filesystem": ({**identity, "mount_state": "mounted", "filesystem_type": "ramfs",
+                                            "total_bytes": 0, "used_bytes": 0, "available_bytes": 0},
+                                           "unverified", where + "capacity unknown, filesystem type is ramfs, not tmpfs"),
+            "ordinary path": ({**identity, **sizes, "mount_state": "not-mounted"},
+                              "unverified", where + "capacity unknown, path is not a mount point"),
+            "wrong filesystem": ({**identity, **sizes, "mount_state": "mounted", "filesystem_type": "ext4"},
+                                 "unverified", where + "capacity unknown, filesystem type is ext4, not tmpfs"),
+            "ambiguous": ({**identity, **sizes, "mount_state": "ambiguous"}, "unverified",
+                          where + "capacity unknown, no single mount at the path is the measured filesystem"),
+            "mount metadata unreadable": ({**identity, **sizes, "mount_state": "unavailable", "mount_error": "denied"},
+                                          "unverified", where + "capacity unknown, mount metadata unavailable (denied)"),
+            "unreadable": ({**identity, "error": "[Errno 2] gone"}, "unreadable", where + "unreadable: [Errno 2] gone"),
+            "string": ("not-a-record", "invalid", invalid + "not an object"),
+            "list": ([1, 2], "invalid", invalid + "not an object"),
+            "null": (None, "invalid", invalid + "not an object"),
+            "no identity": ({**sizes, "mount_state": "mounted", "filesystem_type": "tmpfs"},
+                            "invalid", invalid + "no path, basis or observation time"),
+            "bad time": ({**tmpfs, **sizes, "observed_at": "yesterday"}, "invalid", invalid + "unreadable observation time"),
+            "overflowing time": ({**tmpfs, **sizes, "observed_at": "0001-01-01T00:00:00+01:00"},
+                                 "invalid", invalid + "unreadable observation time"),
+            "bad error": ({**identity, "error": 5}, "invalid", invalid + "malformed error"),
+        }
+        counts = invalid + "missing, out-of-range or inconsistent byte counts"
+        for name, change in {
+            "incomplete": {"total_bytes": None}, "text": {"total_bytes": "unknown"}, "float": {"used_bytes": 1.0},
+            "bool": {"available_bytes": True}, "negative": {"used_bytes": -5}, "used above total": {"used_bytes": 4096001},
+            "used plus available above total": {"available_bytes": 163841}, "huge": {"total_bytes": 2**64},
+        }.items():
+            cases[name] = ({**tmpfs, **sizes, **change}, "invalid", counts)
+        cases["no mount state"] = ({**identity, **sizes}, "invalid", invalid + "missing or malformed mount evidence")
+        cases["no mounted type"] = ({**identity, **sizes, "mount_state": "mounted"}, "invalid",
+                                    invalid + "missing or malformed mount evidence")
+        cases["tmpfs type without mount state"] = ({**identity, **sizes, "filesystem_type": "tmpfs"}, "invalid",
+                                                   invalid + "missing or malformed mount evidence")
+        # Lone surrogates parse from JSON but cannot be printed as UTF-8; valid Unicode stays.
+        for branch in ("reserved blocks", "no block limit", "unreadable", "mount metadata unreadable"):
+            record = cases[branch][0]
+            for key in ("path", "path_basis", "error", "mount_error"):
+                for surrogate in ("\ud800", "\udfff") if key in record else ():
+                    cases[f"{branch} {key} {surrogate!a}"] = (
+                        {**record, key: record[key] + surrogate}, "invalid", invalid + f"{key} is not well-formed Unicode")
+            # A trailing surrogate fails to parse; one replacing the date/time separator parses.
+            for surrogate in ("\ud800", "\udfff"):
+                cases[f"{branch} observed_at separator {surrogate!a}"] = (
+                    {**record, "observed_at": record["observed_at"].replace("T", surrogate)}, "invalid",
+                    invalid + "observed_at is not well-formed Unicode")
+        cases["basic observed_at separator"] = ({**tmpfs, **sizes, "observed_at": "20261011\ud800225533Z"}, "invalid",
+                                                invalid + "observed_at is not well-formed Unicode")
+        cases["unicode beyond latin-1"] = ({**tmpfs, **sizes, "path": "/dev/shm/\U0001f600\ue000"}, "measured",
+                                           "guest memory backing /dev/shm/\U0001f600\ue000 (assumed-kata-default): "
+                                           "tmpfs 96.0% used, 122880 bytes available")
+        cases["unicode measured"] = ({**tmpfs, **sizes, "path": "/dev/shm/gäst", "path_basis": "assumed-kata-défaut"},
+                                     "measured", "guest memory backing /dev/shm/gäst (assumed-kata-défaut): "
+                                                 "tmpfs 96.0% used, 122880 bytes available")
+        cases["unicode unreadable"] = ({**identity, "error": "introuvable: é"}, "unreadable",
+                                       where + "unreadable: introuvable: é")
+        cases["unicode unverified"] = ({**identity, **sizes, "mount_state": "unavailable", "mount_error": "verweigert ü"},
+                                       "unverified", where + "capacity unknown, mount metadata unavailable (verweigert ü)")
+        green = self.green_runner_report({})
+        self.assertEqual((green["sections"]["host_health"]["status"], green["overall_status"], green["exit_code"]),
+                         ("green", "green", 0))
+        for name, (record, state, line) in cases.items():
+            with self.subTest(name):
+                raw["host_health"]["capacity"] = {"guest_memory_backing": record}
+                report = finite_status.build_report(raw, now)
+                backing = report["sections"]["host_health"]["capacity"]["guest_memory_backing"]
+                self.assertEqual(backing["state"], state)
+                self.assertNotIn("status", backing)
+                if state != "measured":
+                    self.assertFalse({"total_bytes", "used_bytes", "available_bytes"} & set(backing))
+                for key in ("overall_status", "exit_code"):
+                    self.assertEqual(report[key], before[key])
+                self.assertEqual(report["sections"]["host_health"]["status"], before["sections"]["host_health"]["status"])
+                # The fixture host is already unknown and the report red, so scoring shows only on a green Runner.
+                green = self.green_runner_report({"guest_memory_backing": record})
+                self.assertEqual(green["sections"]["host_health"]["capacity"]["guest_memory_backing"]["state"], state)
+                self.assertEqual((green["sections"]["host_health"]["status"], green["overall_status"], green["exit_code"]),
+                                 ("green", "green", 0))
+                human = finite_status.render_human(report)
+                self.assertIn(f"\n  {line} (evidence only, unscored)\n", human)
+                # print() encodes; a lone surrogate would raise here.
+                human.encode("utf-8")
+                json.dumps(report, ensure_ascii=False).encode("utf-8")
+
+    def test_guest_memory_backing_text_never_suppresses_the_report(self) -> None:
+        # Before validation a lone surrogate reached print() and lost every byte
+        # of the human report. That crash also exits 1, like this fixture's real
+        # red status, so the streams are the oracle, not the exit code.
+        def run(record, *options):
+            def add(raw):
+                if record is not None:
+                    raw["host_health"].setdefault("capacity", {})["guest_memory_backing"] = record
+            fixture = self.write_fixture_variant(add)
+            return subprocess.run(
+                [str(COMMAND), *options, "--fixture", str(fixture)], cwd=ROOT, check=False, capture_output=True,
+                # Strict, as under a UTF-8 locale.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+        human, machine = run(None), run(None, "--json")
+        self.assertEqual((human.returncode, human.stderr, machine.returncode, machine.stderr), (1, b"", 1, b""))
+        before_lines, before = human.stdout.decode("utf-8").splitlines(), json.loads(machine.stdout)
+        identity = {"path": "/dev/shm", "path_basis": "assumed-kata-default", "observed_at": "2026-10-11T22:55:33Z"}
+        sizes = {"total_bytes": 4096000, "used_bytes": 3932160, "available_bytes": 122880}
+        branches = {
+            "measured": {**identity, "mount_state": "mounted", "filesystem_type": "tmpfs", **sizes},
+            "unreadable": {**identity, "error": "[Errno 2] gone"},
+            "unverified": {**identity, "mount_state": "unavailable", "mount_error": "denied", **sizes},
+        }
+        cases = [
+            ({**record, key: record[key] + "\ud800"}, {"state": "invalid", "error": f"{key} is not well-formed Unicode"},
+             f"guest memory backing: invalid record: {key} is not well-formed Unicode")
+            for record in branches.values() for key in ("path", "path_basis", "error", "mount_error") if key in record
+        ]
+        unicode = {**identity, "path": "/dev/shm/gäst", "path_basis": "assumed-kata-défaut"}
+        cases += [
+            ({**branches["measured"], **unicode}, {**unicode, "state": "measured", "filesystem_type": "tmpfs", **sizes},
+             "guest memory backing /dev/shm/gäst (assumed-kata-défaut): tmpfs 96.0% used, 122880 bytes available"),
+            ({**branches["unreadable"], "error": "introuvable: é"},
+             {**identity, "state": "unreadable", "error": "introuvable: é"},
+             "guest memory backing /dev/shm (assumed-kata-default): unreadable: introuvable: é"),
+            ({**branches["unverified"], "mount_error": "verweigert ü"},
+             {**identity, "state": "unverified", "reason": "mount metadata unavailable (verweigert ü)"},
+             "guest memory backing /dev/shm (assumed-kata-default): capacity unknown, "
+             "mount metadata unavailable (verweigert ü)"),
+        ]
+        # observed_at is not rendered, but a surrogate replacing its date/time separator parses.
+        no_limit = {**branches["measured"], "total_bytes": 0, "used_bytes": 0, "available_bytes": 0}
+        for record, surrogate in ((branches["measured"], "\ud800"), (no_limit, "\udfff"),
+                                  (branches["unreadable"], "\udfff"), (branches["unverified"], "\ud800")):
+            cases.append(({**record, "observed_at": f"2026-10-11{surrogate}22:55:33Z"},
+                          {"state": "invalid", "error": "observed_at is not well-formed Unicode"},
+                          "guest memory backing: invalid record: observed_at is not well-formed Unicode"))
+        valid = {**identity, "path": "/dev/shm/\U0001f600\ue000", "observed_at": "2026-10-12T00:55:33+02:00"}
+        cases.append(({**branches["measured"], **valid},
+                      {**valid, "state": "measured", "filesystem_type": "tmpfs", **sizes},
+                      "guest memory backing /dev/shm/\U0001f600\ue000 (assumed-kata-default): "
+                      "tmpfs 96.0% used, 122880 bytes available"))
+        self.assertEqual(len(cases), 16)
+        for record, evidence, line in cases:
+            with self.subTest(ascii(record)):
+                human, machine = run(record), run(record, "--json")
+                self.assertEqual((human.returncode, human.stderr, machine.returncode, machine.stderr), (1, b"", 1, b""))
+                # The whole existing report, plus exactly one well-formed line.
+                lines = human.stdout.decode("utf-8").splitlines()
+                self.assertIn(f"  {line} (evidence only, unscored)", lines)
+                lines.remove(f"  {line} (evidence only, unscored)")
+                self.assertEqual(lines, before_lines)
+                payload = json.loads(machine.stdout.decode("utf-8"))
+                # The wire escapes a lone surrogate as ASCII; a consumer re-encoding the decoded report would fail.
+                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self.assertEqual(payload["sections"]["host_health"]["capacity"].pop("guest_memory_backing"), evidence)
+                self.assertEqual(payload, before)
+
+    def test_guest_memory_backing_is_runner_only(self) -> None:
+        raw = finite_status.load_fixture(FIXTURE)
+        now = finite_status.parse_time(raw["now"])
+        raw["host_health"]["capacity"] = {"guest_memory_backing": {
+            "path": "/dev/shm", "path_basis": "assumed-kata-default", "observed_at": "2026-10-11T22:55:33Z",
+            "mount_state": "mounted", "filesystem_type": "tmpfs",
+            "total_bytes": 1000, "used_bytes": 500, "available_bytes": 500}}
+        for roles, shown in ((["app"], False), (["runner"], True), (["app", "runner"], True)):
+            with self.subTest(roles):
+                raw["host_health"]["roles"] = roles
+                report = finite_status.build_report(raw, now)
+                self.assertEqual("guest_memory_backing" in report["sections"]["host_health"]["capacity"], shown)
+                self.assertEqual("guest memory backing" in finite_status.render_human(report), shown)
+
     def test_collect_single_disk_does_not_read_mdstat(self) -> None:
         stats = mock.Mock(f_blocks=100, f_frsize=1024, f_bavail=50)
         with (
@@ -2128,6 +2434,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 finite_status, "collect_healthcheck_journal", return_value={}
             ),
             mock.patch.object(finite_status, "collect_host_capacity", return_value={}),
+            mock.patch.object(finite_status, "collect_guest_memory_backing", return_value={}),
             mock.patch.object(finite_status.os, "statvfs", return_value=stats),
             mock.patch.object(finite_status.Path, "exists", return_value=True),
             mock.patch.object(

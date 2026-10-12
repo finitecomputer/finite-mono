@@ -25,6 +25,7 @@ OUTPUT_NAMES = (
     "run_devfinity_smoke",
     "run_brain_product_matrix",
     "run_kata_nerdctl_candidate",
+    "run_ronin_ci_evidence",
 )
 
 # The nix service package build is the CI long pole on a cold cargoArtifacts
@@ -162,6 +163,10 @@ REMAINING_NIX_CHECK_PATHS = {
 KATA_NERDCTL_CANDIDATE_PATH = "infra/nixos/kata-nerdctl-candidate.nix"
 KATA_NERDCTL_CANDIDATE_PATCH_PREFIX = "infra/nixos/patches/"
 
+# The FIN-174 offline evidence tool runs its own synthetic-fixture suite. No
+# Ronin workflow calls the tool, so no other harness exercises these files.
+RONIN_CI_EVIDENCE_PREFIX = "tools/ronin-ci-evidence/"
+
 INFRA_JUSTFILE_PATH = "infra/justfile"
 FINITE_BRAIN_JUSTFILE_PATH = "finite-brain/justfile"
 FINITECHAT_JUSTFILE_PATH = "finitechat/justfile"
@@ -187,6 +192,7 @@ class HarnessSelection:
     run_devfinity_smoke: bool = False
     run_brain_product_matrix: bool = False
     run_kata_nerdctl_candidate: bool = False
+    run_ronin_ci_evidence: bool = False
 
     def select_all(self) -> None:
         for field in fields(self):
@@ -441,6 +447,10 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_finite_status_contract = True
         selection.run_nix_checks = True
         selection.run_nix_service_packages = True
+        return
+
+    if path.startswith(RONIN_CI_EVIDENCE_PREFIX):
+        selection.run_ronin_ci_evidence = True
         return
 
     if path == KATA_NERDCTL_CANDIDATE_PATH or path.startswith(
