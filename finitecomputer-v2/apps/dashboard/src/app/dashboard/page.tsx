@@ -154,7 +154,7 @@ export default async function DashboardPage({
   if (invitationError) return <section className="mx-auto grid max-w-md gap-6 p-8 text-center">
     <h1 className="text-3xl">Organization invitation</h1>
     <p role="alert">{invitationError}</p>
-    <Button asChild size="xl"><a href="/logout">Sign Out</a></Button>
+    <Button asChild size="xl" className="justify-self-center"><a href="/logout">Sign Out</a></Button>
   </section>;
 
   const { core, billing, finitePrivateUsage } = await loadCoreDashboardSummary();
