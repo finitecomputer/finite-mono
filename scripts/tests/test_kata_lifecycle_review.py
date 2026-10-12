@@ -92,6 +92,57 @@ class OwnedCliTests(unittest.TestCase):
     def test_stream_reaps_cli_after_real_sigterm(self) -> None:
         self.interrupted_cli('stream', signal.SIGTERM)
 
+    def test_stream_reaps_cli_when_reader_setup_is_interrupted(self) -> None:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            for stage in ('event', 'reader', 'drain'):
+                with self.subTest(signal=signum, stage=stage):
+                    processes = []
+                    popen = subprocess.Popen
+                    real_event, real_thread = threading.Event, threading.Thread
+                    thread_count = 0
+
+                    def capture(*args, **kwargs):
+                        proc = popen(*args, **kwargs)
+                        processes.append(proc)
+                        return proc
+
+                    def interrupt(_signum, _frame):
+                        raise lab.Interrupted(_signum)
+
+                    def event(*args, **kwargs):
+                        if stage == 'event':
+                            os.kill(os.getpid(), signum)
+                        return real_event(*args, **kwargs)
+
+                    def thread(*args, **kwargs):
+                        nonlocal thread_count
+                        thread_count += 1
+                        if thread_count == (1 if stage == 'reader' else 2) and stage != 'event':
+                            os.kill(os.getpid(), signum)
+                        return real_thread(*args, **kwargs)
+
+                    previous = signal.signal(signum, interrupt)
+                    started = time.monotonic()
+                    try:
+                        with mock.patch.object(lab.subprocess, 'Popen', side_effect=capture), \
+                                mock.patch.object(lab.threading, 'Event', side_effect=event), \
+                                mock.patch.object(lab.threading, 'Thread', side_effect=thread):
+                            with self.assertRaises(lab.Interrupted):
+                                lab.Engine(sys.executable).stream(['-c', 'import time; time.sleep(30)'], 5, lambda line: None)
+                        self.assertLess(time.monotonic() - started, 4, 'Setup cleanup must be bounded')
+                        self.assertEqual(len(processes), 1)
+                        self.assertIsNotNone(processes[0].returncode, 'Setup interruption must reap the owned CLI')
+                        self.assertTrue(processes[0].stdout.closed)
+                        self.assertTrue(processes[0].stderr.closed)
+                    finally:
+                        signal.signal(signum, previous)
+                        for proc in processes:
+                            if proc.poll() is None:
+                                proc.kill()
+                            proc.wait(timeout=2)
+                            proc.stdout.close()
+                            proc.stderr.close()
+
     def test_timeout_reaps_real_cli_and_closes_pipes(self) -> None:
         for method in ('run', 'stream'):
             with self.subTest(method=method):

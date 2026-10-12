@@ -84,8 +84,9 @@ class Engine:
     def run(self, args: list[str], timeout: float) -> Result:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
-        proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = None
         try:
+            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
                 stdout, stderr = proc.communicate(timeout=timeout)
                 result = Result(proc.returncode, stdout, stderr)
@@ -97,7 +98,7 @@ class Engine:
                     stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
                 result = Result(proc.poll(), stdout, stderr, True)
         finally:
-            cleaned = _cleanup_cli(proc)
+            cleaned = proc is None or _cleanup_cli(proc)
         if not cleaned:
             result.timed_out = True
             result.stderr += '\nlocal CLI cleanup unresolved'
@@ -107,21 +108,25 @@ class Engine:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
         deadline = time.monotonic() + timeout
-        proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = None
+        readers: list[threading.Thread] = []
         errors: list[str] = []
-        reader_failed = threading.Event()
-
-        def read_lines() -> None:
-            try:
-                for line in proc.stdout:
-                    on_line(line)
-            except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
-                reader_failed.set()
-                errors.append(f'local CLI reader failed ({type(error).__name__})')
-
-        reader = threading.Thread(target=read_lines, daemon=True)
-        drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
         try:
+            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            reader_failed = threading.Event()
+
+            def read_lines() -> None:
+                try:
+                    for line in proc.stdout:
+                        on_line(line)
+                except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
+                    reader_failed.set()
+                    errors.append(f'local CLI reader failed ({type(error).__name__})')
+
+            reader = threading.Thread(target=read_lines, daemon=True)
+            readers.append(reader)
+            drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
+            readers.append(drain)
             reader.start()
             drain.start()
             try:
@@ -132,7 +137,7 @@ class Engine:
             except subprocess.TimeoutExpired:
                 result = Result(None, '', '', True)
         finally:
-            cleaned = _cleanup_cli(proc, (reader, drain))
+            cleaned = proc is None or _cleanup_cli(proc, tuple(readers))
         if not cleaned:
             result.timed_out = True
             errors.append('local CLI cleanup unresolved')
