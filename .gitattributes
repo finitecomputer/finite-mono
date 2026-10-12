@@ -1,0 +1,3 @@
+# Upstream crate2nix output: regenerate instead of hand editing.
+/Cargo.nix linguist-generated=true whitespace=-blank-at-eof
+/crate-hashes.json linguist-generated=true

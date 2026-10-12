@@ -515,6 +515,12 @@ check_dashboard_agent_creation
 cargo test -p finitechat-client --locked --lib \
   tests::sqlite_client_store_loads_metadata_written_before_paired_agent_field \
   -- --exact
+# A stale exact-name filter previously made this gate green with zero tests.
+stack_tests="$(cargo test -p devfinity --locked --test stack_smoke -- --ignored --list)"
+if [[ "$stack_tests" != *": test"* ]]; then
+  echo "devfinity smoke has no runnable stack tests" >&2
+  exit 1
+fi
 cargo test -p devfinity --locked --test stack_smoke \
   -- --ignored --nocapture
 

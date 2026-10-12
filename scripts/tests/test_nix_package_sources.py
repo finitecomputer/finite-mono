@@ -98,7 +98,10 @@ class NixPackageSourceTests(unittest.TestCase):
         self.assertEqual(set(self.source_files), set(PACKAGES))
         for name, files in self.source_files.items():
             with self.subTest(package=name):
-                self.assertIn("Cargo.lock", files)
+                self.assertTrue(crate_roots(files))
+                # crate2nix resolves dependencies in Cargo.nix, rather than
+                # putting the whole workspace lockfile in every crate source.
+                self.assertNotIn("Cargo.lock", files)
 
     def test_source_sets_leave_out_markdown(self) -> None:
         for name, files in self.source_files.items():
@@ -123,9 +126,17 @@ class NixPackageSourceTests(unittest.TestCase):
             check=True,
         ).stdout.split()
         self.assertTrue(tracked)
-        for name in ("finite-saas-core", "finite-saas-runner", "finite-saas-local"):
+        for name in ("finite-saas-core", "finite-saas-runner"):
             with self.subTest(package=name):
                 self.assertLessEqual(set(tracked), set(self.source_files[name]))
+
+    def test_local_release_excludes_core_test_only_dependency(self) -> None:
+        self.assertFalse(
+            any(
+                path.startswith(SAAS_CORE_MIGRATIONS)
+                for path in self.source_files["finite-saas-local"]
+            )
+        )
 
     def test_finitechat_cli_keeps_the_embedded_hermes_adapter(self) -> None:
         self.assertLessEqual(
