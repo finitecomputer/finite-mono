@@ -1,15 +1,18 @@
 # Offline CI evidence contract
 
-This additive FIN-174 candidate validates synthetic JSON and an inert fake
-executor. It has no CI workflow wiring and cannot qualify a real mechanism.
+This FIN-174 tool validates synthetic JSON and an inert fake executor. CI runs
+only the tool's own tests; no Ronin workflow or input producer calls it, and it
+cannot qualify a real mechanism.
 `FIXTURE_PASS` means only that the supplied offline fixture met this contract
 and the fake process returned zero within its budgets. All reports include
 `real_mechanism_qualified: false`.
 
-Run the scoped suite with the exact repository's Nix-managed Python:
+Run scoped Ruff format and lint checks and the suite with the repository's
+Nix-managed tools. CI selects this recipe for code or fixture changes here and
+whenever it selects every harness. README-only changes are docs-only.
 
 ```sh
-scripts/with-dev-env python3 -B -m unittest discover -s tools/ronin-ci-evidence -p 'test_*.py' -v
+just ronin-ci-evidence-check
 ```
 
 `run.py --manifest PATH --scenario PATH` invokes only `fake_tool.py` using the
@@ -44,16 +47,23 @@ fixture declarations, never observed guest progress.
 Success/completion, case success/completion, capability and cleanup resolution
 must be JSON Booleans; numeric 0/1 and strings are rejected. Acceptance requires
 outcome `COMPLETE`, phase `COMPLETE`, every success/completion true, exact progress,
-cleanup resolved true and pending cleanup empty. Partial phase/completion or
-unresolved cleanup is inconclusive. Failed success is an error. Explicit
-`UNSUPPORTED`, `INCONCLUSIVE` and `ERROR` outcomes require success false and
-remain nonpassing. The whole document is checked before any acceptance.
+cleanup resolved true and pending cleanup empty. Valid evidence takes the first
+status that applies: `ERROR` for outcome `ERROR`; `UNSUPPORTED` for an
+unsupported topology, a false capability or outcome `UNSUPPORTED`;
+`INCONCLUSIVE` for outcome `INCONCLUSIVE`, partial phase/completion or
+unresolved cleanup, even when success is false; then `ERROR` for failed overall
+or case success. Explicit `UNSUPPORTED`, `INCONCLUSIVE` and `ERROR` outcomes
+require success false and remain nonpassing. The whole document is checked
+before any acceptance.
 
 The fake process has a 2-second wall-time budget and a combined stdout/stderr
 budget of 65,536 bytes. CLI test options may tighten these ceilings, never widen
-them. JSON input is capped at 262,144 bytes. Both pipes are drained incrementally;
-on timeout or overflow the owned fake is killed and reaped. These are offline
-test-tool bounds, with no runtime memory, admission, capacity or retry policy.
+them. JSON read from a file or passed to `validate_evidence` is capped at
+262,144 bytes. Through the wrapper the fake's 65,536-byte output budget is
+smaller, so oversized fake output exits 125 whatever the evidence says. Both
+pipes are drained incrementally; on timeout or overflow the owned fake is
+killed and reaped. These are offline test-tool bounds, with no runtime memory,
+admission, capacity or retry policy.
 
 The report retains stdout/stderr as UTF-8 decoded display strings, using
 replacement for invalid or truncated sequences. These strings are not exact
@@ -63,11 +73,15 @@ signed inner returncode is retained.
 For an ordinary nonzero process exit, the outer exit is the same value,
 including 42, 126 and 137, even with otherwise valid evidence. A negative inner
 signal status is retained and maps to 128+signal for the outer exit. Wrapper
-guards have their own outer exits: timeout 124, output limit 125, executor
-failure/missing status 127, invalid manifest/input 64. With inner zero, evidence
-error exits 65, unsupported exits 77 and inconclusive exits 78. Only a complete
-fixture result exits zero. Printed `PASS` text has no authority. The tests assert
-each ordinary mutation fails; they do not turn a recorded failure into a pass.
+guards exit with timeout 124, output limit 125, executor failure/missing status
+127 and invalid manifest/input 64. With inner zero, evidence error exits 65,
+unsupported exits 77 and inconclusive exits 78. Only a complete fixture result
+exits zero. Outer exits are not unique: an inner 77, 78 or 124 passes through
+as `ERROR` with the same code as unsupported or inconclusive evidence or the
+timeout guard. The report's `status` is authoritative and every nonzero exit is
+nonpassing; never map an exit code to a softer outcome. Printed `PASS` text has
+no authority. The tests assert each ordinary mutation fails; they do not turn a
+recorded failure into a pass.
 
 Set `RONIN_CI_TEST_ARTIFACTS` to a scratch directory to retain each actual CLI
 command, scenario, raw outer output, report and observed outer exit during the
@@ -79,8 +93,5 @@ approve the real workflow and input producer, independently verify source and
 binary identity and nonce freshness, observe authenticated guest progress and
 all required cases/phases, verify the actual topology and capabilities, and
 prove execution status and cleanup through the real outer workflow. None of
-those gates is met here. Historical Ronin cause remains unresolved; this slice
-establishes nothing about real-Kata progress, active-backend capacity, fault-time
-capture, predecessor overlap, admission guards or recovery. The retained
-failure-return snapshot lag is 45.124 seconds; no repair or sizing threshold is
-selected by this candidate.
+those gates is met here. The investigation is tracked in
+[FIN-174](https://linear.app/finitecomputer/issue/FIN-174).

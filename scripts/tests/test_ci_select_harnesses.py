@@ -109,6 +109,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
             "finite-status-contract",
             "nix-checks",
             "kata-nerdctl-candidate",
+            "ronin-ci-evidence",
         ):
             with self.subTest(job_id=job_id):
                 block = ci_job_block(job_id)
@@ -275,6 +276,51 @@ class CiHarnessSelectionTests(unittest.TestCase):
         self.assertIn(
             'check_selected "Kata nerdctl candidate" '
             '"$RUN_KATA_NERDCTL_CANDIDATE" "$RESULT_KATA_NERDCTL_CANDIDATE"',
+            gate,
+        )
+
+    def test_ronin_ci_evidence_tool_changes_run_only_its_suite(self) -> None:
+        for path in (
+            "tools/ronin-ci-evidence/contract.py",
+            "tools/ronin-ci-evidence/fake_tool.py",
+            "tools/ronin-ci-evidence/run.py",
+            "tools/ronin-ci-evidence/test_evidence.py",
+            "tools/ronin-ci-evidence/fixtures/manifest.json",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_ronin_ci_evidence"})
+        # The rule covers only this tool; other tools still select everything.
+        for key, value in selection_for("tools/source-structure/src/lib.rs").items():
+            self.assertEqual(value, "true", key)
+
+    def test_ronin_ci_evidence_job_runs_the_tool_suite_and_gates_it(self) -> None:
+        self.assertIn(
+            "run_ronin_ci_evidence: ${{ steps.detect.outputs.run_ronin_ci_evidence }}",
+            ci_job_block("changes"),
+        )
+        job = ci_job_block("ronin-ci-evidence")
+        self.assertIn("if: needs.changes.outputs.run_ronin_ci_evidence == 'true'", job)
+        self.assertIn("nix develop --command just ronin-ci-evidence-check", job)
+        self.assertIn(
+            "ronin-ci-evidence-check:\n"
+            "    ruff format --check tools/ronin-ci-evidence\n"
+            "    ruff check tools/ronin-ci-evidence\n"
+            "    python3 -B -m unittest discover -s tools/ronin-ci-evidence"
+            " -p 'test_*.py' -v\n",
+            (ROOT / "justfile").read_text(encoding="utf-8"),
+        )
+        gate = ci_job_block("ci-gate")
+        self.assertIn("      - ronin-ci-evidence\n", gate)
+        self.assertIn(
+            "RUN_RONIN_CI_EVIDENCE: ${{ needs.changes.outputs.run_ronin_ci_evidence }}",
+            gate,
+        )
+        self.assertIn(
+            "RESULT_RONIN_CI_EVIDENCE: ${{ needs['ronin-ci-evidence'].result }}", gate
+        )
+        self.assertIn(
+            'check_selected "Ronin CI evidence tool suite" '
+            '"$RUN_RONIN_CI_EVIDENCE" "$RESULT_RONIN_CI_EVIDENCE"',
             gate,
         )
 
