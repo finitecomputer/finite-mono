@@ -110,8 +110,7 @@
   gap: 0.75rem;
 }
 
-.secondaryButton,
-.requestAccess {
+.secondaryButton {
   display: inline-flex;
   min-height: 44px;
   align-items: center;
@@ -128,15 +127,6 @@
   color: rgb(0 0 0 / 0.82);
 }
 
-.requestAccess {
-  min-height: 32px;
-  color: rgb(0 0 0 / 0.66);
-  font-size: 0.875rem;
-  font-weight: 500;
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
 .button:hover {
   transform: translateY(-1px);
   background: rgb(0 0 0 / 0.95);
@@ -148,8 +138,7 @@
   outline-offset: 4px;
 }
 
-.secondaryButton:focus-visible,
-.requestAccess:focus-visible {
+.secondaryButton:focus-visible {
   outline: 3px solid rgb(15 15 15 / 0.25);
   outline-offset: 4px;
 }

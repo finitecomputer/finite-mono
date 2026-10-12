@@ -10,9 +10,9 @@ const AGENT_CREATION_BILLING_REQUIRED = "billing is required before creating an 
 const AGENT_CREATION_HOSTING_TIER_NOT_AUTHORIZED =
   "selected hosting tier is not authorized by this account or launch code";
 const AGENT_CREATION_BILLING_REQUIRED_MESSAGE =
-  "Choose payment or enter a Launch Code to continue.";
+  "Continue to secure checkout to create your agent.";
 const AGENT_CREATION_HOSTING_TIER_MESSAGE =
-  "This account or Launch Code does not match the selected hosting option. Choose the matching option or use a different Launch Code.";
+  "This account does not have access to the selected hosting option. Continue with Standard hosting.";
 
 export type AgentCreationRecovery = "access" | null;
 
@@ -31,8 +31,8 @@ export type AgentOnboardingDraft = {
 };
 
 export type AgentCreationAccessPath =
-  | "launch-code"
   | "stripe"
+  | "launch-code"
   | "entitlement"
   | "denied";
 

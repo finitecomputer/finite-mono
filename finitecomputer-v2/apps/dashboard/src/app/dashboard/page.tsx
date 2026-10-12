@@ -1,3 +1,4 @@
+import { LAUNCH_INVITATION_COOKIE, readLaunchInvitation, requireInvitationAccount } from "@/lib/launch-invitations";
 import { PaymentRecoveryNotice } from "@/components/payment-recovery-notice";
 import { paymentRecoveryPresentation } from "@/lib/payment-recovery";
 import { ManageBillingForm } from "@/components/manage-billing-form";
@@ -143,6 +144,19 @@ export default async function DashboardPage({
     getAccountAuthContext(),
   ]);
 
+  const invitationToken = (await cookies()).get(LAUNCH_INVITATION_COOKIE)?.value;
+  const invitation = await readLaunchInvitation(invitationToken, process.env, { allowExpiredRedemption: true });
+  let invitationError: string | null = invitationToken && !invitation ? "This invitation is invalid or expired. Ask your organization for a new link." : null;
+  if (invitation) {
+    try { requireInvitationAccount(invitation, account); }
+    catch (error) { invitationError = (error as Error).message; }
+  }
+  if (invitationError) return <section className="mx-auto grid max-w-md gap-6 p-8 text-center">
+    <h1 className="text-3xl">Organization invitation</h1>
+    <p role="alert">{invitationError}</p>
+    <Button asChild size="xl" className="justify-self-center"><a href="/logout">Sign Out</a></Button>
+  </section>;
+
   const { core, billing, finitePrivateUsage } = await loadCoreDashboardSummary();
   if (core.configured || !viewer.isAdmin) {
     const draft = await unsealAgentOnboardingDraft(
@@ -152,7 +166,7 @@ export default async function DashboardPage({
     const coreProjects = coreProductProjects(core.me?.projects ?? []);
     // First login and resumed creation use the same flow as New agent. The
     // query flag is only an entry point for accounts that already have agents.
-    const isNewAgentFlow = requestedNewAgentFlow || Boolean(trackedCreationRequestId) ||
+    const isNewAgentFlow = requestedNewAgentFlow || Boolean(invitation) || Boolean(trackedCreationRequestId) ||
       Boolean(core.me && !core.error && coreProjects.length === 0);
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
@@ -232,7 +246,7 @@ export default async function DashboardPage({
     const creationAuthorizationRetry = Boolean(agentCreationError && draft);
 
     if (
-      draftStartedStripeCheckout(draft) &&
+      !invitation && draftStartedStripeCheckout(draft) &&
       billingReturnParam === "success" &&
       billing.billing?.customer_org.billing_class === "standard" &&
       !billing.billing.requires_billing
@@ -315,14 +329,14 @@ export default async function DashboardPage({
               {billingReturn.kind === "cancelled" ? (
                 <BillingCheckoutCancelledNotice />
               ) : null}
-              {draftStartedStripeCheckout(draft) && (agentCreationError || billingReturnParam === "success") ? (
+              {!invitation && draftStartedStripeCheckout(draft) && (agentCreationError || billingReturnParam === "success") ? (
                 <PaidAgentCreationRetryPanel
                   error={agentCreationError ?? billing.error ?? "Payment status is unavailable. Retry your saved setup in a moment."}
                   name={draft.displayName}
                 />
               ) : <CoreAgentCreationPanel
-                allowConfidentialHosting={viewer.isAdmin}
                 error={agentCreationError}
+                invitation={invitation && invitationToken ? { organization: invitation.organization, email: invitation.email, token: invitationToken } : undefined}
                 draft={draft}
                 returnMachineId={returnProject?.runtime?.id ?? null}
                 requiresAccess={agentCreationRequiresAccess({
@@ -1023,28 +1037,26 @@ function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: str
 }
 
 function CoreAgentCreationPanel({
-  allowConfidentialHosting,
+  invitation,
   error,
   draft,
   returnMachineId,
   requiresAccess,
 }: {
-  allowConfidentialHosting: boolean;
   error: string | null;
   draft: AgentOnboardingDraft | null;
+  invitation?: { organization: string; email: string; token: string };
   returnMachineId: string | null;
   requiresAccess: boolean;
 }) {
   const idempotencyKey = randomUUID();
   const form = (
     <CoreAgentCreationForm
+      invitation={invitation}
       trialsEnabled={process.env.FC_DASHBOARD_TRIALS_ENABLED === "true"}
-      allowConfidentialHosting={allowConfidentialHosting}
       error={error}
       idempotencyKey={draft?.idempotencyKey ?? idempotencyKey}
       initialName={draft?.displayName}
-      initialPictureUrl={draft?.profilePictureUrl}
-      initialHostingTier={draft?.hostingTier}
       returnMachineId={returnMachineId}
       requiresAccess={requiresAccess}
       stripeConfigured={stripeCheckoutAvailable()}

@@ -1,3 +1,5 @@
+import { cookies } from "next/headers";
+import { LAUNCH_INVITATION_COOKIE, readLaunchInvitation, requireInvitationAccount } from "@/lib/launch-invitations";
 import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
 
@@ -68,8 +70,23 @@ export async function POST(request: Request) {
     if (!account.workosUserId || !account.emailVerified) {
       throw new Error("Sign in again to create your agent.");
     }
+    // A pending invitation must be accepted by its verified recipient even if
+    // a client submits a different access path instead of the invitation form.
+    const pendingToken = (await cookies()).get(LAUNCH_INVITATION_COOKIE)?.value;
+    if (pendingToken) {
+      const pendingInvitation = await readLaunchInvitation(pendingToken, process.env, { allowExpiredRedemption: true });
+      if (!pendingInvitation) throw new Error("This invitation is invalid or expired. Ask your organization for a new link.");
+      requireInvitationAccount(pendingInvitation, account);
+    }
     const displayName = normalizeAgentDisplayName(formData.get("displayName"));
-    const hostingTier = normalizeAgentHostingTier(formData.get("hostingTier"));
+    const usesInvitation = formData.get("access") === "invitation";
+    const invitationToken = String(formData.get("invitationToken") ?? "");
+    const invitation = usesInvitation
+      ? await readLaunchInvitation(invitationToken, process.env, { allowExpiredRedemption: true })
+      : null;
+    if (usesInvitation && !invitation) throw new Error("This invitation is invalid or expired. Ask your organization for a new link.");
+    if (invitation) requireInvitationAccount(invitation, account);
+    const hostingTier = invitation?.hostingTier ?? normalizeAgentHostingTier(formData.get("hostingTier"));
     const existingDraft = await currentDraft(request, account.workosUserId);
     const profilePictureUrl = await profilePicture(
       formData.get("profilePicture"),
@@ -99,7 +116,7 @@ export async function POST(request: Request) {
     const billing = await loadCoreBillingOverview({ cacheMode: "fresh" });
     const access = formData.get("access");
     const accessPath = resolveAgentCreationAccessPath(
-      access,
+      usesInvitation ? "launch-code" : access,
       Boolean(
         billing.billing?.can_create_agent &&
           !billing.billing.requires_billing
@@ -108,24 +125,21 @@ export async function POST(request: Request) {
     );
 
     if (accessPath === "launch-code") {
-      const launchCode = String(formData.get("launchCode") ?? "").trim();
-      if (!launchCode) {
-        throw new Error("Enter your Launch Code.");
-      }
+      const launchCode = invitation?.launchCode ?? String(formData.get("launchCode") ?? "").trim();
+      if (!launchCode) throw new Error("Enter your Launch Code.");
       const creation = await launchDraft(draft, account, launchCode);
-      const response = dashboardRedirect(
-        request,
-        undefined,
-        creation.request.id,
-        draft.returnMachineId
-      );
+      const response = dashboardRedirect(request, undefined, creation.request.id, draft.returnMachineId);
       clearDraftCookie(response);
+      // Another tab may have opened a different seat invitation in the meantime.
+      if (invitation && (await cookies()).get(LAUNCH_INVITATION_COOKIE)?.value === invitationToken) {
+        response.cookies.set(LAUNCH_INVITATION_COOKIE, "", { path: "/dashboard", maxAge: 0 });
+      }
       return response;
     }
 
     if (accessPath === "stripe") {
       if (draft.hostingTier !== "standard") {
-        throw new Error("Confidential hosting currently requires a Confidential Launch Code.");
+        throw new Error("Confidential hosting is unavailable during signup. Continue with Standard hosting.");
       }
       if (!stripeCheckoutAvailable()) {
         throw new Error("Payment is unavailable right now.");
@@ -156,7 +170,7 @@ export async function POST(request: Request) {
       return response;
     }
 
-    throw new Error("Use a Launch Code or continue to payment.");
+    throw new Error("Continue to secure checkout to create your agent.");
   } catch (error) {
     const response = dashboardRedirect(request, error, undefined, returnMachineId);
     if (draft) {
