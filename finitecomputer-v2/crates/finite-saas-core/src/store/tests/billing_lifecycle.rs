@@ -252,6 +252,7 @@ async fn postgres_golden_path_standard_billing_create_lifecycle() {
         // 4. Provision the finite-private key + register the runtime.
         store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: runner_id.clone(),
                 lease_token: lease_token.clone(),

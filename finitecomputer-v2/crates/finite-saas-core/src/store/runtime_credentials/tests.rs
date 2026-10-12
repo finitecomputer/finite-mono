@@ -357,6 +357,7 @@ async fn existing_enrollment_uses_primary_origin_not_relocation_history() {
             complete(&db, &creation).await.unwrap();
             let lease = upgrade(&db, &creation).await;
             let relocation = serde_json::to_value(crate::RuntimeRelocationEnvelope::V1(crate::RuntimeRelocationV1 {
+        trial_archive: None,
                 source_host_id: "previous-host".into(), source_machine_id: "previous-machine".into(),
                 target_source_host_id: "auth-host".into(), expected_agent_npub: "npub-history-fixture".into(),
                 durable_state_manifest_sha256: "a".repeat(64), source_compute_absent: true,
@@ -771,6 +772,7 @@ async fn creation_credential_survives_restart_and_stop_resume_without_reviving_r
                 .unwrap();
             assert_eq!(lease.request.id, operation.id);
             db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: operation.id,
                 runner_id: "auth-runner".into(),
                 lease_token: "control-lease".into(),

@@ -247,6 +247,22 @@ where
         )
         .await
         .map_err(store_error)?;
+    let restoring = locked_agent_creation_request(client, request_id).await?;
+    trial_archives::authorize_restore(client, &restoring).await?;
+    client.execute("UPDATE trial_runtime_archives SET restored_at=$2::text::timestamptz WHERE restore_request_id=$1 AND restored_at IS NULL", &[&request_id,&now]).await.map_err(store_error)?;
+    if restoring
+        .relocation
+        .as_ref()
+        .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
+        client
+            .execute(
+                "DELETE FROM trial_runtime_suspensions WHERE agent_runtime_id=$1",
+                &[&runtime_id],
+            )
+            .await
+            .map_err(store_error)?;
+    }
     let handed_off = runtime_credentials::bind_bootstrap(client, request_id).await?;
     // The creation lease is cleared below. Preserve proof that the credential
     // belongs to the exact completing lease in the same transaction.

@@ -94,6 +94,7 @@ pub(super) fn legacy_kata_runtime_capabilities() -> RuntimeCapabilitiesEnvelope 
         runtime_upgrade: true,
         stop: true,
         runtime_retirement: false,
+        trial_archive: false,
     })
 }
 

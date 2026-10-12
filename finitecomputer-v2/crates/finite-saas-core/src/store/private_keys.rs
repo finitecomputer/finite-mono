@@ -120,6 +120,33 @@ where
             _ => None,
         },
     };
+    if request
+        .relocation
+        .as_ref()
+        .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
+        verify_agent_creation_lease_active(client, &request, &input.runner_id, &input.lease_token)
+            .await?;
+        trial_archives::authorize_restore(client, &request).await?;
+        let relocation = request.relocation.as_ref().unwrap().v1();
+        if source_host_id.as_deref() != Some(relocation.target_source_host_id.as_str())
+            || source_machine_id.as_deref() != Some(relocation.source_machine_id.as_str())
+            || agent_runtime_id != request.agent_runtime_id
+        {
+            return Err(CoreError::RuntimeSpecMismatch);
+        }
+        return trial_restore::provision_trial_restore_key(
+            client,
+            &request,
+            &user.id,
+            input.trial_restore_key,
+            &now,
+        )
+        .await;
+    }
+    if input.trial_restore_key.is_some() {
+        return Err(CoreError::InvalidFinitePrivateApiKey);
+    }
     let grant = approve_finite_private_grant_row(
         client,
         &user,
@@ -366,3 +393,5 @@ where
     .await?;
     Ok(IssuedFinitePrivateFriendKey { grant, api_key })
 }
+
+mod trial_restore;

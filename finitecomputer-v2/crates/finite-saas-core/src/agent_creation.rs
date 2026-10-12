@@ -135,6 +135,9 @@ pub struct LeaseAgentCreationRequestInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCreationLease {
+    /// False permits only stopping an already pinned trial restore target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_restore_allowed: Option<bool>,
     pub project: Project,
     pub request: AgentCreationRequest,
     /// Present after a current runner reserves its provider correlation. N-1

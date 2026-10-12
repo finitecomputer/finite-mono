@@ -141,6 +141,7 @@ where
         return Err(CoreError::RuntimeRetirementSnapshotConflict);
     }
     let relocation = RuntimeRelocationEnvelope::V1(RuntimeRelocationV1 {
+        trial_archive: None,
         source_host_id: runtime.source_host_id.clone(),
         source_machine_id: runtime.source_machine_id.clone(),
         target_source_host_id: target_source_host_id.clone(),

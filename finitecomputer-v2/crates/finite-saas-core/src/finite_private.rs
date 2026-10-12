@@ -269,7 +269,7 @@ pub struct IssuedFinitePrivateFriendKey {
     pub api_key: FinitePrivateApiKey,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionFinitePrivateRuntimeKeyInput {
     pub request_id: String,
@@ -278,6 +278,16 @@ pub struct ProvisionFinitePrivateRuntimeKeyInput {
     pub source_host_id: Option<String>,
     pub source_machine_id: Option<String>,
     pub now: Option<String>,
+    /// Runner-owned, durable proposal; Core persists only its hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_restore_key: Option<String>,
+}
+
+impl std::fmt::Debug for ProvisionFinitePrivateRuntimeKeyInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProvisionFinitePrivateRuntimeKeyInput")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

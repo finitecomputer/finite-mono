@@ -1174,6 +1174,7 @@ dependencies = [
  "thiserror",
  "time",
  "ureq",
+ "url",
  "walkdir",
  "x25519-dalek",
  "zeroize",

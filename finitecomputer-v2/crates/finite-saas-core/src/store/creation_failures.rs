@@ -44,6 +44,22 @@ where
     } else {
         verify_agent_creation_lease(&request, &input.runner_id, &input.lease_token)?;
     }
+    if request
+        .relocation
+        .as_ref()
+        .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
+        // The operation owns one reusable key. It may already be installed in
+        // an uncertain live target, so failure cannot revoke or replace it.
+        if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
+            let owned: bool = client.query_one("SELECT EXISTS(SELECT 1 FROM trial_runtime_archives WHERE restore_request_id=$1 AND restore_private_key_id=$2)", &[&request.id,&key_id]).await.map_err(store_error)?.get(0);
+            if !owned {
+                return Err(CoreError::InvalidFinitePrivateApiKey);
+            }
+        }
+        client.execute("UPDATE agent_creation_requests SET status='requested', lease_token=NULL, lease_expires_at=NULL, failure_message=$2, updated_at=$3::text::timestamptz WHERE id=$1", &[&request.id,&failure_message,&now]).await.map_err(store_error)?;
+        return locked_agent_creation_request(client, &request.id).await;
+    }
     let is_relocation = request.relocation.is_some();
     if let Some(key_id) = input.provisioned_finite_private_api_key_id.as_deref() {
         let key_id = trim_to_option(Some(key_id)).ok_or(CoreError::InvalidFinitePrivateApiKey)?;
@@ -116,7 +132,12 @@ where
     let now = input.now.unwrap_or(current_time_iso()?);
     let request = locked_agent_creation_request(client, &input.request_id).await?;
     let is_relocation = request.relocation.is_some();
-    if request.status == AgentCreationRequestStatus::Running {
+    if request.status == AgentCreationRequestStatus::Running
+        || request
+            .relocation
+            .as_ref()
+            .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
         return Err(CoreError::AgentCreationRequestNotCancellable);
     }
     if select_provider_operation(client, &input.request_id)

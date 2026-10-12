@@ -115,6 +115,9 @@ where
         RuntimeControlKind::Upgrade => "runtime.admin_upgrade",
         RuntimeControlKind::Stop => "runtime.admin_stop",
         RuntimeControlKind::Destroy => "runtime.admin_destroy",
+        RuntimeControlKind::ArchiveTrial | RuntimeControlKind::ReclaimTrial => {
+            return Err(CoreError::RuntimeControlUnsupported);
+        }
     };
     insert_finite_private_admin_audit_event(
         client,

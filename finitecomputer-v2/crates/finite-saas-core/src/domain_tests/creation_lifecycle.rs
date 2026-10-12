@@ -177,6 +177,7 @@ async fn abandoned_launch_key_survives_failure_and_is_revoked_by_cancellation() 
 
         let abandoned_key = db
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: request_id.clone(),
                 runner_id: "runner-a".to_string(),
                 lease_token: "token-a".to_string(),
@@ -511,6 +512,7 @@ async fn finite_private_runtime_key_provisioning_is_bound_to_launching_request()
 
         let provisioned = db
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "lease-token-1".to_string(),
@@ -536,6 +538,7 @@ async fn finite_private_runtime_key_provisioning_is_bound_to_launching_request()
 
         let wrong_lease = db
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: lease.request.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "wrong-token".to_string(),

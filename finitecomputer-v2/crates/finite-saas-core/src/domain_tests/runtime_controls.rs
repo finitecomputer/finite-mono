@@ -72,6 +72,7 @@ async fn user_can_request_and_runner_can_complete_oci_runtime_restart() {
 
         let stale_complete = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "wrong-token".to_string(),
@@ -92,6 +93,7 @@ async fn user_can_request_and_runner_can_complete_oci_runtime_restart() {
 
         let forbidden_refresh = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "restart-lease-1".to_string(),
@@ -117,6 +119,7 @@ async fn user_can_request_and_runner_can_complete_oci_runtime_restart() {
 
         let completed = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "restart-lease-1".to_string(),
@@ -328,6 +331,7 @@ async fn stop_confirms_into_the_stopped_terminal() {
         .expect("stop request should lease");
         let stopped = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: stop.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "stop-lease-1".to_string(),
@@ -356,6 +360,7 @@ async fn stop_confirms_into_the_stopped_terminal() {
         // A replayed completion against the terminal row is refused.
         let replay = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: stop.id,
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "stop-lease-1".to_string(),
@@ -532,6 +537,7 @@ async fn stop_is_supported_but_runtime_retirement_is_fail_closed() {
             .expect("stop request should lease");
         assert_eq!(stop_lease.request.kind, RuntimeControlKind::Stop);
         db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+            trial_archive: None,
             request_id: stop.id,
             runner_id: "runner-oslo-1".to_string(),
             lease_token: "stop-lease-1".to_string(),
@@ -763,6 +769,7 @@ async fn admin_runtime_control_skips_owner_check_and_matches_runner_lease_shape(
         assert_eq!(lease.runtime.source_machine_id, "oslo-agent-001");
         let completed = db
             .complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+                trial_archive: None,
                 request_id: restart.id.clone(),
                 runner_id: "runner-oslo-1".to_string(),
                 lease_token: "admin-restart-lease-1".to_string(),

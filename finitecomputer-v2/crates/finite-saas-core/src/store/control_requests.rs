@@ -124,6 +124,20 @@ where
         // instead: finish offboarding through runtime-offboard-retired-exact.
         return Err(CoreError::RuntimeOffboardingResumeRequired { phase });
     }
+    if !matches!(
+        kind,
+        RuntimeControlKind::ArchiveTrial
+            | RuntimeControlKind::ReclaimTrial
+            | RuntimeControlKind::Stop
+    ) && trial_archives::snapshot(client, &runtime.id)
+        .await?
+        .is_some()
+    {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
+    if client.query_opt("SELECT id FROM agent_creation_requests WHERE agent_runtime_id=$1 AND relocation_spec->'relocation'->'trialArchive' IS NOT NULL AND status IN ('requested','launching')", &[&runtime.id]).await.map_err(store_error)?.is_some() {
+        return Err(CoreError::RuntimeControlOperationConflict);
+    }
     if !runtime.supports_runtime_control(kind) {
         return Err(CoreError::RuntimeControlUnsupported);
     }

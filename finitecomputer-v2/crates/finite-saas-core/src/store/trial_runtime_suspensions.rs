@@ -120,7 +120,10 @@ async fn reconcile_runtime<C: GenericClient + Sync>(
         if blocked
             && (active.get::<_, String>(2) == "requested"
                 || (active.get::<_, String>(2) == "launching" && active.get::<_, bool>(3)))
-            && !matches!(active.get::<_, String>(1).as_str(), "stop" | "destroy")
+            && !matches!(
+                active.get::<_, String>(1).as_str(),
+                "stop" | "destroy" | "archive_trial" | "reclaim_trial"
+            )
         {
             // The provider may already have started compute, even if Core's
             // last confirmed lifecycle latch still says Offline.
@@ -141,6 +144,18 @@ async fn reconcile_runtime<C: GenericClient + Sync>(
         } else {
             return Ok(());
         }
+    }
+    if trial_archives::reconcile(
+        tx,
+        project,
+        &runtime,
+        blocked,
+        marker.as_ref().is_some_and(|m| m.get::<_, bool>(4)),
+        now,
+    )
+    .await?
+    {
+        return Ok(());
     }
     if blocked {
         if runtime.host_facts.runtime_status == RuntimeSummaryStatus::Offline && !uncertain_compute

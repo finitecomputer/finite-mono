@@ -19,6 +19,7 @@ sha2.workspace = true
 sha3 = "0.10"
 thiserror = "2.0"
 time.workspace = true
+url = "2.5"
 ureq = { version = "2.12", features = ["json"] }
 walkdir.workspace = true
 x25519-dalek = { version = "2", features = ["static_secrets"] }

@@ -46,7 +46,9 @@ impl RunnerLeaseCapacity {
             return Ok(());
         };
         let capabilities = capabilities.v1();
-        if (capabilities.recover_known_good_chat || capabilities.runtime_retirement)
+        if (capabilities.recover_known_good_chat
+            || capabilities.runtime_retirement
+            || capabilities.trial_archive)
             && (self.runner_classes.is_empty()
                 || self
                     .runner_classes

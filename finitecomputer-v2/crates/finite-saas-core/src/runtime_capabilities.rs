@@ -22,6 +22,9 @@ pub struct RuntimeCapabilitiesV1 {
     pub stop: bool,
     #[serde(default)]
     pub runtime_retirement: bool,
+    /// Explicit opt-in to reversible trial archive/reclaim and restore.
+    #[serde(default)]
+    pub trial_archive: bool,
 }
 
 /// Versioned persisted Runtime capability advertisement. Missing and empty
@@ -49,6 +52,9 @@ impl RuntimeCapabilitiesEnvelope {
             RuntimeControlKind::Upgrade => capabilities.runtime_upgrade,
             RuntimeControlKind::Stop => capabilities.stop,
             RuntimeControlKind::Destroy => capabilities.runtime_retirement,
+            RuntimeControlKind::ArchiveTrial | RuntimeControlKind::ReclaimTrial => {
+                capabilities.trial_archive
+            }
         }
     }
 
@@ -59,6 +65,7 @@ impl RuntimeCapabilitiesEnvelope {
             || capabilities.runtime_upgrade
             || capabilities.stop
             || capabilities.runtime_retirement
+            || capabilities.trial_archive
     }
 }
 
@@ -90,7 +97,9 @@ pub(crate) fn validate_runtime_capabilities_policy(
         return Ok(());
     };
     let capabilities = capabilities.v1();
-    if (capabilities.recover_known_good_chat || capabilities.runtime_retirement)
+    if (capabilities.recover_known_good_chat
+        || capabilities.runtime_retirement
+        || capabilities.trial_archive)
         && placement.is_none_or(|placement| placement.runner_class != RunnerClass::Kata)
     {
         return Err(CoreError::RuntimeCapabilitiesNotAuthorized);

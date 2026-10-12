@@ -130,6 +130,7 @@ async fn legacy_relocation_recovery_delivers_new_credential_through_exact_upgrad
         let copied = db.query_json("SELECT to_jsonb(a.hosted_enabled=b.hosted_enabled AND a.hosted_generation=b.hosted_generation AND a.hosted_username=b.hosted_username AND a.hosted_password=b.hosted_password AND a.hosted_signing_secret=b.hosted_signing_secret AND b.hosted_applied_generation IS NULL AND b.hosted_apply_status='pending') FROM runtime_core_credentials a, runtime_core_credentials b WHERE a.creation_request_id=$1 AND b.creation_request_id=$2", &[&f.origin_request_id, &f.request_id]).await;
         assert_eq!(copied[0], serde_json::json!(true));
         db.complete_runtime_control_request(crate::CompleteRuntimeControlRequestInput {
+        trial_archive: None,
             request_id: request.id, runner_id: "runner-oslo-1".into(),
             lease_token: "recovery-upgrade-lease".into(),
             runtime_artifact_id: Some(format!("{}-recovery-v2", f.run)),

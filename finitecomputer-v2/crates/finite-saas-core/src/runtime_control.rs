@@ -15,6 +15,8 @@ wire_enum! {
     Upgrade => "upgrade",
     Stop => "stop",
     Destroy => "destroy",
+    ArchiveTrial => "archive_trial",
+    ReclaimTrial => "reclaim_trial",
     }
     parse: parse_runtime_control_kind
 }
@@ -163,6 +165,11 @@ pub struct RuntimeControlLease {
     /// existing Runtime.
     #[serde(default)]
     pub target_runtime_artifact: Option<RuntimeArtifact>,
+    /// Immutable Core receipt; present only for a separately leased reclaim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_archive: Option<crate::TrialArchiveSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive_principal: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,6 +229,8 @@ pub struct CompleteRuntimeControlRequestInput {
     /// same transaction that offboards the Runtime.
     #[serde(default)]
     pub retirement_snapshot: Option<RuntimeRetirementSnapshotReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_archive: Option<crate::TrialArchiveSnapshot>,
     pub now: Option<String>,
 }
 
@@ -253,6 +262,7 @@ pub enum RuntimeControlCompletion {
     Upgrade(Box<RuntimeUpgradeCompletionFacts>),
     /// Destroy carries the verified retirement receipt.
     Destroy(Box<RuntimeRetirementSnapshotReceipt>),
+    ArchiveTrial(Box<crate::TrialArchiveSnapshot>),
 }
 
 /// The runner-reported facts of a completed Upgrade. Core validates them
@@ -279,7 +289,21 @@ impl RuntimeControlCompletion {
             || input.runtime_capabilities.is_some()
             || input.runtime_host.is_some()
             || input.published_app_urls.is_some();
+        if kind != RuntimeControlKind::ArchiveTrial && input.trial_archive.is_some() {
+            return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+        }
         match kind {
+            RuntimeControlKind::ArchiveTrial => {
+                if has_upgrade_facts || input.retirement_snapshot.is_some() {
+                    return Err(CoreError::RuntimeRetirementSnapshotMismatch);
+                }
+                Ok(Self::ArchiveTrial(Box::new(
+                    input
+                        .trial_archive
+                        .clone()
+                        .ok_or(CoreError::RuntimeRetirementSnapshotMismatch)?,
+                )))
+            }
             RuntimeControlKind::Destroy => {
                 if has_upgrade_facts {
                     return Err(CoreError::RuntimeUpgradeCompletionMismatch);
@@ -310,7 +334,8 @@ impl RuntimeControlCompletion {
             }
             RuntimeControlKind::Restart
             | RuntimeControlKind::RecoverKnownGoodChatRuntime
-            | RuntimeControlKind::Stop => {
+            | RuntimeControlKind::Stop
+            | RuntimeControlKind::ReclaimTrial => {
                 if input.retirement_snapshot.is_some() {
                     return Err(CoreError::RuntimeRetirementSnapshotMismatch);
                 }

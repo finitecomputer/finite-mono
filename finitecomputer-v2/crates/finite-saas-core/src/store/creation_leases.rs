@@ -42,13 +42,10 @@ where
     if !(1..=crate::MAX_AGENT_CREATION_LEASE_SECONDS).contains(&lease_seconds) {
         return Err(CoreError::InvalidAgentCreationLeaseDuration);
     }
-    if input
+    let accepts_new = input
         .runner_capacity
         .as_ref()
-        .is_some_and(|capacity| !capacity.accepts_agent_creation())
-    {
-        return Ok(None);
-    }
+        .is_none_or(|capacity| capacity.accepts_agent_creation());
     let in_flight_capacity = input
         .runner_capacity
         .as_ref()
@@ -83,12 +80,13 @@ where
     } else {
         0
     };
-    let may_reserve_new = in_flight_capacity.is_none_or(|capacity| {
-        capacity
-            .provider_inventory_count
-            .saturating_add(core_in_flight_before)
-            < capacity.max_sandbox_count
-    });
+    let may_reserve_new = accepts_new
+        && in_flight_capacity.is_none_or(|capacity| {
+            capacity
+                .provider_inventory_count
+                .saturating_add(core_in_flight_before)
+                < capacity.max_sandbox_count
+        });
     // Partition the claim by source host: a runner declaring a host leases only
     // requests routable to it (`target_source_host_id` NULL = any runner, else
     // must match). This replaces the global claim across all rows; the
@@ -111,19 +109,26 @@ where
         .runner_capacity
         .as_ref()
         .is_some_and(|capacity| capacity.supports_relocation_credentials);
+    let supports_trial_archive = input
+        .runner_capacity
+        .as_ref()
+        .and_then(|c| c.runtime_capabilities.as_ref())
+        .is_some_and(|c| c.v1().trial_archive);
     let Some(row) = client
         .query_opt(
             "WITH candidate AS (
                 SELECT id
                 FROM agent_creation_requests
                 WHERE (
-                        (status = 'requested' AND $7::bool)
+                        (status = 'requested' AND ($7::bool OR (relocation_spec->'relocation'->'trialArchive' IS NOT NULL AND target_source_host_id = $5)))
                         OR (
                           status = 'launching'
                           AND (lease_expires_at IS NULL OR lease_expires_at <= $4::text::timestamptz)
                         )
                       )
-                  AND NOT core_trial_access_blocked(customer_org_id, $4::text::timestamptz)
+                  AND ($10::bool OR (relocation_spec->'relocation'->'trialArchive' IS NOT NULL AND target_source_host_id=$5))
+                  AND (relocation_spec->'relocation'->'trialArchive' IS NULL OR failure_message IS NULL OR updated_at + interval '30 seconds' <= $4::text::timestamptz)
+                  AND (NOT core_trial_access_blocked(customer_org_id, $4::text::timestamptz) OR (relocation_spec->'relocation'->'trialArchive' IS NOT NULL AND target_source_host_id = $5))
                   AND (
                         target_source_host_id IS NULL
                         OR target_source_host_id = $5
@@ -139,8 +144,9 @@ where
                       )
                   AND (
                         relocation_spec IS NULL
-                        OR ($5::text IS NOT NULL AND target_source_host_id = $5)
+                        OR ($5::text IS NOT NULL AND (target_source_host_id = $5 OR (target_source_host_id IS NULL AND relocation_spec->'relocation'->'trialArchive' IS NOT NULL AND $9::bool)))
                       )
+                  AND (relocation_spec->'relocation'->'trialArchive' IS NULL OR ($9::bool AND $8::bool))
                   AND (
                         relocation_spec IS NULL OR $8::bool
                         OR NOT EXISTS (
@@ -187,6 +193,8 @@ where
                 &runner_classes,
                 &may_reserve_new,
                 &supports_relocation_credentials,
+                &supports_trial_archive,
+                &accepts_new,
             ],
         )
         .await
@@ -195,6 +203,33 @@ where
         return Ok(None);
     };
     let mut request = agent_creation_request_from_row(&row)?;
+    let trial_restore_allowed = if request
+        .relocation
+        .as_ref()
+        .is_some_and(|r| r.v1().trial_archive.is_some())
+    {
+        match trial_archives::authorize_restore(client, &request).await {
+            Ok(()) => Some(true),
+            Err(CoreError::BillingRequired) if request.target_source_host_id.is_some() => {
+                Some(false)
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        None
+    };
+    if let Some(RuntimeRelocationEnvelope::V1(relocation)) = request.relocation.as_mut()
+        && relocation.trial_archive.is_some()
+        && request.target_source_host_id.is_none()
+    {
+        let target = source_host_id
+            .clone()
+            .ok_or(CoreError::RuntimeSpecMismatch)?;
+        relocation.target_source_host_id = target.clone();
+        request.target_source_host_id = Some(target.clone());
+        let value = serde_json::to_value(&request.relocation).map_err(json_error)?;
+        client.execute("UPDATE agent_creation_requests SET target_source_host_id=$2,relocation_spec=$3 WHERE id=$1", &[&request.id,&target,&value]).await.map_err(store_error)?;
+    }
     let project = select_project(client, &request.project_id)
         .await?
         .ok_or_else(|| missing_request_project_error(&request))?;
@@ -312,6 +347,7 @@ where
         None
     };
     Ok(Some(AgentCreationLease {
+        trial_restore_allowed,
         project,
         request,
         provider_operation,
@@ -349,6 +385,7 @@ where
     C: GenericClient + Sync,
 {
     verify_agent_creation_lease(request, runner_id, lease_token)?;
+    trial_archives::authorize_restore(client, request).await?;
     let active: bool = client
         .query_one(
             "SELECT COALESCE(lease_expires_at > CURRENT_TIMESTAMP, false)

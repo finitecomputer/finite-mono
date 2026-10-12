@@ -65,6 +65,7 @@ fn runtime_capabilities_json(runtime_upgrade: bool) -> serde_json::Value {
         runtime_upgrade,
         stop: true,
         runtime_retirement: false,
+        trial_archive: false,
     }))
     .unwrap()
 }

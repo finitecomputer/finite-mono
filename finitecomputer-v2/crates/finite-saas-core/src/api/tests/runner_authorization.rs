@@ -39,6 +39,7 @@ fn runner_capability_authorization_is_explicit_and_legacy_kata_is_narrow() {
             runtime_upgrade: true,
             stop: true,
             runtime_retirement: false,
+            trial_archive: false,
         }
     );
     assert_eq!(
@@ -64,6 +65,7 @@ fn runner_capability_authorization_is_explicit_and_legacy_kata_is_narrow() {
     );
     let retirement = RuntimeCapabilitiesV1 {
         runtime_retirement: true,
+        trial_archive: false,
         ..RuntimeCapabilitiesV1::default()
     };
     assert!(
@@ -109,6 +111,7 @@ fn runner_capability_authorization_is_explicit_and_legacy_kata_is_narrow() {
                 runtime_capabilities: Some(RuntimeCapabilitiesEnvelope::V1(
                     RuntimeCapabilitiesV1 {
                         runtime_retirement: true,
+                        trial_archive: false,
                         ..RuntimeCapabilitiesV1::default()
                     }
                 )),

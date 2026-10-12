@@ -65,6 +65,7 @@ fn capabilities() -> crate::RuntimeCapabilitiesEnvelope {
         runtime_upgrade: true,
         stop: true,
         runtime_retirement: true,
+        trial_archive: false,
     })
 }
 
@@ -336,6 +337,7 @@ async fn trial_control_lease_cannot_restart_queued_or_expired_work_after_deadlin
 
 async fn complete_stop(db: &TestDb, request: &RuntimeControlRequest, now: &str) {
     db.complete_runtime_control_request(CompleteRuntimeControlRequestInput {
+        trial_archive: None,
         request_id: request.id.clone(),
         runner_id: "gates-runner".into(),
         lease_token: "gates-control-lease".into(),

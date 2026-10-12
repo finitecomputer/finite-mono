@@ -188,6 +188,7 @@ async fn postgres_provider_operation_ledger_replays_and_crosses_runtime_boundari
             .unwrap();
         let provisioned_key = store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: request_id.clone(),
                 runner_id: "ledger-runner-b".to_string(),
                 lease_token: "ledger-token-b".to_string(),
@@ -337,6 +338,7 @@ async fn postgres_provider_operation_ledger_replays_and_crosses_runtime_boundari
             .unwrap();
         let abandoned_key = store
             .provision_finite_private_runtime_key(ProvisionFinitePrivateRuntimeKeyInput {
+                trial_restore_key: None,
                 request_id: current.request.id.clone(),
                 runner_id: "ledger-current".to_string(),
                 lease_token: "ledger-current-token".to_string(),

@@ -158,6 +158,8 @@ where
         RuntimeControlKind::Upgrade,
         RuntimeControlKind::Stop,
         RuntimeControlKind::Destroy,
+        RuntimeControlKind::ArchiveTrial,
+        RuntimeControlKind::ReclaimTrial,
     ]
     .into_iter()
     .filter(|kind| capacity.supports_runtime_control(*kind))
@@ -182,7 +184,7 @@ where
                   AND runtime.placement_runner_class = ANY($6::text[])
                   AND request.kind = ANY($7::text[])
                   AND (
-                        request.kind IN ('stop', 'destroy')
+                        request.kind IN ('stop', 'destroy', 'archive_trial', 'reclaim_trial')
                         OR EXISTS (
                             SELECT 1 FROM projects
                             WHERE projects.id = request.project_id
@@ -199,6 +201,10 @@ where
                           runtime.runtime_capabilities->'capabilities'->'runtime_upgrade' = 'true'::jsonb
                         WHEN 'stop' THEN
                           runtime.runtime_capabilities->'capabilities'->'stop' = 'true'::jsonb
+                        WHEN 'archive_trial' THEN
+                          runtime.runtime_capabilities->'capabilities'->'trial_archive' = 'true'::jsonb
+                        WHEN 'reclaim_trial' THEN
+                          runtime.runtime_capabilities->'capabilities'->'trial_archive' = 'true'::jsonb
                         WHEN 'destroy' THEN
                           runtime.runtime_capabilities->'capabilities'->'runtime_retirement' = 'true'::jsonb
                         ELSE false
@@ -371,7 +377,9 @@ where
                 RuntimeControlKind::Restart
                 | RuntimeControlKind::Upgrade
                 | RuntimeControlKind::Stop
-                | RuntimeControlKind::Destroy => RuntimeBootIntent::Normal,
+                | RuntimeControlKind::Destroy
+                | RuntimeControlKind::ArchiveTrial
+                | RuntimeControlKind::ReclaimTrial => RuntimeBootIntent::Normal,
             };
             Some(runtime_operation_spec_v1(
                 &current_spec,
@@ -391,6 +399,12 @@ where
             None
         };
         return Ok(Some(RuntimeControlLease {
+            archive_principal: trial_archives::principal(client, &runtime.id).await?,
+            trial_archive: if request.kind == RuntimeControlKind::ReclaimTrial {
+                trial_archives::snapshot(client, &runtime.id).await?
+            } else {
+                None
+            },
             request,
             runtime,
             runtime_spec,
@@ -553,7 +567,12 @@ where
         &now,
     )
     .await?;
-    if locked.kind != RuntimeControlKind::Destroy {
+    if !matches!(
+        locked.kind,
+        RuntimeControlKind::Destroy
+            | RuntimeControlKind::ArchiveTrial
+            | RuntimeControlKind::ReclaimTrial
+    ) {
         return Err(CoreError::RuntimeControlOperationConflict);
     }
     let row = client
