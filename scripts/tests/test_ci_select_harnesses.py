@@ -108,6 +108,7 @@ class CiHarnessSelectionTests(unittest.TestCase):
             "monitoring-nixos-contract",
             "finite-status-contract",
             "nix-checks",
+            "kata-nerdctl-candidate",
         ):
             with self.subTest(job_id=job_id):
                 block = ci_job_block(job_id)
@@ -216,6 +217,73 @@ class CiHarnessSelectionTests(unittest.TestCase):
             selected("scripts/tests/test_nix_package_sources.py"),
             {"run_nix_checks"},
         )
+
+    def test_kata_nerdctl_candidate_changes_build_the_candidate(self) -> None:
+        for path in (
+            "infra/nixos/kata-nerdctl-candidate.nix",
+            "infra/nixos/patches/nerdctl-logger-lifetime.patch",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    selected(path),
+                    {
+                        "run_kata_nerdctl_candidate",
+                        "run_nix_checks",
+                        "run_nix_service_packages",
+                    },
+                )
+
+    def test_flake_and_lock_build_the_kata_nerdctl_candidate(self) -> None:
+        for path in ("flake.lock", "flake.nix"):
+            with self.subTest(path=path):
+                self.assertIn("run_kata_nerdctl_candidate", selected(path))
+
+    def test_kata_nerdctl_selection_inputs_run_the_selection_contract(self) -> None:
+        # Host modules, the shared Runner env and the proof fixture choose the
+        # nerdctl that the selection contract in nix-checks evaluates; the
+        # candidate build does not depend on them.
+        for path in (
+            "infra/nixos/modules/kata-host-runtime.nix",
+            "infra/nixos/modules/finite-saas-runner.nix",
+            "infra/nixos/modules/kata-runner-host.nix",
+            "scripts/check_kata_nerdctl_selection.py",
+            "scripts/proofs/hosted-hermes-lifecycle-tools.nix",
+        ):
+            with self.subTest(path=path):
+                self.assertIn("run_nix_checks", selected(path))
+        for path in (
+            "infra/nixos/modules/kata-host-runtime.nix",
+            "infra/nixos/packages.nix",
+            "infra/nixos/README.md",
+            "scripts/check_kata_nerdctl_selection.py",
+        ):
+            with self.subTest(path=path):
+                self.assertNotIn("run_kata_nerdctl_candidate", selected(path))
+
+    def test_kata_nerdctl_candidate_job_builds_and_gates_the_candidate(self) -> None:
+        job = ci_job_block("kata-nerdctl-candidate")
+        self.assertIn(
+            "if: needs.changes.outputs.run_kata_nerdctl_candidate == 'true'", job
+        )
+        self.assertIn(
+            "nix build --option builders '' --no-link --print-build-logs "
+            ".#packages.x86_64-linux.kata-nerdctl-candidate",
+            job,
+        )
+        gate = ci_job_block("ci-gate")
+        self.assertIn("      - kata-nerdctl-candidate\n", gate)
+        self.assertIn(
+            'check_selected "Kata nerdctl candidate" '
+            '"$RUN_KATA_NERDCTL_CANDIDATE" "$RESULT_KATA_NERDCTL_CANDIDATE"',
+            gate,
+        )
+
+    def test_nix_checks_run_the_selection_contracts(self) -> None:
+        job = ci_job_block("nix-checks")
+        self.assertIn(
+            "python3 -m unittest scripts.tests.test_ci_select_harnesses", job
+        )
+        self.assertIn("just nixos kata-nerdctl-selection-contract", job)
 
     def test_ci_workflow_selects_every_active_harness(self) -> None:
         values = selection_for(".github/workflows/ci.yml")

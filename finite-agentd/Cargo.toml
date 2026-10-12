@@ -21,7 +21,7 @@ finitechat-proto = { path = "../finitechat/crates/finitechat-proto" }
 futures-util.workspace = true
 reqwest = { workspace = true, features = ["stream"] }
 rusqlite.workspace = true
-rustix.workspace = true
+rustix = { workspace = true, features = ["pipe"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
@@ -31,6 +31,9 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "process", "sync"] }
 
 [dev-dependencies]
+# `param` gives the Linux pipe tests the page size their kernel ground truth
+# uses; `fs` lets them switch a pipe to packet mode with `F_SETFL`.
+rustix = { workspace = true, features = ["fs", "param", "pipe"] }
 tempfile.workspace = true
 
 [lints]

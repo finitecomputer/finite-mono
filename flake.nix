@@ -85,6 +85,11 @@
         sourceRoot = ./.;
       };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
+      # FIN-162 qualification only; no host or fixture imports it.
+      kataNerdctlCandidateLinux = import ./infra/nixos/kata-nerdctl-candidate.nix {
+        nixpkgs = nixpkgs-kata;
+        system = "x86_64-linux";
+      };
       sourceRevision =
         if self ? rev then
           self.rev
@@ -456,6 +461,9 @@
           systemOutputs.packages.x86_64-linux
           // finitePackagesLinux
           // {
+            # FIN-162 log-collector candidate, built only to run its tests.
+            # The Runner hosts keep kataPackagesLinux.nerdctl.
+            kata-nerdctl-candidate = kataNerdctlCandidateLinux;
             finite-lat-3-system = lat3.config.system.build.toplevel;
             finite-lat-3-disko = lat3.config.system.build.diskoScript;
             finite-lat-3-kexec = lat3Kexec.config.system.build.kexecInstallerTarball;

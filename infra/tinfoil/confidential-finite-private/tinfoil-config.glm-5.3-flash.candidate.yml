@@ -1,7 +1,7 @@
 # Release-ready source for the model-independent `finite-private` Tinfoil
 # container. The checkpoint, modelwrap artifact, and Finite images are pinned
 # to immutable identities for the authorized 2026-08-28 production window.
-cvm-version: 0.10.8
+cvm-version: 0.14.13
 cpus: 32
 memory: 524288
 gpus: 8
@@ -23,7 +23,8 @@ containers:
     image: "ghcr.io/finitecomputer/glm-5-3-flash-sglang:2026-08-28.3@sha256:91f614789cedf42a4d332fa8c4744eebf5067ba953b546823cec389169ee8008"
     runtime: nvidia
     gpus: all
-    ipc: host
+    ipc: private
+    shm_size: 256g
     restart: always
     command:
       [

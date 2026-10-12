@@ -24,6 +24,7 @@ OUTPUT_NAMES = (
     "run_nix_service_packages",
     "run_devfinity_smoke",
     "run_brain_product_matrix",
+    "run_kata_nerdctl_candidate",
 )
 
 # The nix service package build is the CI long pole on a cold cargoArtifacts
@@ -120,6 +121,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_sites_redirects.py",
     "scripts/check-brain-product-language.py",
     "scripts/check_runner_host_contract.py",
+    "scripts/check_kata_nerdctl_selection.py",
     "scripts/check_lat1_healthcheck_contract.py",
     "scripts/check_finite_private_deepseek_candidate.py",
     "scripts/check_lat1_secret_bootstrap.py",
@@ -154,6 +156,12 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/check_runbook_facts_contract.py",
 }
 
+# The FIN-162 nerdctl qualification candidate and its carried patches. Building
+# the candidate runs the patches' Go tests in its checkPhase. The flake and its
+# lock already select every harness.
+KATA_NERDCTL_CANDIDATE_PATH = "infra/nixos/kata-nerdctl-candidate.nix"
+KATA_NERDCTL_CANDIDATE_PATCH_PREFIX = "infra/nixos/patches/"
+
 INFRA_JUSTFILE_PATH = "infra/justfile"
 FINITE_BRAIN_JUSTFILE_PATH = "finite-brain/justfile"
 FINITECHAT_JUSTFILE_PATH = "finitechat/justfile"
@@ -178,6 +186,7 @@ class HarnessSelection:
     run_nix_service_packages: bool = False
     run_devfinity_smoke: bool = False
     run_brain_product_matrix: bool = False
+    run_kata_nerdctl_candidate: bool = False
 
     def select_all(self) -> None:
         for field in fields(self):
@@ -433,6 +442,11 @@ def apply_path(selection: HarnessSelection, path: str) -> None:
         selection.run_nix_checks = True
         selection.run_nix_service_packages = True
         return
+
+    if path == KATA_NERDCTL_CANDIDATE_PATH or path.startswith(
+        KATA_NERDCTL_CANDIDATE_PATCH_PREFIX
+    ):
+        selection.run_kata_nerdctl_candidate = True
 
     if path.startswith("infra/nixos/"):
         selection.run_nix_checks = True

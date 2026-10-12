@@ -4,7 +4,7 @@ import { once } from "node:events";
 import { writeFile } from "node:fs/promises";
 import http from "node:http";
 import { test } from "node:test";
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Route } from "playwright";
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 
 test("chat history stays scoped to each tab across freeze, reconnect, and old-service snapshots", { timeout: 120_000 }, async (t) => {
@@ -45,9 +45,31 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     });
     const aStreams: string[] = [];
     a.on("request", request => { if (request.url().includes("/updates")) aStreams.push(request.url()); });
+    // Invitations are out-of-band Brain UI, not part of any conversation.
+    // Keep both valid pending and expired responses available so reintroducing
+    // the old mount fails this test instead of hiding behind an empty fixture.
+    let invitationRequests = 0;
+    await context.route("**/api/brain/invitations", route => {
+      invitationRequests++;
+      return route.fulfill({ json: { invitations: [
+        { id: "pending", inviteCode: "pending-code", brainId: "test-brain", brainDisplayName: "Pending test Brain", expired: false },
+        { id: "expired", inviteCode: "expired-code", brainId: "old-brain", brainDisplayName: "Expired test Brain", expired: true },
+      ] } });
+    });
     await a.goto(`${base}/dashboard/machines/runtime_web_design/chat`);
     const history = a.getByText("I kept this conversation after the local dashboard restarted.", { exact: true });
     await history.waitFor();
+    await a.reload();
+    await history.waitFor();
+    for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+      await a.setViewportSize(viewport);
+      assert.equal(await a.getByRole("region", { name: "Brain invitations" }).count(), 0);
+      assert.equal(await a.getByText("This invitation expired. Ask an admin of this Brain for a new one.", { exact: true }).count(), 0);
+      assert.equal(await a.getByRole("button", { name: "Join Brain", exact: true }).count(), 0);
+      assert.equal(invitationRequests, 0, "Chat must not request out-of-band invitations");
+    }
+    await a.setViewportSize({ width: 1440, height: 1000 });
+
     const cdp = await context.newCDPSession(a);
     await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
     const b = await context.newPage();
@@ -102,12 +124,34 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
       await a.locator("textarea").fill("Accepted despite another tab's attachment error");
       await a.getByRole("button", { name: "Send message", exact: true }).click();
       await a.locator(".finite-chat__messages").getByText("Accepted despite another tab's attachment error", { exact: true }).waitFor();
-      await a.waitForFunction(() => document.querySelector("textarea")?.value === "", undefined, { timeout: 3_000 });
+      await a.waitForFunction(() => document.querySelector("textarea")?.value === "");
       assert.equal(await a.getByText("Attachment failed in another tab", { exact: true }).count(), 0);
 
       // Attachment failures can return HTTP 200 with a refusal in AppState.
-      // A later successful view read must not discard the failed draft/files.
+      // The refusal is this send's outcome: it shows without waiting on a view
+      // read, keeps the failed draft/files, and takes the alert when a
+      // connection error already exists. The view read still runs, so this tab
+      // catches up with another tab's message while its update stream is down.
+      const invalidUpdates = (route: Route) => route.fulfill({
+        contentType: "text/event-stream", body: "event: state\ndata: not json\n\n",
+      });
+      const refreshAlert = a.locator(".finite-chat__send-error").getByText("Chat could not refresh. Reconnecting…", { exact: true });
+      await a.route("**/hosted-device/updates?*", invalidUpdates);
+      await writeFile("../../../.local-state/web-design-fixture/scenario", "healthy\n");
+      await refreshAlert.waitFor();
+      let releaseViewReads!: () => void;
+      const viewReadsReleased = new Promise<void>(resolve => { releaseViewReads = resolve; });
+      const heldViewRead = async (route: Route) => {
+        await viewReadsReleased;
+        await route.fallback();
+      };
+      await a.route("**/hosted-device/state?*", heldViewRead);
       const healthy = await (await a.request.get(`${api}/state?room_id=room_design&topic_id=topic_design&chat_id=chat_design`)).json();
+      const otherTab = await b.request.post(`${api}/actions`, { data: { SendChatMessage: {
+        room_id: "room_design", topic_id: "topic_design", chat_id: "chat_design", text: "Sent from another tab while A reconnects",
+      } } });
+      assert(otherTab.ok());
+      const otherTabMessage = a.locator(".finite-chat__messages").getByText("Sent from another tab while A reconnects", { exact: true });
       await a.route("**/hosted-device/attachments", route => route.fulfill({
         status: 200, json: { ...healthy, status: "attachment unavailable", toast: "This attachment was refused" },
       }), { times: 1 });
@@ -116,13 +160,38 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
       });
       await a.locator("textarea").fill("Keep my failed attachment draft");
       await a.getByRole("button", { name: "Send message", exact: true }).click();
-      await a.getByText("This attachment was refused", { exact: true }).waitFor({ timeout: 3_000 });
+      const refusal = a.getByText("This attachment was refused", { exact: true });
+      await refusal.waitFor();
       assert.equal(await a.locator("textarea").inputValue(), "Keep my failed attachment draft");
       assert(await a.getByRole("button", { name: "Remove retry-me.txt", exact: true }).isVisible());
       assert.equal(await a.getByRole("paragraph").filter({ hasText: "Keep my failed attachment draft" }).count(), 0);
+      assert.equal(await otherTabMessage.count(), 0);
+      releaseViewReads();
+      await otherTabMessage.waitFor();
+      assert(await refusal.isVisible(), "the background view read must not replace the refusal");
+      assert.equal(await a.locator("textarea").inputValue(), "Keep my failed attachment draft");
+      assert(await a.getByRole("button", { name: "Remove retry-me.txt", exact: true }).isVisible());
+      await a.unroute("**/hosted-device/state?*", heldViewRead);
       await a.getByRole("button", { name: "Remove retry-me.txt", exact: true }).click();
       await a.locator("textarea").fill("");
+
+      // The refusal belongs to the chat it was sent in. Another chat shows
+      // its own connection error, and returning shows the refusal again.
+      await a.getByRole("button", { name: "New chat", exact: true }).first().click();
+      await a.locator(".finite-chat__messages").getByText("History in the other tab", { exact: true }).waitFor();
+      await refusal.waitFor({ state: "hidden" });
+      await refreshAlert.waitFor();
+      assert(await a.getByRole("button", { name: "Retry load", exact: true }).isVisible());
+      await a.getByRole("button", { name: "Design review", exact: true }).click();
+      await otherTabMessage.waitFor();
+      await refusal.waitFor();
+
+      // Dismissing the refusal reveals the connection error that is still active.
       await a.getByRole("button", { name: "Dismiss", exact: true }).click();
+      await refreshAlert.waitFor();
+      assert(await a.getByRole("button", { name: "Retry load", exact: true }).isVisible());
+      await a.unroute("**/hosted-device/updates?*", invalidUpdates);
+      await refreshAlert.waitFor({ state: "hidden" });
     });
 
     await t.test("loaded history survives live messages and reconnect without growing another tab's view", async () => {
@@ -197,6 +266,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     await a.locator(".finite-chat__messages").getByText("History in the other tab", { exact: true }).waitFor();
     await a.getByRole("button", { name: "Design review", exact: true }).click();
     await a.locator(".finite-chat__messages").getByText("Later arrival 40", { exact: true }).waitFor();
+    assert.equal(invitationRequests, 0, "sends, navigation and reconnect must not fetch invitations");
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();

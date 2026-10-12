@@ -1,0 +1,1203 @@
+Finite carried patch for nerdctl v2.3.4 (Apache-2.0, upstream containerd/nerdctl).
+Container log collector lifetime and ownership: see infra/nixos/README.md.
+
+--- a/pkg/internal/filesystem/errors.go
++++ b/pkg/internal/filesystem/errors.go
+@@ -20,6 +20,7 @@
+ 
+ var (
+ 	ErrLockFail          = errors.New("failed to acquire lock")
++	ErrLockHeld          = errors.New("lock is held by another holder")
+ 	ErrUnlockFail        = errors.New("failed to release lock")
+ 	ErrLockIsNil         = errors.New("nil lock")
+ 	ErrInvalidPath       = errors.New("invalid path")
+--- a/pkg/internal/filesystem/lock.go
++++ b/pkg/internal/filesystem/lock.go
+@@ -37,18 +37,25 @@
+ // If Lock returns nil, no other process will be able to place a read or write lock on the file until
+ // this process exits, closes f, or calls Unlock on it.
+ func Lock(path string) (file *os.File, err error) {
+-	return commonlock(path, writeLock)
++	return commonlock(path, writeLock, platformSpecificLock)
+ }
+ 
++// TryLock places an advisory write lock on the file without waiting for it.
++//
++// If another holder has the file locked, TryLock returns an error that wraps ErrLockHeld.
++func TryLock(path string) (file *os.File, err error) {
++	return commonlock(path, writeLock, platformSpecificTryLock)
++}
++
+ // ReadOnlyLock places an advisory read lock on the file, blocking until it can be locked.
+ //
+ // If ReadOnlyLock returns nil, no other process will be able to place a write lock on
+ // the file until this process exits, closes f, or calls Unlock on it.
+ func ReadOnlyLock(path string) (file *os.File, err error) {
+-	return commonlock(path, readLock)
++	return commonlock(path, readLock, platformSpecificLock)
+ }
+ 
+-func commonlock(path string, mode lockType) (file *os.File, err error) {
++func commonlock(path string, mode lockType, lock func(*os.File, lockType) error) (file *os.File, err error) {
+ 	defer func() {
+ 		if err != nil {
+ 			err = errors.Join(ErrLockFail, err)
+@@ -76,7 +83,7 @@
+ 		return nil, err
+ 	}
+ 
+-	if err = platformSpecificLock(file, mode); err != nil {
++	if err = lock(file, mode); err != nil {
+ 		return nil, errors.Join(err, file.Close())
+ 	}
+ 
+--- a/pkg/internal/filesystem/lock_unix.go
++++ b/pkg/internal/filesystem/lock_unix.go
+@@ -54,6 +54,14 @@
+ 	return err
+ }
+ 
++func platformSpecificTryLock(file *os.File, lockType lockType) error {
++	err := syscall.Flock(int(file.Fd()), int(lockType)|syscall.LOCK_NB)
++	if errors.Is(err, syscall.EWOULDBLOCK) {
++		return ErrLockHeld
++	}
++	return err
++}
++
+ func platformSpecificUnlock(file *os.File) error {
+ 	return syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+ }
+--- a/pkg/internal/filesystem/lock_windows.go
++++ b/pkg/internal/filesystem/lock_windows.go
+@@ -27,6 +27,7 @@
+ package filesystem
+ 
+ import (
++	"errors"
+ 	"os"
+ 
+ 	"golang.org/x/sys/windows"
+@@ -53,6 +54,20 @@
+ 		new(windows.Overlapped))
+ }
+ 
++func platformSpecificTryLock(file *os.File, lockType lockType) error {
++	err := windows.LockFileEx(
++		windows.Handle(file.Fd()),
++		uint32(lockType)|windows.LOCKFILE_FAIL_IMMEDIATELY,
++		reserved,
++		allBytes,
++		allBytes,
++		new(windows.Overlapped))
++	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
++		return ErrLockHeld
++	}
++	return err
++}
++
+ func platformSpecificUnlock(file *os.File) error {
+ 	return windows.UnlockFileEx(windows.Handle(file.Fd()), reserved, allBytes, allBytes, new(windows.Overlapped))
+ }
+--- a/pkg/logging/logging.go
++++ b/pkg/logging/logging.go
+@@ -200,6 +200,26 @@
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	exitCh, err := waitContainerTask(ctx, client, config, outputSeen)
++	if err != nil {
++		client.Close()
++		return nil, err
++	}
++	// The wait RPC runs on this client, so close the client only once the RPC
++	// has returned (exit, transport error or cancellation).
++	out := make(chan containerd.ExitStatus, 1)
++	go func() {
++		defer close(out)
++		status, ok := <-exitCh
++		client.Close()
++		if ok {
++			out <- status
++		}
++	}()
++	return out, nil
++}
++
++func waitContainerTask(ctx context.Context, client *containerd.Client, config *logging.Config, outputSeen func() bool) (<-chan containerd.ExitStatus, error) {
+ 	con, err := client.LoadContainer(ctx, config.ID)
+ 	if err != nil {
+ 		return nil, err
+@@ -249,7 +269,53 @@
+ }
+ 
+ type ContainerWaitFunc func(ctx context.Context, address string, config *logging.Config, outputSeen func() bool) (<-chan containerd.ExitStatus, error)
++
++// watchContainerExit calls cancelReaders once containerd reports that the
++// container's task has exited.
++//
++// Only a wait response without an error is evidence of an exit. The containerd
++// client also delivers a status when the wait RPC fails, for example because
++// containerd stopped or restarted; cancelling the readers on that status ended
++// collection while the container kept running and writing.
++//
++// The watch is not re-established after such a failure. containerd looks up
++// and waits on a task by container ID alone, so a later wait could follow
++// another task that has taken the ID while this container's output is still
++// open, and that task's exit would end this collection. The readers instead
++// collect until the output ends (EOF) or the logger is stopped (SIGTERM), as
++// they do when the first lookup fails. Kata closes the output pipes and stops
++// the logger before it reports the task's exit.
++func watchContainerExit(ctx context.Context, address string, config *logging.Config, getContainerWait ContainerWaitFunc, outputSeen func() bool, cancelReaders func()) {
++	exitCh, err := getContainerWait(ctx, address, config, outputSeen)
++	if err != nil {
++		if ctx.Err() == nil {
++			// We could not determine when the container exits. Do not cancel the
++			// readers: they will finish on their own when the FIFO reaches EOF.
++			// Cancelling here could truncate a still-running container.
++			log.G(ctx).Errorf("failed to get container task wait channel: %v", err)
++		}
++		return
++	}
++	select {
++	case <-ctx.Done():
++	case status, ok := <-exitCh:
++		if ok && status.Error() == nil {
++			cancelReaders()
++			return
++		}
++		if ctx.Err() != nil {
++			return
++		}
++		err := errors.New("wait channel closed")
++		if ok {
++			err = status.Error()
++		}
++		log.G(ctx).WithError(err).Warn("lost the container task wait; collecting until the container's output ends or the logger is stopped")
++	}
++}
+ 
++// loggingProcessAdapter collects the container's output until EOF, SIGTERM
++// (ctx) or, when getContainerWait is not nil, the task's reported exit.
+ func loggingProcessAdapter(ctx context.Context, driver Driver, dataStore, address string, getContainerWait ContainerWaitFunc, config *logging.Config) error {
+ 	if err := driver.PreProcess(ctx, dataStore, config); err != nil {
+ 		return err
+@@ -369,24 +435,20 @@
+ 			driver.Process(stdout, stderr)
+ 		}()
+ 	}
+-	go func() {
+-		// Wait for the container to exit, then cancel the readers. containerd
+-		// keeps the stdio FIFO write ends open (so the container can be
+-		// restarted), so the FIFOs may not reach EOF on exit; without this the
+-		// read goroutines, and therefore the logger, could block forever.
+-		exitCh, err := getContainerWait(ctx, address, config, outputSeen)
+-		if err != nil {
+-			// We could not determine when the container exits. Do not cancel the
+-			// readers: they will finish on their own when the FIFO reaches EOF.
+-			// Cancelling here could truncate a still-running container.
+-			log.G(ctx).Errorf("failed to get container task wait channel: %v", err)
+-			return
+-		}
+-		<-exitCh
+-		stdoutR.Cancel()
+-		stderrR.Cancel()
+-	}()
++	// Wait for the container to exit, then cancel the readers. containerd
++	// keeps the stdio FIFO write ends open (so the container can be
++	// restarted), so the FIFOs may not reach EOF on exit; without this the
++	// read goroutines, and therefore the logger, could block forever. The
++	// watch stops once the readers have finished (EOF or SIGTERM).
++	watchCtx, stopWatch := context.WithCancel(ctx)
++	if getContainerWait != nil {
++		go watchContainerExit(watchCtx, address, config, getContainerWait, outputSeen, func() {
++			stdoutR.Cancel()
++			stderrR.Cancel()
++		})
++	}
+ 	wg.Wait()
++	stopWatch()
+ 	return driver.PostProcess()
+ }
+ 
+@@ -414,7 +476,14 @@
+ 			// the logger will obtain an exclusive lock on a file until the container is
+ 			// stopped and the driver has finished processing all output,
+ 			// so that waiting log viewers can be signalled when the process is complete.
+-			return filesystem.WithLock(loggerLock, func() error {
++			lock, err := filesystem.TryLock(loggerLock)
++			if errors.Is(err, filesystem.ErrLockHeld) {
++				return collectAfterLogOwner(ctx, driver, dataStore, logConfig.Address, loggerLock, config, ready)
++			}
++			if err != nil {
++				return err
++			}
++			return withLockFile(lock, func() error {
+ 				if err := ready(); err != nil {
+ 					return err
+ 				}
+@@ -429,6 +498,73 @@
+ 	}, nil
+ }
+ 
++// collectAfterLogOwner runs a logger whose container log is owned by another
++// logger: one started for an earlier task of this container whose output is
++// still open, for example after containerd lost that task.
++//
++// The runtime finishes starting a task only once its logger is ready. Kata
++// waits for readiness without a deadline while it holds its task service lock,
++// and it takes a readiness pipe closed without a byte as ready. Waiting for the
++// owner before readiness would hold the start for as long as the owner's output
++// stays open; exiting before readiness would let the task run with nothing
++// collecting its output. This logger therefore signals readiness at once and
++// takes ownership when the owner finishes; the task's output waits in its pipe
++// until then. A SIGTERM before that stops the logger without reading, as
++// SIGTERM always stops reading at once.
++//
++// By then containerd may hold another task under the same container ID, so the
++// logger does not watch for the exit: it collects until EOF or SIGTERM.
++func collectAfterLogOwner(ctx context.Context, driver Driver, dataStore, address, loggerLock string, config *logging.Config, ready func() error) error {
++	log.G(ctx).Warn("another logger owns this container's log; collecting once it finishes")
++	if err := ready(); err != nil {
++		return err
++	}
++	lock, err := lockUnlessCancelled(ctx, loggerLock)
++	if err != nil {
++		if ctx.Err() != nil {
++			return nil
++		}
++		return err
++	}
++	return withLockFile(lock, func() error {
++		return loggingProcessAdapter(ctx, driver, dataStore, address, nil, config)
++	})
++}
++
++// lockUnlessCancelled waits for the lock at path, or for ctx to be done.
++func lockUnlessCancelled(ctx context.Context, path string) (*os.File, error) {
++	type result struct {
++		file *os.File
++		err  error
++	}
++	locked := make(chan result, 1)
++	go func() {
++		file, err := filesystem.Lock(path)
++		locked <- result{file, err}
++	}()
++	select {
++	case r := <-locked:
++		return r.file, r.err
++	case <-ctx.Done():
++		// flock cannot be interrupted. Release the lock if it is granted after
++		// all; a stopping logger usually exits first, which releases it too.
++		go func() {
++			if r := <-locked; r.err == nil {
++				filesystem.Unlock(r.file)
++			}
++		}()
++		return nil, ctx.Err()
++	}
++}
++
++// withLockFile runs fn and then releases the lock held through file.
++func withLockFile(file *os.File, fn func() error) (err error) {
++	defer func() {
++		err = errors.Join(filesystem.Unlock(file), err)
++	}()
++	return fn()
++}
++
+ func NewLogFileWatcher(dir string) (*fsnotify.Watcher, error) {
+ 	watcher, err := fsnotify.NewWatcher()
+ 	if err != nil {
+--- /dev/null
++++ b/pkg/logging/logging_lifetime_test.go
+@@ -0,0 +1,888 @@
++/*
++   Copyright The containerd Authors.
++
++   Licensed under the Apache License, Version 2.0 (the "License");
++   you may not use this file except in compliance with the License.
++   You may obtain a copy of the License at
++
++       http://www.apache.org/licenses/LICENSE-2.0
++
++   Unless required by applicable law or agreed to in writing, software
++   distributed under the License is distributed on an "AS IS" BASIS,
++   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++   See the License for the specific language governing permissions and
++   limitations under the License.
++*/
++
++package logging
++
++// These tests cover how long a logger collects and who owns a container's log.
++// They use the real getContainerWait and containerd client against a synthetic
++// containerd that serves the three RPCs the logger uses (Containers.Get,
++// Tasks.Get, Tasks.Wait) and can be stopped and restarted like the daemon. The
++// ownership tests use the real logger-lock and json-file driver, and the
++// entrypoint tests run this test binary as the logger with the runtime's
++// argv, fds 3/4/5 and signals.
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"syscall"
++	"testing"
++	"time"
++
++	containersapi "github.com/containerd/containerd/api/services/containers/v1"
++	tasksapi "github.com/containerd/containerd/api/services/tasks/v1"
++	tasktypes "github.com/containerd/containerd/api/types/task"
++	"github.com/containerd/containerd/v2/core/runtime/v2/logging"
++	"google.golang.org/grpc"
++	"google.golang.org/grpc/codes"
++	"google.golang.org/grpc/status"
++	"google.golang.org/protobuf/types/known/timestamppb"
++
++	"github.com/containerd/nerdctl/v2/pkg/logging/jsonfile"
++)
++
++const (
++	fakeContainerID = "logged"
++	fakeNamespace   = "finite"
++
++	// entrypointDataStoreEnv makes this test binary run as the logger.
++	entrypointDataStoreEnv = "NERDCTL_LOGGING_TEST_ENTRYPOINT_DATASTORE"
++)
++
++func TestMain(m *testing.M) {
++	if dataStore := os.Getenv(entrypointDataStoreEnv); dataStore != "" {
++		// Main runs logging.Run, which exits the process.
++		if err := Main(dataStore); err != nil {
++			fmt.Fprintln(os.Stderr, err)
++			os.Exit(1)
++		}
++		os.Exit(0)
++	}
++	os.Exit(m.Run())
++}
++
++// fakeContainerd is a restartable containerd stand-in. Stop drops every
++// connection, so an in-flight Wait fails on the client exactly as it does
++// when containerd stops.
++type fakeContainerd struct {
++	socket string
++
++	mu          sync.Mutex
++	srv         *grpc.Server
++	taskGone    bool
++	exited      chan struct{}
++	exitCode    uint32
++	activeWaits int
++	openConns   int
++}
++
++func newFakeContainerd(t *testing.T) *fakeContainerd {
++	t.Helper()
++	// Keep the socket path short: t.TempDir() can exceed sun_path on macOS.
++	dir, err := os.MkdirTemp("", "ctrd")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { os.RemoveAll(dir) })
++	d := &fakeContainerd{socket: filepath.Join(dir, "c.sock"), exited: make(chan struct{})}
++	t.Cleanup(d.stop)
++	return d
++}
++
++func (d *fakeContainerd) start(t *testing.T) {
++	t.Helper()
++	_ = os.Remove(d.socket)
++	l, err := net.Listen("unix", d.socket)
++	if err != nil {
++		t.Fatal(err)
++	}
++	srv := grpc.NewServer()
++	containersapi.RegisterContainersServer(srv, &fakeContainers{d: d})
++	tasksapi.RegisterTasksServer(srv, &fakeTasks{d: d})
++	d.mu.Lock()
++	d.srv = srv
++	d.mu.Unlock()
++	go srv.Serve(&countingListener{Listener: l, d: d})
++}
++
++func (d *fakeContainerd) stop() {
++	d.mu.Lock()
++	srv := d.srv
++	d.srv = nil
++	d.mu.Unlock()
++	if srv != nil {
++		srv.Stop()
++	}
++}
++
++// restartWithoutTask restarts containerd without the task, as when it could
++// not reload the task's shim while the task's output stays open.
++func (d *fakeContainerd) restartWithoutTask(t *testing.T) {
++	t.Helper()
++	d.stop()
++	d.mu.Lock()
++	d.taskGone = true
++	d.mu.Unlock()
++	d.start(t)
++}
++
++// startTaskAndExit puts a task under the container ID again and reports its
++// exit to every Wait on the ID: another task that took the container ID.
++func (d *fakeContainerd) startTaskAndExit(code uint32) {
++	d.mu.Lock()
++	d.taskGone = false
++	d.mu.Unlock()
++	d.exit(code)
++}
++
++// exit reports the task's exit to every current and future Wait.
++func (d *fakeContainerd) exit(code uint32) {
++	d.mu.Lock()
++	d.exitCode = code
++	d.mu.Unlock()
++	close(d.exited)
++}
++
++func (d *fakeContainerd) counts() (waits, conns int) {
++	d.mu.Lock()
++	defer d.mu.Unlock()
++	return d.activeWaits, d.openConns
++}
++
++type countingListener struct {
++	net.Listener
++	d *fakeContainerd
++}
++
++func (l *countingListener) Accept() (net.Conn, error) {
++	c, err := l.Listener.Accept()
++	if err != nil {
++		return nil, err
++	}
++	l.d.mu.Lock()
++	l.d.openConns++
++	l.d.mu.Unlock()
++	return &countingConn{Conn: c, d: l.d}, nil
++}
++
++type countingConn struct {
++	net.Conn
++	d    *fakeContainerd
++	once sync.Once
++}
++
++func (c *countingConn) Close() error {
++	c.once.Do(func() { c.d.mu.Lock(); c.d.openConns--; c.d.mu.Unlock() })
++	return c.Conn.Close()
++}
++
++type fakeContainers struct {
++	containersapi.UnimplementedContainersServer
++	d *fakeContainerd
++}
++
++func (c *fakeContainers) Get(ctx context.Context, r *containersapi.GetContainerRequest) (*containersapi.GetContainerResponse, error) {
++	if r.ID != fakeContainerID {
++		return nil, status.Errorf(codes.NotFound, "container %q: not found", r.ID)
++	}
++	return &containersapi.GetContainerResponse{Container: &containersapi.Container{
++		ID:        r.ID,
++		Runtime:   &containersapi.Container_Runtime{Name: "io.containerd.kata.v2"},
++		CreatedAt: timestamppb.New(time.Unix(0, 0)),
++		UpdatedAt: timestamppb.New(time.Unix(0, 0)),
++	}}, nil
++}
++
++type fakeTasks struct {
++	tasksapi.UnimplementedTasksServer
++	d *fakeContainerd
++}
++
++func (t *fakeTasks) Get(ctx context.Context, r *tasksapi.GetRequest) (*tasksapi.GetResponse, error) {
++	t.d.mu.Lock()
++	gone := t.d.taskGone
++	t.d.mu.Unlock()
++	if r.ContainerID != fakeContainerID || gone {
++		return nil, status.Errorf(codes.NotFound, "no running task found: task %s not found", r.ContainerID)
++	}
++	return &tasksapi.GetResponse{Process: &tasktypes.Process{
++		ContainerID: r.ContainerID,
++		ID:          r.ContainerID,
++		Pid:         4242,
++		Status:      tasktypes.Status_RUNNING,
++	}}, nil
++}
++
++func (t *fakeTasks) Wait(ctx context.Context, r *tasksapi.WaitRequest) (*tasksapi.WaitResponse, error) {
++	t.d.mu.Lock()
++	t.d.activeWaits++
++	exited := t.d.exited
++	t.d.mu.Unlock()
++	defer func() { t.d.mu.Lock(); t.d.activeWaits--; t.d.mu.Unlock() }()
++	select {
++	case <-exited:
++		t.d.mu.Lock()
++		code := t.d.exitCode
++		t.d.mu.Unlock()
++		return &tasksapi.WaitResponse{ExitStatus: code, ExitedAt: timestamppb.Now()}, nil
++	case <-ctx.Done():
++		return nil, status.FromContextError(ctx.Err()).Err()
++	}
++}
++
++// stdio is a container's output pipes. The test holds the write ends, so the
++// logger sees EOF only when the test closes them, as with a runtime that
++// keeps its writers open while the container runs.
++type stdio struct {
++	t                *testing.T
++	outR, outW       *os.File
++	errR, errW       *os.File
++	closeWritersOnce sync.Once
++}
++
++func newStdio(t *testing.T) *stdio {
++	t.Helper()
++	outR, outW, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	errR, errW, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := &stdio{t: t, outR: outR, outW: outW, errR: errR, errW: errW}
++	t.Cleanup(func() {
++		for _, f := range []*os.File{outR, outW, errR, errW} {
++			f.Close()
++		}
++	})
++	return s
++}
++
++func (s *stdio) write(line string) {
++	s.t.Helper()
++	if _, err := s.outW.WriteString(line); err != nil {
++		s.t.Fatal(err)
++	}
++}
++
++func (s *stdio) closeWriters() {
++	s.closeWritersOnce.Do(func() {
++		s.outW.Close()
++		s.errW.Close()
++	})
++}
++
++// loggedContainer runs the logging adapter for fakeContainerID with a mock
++// driver that records the collected stdout.
++type loggedContainer struct {
++	*stdio
++	t      *testing.T
++	d      *fakeContainerd
++	driver *SyncMockDriver
++	cancel context.CancelFunc
++	done   chan error
++}
++
++func startLoggedContainer(t *testing.T, d *fakeContainerd, backlog string) *loggedContainer {
++	t.Helper()
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	c := &loggedContainer{stdio: newStdio(t), t: t, d: d, driver: &SyncMockDriver{}, cancel: cancel, done: make(chan error, 1)}
++	if backlog != "" {
++		c.write(backlog)
++	}
++	config := &logging.Config{ID: fakeContainerID, Namespace: fakeNamespace, Stdout: c.outR, Stderr: c.errR}
++	go func() {
++		c.done <- loggingProcessAdapter(ctx, c.driver, "", "unix://"+d.socket, getContainerWait, config)
++	}()
++	return c
++}
++
++func (c *loggedContainer) collected() string {
++	c.driver.mu.Lock()
++	defer c.driver.mu.Unlock()
++	return strings.Join(c.driver.receivedStdout, "")
++}
++
++// emit writes line and waits until the logger has collected it.
++func (c *loggedContainer) emit(line string) {
++	c.t.Helper()
++	c.write(line)
++	waitFor(c.t, "the logger to collect "+strings.TrimSpace(line), func() bool { return strings.HasSuffix(c.collected(), line) })
++}
++
++func (c *loggedContainer) requireCollecting(why string) {
++	c.t.Helper()
++	requireRunning(c.t, c.done, why)
++}
++
++func (c *loggedContainer) requireStops(why string) {
++	c.t.Helper()
++	requireDone(c.t, c.done, why)
++}
++
++// requireReleased checks that no Wait RPC or client connection outlives the
++// adapter.
++func (c *loggedContainer) requireReleased() {
++	c.t.Helper()
++	waitFor(c.t, "wait RPCs and client connections to be released", func() bool {
++		waits, conns := c.d.counts()
++		return waits == 0 && conns == 0
++	})
++}
++
++// requireRunning fails if done delivers within a short grace period. It is
++// the negative half of a lifetime check; the positive half always follows.
++func requireRunning(t *testing.T, done chan error, why string) {
++	t.Helper()
++	select {
++	case err := <-done:
++		done <- err
++		t.Fatalf("logger stopped %s (returned %v)", why, err)
++	case <-time.After(400 * time.Millisecond):
++	}
++}
++
++func requireDone(t *testing.T, done chan error, why string) {
++	t.Helper()
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatalf("logger returned %v", err)
++		}
++	case <-time.After(10 * time.Second):
++		t.Fatalf("logger did not stop %s", why)
++	}
++}
++
++func waitFor(t *testing.T, what string, ok func() bool) {
++	t.Helper()
++	deadline := time.Now().Add(10 * time.Second)
++	for !ok() {
++		if time.Now().After(deadline) {
++			t.Fatalf("timed out waiting for %s", what)
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++}
++
++func waitEstablished(t *testing.T, d *fakeContainerd) {
++	t.Helper()
++	waitFor(t, "an established wait", func() bool { waits, _ := d.counts(); return waits == 1 })
++}
++
++// The task's reported exit still ends collection while the wait is intact.
++func TestLoggingProcessAdapterStopsOnTaskExit(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	c := startLoggedContainer(t, d, "")
++	c.emit("running\n")
++	waitEstablished(t, d)
++	d.exit(0)
++	c.requireStops("on the task's exit")
++	if got, want := c.collected(), "running\n"; got != want {
++		t.Fatalf("collected %q, want %q", got, want)
++	}
++}
++
++// A containerd restart fails the logger's wait RPC while the container keeps
++// running. The logger must keep collecting through and after the outage until
++// the output ends.
++func TestLoggingProcessAdapterKeepsCollectingAfterContainerdLoss(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	c := startLoggedContainer(t, d, "")
++	c.emit("before\n")
++	waitEstablished(t, d)
++
++	d.stop()
++	c.requireCollecting("when containerd stopped")
++	c.emit("during outage\n")
++	d.start(t)
++	c.emit("after restart\n")
++	c.requireCollecting("after containerd restarted")
++
++	c.write("tail")
++	c.closeWriters()
++	c.requireStops("at EOF")
++	if got, want := c.collected(), "before\nduring outage\nafter restart\ntail"; got != want {
++		t.Fatalf("collected %q, want %q", got, want)
++	}
++	c.requireReleased()
++}
++
++// After a lost wait, containerd may report a task under the same container ID
++// that is not the one this logger collects for, and that task may exit while
++// this container's output is still open. That exit must not end collection.
++func TestLoggingProcessAdapterIgnoresExitsAfterLostWait(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	c := startLoggedContainer(t, d, "")
++	c.emit("before\n")
++	waitEstablished(t, d)
++
++	d.restartWithoutTask(t)
++	c.emit("while the task is missing\n")
++	d.startTaskAndExit(0)
++	c.requireCollecting("on another task's exit under the same container ID")
++	c.emit("still writing\n")
++
++	c.closeWriters()
++	c.requireStops("at EOF")
++	if got, want := c.collected(), "before\nwhile the task is missing\nstill writing\n"; got != want {
++		t.Fatalf("collected %q, want %q", got, want)
++	}
++	c.requireReleased()
++}
++
++// The upstream short-lived container case is unchanged: on the first attempt
++// the task never appears, the container has produced output and its writers
++// are still open. The logger must stop on its own with the output kept.
++// https://github.com/containerd/nerdctl/issues/5006
++func TestLoggingProcessAdapterShortLivedContainerStops(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.taskGone = true
++	d.start(t)
++	c := startLoggedContainer(t, d, "short-lived output\n")
++	c.requireStops("for a short-lived container whose task is gone")
++	if got, want := c.collected(), "short-lived output\n"; got != want {
++		t.Fatalf("collected %q, want %q", got, want)
++	}
++}
++
++// The task's exit, EOF and SIGTERM end collection whether the wait is in
++// flight or lost, and none leaves a wait RPC or client connection behind.
++func TestLoggingProcessAdapterReleasesWatch(t *testing.T) {
++	t.Run("task exit", func(t *testing.T) {
++		d := newFakeContainerd(t)
++		d.start(t)
++		c := startLoggedContainer(t, d, "")
++		c.emit("line\n")
++		waitEstablished(t, d)
++		d.exit(0)
++		c.requireStops("on the task's exit")
++		c.requireReleased()
++	})
++	t.Run("eof during wait", func(t *testing.T) {
++		d := newFakeContainerd(t)
++		d.start(t)
++		c := startLoggedContainer(t, d, "")
++		c.emit("line\n")
++		waitEstablished(t, d)
++		c.closeWriters()
++		c.requireStops("at EOF")
++		c.requireReleased()
++	})
++	t.Run("sigterm during wait", func(t *testing.T) {
++		d := newFakeContainerd(t)
++		d.start(t)
++		c := startLoggedContainer(t, d, "")
++		c.emit("line\n")
++		waitEstablished(t, d)
++		c.cancel()
++		c.requireStops("on SIGTERM")
++		c.requireReleased()
++	})
++	t.Run("sigterm after lost wait", func(t *testing.T) {
++		d := newFakeContainerd(t)
++		d.start(t)
++		c := startLoggedContainer(t, d, "")
++		c.emit("line\n")
++		waitEstablished(t, d)
++		d.restartWithoutTask(t)
++		c.requireCollecting("after the wait was lost")
++		c.cancel()
++		c.requireStops("on SIGTERM")
++		c.requireReleased()
++	})
++}
++
++// logStore is a nerdctl data store holding one container's json-file log
++// configuration, pointed at the synthetic containerd.
++type logStore struct {
++	t   *testing.T
++	dir string
++}
++
++func newLogStore(t *testing.T, d *fakeContainerd) *logStore {
++	t.Helper()
++	s := &logStore{t: t, dir: t.TempDir()}
++	cfg, err := json.Marshal(LogConfig{Driver: "json-file", Address: "unix://" + d.socket})
++	if err != nil {
++		t.Fatal(err)
++	}
++	path := LogConfigFilePath(s.dir, fakeNamespace, fakeContainerID)
++	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, cfg, 0o600); err != nil {
++		t.Fatal(err)
++	}
++	return s
++}
++
++// logged returns the stdout entries of the container's json-file log.
++func (s *logStore) logged() string {
++	s.t.Helper()
++	f, err := os.Open(jsonfile.Path(s.dir, fakeNamespace, fakeContainerID))
++	if errors.Is(err, os.ErrNotExist) {
++		return ""
++	}
++	if err != nil {
++		s.t.Fatal(err)
++	}
++	defer f.Close()
++	var out strings.Builder
++	scanner := bufio.NewScanner(f)
++	for scanner.Scan() {
++		var entry struct {
++			Log    string `json:"log"`
++			Stream string `json:"stream"`
++		}
++		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
++			s.t.Fatalf("log entry %q: %v", scanner.Text(), err)
++		}
++		if entry.Stream == "stdout" {
++			out.WriteString(entry.Log)
++		}
++	}
++	if err := scanner.Err(); err != nil {
++		s.t.Fatal(err)
++	}
++	return out.String()
++}
++
++func (s *logStore) waitLogged(want string) {
++	s.t.Helper()
++	waitFor(s.t, fmt.Sprintf("the log to read %q", want), func() bool { return s.logged() == want })
++}
++
++// lockFree reports whether no logger holds the container's logger-lock.
++func (s *logStore) lockFree() bool {
++	s.t.Helper()
++	f, err := os.Open(getLockPath(s.dir, fakeNamespace, fakeContainerID))
++	if err != nil {
++		s.t.Fatal(err)
++	}
++	defer f.Close()
++	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
++	if errors.Is(err, syscall.EWOULDBLOCK) {
++		return false
++	}
++	if err != nil {
++		s.t.Fatal(err)
++	}
++	return true
++}
++
++// runningLogger is the logger entrypoint's LoggerFunc running in this process,
++// as logging.Run runs it: ready signals the runtime and ctx is cancelled on
++// SIGTERM.
++type runningLogger struct {
++	*stdio
++	cancel context.CancelFunc
++	ready  chan struct{}
++	done   chan error
++}
++
++func startLogger(t *testing.T, s *logStore, backlog string) *runningLogger {
++	t.Helper()
++	fn, err := loggerFunc(s.dir)
++	if err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithCancel(context.Background())
++	t.Cleanup(cancel)
++	l := &runningLogger{stdio: newStdio(t), cancel: cancel, ready: make(chan struct{}), done: make(chan error, 1)}
++	if backlog != "" {
++		l.write(backlog)
++	}
++	config := &logging.Config{ID: fakeContainerID, Namespace: fakeNamespace, Stdout: l.outR, Stderr: l.errR}
++	var once sync.Once
++	go func() {
++		l.done <- fn(ctx, config, func() error { once.Do(func() { close(l.ready) }); return nil })
++	}()
++	return l
++}
++
++func (l *runningLogger) requireReady(t *testing.T, why string) {
++	t.Helper()
++	select {
++	case <-l.ready:
++	case err := <-l.done:
++		t.Fatalf("logger returned %v before it was ready %s", err, why)
++	case <-time.After(10 * time.Second):
++		t.Fatalf("logger was not ready %s", why)
++	}
++}
++
++// startOrphanedLogOwner starts a logger, establishes its wait and then loses
++// the task in a containerd restart while the task's output stays open: the
++// logger keeps collecting and keeps the container's log.
++func startOrphanedLogOwner(t *testing.T, d *fakeContainerd, s *logStore) *runningLogger {
++	t.Helper()
++	first := startLogger(t, s, "")
++	first.requireReady(t, "with the log free")
++	first.write("first task\n")
++	s.waitLogged("first task\n")
++	waitEstablished(t, d)
++	d.restartWithoutTask(t)
++	requireRunning(t, first.done, "when containerd lost its task")
++	return first
++}
++
++// A logger started for a new task while an earlier task's logger still owns
++// the log must not hold the runtime's start: it signals readiness, leaves the
++// owner collecting, and collects its own task's output once the owner
++// finishes.
++func TestLoggerReadyWhileAnotherLoggerOwnsTheLog(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	s := newLogStore(t, d)
++	first := startOrphanedLogOwner(t, d, s)
++
++	second := startLogger(t, s, "second task\n")
++	second.requireReady(t, "while another logger owns the log")
++	first.write("first task still writing\n")
++	s.waitLogged("first task\nfirst task still writing\n")
++	requireRunning(t, second.done, "while another logger owns the log")
++
++	first.closeWriters()
++	requireDone(t, first.done, "at its task's EOF")
++	s.waitLogged("first task\nfirst task still writing\nsecond task\n")
++	second.write("second task again\n")
++	s.waitLogged("first task\nfirst task still writing\nsecond task\nsecond task again\n")
++
++	second.closeWriters()
++	requireDone(t, second.done, "at its task's EOF")
++	if !s.lockFree() {
++		t.Fatal("logger-lock still held after both loggers finished")
++	}
++}
++
++// SIGTERM ends a logger that is waiting for the log owner; the owner keeps
++// collecting and the waiting logger never takes the lock.
++func TestLoggerWaitingForTheLogOwnerStopsOnSIGTERM(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	s := newLogStore(t, d)
++	first := startOrphanedLogOwner(t, d, s)
++
++	second := startLogger(t, s, "second task\n")
++	second.requireReady(t, "while another logger owns the log")
++	second.cancel()
++	requireDone(t, second.done, "on SIGTERM while waiting for the log owner")
++
++	first.write("first task after the other logger stopped\n")
++	s.waitLogged("first task\nfirst task after the other logger stopped\n")
++	first.closeWriters()
++	requireDone(t, first.done, "at its task's EOF")
++	waitFor(t, "the logger-lock to be released", s.lockFree)
++	if got, want := s.logged(), "first task\nfirst task after the other logger stopped\n"; got != want {
++		t.Fatalf("log reads %q, want %q", got, want)
++	}
++}
++
++// A logger that waited for the log owner cannot tell its task from a later
++// one with the same container ID, so a reported exit must not end it.
++func TestLoggerAfterTheLogOwnerIgnoresTaskExit(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	s := newLogStore(t, d)
++	first := startOrphanedLogOwner(t, d, s)
++	second := startLogger(t, s, "second task\n")
++	second.requireReady(t, "while another logger owns the log")
++	first.closeWriters()
++	requireDone(t, first.done, "at its task's EOF")
++	s.waitLogged("first task\nsecond task\n")
++
++	d.startTaskAndExit(0)
++	requireRunning(t, second.done, "on a reported exit after waiting for the log owner")
++	second.write("second task still writing\n")
++	s.waitLogged("first task\nsecond task\nsecond task still writing\n")
++	second.closeWriters()
++	requireDone(t, second.done, "at its task's EOF")
++}
++
++// entrypointLogger is this test binary running as the logger, started the way
++// Kata 3.29 newBinaryIO starts it (containerd-shim-v2/shim_io_binary.go): fd 3
++// and 4 are the read ends of the output pipes, fd 5 is the readiness pipe.
++type entrypointLogger struct {
++	*stdio
++	cmd    *exec.Cmd
++	exited chan error
++	// readied reports whether the logger wrote a readiness byte. Kata 3.29
++	// also takes a readiness pipe closed without a byte (EOF) as ready.
++	readied chan bool
++}
++
++func startEntrypointLogger(t *testing.T, s *logStore) *entrypointLogger {
++	t.Helper()
++	l := &entrypointLogger{stdio: newStdio(t), exited: make(chan error, 1), readied: make(chan bool, 1)}
++	readyR, readyW, err := os.Pipe()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer readyR.Close()
++	l.cmd = exec.Command(os.Args[0], "-test.run=^$")
++	l.cmd.Env = append(os.Environ(),
++		entrypointDataStoreEnv+"="+s.dir,
++		"CONTAINER_ID="+fakeContainerID,
++		"CONTAINER_NAMESPACE="+fakeNamespace,
++	)
++	l.cmd.ExtraFiles = []*os.File{l.outR, l.errR, readyW}
++	l.cmd.Stderr = os.Stderr
++	if err := l.cmd.Start(); err != nil {
++		t.Fatal(err)
++	}
++	readyW.Close()
++	t.Cleanup(func() {
++		l.cmd.Process.Kill()
++		<-l.exited
++	})
++	go func() { l.exited <- l.cmd.Wait() }()
++	readResult := make(chan bool, 1)
++	go func() {
++		b := make([]byte, 1)
++		n, err := readyR.Read(b)
++		readResult <- n == 1 && (err == nil || errors.Is(err, io.EOF))
++	}()
++	select {
++	case byteRead := <-readResult:
++		l.readied <- byteRead
++	case <-time.After(10 * time.Second):
++		t.Fatal("the runtime's readiness read is still blocked")
++	}
++	return l
++}
++
++func (l *entrypointLogger) requireReadyByte(t *testing.T, why string) {
++	t.Helper()
++	if !<-l.readied {
++		t.Fatalf("logger closed its readiness pipe without a byte %s", why)
++	}
++}
++
++func (l *entrypointLogger) sigterm(t *testing.T) {
++	t.Helper()
++	if err := l.cmd.Process.Signal(syscall.SIGTERM); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func (l *entrypointLogger) requireExit0(t *testing.T, why string) {
++	t.Helper()
++	select {
++	case err := <-l.exited:
++		l.exited <- err
++		if err != nil {
++			t.Fatalf("logger exited with %v %s", err, why)
++		}
++	case <-time.After(10 * time.Second):
++		t.Fatalf("logger did not exit %s", why)
++	}
++}
++
++func (l *entrypointLogger) requireAlive(t *testing.T, why string) {
++	t.Helper()
++	select {
++	case err := <-l.exited:
++		l.exited <- err
++		t.Fatalf("logger exited (%v) %s", err, why)
++	case <-time.After(400 * time.Millisecond):
++	}
++}
++
++// The real entrypoint: a second task's logger answers the runtime's readiness
++// read with a byte while an orphaned task's logger owns the log, SIGTERM ends
++// it, and the owner keeps collecting throughout.
++func TestLoggerEntrypointReadyWhileAnotherLoggerOwnsTheLog(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	s := newLogStore(t, d)
++	first := startEntrypointLogger(t, s)
++	first.requireReadyByte(t, "with the log free")
++	first.write("first task\n")
++	s.waitLogged("first task\n")
++	waitEstablished(t, d)
++	d.restartWithoutTask(t)
++	first.requireAlive(t, "when containerd lost its task")
++
++	second := startEntrypointLogger(t, s)
++	second.requireReadyByte(t, "while another logger owns the log")
++	first.write("first task still writing\n")
++	s.waitLogged("first task\nfirst task still writing\n")
++	second.requireAlive(t, "while waiting for the log owner")
++
++	second.sigterm(t)
++	second.requireExit0(t, "on SIGTERM while waiting for the log owner")
++	first.write("first task after the other logger stopped\n")
++	s.waitLogged("first task\nfirst task still writing\nfirst task after the other logger stopped\n")
++
++	first.closeWriters()
++	first.requireExit0(t, "at its task's EOF")
++	waitFor(t, "the logger-lock to be released", s.lockFree)
++}
++
++// The real entrypoint stops promptly on SIGTERM while output is still being
++// written after a lost wait. What it logged is an unbroken prefix of the
++// output; SIGTERM stops reading at once, so the rest is not collected.
++func TestLoggerEntrypointStopsOnSIGTERMDuringActiveOutput(t *testing.T) {
++	d := newFakeContainerd(t)
++	d.start(t)
++	s := newLogStore(t, d)
++	l := startEntrypointLogger(t, s)
++	l.requireReadyByte(t, "with the log free")
++	l.write("line 0\n")
++	s.waitLogged("line 0\n")
++	waitEstablished(t, d)
++	d.restartWithoutTask(t)
++	l.requireAlive(t, "when containerd lost its task")
++
++	var written atomic.Int64
++	written.Store(1)
++	writerDone := make(chan struct{})
++	go func() {
++		defer close(writerDone)
++		for i := 1; ; i++ {
++			if _, err := fmt.Fprintf(l.outW, "line %d\n", i); err != nil {
++				return
++			}
++			written.Store(int64(i + 1))
++		}
++	}()
++	waitFor(t, "active output", func() bool { return written.Load() > 1000 })
++	l.sigterm(t)
++	l.requireExit0(t, "on SIGTERM during active output")
++	l.closeWriters()
++	<-writerDone
++
++	lines := strings.SplitAfter(s.logged(), "\n")
++	// The output may end in a fragment of the next line: the logger writes
++	// what it has read when it stops.
++	fragment := lines[len(lines)-1]
++	lines = lines[:len(lines)-1]
++	if !strings.HasPrefix(fmt.Sprintf("line %d\n", len(lines)), fragment) {
++		t.Fatalf("log ends with %q after %d lines", fragment, len(lines))
++	}
++	for i, line := range lines {
++		if want := fmt.Sprintf("line %d\n", i); line != want {
++			t.Fatalf("log line %d is %q, want %q", i, line, want)
++		}
++	}
++	t.Logf("logged %d of at least %d written lines before SIGTERM", len(lines), written.Load())
++}

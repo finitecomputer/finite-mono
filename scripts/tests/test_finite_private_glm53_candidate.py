@@ -46,9 +46,80 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
         self.assertEqual(check_repository(ROOT), [])
 
     def test_release_contract_accepts_committed_release_ready_candidate(self) -> None:
-        # The measured release-ready candidate (sha256 91fe432e...) is checked
-        # in, so the release contract must find zero stop markers.
         self.assertEqual(check_repository(ROOT, release_ready=True), [])
+
+    def test_main_cvm_must_match_the_bridge_compatible_recovery(self) -> None:
+        text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        text = text.replace("cvm-version: 0.14.13", "cvm-version: 0.10.8")
+        with temporary_repository(main_text=text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory), release_ready=True)
+        self.assertTrue(any("cvm-version" in item for item in violations), violations)
+
+    def test_model_requires_private_ipc_and_256g_shared_memory(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        settings = "    ipc: private\n    shm_size: 256g\n"
+        for replacement in (
+            "    ipc: host\n    shm_size: 256g\n",
+            "    shm_size: 256g\n",
+            "    ipc: private\n",
+            "    ipc: private\n    shm_size: 64g\n",
+            settings + "    ipc: host\n",
+            settings + "    shm_size: 64g\n",
+        ):
+            with self.subTest(replacement=replacement):
+                text = original.replace(settings, replacement)
+                with temporary_repository(main_text=text) as temporary_directory:
+                    violations = check_repository(Path(temporary_directory))
+                self.assertTrue(any("IPC" in item for item in violations), violations)
+
+        # Declaring these settings on the limiter must not satisfy the model contract.
+        text = original.replace(settings, "").replace(
+            '  - name: "finite-private-limiter"\n',
+            '  - name: "finite-private-limiter"\n' + settings,
+        )
+        with temporary_repository(main_text=text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(any("IPC" in item for item in violations), violations)
+
+    def test_limiter_digest_accepts_an_optional_tag_but_never_a_mutable_image(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        image_prefix = "ghcr.io/finitecomputer/private-limiter"
+        digest = original.split(image_prefix + "@sha256:", 1)[1].split('"', 1)[0]
+        for image, accepted in (
+            (image_prefix + "@sha256:" + digest, True),
+            (image_prefix + ":recovery@sha256:" + digest, True),
+            (image_prefix + ":latest", False),
+            (image_prefix + ":recovery@sha256:abc123", False),
+        ):
+            with self.subTest(image=image):
+                text = original.replace(image_prefix + "@sha256:" + digest, image)
+                with temporary_repository(main_text=text) as temporary_directory:
+                    violations = check_repository(
+                        Path(temporary_directory), release_ready=True
+                    )
+                if accepted:
+                    self.assertEqual(violations, [])
+                else:
+                    self.assertTrue(
+                        any(
+                            "immutable limiter image digest" in item
+                            for item in violations
+                        ),
+                        violations,
+                    )
+
+    def test_compatibility_bridge_retains_its_separate_cvm_contract(self) -> None:
+        text = (ROOT / BRIDGE_CANDIDATE).read_text(encoding="utf-8")
+        text = text.replace("cvm-version: 0.10.8", "cvm-version: 0.14.13")
+        with temporary_repository(bridge_text=text) as temporary_directory:
+            violations = check_repository(Path(temporary_directory))
+        self.assertTrue(
+            any(
+                "compatibility bridge lacks required anchor: cvm-version" in item
+                for item in violations
+            ),
+            violations,
+        )
 
     def test_checkpoint_and_h200_recipe_are_fixed(self) -> None:
         text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")

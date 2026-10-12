@@ -1426,7 +1426,261 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertEqual(result, {
             "status": "unknown", "repair_authority": False,
             "agent_principal_sha256": None, "matches_core_principal": False,
+            "container_output": {"state": "unknown", "reason": "principal_not_matched"},
         })
+
+    # agentd.container_output as health_server.py projects it into /contact
+    # (FIN-171): a full stdout pipe whose stderr is the same pipe.
+    OUTPUT_PRINCIPAL = "npub1" + "q" * 58
+    REPORTED_OUTPUT = {"state": "reported", "sample_interval_ms": 1000,
+                       "stdout": {"kind": "pipe", "observed_at_ms": 1760184000900, "buffered_bytes": 65536,
+                                  "capacity_bytes": 65536, "first_observed_at_ms": 1760183990900,
+                                  "sample_count": 11, "observed_decrease_bytes": 0},
+                       "stderr": {"kind": "same_pipe_as_stdout"}}
+    UNMATCHED_OUTPUT = {"state": "unknown", "reason": "principal_not_matched"}
+    UNRECOGNIZED_OUTPUT = {"state": "unknown", "reason": "unrecognized"}
+
+    def contact_with_output(self, body: dict, endpoint: str = "http://10.254.3.2:49155/contact",
+                            host: str = "finite-lat-3", expected: str | None = None,
+                            returncode: int = 0) -> tuple[dict, mock.MagicMock]:
+        assignment = {"source_host_id": host, "contact_endpoint": endpoint,
+                      "expected_agent_npub": expected or self.OUTPUT_PRINCIPAL}
+        with mock.patch.object(finite_status, "run_read_only", return_value=subprocess.CompletedProcess(
+                [], returncode, json.dumps(body), "")) as run:
+            return finite_status.collect_assignment_contact(assignment), run
+
+    def test_assignment_contact_copies_output_observations_only_from_the_core_principal(self) -> None:
+        # Guest output evidence is only as trustworthy as the Agent that
+        # published it: copy nothing until the published Principal is Core's.
+        padded = json.loads(json.dumps(self.REPORTED_OUTPUT))
+        padded["PRIVATE_report"] = "PRIVATE argv /data/PRIVATE"
+        padded["stdout"]["PRIVATE_stream"] = {"path": "/data/PRIVATE"}
+        padded["stderr"]["file_type"] = "PRIVATE"
+        body = {"agent_npub": self.OUTPUT_PRINCIPAL, "ready": True,
+                "agentd": {"status": "running", "PRIVATE_agentd": "PRIVATE", "container_output": padded}}
+        for host, address in [("finite-lat-3", "10.254.3.2"), ("finite-lat-4", "10.254.3.4"),
+                              ("finite-lat-5", "10.254.3.5")]:
+            with self.subTest(host=host):
+                result, run = self.contact_with_output(body, f"http://{address}:49155/contact", host)
+                run.assert_called_once()
+                self.assertEqual((result["status"], result["matches_core_principal"]), ("observed", True))
+                self.assertEqual(result["container_output"], self.REPORTED_OUTPUT)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+        oversized = {**body, "padding": "x" * 65536}
+        untrusted = [
+            ("another Agent", body, {"expected": "npub1" + "p" * 58}, ("observed", False)),
+            ("not-ready 503 refused by --fail", body, {"returncode": 22}, ("unknown", False)),
+            ("no Principal", {key: value for key, value in body.items() if key != "agent_npub"}, {}, ("unknown", False)),
+            ("invalid Principal", {**body, "agent_npub": "PRIVATE"}, {}, ("unknown", False)),
+            ("over 64 KiB", oversized, {}, ("unknown", False)),
+        ]
+        for name, document, options, identity in untrusted:
+            with self.subTest(name):
+                result, run = self.contact_with_output(document, **options)
+                run.assert_called_once()
+                self.assertEqual((result["status"], result["matches_core_principal"]), identity)
+                self.assertEqual(result["container_output"], self.UNMATCHED_OUTPUT)
+                self.assertFalse(result["repair_authority"])
+                self.assertNotIn("PRIVATE", json.dumps(result))
+                self.assertNotIn(str(self.REPORTED_OUTPUT["stdout"]["observed_at_ms"]), json.dumps(result))
+        for host, endpoint in [("finite-lat-4", "http://10.254.3.3:49155/contact"),
+                               ("finite-lat-3", "http://10.254.3.2:4200/contact"),
+                               ("finite-lat-3", "http://10.254.3.2:49155/contact?PRIVATE=1"),
+                               ("finite-lat-2", "http://10.254.3.1:49155/contact")]:
+            with self.subTest(endpoint=endpoint):
+                result, run = self.contact_with_output(body, endpoint, host)
+                run.assert_not_called()
+                self.assertEqual(result["container_output"], self.UNMATCHED_OUTPUT)
+
+    def test_assignment_contact_reads_images_without_output_observations_as_not_reported(self) -> None:
+        # Images before the observer (and agentd before its first sample)
+        # publish no container_output; the Principal result is unchanged.
+        for name, agentd in [("before agentd", None), ("agentd null", {"agentd": None}),
+                             ("before the observer", {"agentd": {"status": "running", "ok": True}}),
+                             ("no sample yet", {"agentd": {"status": "running", "container_output": None}}),
+                             ("agentd starting", {"agentd": {"status": "starting", "ok": True}})]:
+            with self.subTest(name):
+                result, _ = self.contact_with_output({"agent_npub": self.OUTPUT_PRINCIPAL, **(agentd or {})})
+                self.assertEqual((result["status"], result["matches_core_principal"]), ("observed", True))
+                self.assertEqual(result["container_output"], {"state": "not_reported"})
+
+    def test_assignment_contact_keeps_every_producer_state_and_timestamp(self) -> None:
+        # Raw observations pass through as published, with no consumer
+        # arithmetic or consistency rule: buffered and capacity are separate
+        # reads, and a packet-mode short read can discard bytes, so the
+        # decrease may exceed anything still buffered.
+        pipe = self.REPORTED_OUTPUT["stdout"]
+        stamp = {"observed_at_ms": pipe["observed_at_ms"]}
+        streams = [
+            ("buffered above capacity", {**pipe, "buffered_bytes": 131072}, {"kind": "same_pipe_as_stdout"}),
+            ("packet discard", {**pipe, "buffered_bytes": 0, "observed_decrease_bytes": 4}, {**pipe, "buffered_bytes": 7}),
+            ("stale sample", {"kind": "unknown", "reason": "observation_stale"}, {**pipe, "sample_count": 1}),
+            ("unsupported platform", {"kind": "unsupported_platform"}, {"kind": "unsupported_platform"}),
+            ("sampler not started", {"kind": "sampler_not_started"}, {"kind": "sampler_not_started"}),
+        ]
+        streams += [(f"not a pipe: {name}", {"kind": "not_pipe", **stamp, "file_type": name}, {**pipe})
+                    for name in ("block_device", "character_device", "directory", "other", "regular_file",
+                                 "socket", "symlink")]
+        streams += [(f"unavailable: {name}", {**pipe}, {"kind": "unavailable", **stamp, "error": name})
+                    for name in ("EBADF", "EINTR", "EINVAL", "EIO", "EMFILE", "ENFILE", "ENOMEM", "ENOTTY", "other")]
+        reports = [(name, {"state": "reported", "sample_interval_ms": 1000, "stdout": stdout, "stderr": stderr})
+                   for name, stdout, stderr in streams]
+        reports += [("agentd status stale", {"state": "unknown", "reason": "agentd_status_stale"}),
+                    ("agentd report malformed", {"state": "unknown", "reason": "malformed"}),
+                    ("explicitly not reported", {"state": "not_reported"})]
+        for name, report in reports:
+            padded = json.loads(json.dumps(report))
+            padded["extra"] = 1
+            for key in ("stdout", "stderr"):
+                if key in padded:
+                    padded[key]["extra"] = 1
+            with self.subTest(name):
+                result, _ = self.contact_with_output({"agent_npub": self.OUTPUT_PRINCIPAL,
+                                                      "agentd": {"container_output": padded}})
+                self.assertEqual(result["container_output"], report)
+
+    def test_assignment_contact_reads_malformed_output_as_unknown_without_echo(self) -> None:
+        # Every enum is checked as a string before vocabulary membership: a
+        # JSON array or object is unhashable, and neither it nor a missing key
+        # may escape as an exception.
+        def report(path: tuple, value) -> dict:
+            document = json.loads(json.dumps({"agent_npub": self.OUTPUT_PRINCIPAL,
+                                              "agentd": {"container_output": self.REPORTED_OUTPUT}}))
+            parent = document
+            for key in path[:-1]:
+                parent = parent[key]
+            if value is KeyError:
+                del parent[path[-1]]
+            else:
+                parent[path[-1]] = value
+            return document
+        output = ("agentd", "container_output")
+        shapes = [[], {}, ["PRIVATE"], {"PRIVATE": 1}, True, 1, 1.5, None, "PRIVATE", KeyError]
+        cases = [(output + ("state",), shape) for shape in shapes]
+        cases += [(output, value) for value in ([], ["PRIVATE"], "PRIVATE", 1, True)]
+        cases += [(("agentd",), value) for value in ([], "PRIVATE", 1, True)]
+        for stream in ("stdout", "stderr"):
+            cases += [(output + (stream,), shape) for shape in shapes]
+            cases += [(output + (stream, "kind"), shape) for shape in shapes]
+        cases += [(output + ("stdout",), {"kind": "same_pipe_as_stdout"})]
+        unknown = {"state": "unknown", "reason": "malformed"}
+        cases += [(output, {**unknown, "reason": shape}) for shape in shapes if shape is not KeyError]
+        cases += [(output, {key: value for key, value in unknown.items() if key != "reason"})]
+        stamp = {"observed_at_ms": 1}
+        for stream in ("stdout", "stderr"):
+            for shape in shapes:
+                for kind, field in [("not_pipe", "file_type"), ("unavailable", "error"), ("unknown", "reason")]:
+                    value = {"kind": kind, **stamp}
+                    if shape is not KeyError:
+                        value[field] = shape
+                    cases.append((output + (stream,), value))
+            for kind, key, valid in [("not_pipe", "file_type", "regular_file"), ("unavailable", "error", "EIO")]:
+                cases += [(output + (stream,), {"kind": kind, key: valid, "observed_at_ms": value})
+                          for value in (-1, 2**53, True, 1.0, "1", None, [1])]
+        numbers = [-1, 2**53, 10**30, True, False, 1.0, 0.5, "1", None, [1], {"value": 1}, KeyError]
+        cases += [(output + ("sample_interval_ms",), value) for value in numbers]
+        cases += [(output + ("stdout", field), value)
+                  for field in self.REPORTED_OUTPUT["stdout"] if field != "kind" for value in numbers]
+        for path, value in cases:
+            with self.subTest(path=path, value=value):
+                result, _ = self.contact_with_output(report(path, value))
+                self.assertEqual((result["status"], result["matches_core_principal"]), ("observed", True))
+                self.assertEqual(result["container_output"], self.UNRECOGNIZED_OUTPUT)
+                self.assertNotIn("PRIVATE", json.dumps(result))
+        # The largest accepted projection stays a small fixed size.
+        largest = {**self.REPORTED_OUTPUT, "sample_interval_ms": 2**53 - 1,
+                   "stdout": {field: 2**53 - 1 for field in self.REPORTED_OUTPUT["stdout"]} | {"kind": "pipe"}}
+        largest["stderr"] = {**largest["stdout"]}
+        result, _ = self.contact_with_output({"agent_npub": self.OUTPUT_PRINCIPAL, "padding": "x" * 60000,
+                                              "agentd": {"container_output": largest}})
+        self.assertEqual(result["container_output"], largest)
+        self.assertLess(len(json.dumps(result["container_output"])), 1024)
+
+    OUTPUT_ASSIGNMENT_ROW = {
+        "project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",
+        "agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
+        "source_machine_id": "machine-a", "expected_agent_npub": OUTPUT_PRINCIPAL,
+        "contact_endpoint": "http://10.254.3.4:49155/contact",
+        "runtime_artifact_id": "artifact-a", "image_reference": "image-a",
+        "state_schema_version": "runtime-state-v1", "retirement_snapshots": 0,
+        "creation_lineage": [{"id": "creation-a", "status": "running", "relocation": False,
+                              "agent_runtime_id": "runtime-a", "owner_user_id": "user-a"}],
+        "credentials": [{"agent_runtime_id": "runtime-a", "source_host_id": "finite-lat-4",
+                         "source_machine_id": "machine-a", "owner_user_id": "user-a",
+                         "activated": True, "revoked": False, "creation_request_id": "creation-a"}]}
+
+    def assignment_target_report(self, contact: str) -> tuple[int, str, int]:
+        """Run target mode on a synthetic Core row; return exit code, output and contact requests."""
+        requests = []
+
+        def read_only(command, **_):
+            if command[0] == "psql":
+                return subprocess.CompletedProcess(command, 0, json.dumps([self.OUTPUT_ASSIGNMENT_ROW]), "")
+            requests.append(command)
+            return subprocess.CompletedProcess(command, 0, contact, "")
+        output = io.StringIO()
+        with (
+            mock.patch.object(finite_status, "postgres_environment", return_value={}),
+            mock.patch.object(finite_status, "run_read_only", side_effect=read_only),
+            contextlib.redirect_stdout(output),
+            self.assertRaises(SystemExit) as exit_status,
+        ):
+            finite_status.main(["--runtime-assignment", "project-a"])
+        return exit_status.exception.code, output.getvalue(), len(requests)
+
+    def test_runtime_assignment_output_observations_never_change_its_verdict(self) -> None:
+        other = "npub1" + "p" * 58
+        for name, principal, agentd, expected in [
+            ("full pipe", self.OUTPUT_PRINCIPAL, {"container_output": self.REPORTED_OUTPUT}, self.REPORTED_OUTPUT),
+            ("unrecognized", self.OUTPUT_PRINCIPAL, {"container_output": {"state": []}}, self.UNRECOGNIZED_OUTPUT),
+            ("older image", self.OUTPUT_PRINCIPAL, {"status": "running"}, {"state": "not_reported"}),
+            ("another Agent", other, {"container_output": self.REPORTED_OUTPUT}, self.UNMATCHED_OUTPUT),
+        ]:
+            with self.subTest(name):
+                code, output, _ = self.assignment_target_report(json.dumps({"agent_npub": principal, "agentd": agentd}))
+                report = json.loads(output)
+                section = report["sections"]["runtime_assignment"]
+                self.assertEqual((code, report["exit_code"], report["overall_status"]), (0, 0, "green"))
+                self.assertEqual((section["status"], section["errors"], section["repair_authority"]),
+                                 ("green", [], False))
+                self.assertFalse(section["live_contact"]["repair_authority"])
+                self.assertEqual(section["live_contact"]["matches_core_principal"],
+                                 principal == self.OUTPUT_PRINCIPAL)
+                self.assertEqual(section["live_contact"]["container_output"], expected)
+
+    def test_runtime_assignment_reads_a_contact_nested_past_the_parser_limit_as_unknown(self) -> None:
+        # Valid JSON nested deeper than json.loads allows still fits the 64 KiB
+        # body bound. It must read as an unverified contact, not abort the report.
+        def contact(where: str, depth: int) -> str:
+            document = {"agent_npub": self.OUTPUT_PRINCIPAL, "ready": True,
+                        "agentd": {"status": "running", "container_output": {**self.REPORTED_OUTPUT}}}
+            parent = document if where == "contact" else document["agentd"]["container_output"]
+            parent["PRIVATE_extra"] = "NESTED"
+            return json.dumps(document).replace('"NESTED"', "[" * depth + '"PRIVATE"' + "]" * depth)
+        for where in ("contact", "container_output"):
+            with self.subTest(where):
+                # The same optional field at a shallow depth: a matched, reported Agent.
+                code, output, requests = self.assignment_target_report(contact(where, 8))
+                shallow = json.loads(output)
+                self.assertEqual((code, requests), (0, 1))
+                self.assertEqual(shallow["sections"]["runtime_assignment"]["live_contact"]["container_output"],
+                                 self.REPORTED_OUTPUT)
+                body = contact(where, 30000)
+                self.assertLessEqual(len(body), 65536)
+                with self.assertRaises(RecursionError):
+                    json.loads(body)
+                code, output, requests = self.assignment_target_report(body)
+                report = json.loads(output)
+                section = report["sections"]["runtime_assignment"]
+                self.assertEqual((code, report["exit_code"], report["overall_status"], requests), (0, 0, "green", 1))
+                self.assertEqual((section["status"], section["errors"], section["repair_authority"]),
+                                 ("green", [], False))
+                self.assertEqual(section["live_contact"], {
+                    "status": "unknown", "repair_authority": False,
+                    "agent_principal_sha256": None, "matches_core_principal": False,
+                    "container_output": self.UNMATCHED_OUTPUT,
+                })
+                self.assertNotIn("PRIVATE", output)
 
     def test_runtime_assignment_fails_closed_on_ambiguity_and_mismatched_credential(self) -> None:
         row = {"project_id": "project-a", "owner_user_id": "user-a", "owner_link_status": "linked",

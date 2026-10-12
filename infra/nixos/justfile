@@ -145,6 +145,13 @@ lat1-healthcheck-contract:
 runner-host-contract:
     cd ../.. && python3 scripts/check_runner_host_contract.py
 
+# Evaluated contract: the Kata Runner hosts' system packages and Runner PATH,
+# and the hosted lifecycle proof fixture, run nixpkgs-kata's nerdctl; the
+# FIN-162 qualification candidate and its patch are in none of their closures
+# or the hosts' system closures, and the candidate still runs the patch's tests.
+kata-nerdctl-selection-contract:
+    cd ../.. && python3 scripts/check_kata_nerdctl_selection.py
+
 # Scoped Rust package source sets hold each crate's manifest, build script and
 # src/ tree plus its declared compile inputs. Edits to docs and to files beside
 # src/ (tests/, scripts, examples) keep package store paths and running services

@@ -57,7 +57,7 @@ Environment:
   FINITE_PRIVATE_LOAD_CONCURRENCY        default: 32
   FINITE_PRIVATE_LOAD_MAX_TOKENS         default: 64
   FINITE_PRIVATE_LOAD_SWEEP_APPROVED     must equal 1,4,8,16,32,64,128,256 for N > 32 or load-sweep
-  FINITE_PRIVATE_CORE_HOST               default: root@64.34.82.77
+  FINITE_PRIVATE_CORE_HOST               default: root@64.34.80.19
   FINITE_PRIVATE_RELAUNCH_APPROVED     must equal the exact TAG for relaunch
 EOF
 }
@@ -556,7 +556,7 @@ settlement_status() {
     echo "could not compute the canary API key hash" >&2
     exit 1
   fi
-  local core_host="${FINITE_PRIVATE_CORE_HOST:-root@64.34.82.77}"
+  local core_host="${FINITE_PRIVATE_CORE_HOST:-root@64.34.80.19}"
   local result
   result="$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$core_host" \
     "sudo -u postgres psql --no-psqlrc -d finite_core -v ON_ERROR_STOP=1 -P pager=off -Atc \"SELECT r.model, r.status, COALESCE(r.settlement_kind, 'none'), COUNT(*) FROM finite_private_reservations r JOIN finite_private_api_keys k ON k.id = r.api_key_id WHERE k.key_hash = '$key_hash' AND r.created_at >= '$since'::timestamptz GROUP BY 1,2,3 ORDER BY 1,2,3; SELECT 'preexisting_reserved', COUNT(*) FILTER (WHERE r.status = 'reserved' AND r.created_at < '$since'::timestamptz), 'rollout_reserved', COUNT(*) FILTER (WHERE r.status = 'reserved' AND r.created_at >= '$since'::timestamptz) FROM finite_private_reservations r JOIN finite_private_api_keys k ON k.id = r.api_key_id WHERE k.key_hash = '$key_hash';\"")"
