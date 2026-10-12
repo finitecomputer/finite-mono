@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "kind": "OFFLINE_FIXTURE",
+  "run_nonce": "synthetic-fin174-run-0001",
+  "identity": {
+    "source_revision": "ea8c264d6d3d7a6597217da3365fd6f2da36e979",
+    "binary_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "topology": "single-process-fixture-v1",
+  "capabilities": {"synthetic-json-v1": true},
+  "outcome": "COMPLETE",
+  "success": true,
+  "complete": true,
+  "phase": "COMPLETE",
+  "cases": [
+    {
+      "id": "json-contract",
+      "complete": true,
+      "success": true,
+      "progress": ["FIXTURE_INPUT_READ", "FIXTURE_SCHEMA_VALIDATED"]
+    },
+    {
+      "id": "cleanup-contract",
+      "complete": true,
+      "success": true,
+      "progress": ["FIXTURE_CLEANUP_RESOLVED"]
+    }
+  ],
+  "cleanup": {"resolved": true, "pending": []}
+}
