@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -32,34 +33,19 @@ fn dashboard_create_agent_flow_persists_request_in_core() -> Result<(), Box<dyn 
     let run_id = smoke_run_id();
     let display_name = format!("Devfinity Rust Smoke Agent {run_id}");
     let idempotency_key = format!("devfinity-rust-smoke-{run_id}");
-    let issued: Value = ureq::post(&format!(
-        "{}/api/core/v1/admin/launch-code-batches",
-        env.core_url
-    ))
-    .set(
-        "authorization",
-        &format!("Bearer {}", env.operator_access_token),
-    )
-    .send_json(serde_json::json!({
-        "name": "Devfinity Rust smoke",
-        "codeCount": 1,
-        "expiresInHours": 24
-    }))?
-    .into_json()?;
-    let launch_code = issued
-        .get("codes")
-        .and_then(Value::as_array)
-        .and_then(|codes| codes.first())
-        .and_then(|code| code.get("code"))
-        .and_then(Value::as_str)
-        .ok_or("Core did not return one Launch Code")?;
+    let billing = Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../scripts/lib/devfinity-smoke-billing"
+        ))
+        .status()?;
+    assert!(billing.success(), "local fixture billing setup failed");
 
     let response = ureq::post(&format!("{}/agent-creation-requests", env.dashboard_url))
         .send_form(&[
             ("displayName", display_name.as_str()),
             ("hostingTier", "standard"),
-            ("access", "launch-code"),
-            ("launchCode", launch_code),
+            ("access", "entitled"),
             ("idempotencyKey", idempotency_key.as_str()),
         ])?;
     assert!(
@@ -136,7 +122,6 @@ struct DevfinityEnv {
     finitechat_url: String,
     hosted_web_device_url: String,
     finitesites_api_url: String,
-    operator_access_token: String,
     customer_access_token: String,
     profile: String,
 }
@@ -150,7 +135,6 @@ impl DevfinityEnv {
             finitechat_url: trim_trailing_slash(env::var("FINITECHAT_SERVER_URL")?),
             hosted_web_device_url: trim_trailing_slash(env::var("FC_HOSTED_WEB_DEVICE_URL")?),
             finitesites_api_url: trim_trailing_slash(env::var("FINITE_SITES_API")?),
-            operator_access_token: read_nonempty_token(fixture_dir.join("operator.jwt"))?,
             customer_access_token: read_nonempty_token(fixture_dir.join("dashboard-customer.jwt"))?,
             profile: env::var("DEVFINITY_PROFILE")?,
         })
