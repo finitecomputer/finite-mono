@@ -27,7 +27,7 @@ class OwnedCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             ready = Path(directory) / 'ready'
             processes: list[subprocess.Popen] = []
-            real_popen = subprocess.Popen
+            real_popen = lab._OwnedPopen
             stop = threading.Event()
             sent = threading.Event()
 
@@ -35,9 +35,6 @@ class OwnedCliTests(unittest.TestCase):
                 proc = real_popen(*args, **kwargs)
                 processes.append(proc)
                 return proc
-
-            def interrupt(_signum, _frame):
-                raise lab.Interrupted(_signum)
 
             def send_signal() -> None:
                 deadline = time.monotonic() + 4
@@ -47,14 +44,14 @@ class OwnedCliTests(unittest.TestCase):
                         os.kill(os.getpid(), signum)
                         return
 
-            previous = signal.signal(signum, interrupt)
+            previous = signal.signal(signum, lab.handle_interrupt)
             sender = threading.Thread(target=send_signal, daemon=True)
             sender.start()
             script = 'import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text("ready"); print("ready",flush=True); time.sleep(30)'
             args = ['-u', '-c', script, str(ready)]
             started = time.monotonic()
             try:
-                with mock.patch.object(lab.subprocess, 'Popen', side_effect=capture):
+                with mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
                     engine = lab.Engine(sys.executable)
                     with self.assertRaises(lab.Interrupted):
                         if method == 'run':
@@ -97,7 +94,7 @@ class OwnedCliTests(unittest.TestCase):
             for stage in ('event', 'reader', 'drain'):
                 with self.subTest(signal=signum, stage=stage):
                     processes = []
-                    popen = subprocess.Popen
+                    popen = lab._OwnedPopen
                     real_event, real_thread = threading.Event, threading.Thread
                     thread_count = 0
 
@@ -105,9 +102,6 @@ class OwnedCliTests(unittest.TestCase):
                         proc = popen(*args, **kwargs)
                         processes.append(proc)
                         return proc
-
-                    def interrupt(_signum, _frame):
-                        raise lab.Interrupted(_signum)
 
                     def event(*args, **kwargs):
                         if stage == 'event':
@@ -121,10 +115,10 @@ class OwnedCliTests(unittest.TestCase):
                             os.kill(os.getpid(), signum)
                         return real_thread(*args, **kwargs)
 
-                    previous = signal.signal(signum, interrupt)
+                    previous = signal.signal(signum, lab.handle_interrupt)
                     started = time.monotonic()
                     try:
-                        with mock.patch.object(lab.subprocess, 'Popen', side_effect=capture), \
+                        with mock.patch.object(lab, '_OwnedPopen', side_effect=capture), \
                                 mock.patch.object(lab.threading, 'Event', side_effect=event), \
                                 mock.patch.object(lab.threading, 'Thread', side_effect=thread):
                             with self.assertRaises(lab.Interrupted):
@@ -143,18 +137,145 @@ class OwnedCliTests(unittest.TestCase):
                             proc.stdout.close()
                             proc.stderr.close()
 
+    def test_constructor_interruption_reaps_the_spawned_cli(self) -> None:
+        for method in ('run', 'stream'):
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                with self.subTest(method=method, signal=signum):
+                    processes = []
+                    execute_child = subprocess.Popen._execute_child
+
+                    def interrupt_after_spawn(proc, *args, **kwargs):
+                        execute_child(proc, *args, **kwargs)
+                        processes.append(proc)
+                        os.kill(os.getpid(), signum)
+
+                    previous = signal.signal(signum, lab.handle_interrupt)
+                    started = time.monotonic()
+                    try:
+                        with mock.patch.object(subprocess.Popen, '_execute_child', new=interrupt_after_spawn):
+                            with self.assertRaises(lab.Interrupted):
+                                engine = lab.Engine(sys.executable)
+                                args = ['-c', 'import time; time.sleep(30)']
+                                if method == 'run':
+                                    engine.run(args, 5)
+                                else:
+                                    engine.stream(args, 5, lambda line: None)
+                        self.assertLess(time.monotonic() - started, 4)
+                        self.assertEqual(len(processes), 1)
+                        self.assertIsNotNone(processes[0].returncode, 'Constructor interruption must reap the spawned CLI')
+                        self.assertTrue(processes[0].stdout.closed)
+                        self.assertTrue(processes[0].stderr.closed)
+                    finally:
+                        signal.signal(signum, previous)
+                        for proc in processes:
+                            if proc.poll() is None:
+                                proc.kill()
+                            proc.wait(timeout=2)
+                            proc.stdout.close()
+                            proc.stderr.close()
+
+    def test_repeated_interruption_cannot_preempt_cli_cleanup(self) -> None:
+        for method in ('run', 'stream'):
+            with self.subTest(method=method):
+                processes = []
+                popen, cleanup = lab._OwnedPopen, lab._cleanup_cli
+                sent = []
+
+                def capture(*args, **kwargs):
+                    proc = popen(*args, **kwargs)
+                    processes.append(proc)
+                    target = 'communicate' if method == 'run' else 'wait'
+                    original = getattr(proc, target)
+
+                    def interrupt_wait(*a, **kw):
+                        if not sent:
+                            sent.append(signal.SIGTERM)
+                            os.kill(os.getpid(), signal.SIGTERM)
+                        return original(*a, **kw)
+
+                    setattr(proc, target, interrupt_wait)
+                    return proc
+
+                def interrupt_cleanup(*args, **kwargs):
+                    sent.append(signal.SIGINT)
+                    os.kill(os.getpid(), signal.SIGINT)
+                    return cleanup(*args, **kwargs)
+
+                previous = {s: signal.signal(s, lab.handle_interrupt) for s in (signal.SIGINT, signal.SIGTERM)}
+                started = time.monotonic()
+                try:
+                    with mock.patch.object(lab, '_OwnedPopen', side_effect=capture), \
+                            mock.patch.object(lab, '_cleanup_cli', side_effect=interrupt_cleanup):
+                        with self.assertRaises(lab.Interrupted):
+                            engine = lab.Engine(sys.executable)
+                            args = ['-c', 'import time; time.sleep(30)']
+                            if method == 'run':
+                                engine.run(args, 5)
+                            else:
+                                engine.stream(args, 5, lambda line: None)
+                    self.assertEqual(sent, [signal.SIGTERM, signal.SIGINT])
+                    self.assertLess(time.monotonic() - started, 4)
+                    self.assertIsNotNone(processes[0].returncode, 'Repeated interruption must not skip cleanup')
+                    self.assertTrue(processes[0].stdout.closed)
+                    self.assertTrue(processes[0].stderr.closed)
+                    self.assertEqual(lab._active_cli_interrupts, [])
+                    for s in previous:
+                        self.assertIs(signal.getsignal(s), lab.handle_interrupt)
+                finally:
+                    for s, handler in previous.items():
+                        signal.signal(s, handler)
+                    for proc in processes:
+                        if proc.poll() is None:
+                            proc.kill()
+                        proc.wait(timeout=2)
+                        proc.stdout.close()
+                        proc.stderr.close()
+
+    def test_constructor_exception_reaps_the_spawned_cli(self) -> None:
+        for method in ('run', 'stream'):
+            with self.subTest(method=method):
+                processes = []
+                execute_child = subprocess.Popen._execute_child
+
+                def fail_after_spawn(proc, *args, **kwargs):
+                    execute_child(proc, *args, **kwargs)
+                    processes.append(proc)
+                    raise ValueError('synthetic constructor failure after spawn')
+
+                try:
+                    with mock.patch.object(subprocess.Popen, '_execute_child', new=fail_after_spawn):
+                        with self.assertRaisesRegex(ValueError, 'synthetic constructor'):
+                            engine = lab.Engine(sys.executable)
+                            args = ['-c', 'import time; time.sleep(30)']
+                            if method == 'run':
+                                engine.run(args, 5)
+                            else:
+                                engine.stream(args, 5, lambda line: None)
+                    self.assertEqual(len(processes), 1)
+                    self.assertIsNotNone(processes[0].returncode, 'Failed construction must reap the spawned CLI')
+                    self.assertTrue(processes[0].stdout.closed)
+                    self.assertTrue(processes[0].stderr.closed)
+                    self.assertEqual(lab._active_cli_interrupts, [])
+                finally:
+                    for proc in processes:
+                        if proc.poll() is None:
+                            proc.kill()
+                        proc.wait(timeout=2)
+                        proc.stdout.close()
+                        proc.stderr.close()
+
     def test_timeout_reaps_real_cli_and_closes_pipes(self) -> None:
         for method in ('run', 'stream'):
             with self.subTest(method=method):
                 processes = []
-                popen = subprocess.Popen
+                popen = lab._OwnedPopen
 
                 def capture(*args, **kwargs):
                     proc = popen(*args, **kwargs)
                     processes.append(proc)
                     return proc
 
-                with mock.patch.object(lab.subprocess, 'Popen', side_effect=capture):
+                with mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
                     engine = lab.Engine(sys.executable)
                     args = ['-c', 'import time; time.sleep(30)']
                     result = engine.run(args, 0.05) if method == 'run' else engine.stream(args, 0.05, lambda line: None)
@@ -167,7 +288,7 @@ class OwnedCliTests(unittest.TestCase):
         for method in ('run', 'stream'):
             with self.subTest(method=method):
                 processes = []
-                popen = subprocess.Popen
+                popen = lab._OwnedPopen
 
                 def capture(*args, **kwargs):
                     proc = popen(*args, **kwargs)
@@ -187,7 +308,7 @@ class OwnedCliTests(unittest.TestCase):
                     return proc
 
                 try:
-                    with mock.patch.object(lab.subprocess, 'Popen', side_effect=capture):
+                    with mock.patch.object(lab, '_OwnedPopen', side_effect=capture):
                         engine = lab.Engine(sys.executable)
                         args = ['-c', 'import time; time.sleep(30)']
                         with self.assertRaisesRegex(ValueError, 'synthetic owned CLI'):

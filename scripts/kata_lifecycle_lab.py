@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -68,6 +69,63 @@ class Interrupted(BaseException):
 
 
 @dataclass
+class _CliInterrupts:
+    signum: int | None = None
+
+    def check(self) -> None:
+        if self.signum is not None:
+            raise Interrupted(self.signum)
+
+
+_active_cli_interrupts: list[_CliInterrupts] = []
+
+
+def handle_interrupt(signum: int, _frame: Any) -> None:
+    """Defer configured signals while an owned CLI is being cleaned up."""
+    if _active_cli_interrupts:
+        _active_cli_interrupts[-1].signum = signum
+    else:
+        raise Interrupted(signum)
+
+
+@contextmanager
+def _cli_interrupts():
+    """The canonical handler cannot preempt acquisition or final cleanup."""
+    interrupts = _CliInterrupts()
+    main = threading.current_thread() is threading.main_thread()
+    if main:
+        _active_cli_interrupts.append(interrupts)
+    try:
+        yield interrupts
+    finally:
+        if main:
+            _active_cli_interrupts.pop()
+        interrupts.check()
+
+
+def _poll_cli(operation: Callable[..., Any], deadline: float, interrupts: _CliInterrupts) -> Any:
+    while True:
+        interrupts.check()
+        try:
+            return operation(timeout=min(0.1, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            if time.monotonic() >= deadline:
+                raise
+
+
+class _OwnedPopen(subprocess.Popen):
+    """Retain the local child handle even when its constructor raises."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        try:
+            super().__init__(*args, **kwargs)
+        except BaseException:
+            if getattr(self, 'pid', None) is not None:
+                _cleanup_cli(self)
+            raise
+
+
+@dataclass
 class Result:
     code: int | None
     stdout: str
@@ -84,72 +142,74 @@ class Engine:
     def run(self, args: list[str], timeout: float) -> Result:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
-        proc = None
-        try:
-            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        with _cli_interrupts() as interrupts:
+            proc = None
             try:
-                stdout, stderr = proc.communicate(timeout=timeout)
-                result = Result(proc.returncode, stdout, stderr)
-            except subprocess.TimeoutExpired as expired:
-                proc.kill()
+                proc = _OwnedPopen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 try:
-                    stdout, stderr = proc.communicate(timeout=1)
-                except subprocess.TimeoutExpired:
-                    stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
-                result = Result(proc.poll(), stdout, stderr, True)
-        finally:
-            cleaned = proc is None or _cleanup_cli(proc)
-        if not cleaned:
-            result.timed_out = True
-            result.stderr += '\nlocal CLI cleanup unresolved'
-        return result
+                    stdout, stderr = _poll_cli(proc.communicate, time.monotonic() + timeout, interrupts)
+                    result = Result(proc.returncode, stdout, stderr)
+                except subprocess.TimeoutExpired as expired:
+                    proc.kill()
+                    try:
+                        stdout, stderr = proc.communicate(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        stdout, stderr = _text(expired.stdout), _text(expired.stderr) + '\nlocal CLI drain unresolved'
+                    result = Result(proc.poll(), stdout, stderr, True)
+            finally:
+                cleaned = proc is None or _cleanup_cli(proc)
+            if not cleaned:
+                result.timed_out = True
+                result.stderr += '\nlocal CLI cleanup unresolved'
+            return result
 
     def stream(self, args: list[str], timeout: float, on_line: Callable[[str], None]) -> Result:
         if timeout <= 0:
             raise Refused('expired CLI submission budget')
         deadline = time.monotonic() + timeout
-        proc = None
-        readers: list[threading.Thread] = []
-        errors: list[str] = []
-        try:
-            proc = subprocess.Popen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            reader_failed = threading.Event()
-
-            def read_lines() -> None:
-                try:
-                    for line in proc.stdout:
-                        on_line(line)
-                except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
-                    reader_failed.set()
-                    errors.append(f'local CLI reader failed ({type(error).__name__})')
-
-            reader = threading.Thread(target=read_lines, daemon=True)
-            readers.append(reader)
-            drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
-            readers.append(drain)
-            reader.start()
-            drain.start()
+        with _cli_interrupts() as interrupts:
+            proc = None
+            readers: list[threading.Thread] = []
+            errors: list[str] = []
             try:
-                code = proc.wait(timeout=timeout)
-                reader.join(max(0, deadline - time.monotonic()))
-                drain.join(max(0, deadline - time.monotonic()))
-                result = Result(code, '', '', reader.is_alive() or drain.is_alive() or reader_failed.is_set())
-            except subprocess.TimeoutExpired:
-                result = Result(None, '', '', True)
-        finally:
-            cleaned = proc is None or _cleanup_cli(proc, tuple(readers))
-        if not cleaned:
-            result.timed_out = True
-            errors.append('local CLI cleanup unresolved')
-        result.stderr = ''.join(errors)
-        return result
+                proc = _OwnedPopen([self.binary, *args], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                interrupts.check()
+                reader_failed = threading.Event()
+
+                def read_lines() -> None:
+                    try:
+                        for line in proc.stdout:
+                            on_line(line)
+                    except Exception as error:  # noqa: BLE001 - callback failure is not successful evidence
+                        reader_failed.set()
+                        errors.append(f'local CLI reader failed ({type(error).__name__})')
+
+                reader = threading.Thread(target=read_lines, daemon=True)
+                readers.append(reader)
+                drain = threading.Thread(target=lambda: errors.extend(proc.stderr), daemon=True)
+                readers.append(drain)
+                reader.start()
+                drain.start()
+                try:
+                    code = _poll_cli(proc.wait, deadline, interrupts)
+                    for thread in readers:
+                        while thread.is_alive() and time.monotonic() < deadline:
+                            interrupts.check()
+                            thread.join(min(0.1, max(0, deadline - time.monotonic())))
+                    result = Result(code, '', '', reader.is_alive() or drain.is_alive() or reader_failed.is_set())
+                except subprocess.TimeoutExpired:
+                    result = Result(None, '', '', True)
+            finally:
+                cleaned = proc is None or _cleanup_cli(proc, tuple(readers))
+            if not cleaned:
+                result.timed_out = True
+                errors.append('local CLI cleanup unresolved')
+            result.stderr = ''.join(errors)
+            return result
 
 
 def _cleanup_cli(proc: subprocess.Popen, readers: tuple[threading.Thread, ...] = ()) -> bool:
     """Reap only this local CLI and close pipes within one two-second budget."""
-    previous = {}
-    if threading.current_thread() is threading.main_thread():
-        previous = {s: signal.signal(s, signal.SIG_IGN) for s in (signal.SIGTERM, signal.SIGINT)}
     deadline = time.monotonic() + 2
     close_errors: list[OSError] = []
 
@@ -161,30 +221,26 @@ def _cleanup_cli(proc: subprocess.Popen, readers: tuple[threading.Thread, ...] =
                 except OSError as error:
                     close_errors.append(error)
 
+    if proc.poll() is None:
+        proc.kill()
     try:
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.wait(timeout=max(0, deadline - time.monotonic()))
-        except subprocess.TimeoutExpired:
-            pass
-        for reader in readers:
-            if reader.ident is not None:
-                reader.join(max(0, deadline - time.monotonic()))
-        # An inherited pipe can outlive the CLI. Closing a TextIO wrapper while
-        # a reader holds its lock can block; retain a bounded unresolved result.
-        if any(reader.is_alive() for reader in readers):
-            closer = threading.Thread(target=close_pipes, daemon=True)
-            closer.start()
-            closer.join(max(0, deadline - time.monotonic()))
-            closed = not closer.is_alive()
-        else:
-            close_pipes()
-            closed = True
-        return proc.returncode is not None and closed and not close_errors and not any(r.is_alive() for r in readers)
-    finally:
-        for s, handler in previous.items():
-            signal.signal(s, handler)
+        proc.wait(timeout=max(0, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        pass
+    for reader in readers:
+        if reader.ident is not None:
+            reader.join(max(0, deadline - time.monotonic()))
+    # An inherited pipe can outlive the CLI. Closing a TextIO wrapper while
+    # a reader holds its lock can block; retain a bounded unresolved result.
+    if any(reader.is_alive() for reader in readers):
+        closer = threading.Thread(target=close_pipes, daemon=True)
+        closer.start()
+        closer.join(max(0, deadline - time.monotonic()))
+        closed = not closer.is_alive()
+    else:
+        close_pipes()
+        closed = True
+    return proc.returncode is not None and closed and not close_errors and not any(r.is_alive() for r in readers)
 
 
 def _text(value: Any) -> str:
@@ -609,10 +665,7 @@ def main(argv: list[str], engine: Engine | None = None) -> int:
         return 2
     (out / 'arm.json').write_text(json.dumps(arm, indent=2, sort_keys=True) + '\n')
 
-    def interrupt(signum: int, _frame: Any) -> None:
-        raise Interrupted(signum)
-
-    previous = {s: signal.signal(s, interrupt) for s in (signal.SIGTERM, signal.SIGINT)}
+    previous = {s: signal.signal(s, handle_interrupt) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
         code = LabRun(arm, helper, out, engine or Engine()).execute()
     finally:
