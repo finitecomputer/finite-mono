@@ -59,8 +59,6 @@ pub(super) fn subscription(
         stripe_price_id: Some("price_standard".into()),
         expected_stripe_price_id: Some("price_standard".into()),
         subscription_status: status,
-        // These fixtures use the live clock, so active trials must not expire
-        // when the calendar passes a hard-coded date.
         current_period_end: Some(
             (time::OffsetDateTime::now_utc() + time::Duration::days(7))
                 .format(&time::format_description::well_known::Rfc3339)
