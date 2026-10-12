@@ -45,9 +45,31 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     });
     const aStreams: string[] = [];
     a.on("request", request => { if (request.url().includes("/updates")) aStreams.push(request.url()); });
+    // Invitations are out-of-band Brain UI, not part of any conversation.
+    // Keep both valid pending and expired responses available so reintroducing
+    // the old mount fails this test instead of hiding behind an empty fixture.
+    let invitationRequests = 0;
+    await context.route("**/api/brain/invitations", route => {
+      invitationRequests++;
+      return route.fulfill({ json: { invitations: [
+        { id: "pending", inviteCode: "pending-code", brainId: "test-brain", brainDisplayName: "Pending test Brain", expired: false },
+        { id: "expired", inviteCode: "expired-code", brainId: "old-brain", brainDisplayName: "Expired test Brain", expired: true },
+      ] } });
+    });
     await a.goto(`${base}/dashboard/machines/runtime_web_design/chat`);
     const history = a.getByText("I kept this conversation after the local dashboard restarted.", { exact: true });
     await history.waitFor();
+    await a.reload();
+    await history.waitFor();
+    for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844 }]) {
+      await a.setViewportSize(viewport);
+      assert.equal(await a.getByRole("region", { name: "Brain invitations" }).count(), 0);
+      assert.equal(await a.getByText("This invitation expired. Ask an admin of this Brain for a new one.", { exact: true }).count(), 0);
+      assert.equal(await a.getByRole("button", { name: "Join Brain", exact: true }).count(), 0);
+      assert.equal(invitationRequests, 0, "Chat must not request out-of-band invitations");
+    }
+    await a.setViewportSize({ width: 1440, height: 1000 });
+
     const cdp = await context.newCDPSession(a);
     await cdp.send("Page.setWebLifecycleState", { state: "frozen" });
     const b = await context.newPage();
@@ -197,6 +219,7 @@ test("chat history stays scoped to each tab across freeze, reconnect, and old-se
     await a.locator(".finite-chat__messages").getByText("History in the other tab", { exact: true }).waitFor();
     await a.getByRole("button", { name: "Design review", exact: true }).click();
     await a.locator(".finite-chat__messages").getByText("Later arrival 40", { exact: true }).waitFor();
+    assert.equal(invitationRequests, 0, "sends, navigation and reconnect must not fetch invitations");
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
