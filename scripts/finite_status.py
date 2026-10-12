@@ -1202,6 +1202,74 @@ def collect_host_capacity(proc: Path = Path("/proc")) -> dict[str, Any]:
     return result
 
 
+def collect_guest_memory_backing(
+    path: Path = Path("/dev/shm"), proc: Path = Path("/proc")
+) -> dict[str, Any]:
+    """Statfs of the filesystem at Kata's default guest-RAM path, and its mount.
+
+    Kata backs guest RAM with files under a configurable root, /dev/shm by
+    default. The path is assumed: neither Kata configuration nor a running VM
+    is read. That filesystem's block limit is separate from MemAvailable, and
+    Shmem can differ from statfs usage. Evidence only: thresholds are not
+    decided (FIN-176). It is not fault-time state or space reserved for a launch.
+    """
+    result: dict[str, Any] = {
+        "path": str(path), "path_basis": "assumed-kata-default", "observed_at": isoformat(utc_now()),
+    }
+    try:
+        # O_DIRECTORY refuses a non-directory before opening it, so a FIFO at
+        # the path cannot block. The descriptor ties the device to the statfs
+        # numbers and keeps that device number allocated while mounts are read.
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            device, stats = os.fstat(descriptor).st_dev, os.fstatvfs(descriptor)
+            mount = observe_mount(proc / "self" / "mountinfo", str(path), (os.major(device), os.minor(device)))
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        result["error"] = str(error)
+        return result
+    result.update(
+        total_bytes=stats.f_blocks * stats.f_frsize,
+        used_bytes=(stats.f_blocks - stats.f_bfree) * stats.f_frsize,
+        available_bytes=stats.f_bavail * stats.f_frsize,
+        **mount,
+    )
+    return result
+
+
+def observe_mount(mountinfo: Path, mountpoint: str, device: tuple[int, int]) -> dict[str, Any]:
+    """Find the one mount at `mountpoint`, in this mount namespace, whose device was measured.
+
+    Stacked mounts share a mount point; the device, not row order, says which
+    one statfs saw. Mount rows are observation, not writer-generation fencing.
+    """
+    rows = []
+    try:
+        with mountinfo.open("rb") as stream:
+            data = stream.read(4 * 1024 * 1024 + 1)
+        if len(data) > 4 * 1024 * 1024:
+            raise ValueError("mount metadata exceeds read bound")
+        for line in data.decode("utf-8", "surrogateescape").splitlines():
+            before, separator, after = line.partition(" - ")
+            fields, trailing = before.split(), after.split()
+            if not separator or len(fields) < 6 or not trailing or not re.fullmatch(r"[0-9]+:[0-9]+", fields[2]):
+                raise ValueError("mount metadata is malformed")
+            if re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4]) == mountpoint:
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", trailing[0]):
+                    raise ValueError("mount metadata is malformed")
+                major, minor = fields[2].split(":")
+                rows.append(((int(major), int(minor)), trailing[0]))
+    except (OSError, ValueError) as error:
+        return {"mount_state": "unavailable", "mount_error": str(error)}
+    if not rows:
+        return {"mount_state": "not-mounted"}
+    measured = [kind for identity, kind in rows if identity == device]
+    if len(measured) != 1:
+        return {"mount_state": "ambiguous"}
+    return {"mount_state": "mounted", "filesystem_type": measured[0]}
+
+
 def collect_hosted_hermes(now: datetime, root: Path | None = None) -> dict[str, Any]:
     """Diagnostic evidence only; never selects routes or mutates the host."""
     contract = CONTRACT["hosted_hermes"]
@@ -1315,6 +1383,8 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
         raw["probes"] = {}
 
     raw["capacity"] = collect_host_capacity()
+    if "runner" in raw["roles"]:
+        raw["capacity"]["guest_memory_backing"] = collect_guest_memory_backing()
     raw["filesystems"] = []
     for mount in profile["mounts"]:
         try:
@@ -3251,6 +3321,57 @@ def unit_status(properties: dict[str, Any], *, active_required: bool) -> str:
     return "unknown"
 
 
+def guest_memory_backing_evidence(record: Any) -> dict[str, Any]:
+    """Validate the optional backing record. It never scores host health.
+
+    Bytes are attributed to the guest-RAM path only when exactly one tmpfs
+    mount there is the measured device. Zero blocks on that mount mean no
+    block limit was reported; elsewhere they mean nothing. A present record
+    that does not fit is reported invalid, unlike an absent older record.
+    """
+    def invalid(error: str) -> dict[str, Any]:
+        return {"state": "invalid", "error": error}
+
+    if not isinstance(record, dict):
+        return invalid("not an object")
+    if not all(isinstance(record.get(key), str) for key in ("path", "path_basis", "observed_at")):
+        return invalid("no path, basis or observation time")
+    try:
+        observed_at = parse_time(record["observed_at"])
+    except OverflowError:
+        observed_at = None
+    if observed_at is None:
+        return invalid("unreadable observation time")
+    evidence = {key: record[key] for key in ("path", "path_basis", "observed_at")}
+    if "error" in record:
+        if not isinstance(record["error"], str):
+            return invalid("malformed error")
+        return {**evidence, "state": "unreadable", "error": record["error"]}
+    total, used, available = (record.get(key) for key in ("total_bytes", "used_bytes", "available_bytes"))
+    # used + available may be below total (reserved blocks), never above it.
+    if (not all(type(value) is int and 0 <= value < 2**64 for value in (total, used, available))
+            or used + available > total):
+        return invalid("missing, out-of-range or inconsistent byte counts")
+    mount_state, kind = record.get("mount_state"), record.get("filesystem_type")
+    if mount_state == "mounted" and kind == "tmpfs":
+        if total == 0:
+            return {**evidence, "state": "no-block-limit", "filesystem_type": kind}
+        return {**evidence, "state": "measured", "filesystem_type": kind,
+                "total_bytes": total, "used_bytes": used, "available_bytes": available}
+    if mount_state == "mounted" and isinstance(kind, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,32}", kind):
+        reason = f"filesystem type is {kind}, not tmpfs"
+    elif mount_state == "not-mounted":
+        reason = "path is not a mount point"
+    elif mount_state == "ambiguous":
+        reason = "no single mount at the path is the measured filesystem"
+    elif mount_state == "unavailable":
+        detail = record.get("mount_error")
+        reason = "mount metadata unavailable" + (f" ({detail})" if isinstance(detail, str) else "")
+    else:
+        return invalid("missing or malformed mount evidence")
+    return {**evidence, "state": "unverified", "reason": reason}
+
+
 def build_host_health(
     raw: dict[str, Any] | None, target_id: str | None
 ) -> dict[str, Any]:
@@ -3472,6 +3593,12 @@ def build_host_health(
             "unit": CONTRACT["hosted_hermes"]["unit"],
         })
         statuses.append(hosted_hermes["status"])
+    capacity = dict(raw.get("capacity", {}))
+    if "guest_memory_backing" in capacity:
+        backing = capacity.pop("guest_memory_backing")
+        # The path is Kata's default guest-RAM root, meaningful on Runner hosts only.
+        if "runner" in roles:
+            capacity["guest_memory_backing"] = guest_memory_backing_evidence(backing)
     return {
         "status": combine_status(statuses),
         "hostname": raw.get("hostname"),
@@ -3489,7 +3616,7 @@ def build_host_health(
         "filesystems": filesystems,
         "storage": storage,
         "capacity": {
-            **raw.get("capacity", {}),
+            **capacity,
             "runner_limits": {key: raw.get("runner_environment", {}).get(key) for key in
                               ("FC_RUNNER_MAX_SANDBOXES", "FC_RUNNER_KATA_CPUS", "FC_RUNNER_KATA_MEMORY")},
         },
@@ -4095,6 +4222,21 @@ def render_human(report: dict[str, Any]) -> str:
                 f"  filesystem {filesystem['mount']}: {used if used is not None else 'unknown'}% used "
                 f"{badge(filesystem['status'])}"
             )
+        backing = health.get("capacity", {}).get("guest_memory_backing")
+        if backing and "runner" in health.get("roles", []):
+            if backing["state"] == "invalid":
+                detail = f"invalid record: {backing['error']}"
+            elif backing["state"] == "measured":
+                percent = backing["used_bytes"] * 100.0 / backing["total_bytes"]
+                detail = f"tmpfs {percent:.1f}% used, {backing['available_bytes']} bytes available"
+            elif backing["state"] == "no-block-limit":
+                detail = "tmpfs reports no block limit"
+            elif backing["state"] == "unverified":
+                detail = f"capacity unknown, {backing['reason']}"
+            else:
+                detail = f"unreadable: {backing['error']}"
+            where = "" if backing["state"] == "invalid" else f" {backing['path']} ({backing['path_basis']})"
+            lines.append(f"  guest memory backing{where}: {detail} (evidence only, unscored)")
         storage = health["storage"]
         if storage.get("mode") == "single-disk":
             disks = storage.get("disks", [])
