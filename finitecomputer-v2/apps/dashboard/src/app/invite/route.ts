@@ -23,9 +23,3 @@ export async function GET(request: NextRequest) {
   });
   return response;
 }
-
-export async function POST(request: NextRequest) {
-  const response = NextResponse.redirect(new URL("/dashboard?new=1", workosBaseUrl() ?? request.url), 303);
-  response.cookies.set(LAUNCH_INVITATION_COOKIE, "", { path: "/dashboard", maxAge: 0 });
-  return response;
-}

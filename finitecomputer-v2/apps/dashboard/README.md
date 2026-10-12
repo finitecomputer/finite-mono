@@ -24,7 +24,9 @@ credentials for manual entry; they are never exposed to invited recipients.
 
 The public invite route places the encrypted token in an HttpOnly cookie before
 WorkOS signup/sign-in. Onboarding submits the token displayed with that form and
-checks the verified WorkOS email again server-side. Core remains the authority
+checks the verified WorkOS email again server-side. A mismatched account sees a
+generic message and can only sign out; the pending invitation also blocks other
+creation access paths until the correct verified account signs in. Core remains the authority
 for code expiry, revocation, one-time redemption, sponsored allowance, and exact
 idempotent retries. No subscription or trial is created by this path. The cookie
 survives launch failures and is cleared after chat binding succeeds; an opened

@@ -70,6 +70,14 @@ export async function POST(request: Request) {
     if (!account.workosUserId || !account.emailVerified) {
       throw new Error("Sign in again to create your agent.");
     }
+    // A pending invitation must be accepted by its verified recipient even if
+    // a client submits a different access path instead of the invitation form.
+    const pendingToken = (await cookies()).get(LAUNCH_INVITATION_COOKIE)?.value;
+    if (pendingToken) {
+      const pendingInvitation = await readLaunchInvitation(pendingToken, process.env, { allowExpiredRedemption: true });
+      if (!pendingInvitation) throw new Error("This invitation is invalid or expired. Ask your organization for a new link.");
+      requireInvitationAccount(pendingInvitation, account);
+    }
     const displayName = normalizeAgentDisplayName(formData.get("displayName"));
     const usesInvitation = formData.get("access") === "invitation";
     const invitationToken = String(formData.get("invitationToken") ?? "");

@@ -58,6 +58,6 @@ export async function readLaunchInvitation(
 
 export function requireInvitationAccount(invitation: LaunchInvitation, account: { email: string | null; emailVerified: boolean; workosUserId: string | null }) {
   if (!account.workosUserId || !account.emailVerified || account.email?.trim().toLowerCase() !== invitation.email) {
-    throw new Error(`Sign in with the verified email ${invitation.email} to use this invitation.`);
+    throw new Error("Make sure you are signing in with the correct email provided to you by your organization.");
   }
 }

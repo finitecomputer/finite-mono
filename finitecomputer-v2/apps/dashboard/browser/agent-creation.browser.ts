@@ -339,7 +339,18 @@ test("dashboard agent creation browser states", { timeout: 420_000 }, async () =
         assert(!page.url().includes(token), "authentication and onboarding URLs must not retain the token");
         assert.equal(core.state.creationPosts.length, 0, "visiting an invite must not redeem a seat");
         if (email !== "browser@finite.vip") {
-          await expectVisibleText(page, `Sign in with the verified email ${email} to use this invitation.`);
+          await expectVisibleText(page, "Make sure you are signing in with the correct email provided to you by your organization.");
+          assert(!(await page.locator("body").innerText()).includes(email), "mismatch must not disclose the invited email");
+          await page.getByRole("link", { name: "Sign Out", exact: true }).waitFor();
+          assert.equal(await page.getByText("Continue without this invitation").count(), 0);
+          assert.equal(await page.getByLabel("Agent name").count(), 0);
+          const dismiss = await page.request.post(`http://127.0.0.1:${paidDashboardPort}/invite`);
+          assert.equal(dismiss.status(), 405, "an invitation cannot be dismissed to bypass the email check");
+          const bypass = await page.request.post(`http://127.0.0.1:${paidDashboardPort}/dashboard/agent-creation-requests`, {
+            form: { access: "launch-code", launchCode: "fixture-personal-invite", displayName: "Bypass", hostingTier: "standard", idempotencyKey: "wrong-email-bypass" },
+          });
+          assert.equal(bypass.ok(), true);
+          assert.equal(core.state.creationPosts.length, 0, "switching access paths must not bypass a pending invitation");
           const result = await page.request.post(`http://127.0.0.1:${paidDashboardPort}/dashboard/agent-creation-requests`, {
             form: { access: "invitation", invitationToken: token, displayName: "Wrong Email", hostingTier: "standard", idempotencyKey: "wrong-email-test" },
           });

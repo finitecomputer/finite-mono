@@ -21,9 +21,9 @@ test("invitation conceals code and binds email, hosting tier, purpose and expiry
 test("only the invited verified WorkOS account can redeem", () => {
   const account = { email: "Person@Example.com", emailVerified: true, workosUserId: "user_synthetic" };
   assert.doesNotThrow(() => requireInvitationAccount(invite, account));
-  assert.throws(() => requireInvitationAccount(invite, { ...account, email: "other@example.com" }), /verified email/u);
-  assert.throws(() => requireInvitationAccount(invite, { ...account, emailVerified: false }), /verified email/u);
-  assert.throws(() => requireInvitationAccount(invite, { ...account, workosUserId: null }), /verified email/u);
+  assert.throws(() => requireInvitationAccount(invite, { ...account, email: "other@example.com" }), { message: "Make sure you are signing in with the correct email provided to you by your organization." });
+  assert.throws(() => requireInvitationAccount(invite, { ...account, emailVerified: false }), { message: "Make sure you are signing in with the correct email provided to you by your organization." });
+  assert.throws(() => requireInvitationAccount(invite, { ...account, workosUserId: null }), { message: "Make sure you are signing in with the correct email provided to you by your organization." });
 });
 
 test("recipient list is optional but otherwise has exactly one distinct email per seat", () => {
