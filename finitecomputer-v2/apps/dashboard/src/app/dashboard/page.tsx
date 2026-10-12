@@ -225,11 +225,22 @@ export default async function DashboardPage({
       );
     }
 
-    // Core may have durably accepted this exact creation request before chat
-    // bootstrap authorization failed. Keep the retry form visible; the POST
-    // route reuses the signed draft idempotency key instead of creating a
-    // second Project.
+    // A saved setup may already have consumed its creation allowance before
+    // chat authorization failed. Paid drafts can replay their exact request;
+    // older non-paid drafts resume read-only progress and existing chat recovery.
     const creationAuthorizationRetry = Boolean(agentCreationError && draft);
+    const savedCreationCandidates = draft
+      ? initialAgentCreationRequests.filter((request) =>
+          request.display_name === draft.displayName &&
+          (request.profile_picture_url ?? null) === draft.profilePictureUrl &&
+          ["requested", "launching", "running"].includes(request.status))
+      : [];
+    // Core summaries do not expose the signed draft's idempotency key. A
+    // unique display match can restore navigation only; it never authorizes
+    // creation or binding. Multiple matches require an explicit dashboard choice.
+    const savedCreationRequest = savedCreationCandidates.length === 1
+      ? savedCreationCandidates[0]
+      : null;
 
     if (
       draftStartedStripeCheckout(draft) &&
@@ -319,6 +330,12 @@ export default async function DashboardPage({
                 <PaidAgentCreationRetryPanel
                   error={agentCreationError ?? billing.error ?? "Payment status is unavailable. Retry your saved setup in a moment."}
                   name={draft.displayName}
+                />
+              ) : draft && agentCreationError && agentCreationRecovery !== "access" ? (
+                <SavedAgentCreationResumePanel
+                  error={agentCreationError}
+                  name={draft.displayName}
+                  request={savedCreationRequest ?? null}
                 />
               ) : <CoreAgentCreationPanel
                 error={agentCreationError}
@@ -1016,6 +1033,30 @@ function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: str
       <p role="alert" className="max-w-md text-sm text-destructive">{error}</p>
       <Button asChild size="xl">
         <a href="/dashboard/agent-creation-requests/complete">Retry agent setup</a>
+      </Button>
+    </section>
+  );
+}
+
+function SavedAgentCreationResumePanel({ error, name, request }: {
+  error: string;
+  name: string;
+  request: CoreAgentCreationRequestSummary | null;
+}) {
+  return (
+    <section className="grid w-full justify-items-center gap-6 text-center">
+      <AgentOnboardingStageSync stage="launch" />
+      <h1 className="text-balance text-3xl font-medium sm:text-5xl">Finish setting up {name}</h1>
+      <p className="max-w-md text-pretty text-muted-foreground">
+        {request
+          ? "Your agent request is saved. Open its progress to continue, then finish chat setup when it is ready."
+          : "Check your existing agents on the dashboard before starting another setup."}
+      </p>
+      <p role="alert" className="max-w-md text-sm text-destructive">{error}</p>
+      <Button asChild size="xl">
+        <Link href={request ? `/dashboard?creation=${encodeURIComponent(request.id)}` : "/dashboard"}>
+          {request ? "Resume agent setup" : "Open dashboard"}
+        </Link>
       </Button>
     </section>
   );
