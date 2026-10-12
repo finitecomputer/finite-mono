@@ -1954,6 +1954,34 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertNotIn("guest_memory_backing", app["capacity"])
         backing.assert_called_once_with()
 
+    def green_runner_report(self, capacity: dict[str, object]) -> dict[str, object]:
+        """A report whose Runner host health and every other section are green, so any scoring shows."""
+        runner = finite_status.CONTRACT["runner"]
+        host_health = {
+            "hostname": "finite-lat-3", "roles": ["runner"], "errors": [],
+            "units": {runner["timer"]: {"LoadState": "loaded", "ActiveState": "active"},
+                      finite_status.CONTRACT["hosts"]["finite-lat-3"]["storage_health_unit"]:
+                          {"LoadState": "loaded", "Result": "success", "ExecMainStatus": "0"}},
+            "hosted_hermes": {"status": "green", "state": "ok"},
+            "filesystems": [{"mount": "/", "total_bytes": 100, "available_bytes": 50, "used_percent": 50.0}],
+            "storage": {"mode": "raid"},
+            "containers": {"kata_running": 1, "kata_total": 1, "podman_running": 0, "podman_total": 0},
+            "runner_environment": {runner["drain_variable"]: "false", runner["artifact_variable"]: "artifact-1",
+                                   runner["base_url_variable"]: runner["expected_base_url"],
+                                   runner["model_variable"]: runner["expected_model"]},
+            "runner_shared_environment": {runner["model_variable"]: runner["expected_model"]},
+            "runner_environment_files_read": ["runner_shared_environment"],
+            "capacity": capacity,
+        }
+        green = {"status": "green"}
+        with (
+            mock.patch.object(finite_status, "build_fleet", return_value={**green, "target_artifact": {"id": "artifact-1"}}),
+            mock.patch.object(finite_status, "build_recovery", return_value=green),
+            mock.patch.object(finite_status, "build_rollout", return_value=green),
+            mock.patch.object(finite_status, "build_chat_plane", return_value=green),
+        ):
+            return finite_status.build_report({"host_health": host_health}, finite_status.parse_time("2026-10-11T23:00:00Z"))
+
     def test_guest_memory_backing_report_is_unscored_and_never_guesses(self) -> None:
         raw = finite_status.load_fixture(FIXTURE)
         now = finite_status.parse_time(raw["now"])
@@ -1973,6 +2001,9 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                                "no-block-limit", where + "tmpfs reports no block limit"),
             "zero unverified": ({**identity, "mount_state": "not-mounted", "total_bytes": 0, "used_bytes": 0,
                                  "available_bytes": 0}, "unverified", where + "capacity unknown, path is not a mount point"),
+            "zero on another filesystem": ({**identity, "mount_state": "mounted", "filesystem_type": "ramfs",
+                                            "total_bytes": 0, "used_bytes": 0, "available_bytes": 0},
+                                           "unverified", where + "capacity unknown, filesystem type is ramfs, not tmpfs"),
             "ordinary path": ({**identity, **sizes, "mount_state": "not-mounted"},
                               "unverified", where + "capacity unknown, path is not a mount point"),
             "wrong filesystem": ({**identity, **sizes, "mount_state": "mounted", "filesystem_type": "ext4"},
@@ -2002,6 +2033,25 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         cases["no mount state"] = ({**identity, **sizes}, "invalid", invalid + "missing or malformed mount evidence")
         cases["no mounted type"] = ({**identity, **sizes, "mount_state": "mounted"}, "invalid",
                                     invalid + "missing or malformed mount evidence")
+        cases["tmpfs type without mount state"] = ({**identity, **sizes, "filesystem_type": "tmpfs"}, "invalid",
+                                                   invalid + "missing or malformed mount evidence")
+        # Lone surrogates parse from JSON but cannot be printed as UTF-8; valid Unicode stays.
+        for branch in ("reserved blocks", "unreadable", "mount metadata unreadable"):
+            record = cases[branch][0]
+            for key in ("path", "path_basis", "error", "mount_error"):
+                for surrogate in ("\ud800", "\udfff") if key in record else ():
+                    cases[f"{branch} {key} {surrogate!a}"] = (
+                        {**record, key: record[key] + surrogate}, "invalid", invalid + f"{key} is not well-formed Unicode")
+        cases["unicode measured"] = ({**tmpfs, **sizes, "path": "/dev/shm/gäst", "path_basis": "assumed-kata-défaut"},
+                                     "measured", "guest memory backing /dev/shm/gäst (assumed-kata-défaut): "
+                                                 "tmpfs 96.0% used, 122880 bytes available")
+        cases["unicode unreadable"] = ({**identity, "error": "introuvable: é"}, "unreadable",
+                                       where + "unreadable: introuvable: é")
+        cases["unicode unverified"] = ({**identity, **sizes, "mount_state": "unavailable", "mount_error": "verweigert ü"},
+                                       "unverified", where + "capacity unknown, mount metadata unavailable (verweigert ü)")
+        green = self.green_runner_report({})
+        self.assertEqual((green["sections"]["host_health"]["status"], green["overall_status"], green["exit_code"]),
+                         ("green", "green", 0))
         for name, (record, state, line) in cases.items():
             with self.subTest(name):
                 raw["host_health"]["capacity"] = {"guest_memory_backing": record}
@@ -2014,8 +2064,71 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 for key in ("overall_status", "exit_code"):
                     self.assertEqual(report[key], before[key])
                 self.assertEqual(report["sections"]["host_health"]["status"], before["sections"]["host_health"]["status"])
-                self.assertIn(f"\n  {line} (evidence only, unscored)\n", finite_status.render_human(report))
-                json.dumps(report)
+                # The fixture host is already unknown and the report red, so scoring shows only on a green Runner.
+                green = self.green_runner_report({"guest_memory_backing": record})
+                self.assertEqual(green["sections"]["host_health"]["capacity"]["guest_memory_backing"]["state"], state)
+                self.assertEqual((green["sections"]["host_health"]["status"], green["overall_status"], green["exit_code"]),
+                                 ("green", "green", 0))
+                human = finite_status.render_human(report)
+                self.assertIn(f"\n  {line} (evidence only, unscored)\n", human)
+                # print() encodes; a lone surrogate would raise here.
+                human.encode("utf-8")
+                json.dumps(report, ensure_ascii=False).encode("utf-8")
+
+    def test_guest_memory_backing_text_never_suppresses_the_report(self) -> None:
+        # Before validation a lone surrogate reached print() and lost every byte
+        # of the human report. That crash also exits 1, like this fixture's real
+        # red status, so the streams are the oracle, not the exit code.
+        def run(record, *options):
+            def add(raw):
+                if record is not None:
+                    raw["host_health"].setdefault("capacity", {})["guest_memory_backing"] = record
+            fixture = self.write_fixture_variant(add)
+            return subprocess.run(
+                [str(COMMAND), *options, "--fixture", str(fixture)], cwd=ROOT, check=False, capture_output=True,
+                # Strict, as under a UTF-8 locale.
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+
+        human, machine = run(None), run(None, "--json")
+        self.assertEqual((human.returncode, human.stderr, machine.returncode, machine.stderr), (1, b"", 1, b""))
+        before_lines, before = human.stdout.decode("utf-8").splitlines(), json.loads(machine.stdout)
+        identity = {"path": "/dev/shm", "path_basis": "assumed-kata-default", "observed_at": "2026-10-11T22:55:33Z"}
+        sizes = {"total_bytes": 4096000, "used_bytes": 3932160, "available_bytes": 122880}
+        branches = {
+            "measured": {**identity, "mount_state": "mounted", "filesystem_type": "tmpfs", **sizes},
+            "unreadable": {**identity, "error": "[Errno 2] gone"},
+            "unverified": {**identity, "mount_state": "unavailable", "mount_error": "denied", **sizes},
+        }
+        cases = [
+            ({**record, key: record[key] + "\ud800"}, {"state": "invalid", "error": f"{key} is not well-formed Unicode"},
+             f"guest memory backing: invalid record: {key} is not well-formed Unicode")
+            for record in branches.values() for key in ("path", "path_basis", "error", "mount_error") if key in record
+        ]
+        unicode = {**identity, "path": "/dev/shm/gäst", "path_basis": "assumed-kata-défaut"}
+        cases += [
+            ({**branches["measured"], **unicode}, {**unicode, "state": "measured", "filesystem_type": "tmpfs", **sizes},
+             "guest memory backing /dev/shm/gäst (assumed-kata-défaut): tmpfs 96.0% used, 122880 bytes available"),
+            ({**branches["unreadable"], "error": "introuvable: é"},
+             {**identity, "state": "unreadable", "error": "introuvable: é"},
+             "guest memory backing /dev/shm (assumed-kata-default): unreadable: introuvable: é"),
+            ({**branches["unverified"], "mount_error": "verweigert ü"},
+             {**identity, "state": "unverified", "reason": "mount metadata unavailable (verweigert ü)"},
+             "guest memory backing /dev/shm (assumed-kata-default): capacity unknown, "
+             "mount metadata unavailable (verweigert ü)"),
+        ]
+        self.assertEqual(len(cases), 11)
+        for record, evidence, line in cases:
+            with self.subTest(ascii(record)):
+                human, machine = run(record), run(record, "--json")
+                self.assertEqual((human.returncode, human.stderr, machine.returncode, machine.stderr), (1, b"", 1, b""))
+                # The whole existing report, plus exactly one well-formed line.
+                lines = human.stdout.decode("utf-8").splitlines()
+                self.assertIn(f"  {line} (evidence only, unscored)", lines)
+                lines.remove(f"  {line} (evidence only, unscored)")
+                self.assertEqual(lines, before_lines)
+                payload = json.loads(machine.stdout.decode("utf-8"))
+                self.assertEqual(payload["sections"]["host_health"]["capacity"].pop("guest_memory_backing"), evidence)
+                self.assertEqual(payload, before)
 
     def test_guest_memory_backing_is_runner_only(self) -> None:
         raw = finite_status.load_fixture(FIXTURE)
@@ -2043,6 +2156,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 finite_status, "collect_healthcheck_journal", return_value={}
             ),
             mock.patch.object(finite_status, "collect_host_capacity", return_value={}),
+            mock.patch.object(finite_status, "collect_guest_memory_backing", return_value={}),
             mock.patch.object(finite_status.os, "statvfs", return_value=stats),
             mock.patch.object(finite_status.Path, "exists", return_value=True),
             mock.patch.object(
