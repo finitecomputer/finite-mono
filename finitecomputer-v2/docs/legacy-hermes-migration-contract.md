@@ -162,8 +162,9 @@ paths must be checked before using imported content in the target environment.
 7. Keep box1 frozen through the observation window. Decommissioning requires a
    later approval.
 
-The importer builds new v0.20 session and structured-memory databases beside
-the active files, rebuilds memory vectors through v0.20, checkpoints both
+The importer builds new session and structured-memory databases beside
+the active files using the selected supported target Hermes version,
+rebuilds memory vectors through that environment, checkpoints both
 WALs, runs SQLite `quick_check`, and swaps only after every source session and
 memory fact imports.
 The target's pre-import database, complete source snapshot, and receipt remain
@@ -180,20 +181,23 @@ depend on an operator's memory of the bundle.
 - the v2 Runtime remains stopped while the importer owns `/data`;
 - Core and the Runner remain authoritative for stop, restart, artifact,
   placement, and target identity;
-- Hermes v0.20 reads the rebuilt session database after restart;
+- the selected target Hermes version reads the rebuilt session database after restart;
 - Finite Chat reads its unchanged target identity and client store.
 
 No Core schema, Runner lifecycle change, or Runtime image publication is
 required. Operators hash the reviewed tool archive, mount the extracted modules
 read-only into the existing digest-pinned target image, and run them with that
-image's Hermes v0.20 Python environment. Source export also verifies that its
+image's Hermes Python environment. Source export also verifies that its
 executing Hermes environment is v0.14 before reading state; target installation
-verifies v0.20 before any target mutation.
+verifies v0.20.0 or v0.21.0 before any target mutation. A supported version does
+not qualify an image: the exact intended target image still requires the
+real-library compatibility test and its durable smoke.
 
 ## Compatibility and removal
 
 The first supported pair is source Hermes v0.14.0 to target Hermes v0.20.0.
-Tests exercise the legacy export shape against the pinned target Hermes
+The tested target versions now include v0.20.0 and v0.21.0. Tests exercise the
+legacy export shape against the pinned target Hermes
 importer and prove that gateway ownership is not retained. A different source
 or target version requires a new tested pair; editing the manifest version in
 place is forbidden.

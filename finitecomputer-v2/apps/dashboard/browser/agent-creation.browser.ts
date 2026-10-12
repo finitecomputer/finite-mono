@@ -432,6 +432,46 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         .waitFor({ state: "visible" });
     });
 
+    // Compatibility with a code-funded draft sealed by the previous release:
+    // the customer signup must resume the accepted request without checkout.
+    const legacyRequest = agentCreationRequest({
+      id: "agent_request_legacy", projectId: "project_legacy",
+      displayName: "Legacy Code Bot", status: "requested",
+      createdAt: new Date().toISOString(),
+    });
+    core.reset({ canCreateAgent: false, requiresBilling: false, requests: [legacyRequest] });
+    await withSignedInPage(browser, paidDashboardPort, async (page) => {
+      const sealed = await sealAgentOnboardingDraft({
+        version: 1, workosUserId: "user_browser", displayName: "Legacy Code Bot",
+        profilePictureUrl: null, hostingTier: "confidential",
+        idempotencyKey: "previous-release-code-funded-draft", issuedAtMs: Date.now() - 10_000,
+        stripeCheckoutStartedAtMs: null,
+      }, { WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum" });
+      await page.context().addCookies([{
+        name: "finite-agent-draft", value: sealed, domain: "127.0.0.1",
+        path: "/dashboard", httpOnly: true, sameSite: "Lax",
+      }]);
+      const errorUrl = `http://127.0.0.1:${paidDashboardPort}/dashboard?new=1&agentCreationError=binding%20authorization%20is%20temporarily%20unavailable`;
+      const authorizations = hostedDevice.state.bindingAuthorizations.length;
+      await page.goto(errorUrl);
+      const resume = page.getByRole("link", { name: "Resume agent setup", exact: true });
+      await resume.waitFor();
+      assert.equal(await resume.getAttribute("href"), "/dashboard?creation=agent_request_legacy");
+      assert.equal(await page.locator('form[action="/dashboard/agent-creation-requests"]').count(), 0);
+      await resume.click();
+      await expectVisibleText(page, "Creating your agent");
+      assert.equal(core.state.creationPosts.length, 0);
+      assert.equal(hostedDevice.state.bindingAuthorizations.length, authorizations);
+
+      core.state.requests.push({ ...legacyRequest, id: "agent_request_ambiguous", project_id: "project_ambiguous" });
+      await page.goto(errorUrl);
+      await page.getByRole("link", { name: "Open dashboard", exact: true }).waitFor();
+      assert.equal(await page.getByRole("link", { name: "Resume agent setup", exact: true }).count(), 0);
+      assert.equal(await page.locator('form[action="/dashboard/agent-creation-requests"]').count(), 0);
+      assert.equal(core.state.creationPosts.length, 0, "ambiguous saved setup must not create another agent");
+      assert.equal(hostedDevice.state.bindingAuthorizations.length, authorizations);
+    });
+
     // This differently configured Next dev server is not used again. Keeping
     // both compilers alive makes later on-demand route compilation contend in CI.
     await stopChildProcess(paidDashboard);
@@ -647,33 +687,19 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         ),
         "binding authorization failure did not preserve the signed draft cookie"
       );
-      const retryCode = page.getByRole("button", { name: "Continue", exact: true });
-      await retryCode.waitFor({ state: "visible" }).catch(async (error) => {
-        throw new Error(
-          `binding authorization retry form did not render: ${String(error)}\n${await pageText(page)}`
-        );
-      });
+      core.state.canCreateAgent = false; // Core accepted the last allowance.
+      await page.reload();
+      const resume = page.getByRole("link", { name: "Resume agent setup", exact: true });
+      await resume.waitFor({ state: "visible" });
       await expectVisibleText(page, "binding authorization is temporarily unavailable");
-      await prepareAgentLaunch(page, "Authorization Retry Bot");
-      await page.getByRole("button", { name: "Continue", exact: true }).click();
-      await page.waitForURL(/\/dashboard\?new=1&creation=agent_request_1$/u);
-
-      assert.equal(core.state.creationPosts.length, 2);
-      assert.equal(
-        (core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey,
-        (core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey,
-        "authorization retry did not reuse the successful Core creation request"
-      );
-      assert.deepEqual(hostedDevice.state.bindingAuthorizations.slice(-2), [
-        {
-          project_id: "project_1",
-          creation_request_id: "agent_request_1",
-        },
-        {
-          project_id: "project_1",
-          creation_request_id: "agent_request_1",
-        },
-      ]);
+      assert.equal(await page.getByRole("button", { name: "Continue", exact: true }).count(), 0);
+      const authorizations = hostedDevice.state.bindingAuthorizations.length;
+      await resume.click();
+      await page.waitForURL(/\/dashboard\?creation=agent_request_1$/u);
+      await expectVisibleText(page, "Creating your agent");
+      assert.equal(core.state.creationPosts.length, 1, "resuming progress must not submit creation again");
+      assert.equal(hostedDevice.state.bindingAuthorizations.length, authorizations,
+        "read-only progress must not authorize a binding");
     });
 
     core.reset({
