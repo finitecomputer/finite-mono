@@ -122,6 +122,11 @@ fn direct_authorization_tags(
     if let Some(digest) = payload {
         tags.push(vec!["payload".to_owned(), digest.to_owned()]);
     }
+    // Identical requests in the same second must still be distinct events:
+    // the bridge rejects a reused event id.
+    let mut nonce = [0u8; 16];
+    getrandom::fill(&mut nonce).map_err(|_| invalid("randomness is unavailable"))?;
+    tags.push(vec!["nonce".to_owned(), hex::encode(nonce)]);
     tags.into_iter()
         .map(|tag| Tag::parse(tag).map_err(|_| invalid("request tag is invalid")))
         .collect()

@@ -82,9 +82,18 @@ async fn direct_authorization_signs_bridge_requests_with_the_existing_chat_accou
     let path = "/v1/app/state?room_id=room-1&limit=50";
     let event = signed_event(device.clone(), "user_paul", get_request(path), &account_id).await;
     let url = format!("finitechat-direct://{AGENT_ID}{path}");
+    let value = serde_json::to_value(&event.tags).unwrap();
+    let tags = value.as_array().unwrap();
     assert_eq!(
-        serde_json::to_value(&event.tags).unwrap(),
-        json!([["u", url], ["method", "GET"]])
+        tags[..2],
+        json!([["u", url], ["method", "GET"]]).as_array().unwrap()[..]
+    );
+    assert_eq!(tags.len(), 3);
+    assert_nonce_tag(&tags[2]);
+    let repeat = signed_event(device.clone(), "user_paul", get_request(path), &account_id).await;
+    assert_ne!(
+        repeat.id, event.id,
+        "identical requests sign distinct events"
     );
     // The shared NIP-98 verifier accepts the assertion exactly as signed.
     let now = test_now_unix_seconds();
@@ -111,14 +120,19 @@ async fn direct_authorization_signs_bridge_requests_with_the_existing_chat_accou
     )
     .await;
     let post_url = format!("finitechat-direct://{AGENT_ID}{post_path}");
+    let value = serde_json::to_value(&event.tags).unwrap();
+    let tags = value.as_array().unwrap();
     assert_eq!(
-        serde_json::to_value(&event.tags).unwrap(),
+        tags[..3],
         json!([
             ["u", post_url],
             ["method", "POST"],
             ["payload", body_sha256]
         ])
+        .as_array()
+        .unwrap()[..]
     );
+    assert_nonce_tag(&tags[3]);
     validate_http_auth_event(
         &event,
         &HttpAuthValidation::new("POST", post_url, now, 120)
@@ -305,4 +319,12 @@ async fn direct_authorization_never_mints_a_chat_identity() {
     let response = authorize(test_app(&root), "user_paul", get_request("/v1/app/state")).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+}
+
+fn assert_nonce_tag(tag: &serde_json::Value) {
+    let tag = tag.as_array().expect("nonce tag is an array");
+    assert_eq!(tag[0], "nonce");
+    let value = tag[1].as_str().unwrap();
+    assert_eq!(value.len(), 32);
+    assert!(value.bytes().all(|byte| byte.is_ascii_hexdigit()));
 }

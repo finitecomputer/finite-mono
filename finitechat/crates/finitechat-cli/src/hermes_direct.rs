@@ -738,7 +738,7 @@ impl DirectRuntime {
             .lock()
             .map_err(|_| AppApiError::Internal("authorization cache poisoned".to_owned()))?;
         seen.retain(|_, at| now.saturating_sub(*at) <= AUTHORIZATION_REPLAY_SECS);
-        if seen.insert(event.id.to_hex(), now).is_some() {
+        if seen.insert(event.sig.to_string(), now).is_some() {
             return Err(AppApiError::Unauthorized(
                 "chat authorization was already used",
             ));

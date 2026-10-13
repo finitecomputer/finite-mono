@@ -1,0 +1,635 @@
+//! Direct transport end to end: an agent with real MLS history folds it into
+//! a direct room log, then serves the person's signed web requests, Hermes
+//! and agentd over the sidecar's loopback API. Its own test binary, because
+//! the transport is selected by process environment.
+
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use base64::Engine as _;
+use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions};
+use finitechat_mls::NOSTR_SECRET_KEY_BYTES;
+use finitechat_server::{HttpServerState, http_router};
+use nostr::event::FinalizeEvent;
+use nostr::{EventBuilder, Keys, Kind, SecretKey, Tag};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+
+const USER_SECRET: [u8; NOSTR_SECRET_KEY_BYTES] = [41; NOSTR_SECRET_KEY_BYTES];
+const STRANGER_SECRET: [u8; NOSTR_SECRET_KEY_BYTES] = [42; NOSTR_SECRET_KEY_BYTES];
+const AGENT_ID: &str = "agent_project_direct_flow";
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn spawn_chat_server(path: &std::path::Path) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = http_router(HttpServerState::from_sqlite_path(path).unwrap());
+    std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
+    });
+    let url = format!("http://{addr}");
+    for _ in 0..100 {
+        if reqwest::blocking::get(format!("{url}/health")).is_ok_and(|r| r.status().is_success()) {
+            return url;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("chat server did not start");
+}
+
+fn cli_json(args: &[&str]) -> Value {
+    let mut output = Vec::new();
+    finitechat_cli::run(args.iter().map(|arg| arg.to_string()), &mut output)
+        .unwrap_or_else(|error| panic!("finitechat {args:?} failed: {error}"));
+    serde_json::from_slice(&output).unwrap()
+}
+
+/// Run `hermes serve` on an ephemeral port in this process; returns its URL.
+fn spawn_sidecar(agent_home: &str, ready: PathBuf) -> String {
+    let home = agent_home.to_owned();
+    let ready_arg = ready.display().to_string();
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        let _ = finitechat_cli::run(
+            [
+                "hermes",
+                "--agent-home",
+                &home,
+                "serve",
+                "--addr",
+                "127.0.0.1:0",
+                "--ready-file",
+                &ready_arg,
+                "--json",
+            ]
+            .iter()
+            .map(|arg| arg.to_string()),
+            &mut sink,
+        );
+    });
+    for _ in 0..600 {
+        if let Ok(bytes) = std::fs::read(&ready)
+            && let Ok(started) = serde_json::from_slice::<Value>(&bytes)
+        {
+            return started["url"].as_str().unwrap().to_owned();
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    panic!("sidecar did not become ready");
+}
+
+struct Person {
+    keys: Keys,
+}
+
+impl Person {
+    fn new(secret: [u8; NOSTR_SECRET_KEY_BYTES]) -> Self {
+        Self {
+            keys: Keys::new(SecretKey::from_slice(&secret).unwrap()),
+        }
+    }
+
+    fn account(&self) -> String {
+        self.keys.public_key().to_hex()
+    }
+
+    fn sign(&self, method: &str, path_and_query: &str, body: Option<&[u8]>) -> String {
+        let mut tags = vec![
+            Tag::parse([
+                "u",
+                &format!("finitechat-direct://{AGENT_ID}{path_and_query}"),
+            ])
+            .unwrap(),
+            Tag::parse(["method", method]).unwrap(),
+        ];
+        if let Some(body) = body {
+            tags.push(Tag::parse(["payload", &hex_lower(&Sha256::digest(body))]).unwrap());
+        }
+        let mut nonce = [0u8; 16];
+        getrandom::fill(&mut nonce).unwrap();
+        tags.push(Tag::parse(["nonce", &hex_lower(&nonce)]).unwrap());
+        let event = EventBuilder::new(Kind::Custom(27_235), "")
+            .tags(tags)
+            .finalize(&self.keys)
+            .unwrap();
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(&event).unwrap())
+    }
+}
+
+struct Bridge {
+    url: String,
+    http: reqwest::blocking::Client,
+}
+
+impl Bridge {
+    fn get(&self, person: &Person, path: &str) -> reqwest::blocking::Response {
+        self.http
+            .get(format!("{}{path}", self.url))
+            .header(
+                "x-finite-chat-authorization",
+                person.sign("GET", path, None),
+            )
+            .send()
+            .unwrap()
+    }
+
+    fn post(&self, person: &Person, path: &str, body: &Value) -> reqwest::blocking::Response {
+        let bytes = serde_json::to_vec(body).unwrap();
+        self.http
+            .post(format!("{}{path}", self.url))
+            .header("content-type", "application/json")
+            .header(
+                "x-finite-chat-authorization",
+                person.sign("POST", path, Some(&bytes)),
+            )
+            .body(bytes)
+            .send()
+            .unwrap()
+    }
+
+    fn json(&self, response: reqwest::blocking::Response) -> Value {
+        let status = response.status();
+        let url = response.url().clone();
+        let text = response.text().unwrap();
+        let body: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|_| panic!("{url} {status}: non-JSON body {text:?}"));
+        assert!(status.is_success(), "{url} {status}: {body}");
+        body
+    }
+
+    fn loopback(&self, path: &str, body: &Value) -> Value {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.url))
+            .json(body)
+            .send()
+            .unwrap();
+        self.json(response)
+    }
+}
+
+fn chat_messages(state: &Value) -> Vec<String> {
+    state["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|message| message["text"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[test]
+fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
+    let dir = tempfile::tempdir().unwrap();
+    let finite_home = dir.path().join("finite-home");
+    // SAFETY: this test binary has one test; nothing else reads the env.
+    unsafe {
+        std::env::set_var("FINITE_HOME", &finite_home);
+        std::env::set_var("FINITE_AGENT_ID", AGENT_ID);
+    }
+    let server_url = spawn_chat_server(&dir.path().join("server.sqlite3"));
+    let agent_home = dir.path().join("agent").display().to_string();
+    let now_arg = now().to_string();
+
+    // Today's path: the agent and the person share an MLS room with topics.
+    let init = cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "init",
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--skip-agent-profile",
+        "--json",
+    ]);
+    let agent_account = init["account_id"].as_str().unwrap().to_owned();
+    let room_id = cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "create-room",
+        "--display-name",
+        "Direct Flow",
+    ])["selected_room_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let user = FiniteChatRuntime::open(OpenOptions {
+        data_dir: dir.path().join("user").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "hosted-web".to_owned(),
+        account_secret_hex: Some(hex_lower(&USER_SECRET)),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let person = Person::new(USER_SECRET);
+    assert_eq!(user.state().unwrap().identity.account_id, person.account());
+    user.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    cli_json(&[
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "add-member",
+        "--room-id",
+        &room_id,
+        "--account-id",
+        &person.account(),
+        "--display-name",
+        "Person",
+    ]);
+    user.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+    let topic = user
+        .dispatch_and_wait(AppAction::CreateTopic {
+            room_id: room_id.clone(),
+            title: "Trip planning".to_owned(),
+        })
+        .unwrap();
+    let topic_id = topic.selected_topic_id.clone().unwrap();
+    let chat_id = topic.selected_chat_id.clone().unwrap();
+    user.dispatch_and_wait(AppAction::SendChatMessage {
+        room_id: room_id.clone(),
+        topic_id: topic_id.clone(),
+        chat_id: chat_id.clone(),
+        text: "history before direct".to_owned(),
+        metadata_json: None,
+    })
+    .unwrap();
+    user.dispatch_and_wait(AppAction::RenameChat {
+        room_id: room_id.clone(),
+        topic_id: topic_id.clone(),
+        chat_id: chat_id.clone(),
+        title: "Flights".to_owned(),
+    })
+    .unwrap();
+
+    // The MLS sidecar already handed this history to Hermes; its inbox
+    // cursor carries over, so the fold must not hand it over again.
+    let request = json!({"timeout_millis": 2000}).to_string();
+    let polled = cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "--request-json",
+        &request,
+        "poll",
+    ]);
+    let delivered = polled["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["text"] == "history before direct")
+        .unwrap_or_else(|| panic!("MLS poll did not deliver history: {polled}"))
+        .clone();
+    let ack = json!({
+        "room_id": room_id, "seq": delivered["seq"], "message_id": delivered["message_id"],
+    })
+    .to_string();
+    cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "--request-json",
+        &ack,
+        "ack",
+    ]);
+
+    // Switch the agent to direct transport: the first start folds.
+    // SAFETY: as above.
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
+    let bridge = Bridge {
+        url: spawn_sidecar(&agent_home, dir.path().join("ready-1.json")),
+        http: reqwest::blocking::Client::new(),
+    };
+
+    let info: Value = bridge
+        .http
+        .get(format!("{}/v1/app/info", bridge.url))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(info["transport"], "direct");
+    assert_eq!(info["migration"]["state"], "migrated");
+    assert_eq!(info["canonical_room_id"], room_id);
+    assert_eq!(info["agent_account_id"], agent_account);
+    let readyz: Value = reqwest::blocking::get(format!("{}/readyz", bridge.url))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(readyz["transport"], "direct");
+
+    // The person sees the folded topic, renamed chat and message.
+    let path = format!("/v1/app/state?room_id={room_id}&topic_id={topic_id}&chat_id={chat_id}");
+    let state = bridge.json(bridge.get(&person, &path));
+    assert_eq!(state["identity"]["account_id"], person.account());
+    let trip = state["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|topic| topic["topic_id"] == topic_id)
+        .unwrap();
+    assert_eq!(trip["title"], "Trip planning");
+    assert_eq!(trip["chats"][0]["title"], "Flights");
+    assert_eq!(chat_messages(&state), vec!["history before direct"]);
+    assert!(state["messages"][0]["is_mine"].as_bool().unwrap());
+
+    // Authorization: missing, foreign, tampered and replayed requests fail.
+    let anonymous = bridge
+        .http
+        .get(format!("{}{path}", bridge.url))
+        .send()
+        .unwrap();
+    assert_eq!(anonymous.status(), 401);
+    let stranger = Person::new(STRANGER_SECRET);
+    assert_eq!(bridge.get(&stranger, &path).status(), 403);
+    let signed = person.sign("GET", "/v1/app/state", None);
+    let elsewhere = bridge
+        .http
+        .get(format!("{}{path}", bridge.url))
+        .header("x-finite-chat-authorization", &signed)
+        .send()
+        .unwrap();
+    assert_eq!(elsewhere.status(), 401, "a signature binds its exact path");
+    let once = person.sign("GET", &path, None);
+    for expected in [200, 401] {
+        let response = bridge
+            .http
+            .get(format!("{}{path}", bridge.url))
+            .header("x-finite-chat-authorization", &once)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), expected, "a signature is single-use");
+    }
+    let body = serde_json::to_vec(&json!({"MarkRoomRead": {"room_id": room_id}})).unwrap();
+    let tampered = bridge
+        .http
+        .post(format!("{}/v1/app/actions", bridge.url))
+        .header(
+            "x-finite-chat-authorization",
+            person.sign("POST", "/v1/app/actions", Some(b"{}")),
+        )
+        .body(body)
+        .send()
+        .unwrap();
+    assert_eq!(tampered.status(), 401, "a signature binds its body");
+
+    // A web send reaches Hermes with the person's identity and route.
+    let sent = bridge.json(bridge.post(
+        &person,
+        "/v1/app/actions",
+        &json!({"SendChatMessage": {
+            "room_id": room_id, "topic_id": topic_id, "chat_id": chat_id,
+            "text": "hello direct", "metadata_json": null,
+        }}),
+    ));
+    assert_eq!(chat_messages(&sent).last().unwrap(), "hello direct");
+    let polled = bridge.loopback("/v1/hermes/poll", &json!({"timeout_millis": 5000}));
+    let event = polled["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["text"] == "hello direct")
+        .unwrap_or_else(|| panic!("Hermes did not receive the web message: {polled}"))
+        .clone();
+    assert_eq!(event["source"]["user_id"], person.account());
+    assert_eq!(event["source"]["thread_id"], chat_id);
+    assert!(
+        polled["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["text"] != "history before direct"),
+        "folded history is not replayed to Hermes"
+    );
+    bridge.loopback(
+        "/v1/hermes/ack",
+        &json!({"room_id": room_id, "seq": event["seq"], "message_id": event["message_id"]}),
+    );
+
+    // Hermes' reply, sent by thread id, lands in the person's chat.
+    let reply = bridge.loopback(
+        "/v1/hermes/send",
+        &json!({
+            "room_id": room_id, "conversation_id": null, "thread_id": chat_id,
+            "text": "hello from Hermes", "kind": "message", "status": "complete",
+            "attachments": [], "reply_to_message_id": null, "metadata": {},
+        }),
+    );
+    assert!(reply["message_id"].as_str().unwrap().starts_with("direct-"));
+    let after = bridge.json(bridge.get(&person, &path));
+    let last = after["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["text"], "hello from Hermes");
+    assert!(!last["is_mine"].as_bool().unwrap());
+
+    // Organization actions behave as on the hosted device.
+    let created = bridge.json(bridge.post(
+        &person,
+        "/v1/app/new-chat",
+        &json!({"room_id": room_id, "topic_id": topic_id, "intent_key": "intent-1"}),
+    ));
+    let new_chat = created["selected_chat_id"].as_str().unwrap().to_owned();
+    let again = bridge.json(bridge.post(
+        &person,
+        "/v1/app/new-chat",
+        &json!({"room_id": room_id, "topic_id": topic_id, "intent_key": "intent-1"}),
+    ));
+    assert_eq!(again["selected_chat_id"], new_chat.as_str());
+    let archived = bridge.json(bridge.post(
+        &person,
+        "/v1/app/actions",
+        &json!({"SetChatArchived": {
+            "room_id": room_id, "topic_id": topic_id, "chat_id": new_chat, "archived": true,
+        }}),
+    ));
+    let archived_chat = archived["topics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|topic| topic["chats"].as_array().unwrap())
+        .find(|chat| chat["chat_id"] == new_chat.as_str())
+        .unwrap();
+    assert_eq!(archived_chat["archived"], true);
+
+    // Attachments: upload, then download the same bytes.
+    let boundary = "direct-flow-boundary";
+    let mut multipart = Vec::new();
+    for (name, value) in [
+        ("room_id", room_id.as_str()),
+        ("topic_id", &topic_id),
+        ("chat_id", &chat_id),
+        ("caption", "a photo"),
+    ] {
+        multipart.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    let photo = b"\x89PNG direct flow bytes".to_vec();
+    multipart.extend_from_slice(
+        format!("--{boundary}\r\nContent-Disposition: form-data; name=\"files\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n").as_bytes(),
+    );
+    multipart.extend_from_slice(&photo);
+    multipart.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let uploaded = bridge.json(
+        bridge
+            .http
+            .post(format!("{}/v1/app/attachments", bridge.url))
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .header(
+                "x-finite-chat-authorization",
+                person.sign("POST", "/v1/app/attachments", Some(&multipart)),
+            )
+            .body(multipart.clone())
+            .send()
+            .unwrap(),
+    );
+    let media_message = uploaded["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(media_message["text"], "a photo");
+    let attachment_id = media_message["media"][0]["attachment_id"].as_str().unwrap();
+    let download_path = format!(
+        "/v1/app/attachments/{room_id}/{}/{}",
+        media_message["message_id"].as_str().unwrap(),
+        attachment_id
+    );
+    let download = bridge.get(&person, &download_path);
+    assert_eq!(download.status(), 200);
+    assert_eq!(download.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(download.bytes().unwrap().to_vec(), photo);
+    let media_event = bridge.loopback("/v1/hermes/poll", &json!({"timeout_millis": 5000}));
+    let media_event = media_event["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["text"] == "a photo")
+        .unwrap()
+        .clone();
+    let local_path = media_event["attachments"][0]["path"].as_str().unwrap();
+    assert_eq!(
+        std::fs::read(local_path).unwrap(),
+        photo,
+        "Hermes reads the upload locally"
+    );
+
+    // A Connections command travels web → agentd → web over the direct log.
+    let command_bridge = Bridge {
+        url: bridge.url.clone(),
+        http: reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(60))
+            .build()
+            .unwrap(),
+    };
+    let command_person = Person::new(USER_SECRET);
+    let command_room = room_id.clone();
+    let command_agent = agent_account.clone();
+    let command = std::thread::spawn(move || {
+        command_bridge.json(command_bridge.post(
+            &command_person,
+            "/v1/app/runtime-commands",
+            &json!({
+                "room_id": command_room, "target_account_id": command_agent,
+                "command": "agent.connections.status", "schema": "finite.agent.empty.request.v1",
+                "body": {}, "wait_millis": 20000,
+            }),
+        ))
+    });
+    let inbound = bridge
+        .http
+        .get(format!(
+            "{}/v1/agentd/inbound?timeout_millis=10000",
+            bridge.url
+        ))
+        .timeout(Duration::from_secs(20))
+        .send()
+        .unwrap();
+    let mut delivery = Value::Null;
+    for line in BufReader::new(inbound).lines() {
+        let line = line.unwrap();
+        if line.trim().is_empty() {
+            continue;
+        }
+        delivery = serde_json::from_str(&line).unwrap();
+        break;
+    }
+    assert_eq!(delivery["sender"]["account_id"], person.account());
+    let request = &delivery["payload"]["value"];
+    assert_eq!(request["command"], "agent.connections.status");
+    bridge.loopback(
+        "/v1/agentd/result",
+        &json!({
+            "room_id": room_id, "conversation_id": null,
+            "result": {
+                "type": "runtime.command.result", "request_id": request["request_id"], "status": "succeeded",
+                "body": {"schema": "finite.agent.connections.status.v1", "json_payload": serde_json::to_vec(&json!({"ok": true})).unwrap()},
+                "error": null,
+            },
+        }),
+    );
+    bridge.loopback(
+        "/v1/agentd/ack",
+        &json!({"room_id": room_id, "seq": delivery["seq"], "message_id": delivery["message_id"]}),
+    );
+    let result = command.join().unwrap();
+    assert_eq!(result["status"], "succeeded");
+    assert_eq!(result["body"], json!({"ok": true}));
+
+    // Digest is hashes only, and a second process sees the same durable log.
+    let digest = bridge.json(bridge.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
+    assert!(!digest.to_string().contains("hello direct"));
+    let restarted = Bridge {
+        url: spawn_sidecar(&agent_home, dir.path().join("ready-2.json")),
+        http: reqwest::blocking::Client::new(),
+    };
+    let restarted_digest =
+        restarted.json(restarted.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
+    assert_eq!(restarted_digest, digest);
+    let mut sink = Vec::new();
+    finitechat_cli::run(
+        ["hermes", "--agent-home", &agent_home, "direct-digest"]
+            .iter()
+            .map(|arg| arg.to_string()),
+        &mut sink,
+    )
+    .unwrap();
+    let operator: Value = serde_json::from_slice(&sink).unwrap();
+    assert_eq!(operator["rooms"][0], digest);
+}
