@@ -112,6 +112,9 @@ pub struct DirectRoomEngine {
     drafts: BTreeMap<(String, String), ChatMessage>,
     max_seq: BTreeMap<String, u64>,
     rev: u64,
+    /// Topic summaries for `rev`: each one walks every message, and a single
+    /// action validates its route several times.
+    topics_cache: std::sync::Mutex<Option<(u64, Vec<AppTopicSummary>)>>,
 }
 
 impl DirectRoomEngine {
@@ -127,6 +130,7 @@ impl DirectRoomEngine {
             drafts: BTreeMap::new(),
             max_seq: BTreeMap::new(),
             rev: 0,
+            topics_cache: std::sync::Mutex::new(None),
         }
     }
 
@@ -242,7 +246,18 @@ impl DirectRoomEngine {
     }
 
     pub fn topics(&self) -> Vec<AppTopicSummary> {
-        self.projection.topics(&self.local_read_seq)
+        let mut cache = self
+            .topics_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((rev, topics)) = cache.as_ref()
+            && *rev == self.rev
+        {
+            return topics.clone();
+        }
+        let topics = self.projection.topics(&self.local_read_seq);
+        *cache = Some((self.rev, topics.clone()));
+        topics
     }
 
     pub fn message(&self, room_id: &str, message_id: &str) -> Option<&ChatMessage> {
@@ -1259,11 +1274,32 @@ impl DirectRoomEngine {
                 is_agent_chat: true,
             })
             .collect::<Vec<_>>();
-        apply_room_message_projection(
-            &mut rooms,
-            &self.projection.messages(),
-            &self.local_read_seq,
-        );
+        // One pass over references: cloning every message per view dominated
+        // large rooms. Same preview and unread rules as the Device.
+        let mut latest = BTreeMap::<&str, &ChatMessage>::new();
+        let mut unread = BTreeMap::<&str, u32>::new();
+        for message in self.projection.messages.values() {
+            let room = message.room_id.as_str();
+            if latest
+                .get(room)
+                .is_none_or(|current| message_sort(message, current).is_gt())
+            {
+                latest.insert(room, message);
+            }
+            if !message.is_mine && message.seq > self.read_seq(room) {
+                *unread.entry(room).or_default() += 1;
+            }
+        }
+        for room in &mut rooms {
+            room.last_message_preview = latest
+                .get(room.room_id.as_str())
+                .map(|message| message_preview(message))
+                .unwrap_or_default();
+            room.unread_count = unread
+                .get(room.room_id.as_str())
+                .copied()
+                .unwrap_or_default();
+        }
         let paired_agent = (self.rooms.len() == 1).then(|| AppPairedAgent {
             agent_account_id: self.agent.account_id.clone(),
             canonical_room_id: self.rooms.keys().next().cloned().unwrap_or_default(),
