@@ -194,6 +194,7 @@ export function fixtureBridge(
   let clock = 1_800_000_000_000;
   const mints: Array<{ userId: string | null; runtimeId: string }> = [];
   const bridge = new DirectChatBridge({
+    eligible: () => true,
     now: () => clock,
     mintGrant: async (account, runtimeId) => {
       mints.push({ userId: account.workosUserId, runtimeId });

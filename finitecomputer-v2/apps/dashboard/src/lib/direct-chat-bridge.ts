@@ -25,6 +25,11 @@ import {
  * never seen is unavailable. There is no hidden fallback from direct to the
  * hosted device's MLS path.
  *
+ * Only runtimes the deployment names in `FC_DIRECT_CHAT_RUNTIME_IDS` (a
+ * comma-separated list, or `*` for all) are probed; every other runtime stays
+ * on the hosted device without contacting the agent. This keeps canaries and
+ * staged rollouts explicit; the agent's own report still decides its mode.
+ *
  * Native grants and decisions live in this process's memory only. The grant
  * is never returned to a browser and the WorkOS token never reaches an agent.
  */
@@ -75,6 +80,8 @@ export type DirectBridgeRequest = {
 };
 
 export type DirectChatBridgeDeps = {
+  /** Whether this runtime may use direct chat at all; defaults to the env. */
+  eligible?: (runtimeId: string) => boolean;
   mintGrant: (
     account: AccountAuthContext,
     runtimeId: string,
@@ -102,13 +109,16 @@ export class DirectChatBridge {
   private readonly grants = new Map<string, CachedGrant>();
   private readonly minting = new Map<string, Promise<HostedHermesSession>>();
   private readonly now: () => number;
+  private readonly eligible: (runtimeId: string) => boolean;
 
   constructor(private readonly deps: DirectChatBridgeDeps) {
     this.now = deps.now ?? Date.now;
+    this.eligible = deps.eligible ?? directChatEnabledFor;
   }
 
   /** Decide direct vs legacy for one machine; reused for 30 s per runtime. */
   async resolve(access: DirectChatAccess): Promise<ChatTarget> {
+    if (!this.eligible(access.runtimeId)) return LEGACY;
     const seen = this.observations.get(access.runtimeId);
     if (seen && this.now() - seen.observedAtMs <= DIRECT_CHAT_DECISION_TTL_MS) {
       return targetFor(seen);
@@ -354,6 +364,18 @@ export class DirectChatBridge {
   private observe(runtimeId: string, observation: Observation) {
     boundedSet(this.observations, runtimeId, observation);
   }
+}
+
+/** Runtimes `FC_DIRECT_CHAT_RUNTIME_IDS` admits to direct chat probing. */
+export function directChatEnabledFor(
+  runtimeId: string,
+  configured = process.env.FC_DIRECT_CHAT_RUNTIME_IDS ?? ""
+) {
+  const entries = configured
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  return entries.includes("*") || entries.includes(runtimeId);
 }
 
 /** The process-wide bridge used by chat and Connections routes. */

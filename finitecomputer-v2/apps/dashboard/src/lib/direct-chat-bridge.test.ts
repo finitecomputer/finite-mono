@@ -23,6 +23,7 @@ import {
   classifyDirectChatInfo,
   directChatAgentId,
   directChatCanonicalRoomId,
+  directChatEnabledFor,
   encodeMultipartBody,
   npubFromAccountId,
   type DirectChatTarget,
@@ -493,4 +494,11 @@ test("an oversized info response is not evidence of legacy", async (context) => 
     bridge.resolve(fixtureAccess),
     (error: unknown) => error instanceof HostedWebChatError && error.status === 503
   );
+});
+
+test("only runtimes the deployment names are probed for direct chat", () => {
+  assert.equal(directChatEnabledFor("runtime_a", ""), false);
+  assert.equal(directChatEnabledFor("runtime_a", " runtime_b , runtime_a "), true);
+  assert.equal(directChatEnabledFor("runtime_c", "runtime_b,runtime_a"), false);
+  assert.equal(directChatEnabledFor("runtime_c", "*"), true);
 });
