@@ -283,6 +283,25 @@ const DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV: &str = "DEVFINITY_DOCKER_RUNTIM
 /// Synthetic hosted-Hermes origin host. agentd requires a non-loopback HTTPS
 /// public URL; Core, curl and browsers map this reserved name to loopback.
 const HOSTED_HERMES_PUBLIC_HOST: &str = "agents.devfinity.test";
+
+fn dashboard_ingress_resolver_source() -> String {
+    format!(
+        r#"// Written by devfinity. Resolves the local hosted-Hermes ingress host
+// to loopback for the dashboard's server-side fetches.
+const dns = require("node:dns");
+const lookup = dns.lookup;
+dns.lookup = function (hostname, options, callback) {{
+  if (hostname !== "{HOSTED_HERMES_PUBLIC_HOST}") return lookup.apply(this, arguments);
+  if (typeof options === "function") {{ callback = options; options = {{}}; }}
+  if (typeof options === "number") options = {{ family: options }};
+  if (options && options.all) {{
+    return process.nextTick(callback, null, [{{ address: "127.0.0.1", family: 4 }}]);
+  }}
+  return process.nextTick(callback, null, "127.0.0.1", 4);
+}};
+"#
+    )
+}
 const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
 const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
 const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
@@ -667,6 +686,9 @@ impl Stack {
         } else {
             self.write_secret_files()?;
             self.write_dashboard_tsconfig()?;
+            if self.hosted_hermes_enabled() {
+                self.write_dashboard_ingress_resolver()?;
+            }
         }
         self.write_env_file()?;
         self.write_postgres_script()?;
@@ -2345,22 +2367,23 @@ wait "$postgres_pid"
         let dashboard_dir = self.repo_root.join("finitecomputer-v2/apps/dashboard");
         let _ = writeln!(yaml, "  {process}:");
         self.write_process_header(yaml, "Finite dashboard dev server", &dashboard_dir, process);
-        self.write_managed_command(
-            yaml,
-            process,
-            &[
-                format!(
-                    ". {}",
-                    shell_quote(&self.dashboard_auth_secret_file().display().to_string())
-                ),
-                format!(
-                    "exec pnpm run dev --hostname 127.0.0.1 --port {}",
-                    self.ports.dashboard
-                ),
-            ],
-            &[],
-        );
+        let mut command = vec![format!(
+            ". {}",
+            shell_quote(&self.dashboard_auth_secret_file().display().to_string())
+        )];
+        if self.hosted_hermes_enabled() {
+            command.push(self.dashboard_wait_for_ingress_ca());
+        }
+        command.push(format!(
+            "exec pnpm run dev --hostname 127.0.0.1 --port {}",
+            self.ports.dashboard
+        ));
+        self.write_managed_command(yaml, process, &command, &[]);
         let _ = writeln!(yaml, "    depends_on:");
+        if self.hosted_hermes_enabled() {
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::HostedHermesIngress);
+            let _ = writeln!(yaml, "        condition: process_started");
+        }
         let _ = writeln!(yaml, "      {}:", ManagedProcess::DashboardDeps);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
@@ -2430,6 +2453,24 @@ wait "$postgres_pid"
                 ("WORKOS_CLIENT_ID", config.client_id.clone()),
                 ("FC_WORKOS_OPERATOR_ORG_ID", config.operator_org_id.clone()),
             ]),
+        }
+        if self.hosted_hermes_enabled() {
+            // Direct web chat reaches each agent through the local ingress,
+            // the way Core's FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON does.
+            dashboard_environment.extend([
+                ("FC_DIRECT_CHAT_RUNTIME_IDS", "*".to_string()),
+                (
+                    "NODE_EXTRA_CA_CERTS",
+                    self.hosted_hermes_ca_file().display().to_string(),
+                ),
+                (
+                    "NODE_OPTIONS",
+                    format!(
+                        "--require={}",
+                        self.dashboard_ingress_resolver_file().display()
+                    ),
+                ),
+            ]);
         }
         for name in [
             "GOOGLE_WORKSPACE_CLIENT_ID",
@@ -3420,6 +3461,32 @@ wait "$postgres_pid"
     fn hosted_hermes_ca_file(&self) -> PathBuf {
         self.hosted_hermes_dir()
             .join("data/caddy/pki/authorities/local/root.crt")
+    }
+
+    /// A Node preload that resolves the ingress host to loopback in the
+    /// dashboard's processes, so no host resolver change is needed.
+    fn dashboard_ingress_resolver_file(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::Dashboard)
+            .join("hosted-hermes-resolver.cjs")
+    }
+
+    fn write_dashboard_ingress_resolver(&self) -> Result<()> {
+        let path = self.dashboard_ingress_resolver_file();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&path, dashboard_ingress_resolver_source())
+            .with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    /// Node reads NODE_EXTRA_CA_CERTS once at start, and Caddy creates its
+    /// local CA when the ingress first starts.
+    fn dashboard_wait_for_ingress_ca(&self) -> String {
+        format!(
+            "for _ in $(seq 120); do [ -s {ca} ] && break; sleep 0.5; done; [ -s {ca} ] || {{ echo \"hosted Hermes CA missing: \"{ca} >&2; exit 1; }}",
+            ca = shell_quote(&self.hosted_hermes_ca_file().display().to_string()),
+        )
     }
 
     fn hosted_hermes_admin_socket(&self) -> PathBuf {
@@ -5200,6 +5267,17 @@ mod tests {
         assert!(ingress.contains("core:\n        condition: process_healthy"));
         assert!(!ingress.contains(DEVFINITY_RUNNER_TOKEN));
 
+        let dashboard = process_section(&yaml, ManagedProcess::Dashboard);
+        assert!(dashboard.contains("FC_DIRECT_CHAT_RUNTIME_IDS=*"));
+        assert!(dashboard.contains(&format!("NODE_EXTRA_CA_CERTS={ca}")));
+        assert!(dashboard.contains(&format!(
+            "NODE_OPTIONS=--require={}",
+            stack.dashboard_ingress_resolver_file().display()
+        )));
+        assert!(dashboard.contains("hosted-hermes-ingress:\n        condition: process_started"));
+        assert!(dashboard.contains("hosted Hermes CA missing"));
+        assert!(dashboard_ingress_resolver_source().contains("\"agents.devfinity.test\""));
+
         // The renderer only accepts a short, plain admin socket path.
         let socket = stack.hosted_hermes_admin_socket().display().to_string();
         assert!(socket.len() <= 100 && socket.ends_with("/hermes-caddy.sock"));
@@ -5253,6 +5331,9 @@ mod tests {
                 "FC_RUNNER_DOCKER_HERMES_HOST_PORT",
                 "\n  runtime-core-bridge:\n",
                 "\n  hosted-hermes-ingress:\n",
+                "FC_DIRECT_CHAT_RUNTIME_IDS",
+                "NODE_EXTRA_CA_CERTS",
+                "hosted-hermes-resolver.cjs",
             ] {
                 assert!(!yaml.contains(absent), "{profile:?} contains {absent}");
             }
