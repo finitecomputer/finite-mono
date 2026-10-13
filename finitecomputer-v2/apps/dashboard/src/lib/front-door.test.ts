@@ -14,6 +14,7 @@ import type {
 import {
   FRONT_DOOR_DEFAULT_SIGNUP_URL,
   FRONT_DOOR_DEFAULT_TARGET_URL,
+  FRONT_DOOR_SETTINGS_PATH,
   accountMigrated,
   frontDoorAgentCreationMovedMessage,
   frontDoorBannerHref,
@@ -121,6 +122,7 @@ function billing(
 function account(overrides: Partial<FrontDoorAccount> = {}): FrontDoorAccount {
   return {
     isAdmin: false,
+    visitingLegacy: false,
     workosUserId: "user_owner",
     me: me(),
     coreUnavailable: false,
@@ -302,6 +304,37 @@ test("a migrated account is redirected even while its legacy agent remains", () 
       "stay"
     );
   }
+});
+
+test("an explicit visit to the way back keeps even an opted-in account here", async () => {
+  for (const candidate of [
+    account({ visitingLegacy: true, me: me({ migrated_at: "2026-10-19T09:00:00Z" }) }),
+    account({ visitingLegacy: true }),
+    account({ visitingLegacy: true, me: null, coreUnavailable: true }),
+  ]) {
+    assert.deepEqual(frontDoorDecision(ENABLED, candidate), { kind: "stay", reason: "legacy-visit" });
+    const visit = confirmation();
+    assert.deepEqual(await resolveFrontDoorRoute(ENABLED, candidate, visit.confirm), {
+      kind: "stay",
+      reason: "legacy-visit",
+    });
+    assert.deepEqual(visit.calls, { reload: 0, operator: 0 });
+  }
+  // Switched off, the visit marker changes nothing.
+  assert.deepEqual(frontDoorDecision(DISABLED, account({ visitingLegacy: true })), {
+    kind: "stay",
+    reason: "disabled",
+  });
+});
+
+test("the way back is a stable dashboard path on this origin, never a redirect target", () => {
+  assert.equal(FRONT_DOOR_SETTINGS_PATH, "/dashboard/front-door");
+  // A target pointing back into this dashboard (the way back included)
+  // would loop, so it keeps the front door off.
+  assert.deepEqual(
+    frontDoorConfig({ ...PRODUCTION_ENV, FC_FRONT_DOOR_TARGET_URL: `https://finite.computer${FRONT_DOOR_SETTINGS_PATH}` }),
+    { enabled: false, invalid: ["FC_FRONT_DOOR_TARGET_URL"] }
+  );
 });
 
 test("operators always keep the legacy dashboard and its admin pages", () => {

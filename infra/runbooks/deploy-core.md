@@ -166,10 +166,12 @@ Fleet scope requires both `--roll-all` and an explicit
 5. **Front door switch** (dashboard image with the front door, Core with
    migration 0042): set `FC_FRONT_DOOR_ENABLED = "true"` in
    `modules/dashboard.nix`, commit to `main`, and repeat steps 1-3. Turning it
-   off is the same edit back to `"false"`; no data changes either way. Core's
-   optional `FC_CORE_ACCOUNT_MIGRATION_API_TOKEN` is unrelated to the flip.
-   Verify signed-out `/signup` redirects to the new sign-up URL and an
-   operator account still reaches `/dashboard/admin`. Admin pages need a
+   off is the same edit back to `"false"`; the flip itself changes no data
+   (users' own "Use the new Finite by default" choices are kept either way).
+   No Core env or secret is involved. Verify signed-out `/signup` redirects to
+   the new sign-up URL, `/dashboard/front-door` opens the legacy dashboard on
+   that setting, and an operator account still reaches `/dashboard/admin`.
+   Admin pages need a
    session in the operator org: an operator signed in under another org stays
    on the legacy dashboard (WorkOS membership lookup) but must switch org to
    see admin; if WorkOS cannot answer within 2s the account also stays.

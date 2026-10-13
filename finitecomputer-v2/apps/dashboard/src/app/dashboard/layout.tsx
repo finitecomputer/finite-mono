@@ -18,6 +18,8 @@ import {
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import {
+  FRONT_DOOR_FRESH_COOKIE,
+  FRONT_DOOR_STAY_COOKIE,
   frontDoorBannerHref,
   frontDoorOffersAgentCreation,
   loadFrontDoorConfig,
@@ -30,29 +32,34 @@ export default async function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const [viewer, core, billing] = await Promise.all([
-    loadOptionalViewerContext(),
-    loadCoreMe({ cacheMode: "swr" }),
-    loadCoreBillingOverview({ cacheMode: "fresh" }),
-  ]);
   // The front door is decided here only: Next.js applies this layout to
   // dashboard pages, never to route handlers, so no API, callback, webhook
-  // or asset request is ever redirected.
+  // or asset request is ever redirected. Switched off, no cookie is read.
   const frontDoor = loadFrontDoorConfig();
+  const frontDoorCookies = frontDoor.enabled ? await cookies() : null;
+  const preferenceJustChanged =
+    frontDoorCookies?.get(FRONT_DOOR_FRESH_COOKIE)?.value === "1";
+  const [viewer, core, billing] = await Promise.all([
+    loadOptionalViewerContext(),
+    loadCoreMe({ cacheMode: preferenceJustChanged ? "fresh" : "swr" }),
+    loadCoreBillingOverview({ cacheMode: "fresh" }),
+  ]);
   const account = core.account;
   const agentCreationOffered = frontDoorOffersAgentCreation(frontDoor, viewer.isAdmin);
   const paidSetupPending =
-    frontDoor.enabled &&
+    frontDoorCookies !== null &&
     draftStartedStripeCheckout(
       await unsealAgentOnboardingDraft(
-        (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
+        frontDoorCookies.get(AGENT_DRAFT_COOKIE)?.value,
         account.workosUserId
       )
     );
+  const visitingLegacy = frontDoorCookies?.get(FRONT_DOOR_STAY_COOKIE)?.value === "1";
   const frontDoorRoute = await resolveFrontDoorRoute(
     frontDoor,
     {
       isAdmin: viewer.isAdmin,
+      visitingLegacy,
       workosUserId: account.workosUserId,
       me: core.me,
       coreUnavailable: !core.configured || Boolean(core.error),

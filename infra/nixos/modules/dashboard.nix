@@ -39,7 +39,8 @@
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
       # Front door to the new Finite product (finite.chat). Off = today's
       # dashboard exactly. "true" sends signed-in accounts without a legacy
-      # agent (or marked migrated in Core) to the target, /signup to the new
+      # agent (or that chose "Use the new Finite by default") to the target,
+      # with /dashboard/front-door as the stable way back, /signup to the new
       # sign-up screen, and stops legacy agent creation for non-operators;
       # operators, legacy agent owners, accounts still billed by a legacy
       # subscription, and anyone Core cannot be read for stay here. A target

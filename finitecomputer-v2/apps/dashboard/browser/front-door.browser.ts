@@ -49,8 +49,18 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
       : null,
     agent_creation_entitlement: null, can_create_agent: !state.requiresBilling, requires_billing: state.requiresBilling,
   });
-  const core = http.createServer((request, response) => {
+  const core = http.createServer(async (request, response) => {
     if (request.method !== "GET") state.writes.push(`${request.method} ${request.url}`);
+    if (request.method === "PUT" && request.url === "/api/core/v1/me/front-door-preference") {
+      // The caller's own preference, as Core records it on their row.
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      const { useNewFinite } = JSON.parse(body) as { useNewFinite: boolean };
+      state.migratedAt = useNewFinite ? (state.migratedAt ?? new Date().toISOString()) : null;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ use_new_finite: useNewFinite, migrated_at: state.migratedAt }));
+      return;
+    }
     if (request.url === "/api/core/v1/me") state.meReads++;
     const unavailable = state.meStatus !== 200;
     let data: unknown = request.url === "/api/core/v1/me" ? (unavailable ? null : me())
@@ -99,6 +109,8 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
       FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_front_door",
       FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "front-door-fixture-access-token",
       FC_DASHBOARD_RUNTIME_MODE: "customer", FC_WORKOS_AUTH_ENABLED: "0",
+      // Redirect origins come from here, as in production (finite.computer).
+      NEXT_PUBLIC_WORKOS_REDIRECT_URI: `${origin}/callback`,
       WORKOS_COOKIE_PASSWORD: COOKIE_PASSWORD,
       FC_HOSTED_WEB_DEVICE_URL: `http://127.0.0.1:${hostedDevicePort}`,
       FINITECHAT_HOSTED_API_TOKEN: "front-door-fixture-hosted-token",
@@ -222,6 +234,40 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
       await page.waitForLoadState("domcontentloaded");
       assert.equal(new URL(page.url()).origin, origin);
       assert.equal(new URL(page.url()).pathname, "/dashboard");
+    }));
+
+    await t.test("a legacy owner can opt into the new Finite and come back through the stable way back", async () => withPage({ projects: [legacyProject()] }, async (page) => {
+      state.writes = [];
+      await page.goto(`${origin}/dashboard`);
+      const setting = page.getByRole("region", { name: "Use the new Finite by default" });
+      await setting.getByText("Off: signing in to finite.computer opens this dashboard.", { exact: false }).waitFor();
+      assert.match((await setting.textContent()) ?? "", /\/dashboard\/front-door/u, "the way back is shown");
+
+      // Enable → the next /dashboard load sends this owner to the new Finite.
+      await setting.getByRole("button", { name: "Use the new Finite by default" }).click();
+      await page.waitForURL((url) => url.origin === newFiniteOrigin);
+      await expectNewFinite(page, "/dashboard");
+
+      // The stable way back opens legacy despite the preference, on the setting.
+      await page.goto(`${origin}/dashboard/front-door`);
+      await page.waitForURL((url) => url.port === String(port) && url.pathname === "/dashboard");
+      const back = page.getByRole("region", { name: "Use the new Finite by default" });
+      await back.getByText("On: signing in to finite.computer opens the new Finite.", { exact: false }).waitFor();
+
+      // Disable → stays on legacy, now and on later loads.
+      await back.getByRole("button", { name: "Keep using this dashboard" }).click();
+      await page.waitForURL((url) => url.port === String(port) && url.pathname === "/dashboard");
+      await page.getByRole("region", { name: "Use the new Finite by default" })
+        .getByText("Off: signing in to finite.computer opens this dashboard.", { exact: false }).waitFor();
+      await page.goto(`${origin}/dashboard`);
+      await page.getByRole("heading", { name: "Your agents" }).waitFor();
+      assert.equal(new URL(page.url()).port, String(port));
+      assert.equal(state.migratedAt, null);
+      assert.deepEqual(state.writes, [
+        "PUT /api/core/v1/me/front-door-preference",
+        "PUT /api/core/v1/me/front-door-preference",
+      ], "only the user's own preference changed");
+      state.writes = [];
     }));
 
     await t.test("an agentless account still billed by a legacy subscription stays and can manage billing", async () => withPage({ subscription: "active" }, async (page) => {

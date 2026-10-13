@@ -23,6 +23,26 @@ import { workosBaseUrl } from "./workos-auth";
 export const FRONT_DOOR_DEFAULT_TARGET_URL = "https://finite.chat/";
 export const FRONT_DOOR_DEFAULT_SIGNUP_URL = "https://finite.chat/auth/login";
 
+/**
+ * Stable, documented way back to the legacy dashboard (finite.chat and the
+ * import flow link here). GET opens this dashboard for the browser session
+ * even when "use the new Finite by default" is on and lands on the setting;
+ * POST changes the setting. It is a route handler, so it is never redirected.
+ */
+export const FRONT_DOOR_SETTINGS_PATH = "/dashboard/front-door";
+/** Where the setting renders on the dashboard home. */
+export const FRONT_DOOR_SETTINGS_ANCHOR = "front-door";
+/** Session cookie set by GET FRONT_DOOR_SETTINGS_PATH: "stay on legacy for now". */
+export const FRONT_DOOR_STAY_COOKIE = "finite-front-door-stay";
+export const FRONT_DOOR_STAY_SECONDS = 12 * 60 * 60;
+/**
+ * Set by POST FRONT_DOOR_SETTINGS_PATH after the preference changes. While
+ * present the layout reads `/me` uncached: its server SWR entry can lag up to
+ * 30s, and a route handler's cache invalidation need not reach the layout.
+ */
+export const FRONT_DOOR_FRESH_COOKIE = "finite-front-door-fresh";
+export const FRONT_DOOR_FRESH_SECONDS = 30;
+
 type EnvSource = Record<string, string | undefined>;
 
 export type FrontDoorConfig =
@@ -32,6 +52,7 @@ export type FrontDoorConfig =
 export type FrontDoorStayReason =
   | "disabled"
   | "admin"
+  | "legacy-visit"
   | "operator"
   | "account-unavailable"
   | "legacy-billing"
@@ -45,6 +66,8 @@ export type FrontDoorDecision =
 export type FrontDoorAccount = {
   /** Operator (dashboard admin) accounts always keep the legacy dashboard. */
   isAdmin: boolean;
+  /** This browser opened FRONT_DOOR_SETTINGS_PATH to use the legacy dashboard. */
+  visitingLegacy: boolean;
   /** The signed-in WorkOS user, when known. */
   workosUserId: string | null;
   /** Core `/me` for this request; null when it was not loaded. */
@@ -134,6 +157,9 @@ export function frontDoorDecision(
   if (!config.enabled) return { kind: "stay", reason: "disabled" };
   // Admin pages live on this dashboard; operators are never sent away.
   if (account.isAdmin) return { kind: "stay", reason: "admin" };
+  // An explicit "take me back" visit wins for this browser session, so a
+  // user who opted into the new Finite can always reach the setting again.
+  if (account.visitingLegacy) return { kind: "stay", reason: "legacy-visit" };
   const me = account.me;
   if (
     account.coreUnavailable ||
@@ -208,7 +234,7 @@ export function frontDoorBannerHref(
   return config.enabled && decision.kind === "stay" ? config.targetUrl : null;
 }
 
-/** Core recorded that this account's import into the new product finished. */
+/** The user turned on "use the new Finite by default" (Core `migrated_at`). */
 export function accountMigrated(me: Pick<CoreMe, "migrated_at">) {
   return typeof me.migrated_at === "string" && me.migrated_at.trim() !== "";
 }

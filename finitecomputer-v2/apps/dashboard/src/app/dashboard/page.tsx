@@ -90,8 +90,12 @@ import {
   type AgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
 import {
+  FRONT_DOOR_SETTINGS_ANCHOR,
+  FRONT_DOOR_SETTINGS_PATH,
+  accountMigrated,
   frontDoorAgentCreationMovedMessage,
   frontDoorOffersAgentCreation,
+  legacySubscriptionNeedsDashboard,
   loadFrontDoorConfig,
   type FrontDoorConfig,
 } from "@/lib/front-door";
@@ -111,6 +115,7 @@ type DashboardSearchParams = {
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
   creation?: string | string[];
+  frontDoorError?: string | string[];
   machine?: string | string[];
   machineId?: string | string[];
   new?: string | string[];
@@ -304,6 +309,20 @@ export default async function DashboardPage({
         ) : null}
         {!isNewAgentFlow && !finitePrivateUsage.usage && finitePrivateUsage.error ? (
           <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
+        ) : null}
+        {!isNewAgentFlow && core.me ? (
+          <FrontDoorPreferencePanel
+            config={frontDoor}
+            useNewFinite={accountMigrated(core.me)}
+            keptHereBy={
+              viewer.isAdmin
+                ? "operator"
+                : billing.billing && legacySubscriptionNeedsDashboard(billing.billing)
+                  ? "billing"
+                  : null
+            }
+            saveFailed={firstSearchParam(query.frontDoorError) === "1"}
+          />
         ) : null}
       </>
     );
@@ -1075,6 +1094,61 @@ function PaidAgentCreationRetryPanel({ error, name }: { error: string | null; na
       <Button asChild size="xl">
         <a href="/dashboard/agent-creation-requests/complete">Retry agent setup</a>
       </Button>
+    </section>
+  );
+}
+
+function FrontDoorPreferencePanel({
+  config,
+  useNewFinite,
+  keptHereBy,
+  saveFailed,
+}: {
+  config: FrontDoorConfig;
+  useNewFinite: boolean;
+  /** A stay rule that outranks the setting for this account, if any. */
+  keptHereBy: "operator" | "billing" | null;
+  saveFailed: boolean;
+}) {
+  if (!config.enabled) return null;
+  const status = !useNewFinite
+    ? "Off: signing in to finite.computer opens this dashboard."
+    : keptHereBy === "operator"
+      ? "On, but operator accounts always keep this dashboard."
+      : keptHereBy === "billing"
+        ? "On, but while your Finite Computer subscription is active this dashboard stays open so you can manage billing."
+        : "On: signing in to finite.computer opens the new Finite.";
+  return (
+    <section
+      id={FRONT_DOOR_SETTINGS_ANCHOR}
+      className="ocean-utility-card scroll-mt-20"
+      aria-labelledby="front-door-preference-title"
+    >
+      <div className="ocean-utility-card__header">
+        <span className="ocean-utility-card__icon" aria-hidden>
+          <SparklesIcon className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 id="front-door-preference-title" className="ocean-utility-card__title">
+            Use the new Finite by default
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {status} Your agents here keep running either way. Come back any
+            time at <code>{FRONT_DOOR_SETTINGS_PATH}</code>.
+          </p>
+          {saveFailed ? (
+            <p role="alert" className="mt-2 text-sm text-destructive">
+              Your setting could not be saved. Try again.
+            </p>
+          ) : null}
+        </div>
+        <form method="post" action={FRONT_DOOR_SETTINGS_PATH}>
+          <input type="hidden" name="useNewFinite" value={useNewFinite ? "false" : "true"} />
+          <Button type="submit" variant="outline" size="sm">
+            {useNewFinite ? "Keep using this dashboard" : "Use the new Finite by default"}
+          </Button>
+        </form>
+      </div>
     </section>
   );
 }

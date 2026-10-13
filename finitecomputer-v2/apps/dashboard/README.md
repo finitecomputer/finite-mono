@@ -85,7 +85,8 @@ be https and off this dashboard's origin. When on:
   it has a legacy agent. Core's `/me` defines one: a Project with an active
   runtime link, or a creation request that is `requested`, `launching`,
   `running` without a runtime, or in a status the dashboard does not know.
-  A Core `migrated_at` sends the account away even with an agent.
+  A user who turned on "Use the new Finite by default" (Core `migrated_at`)
+  is sent away even with an agent.
 - These always stay: operators (an operator-org session, or active WorkOS
   membership of `FC_WORKOS_OPERATOR_ORG_ID` from another org's session);
   accounts whose `/me` or billing cannot be read; owners of a Stripe checkout
@@ -105,12 +106,19 @@ be https and off this dashboard's origin. When on:
   through `/dashboard/agent-creation-requests/complete`, and a cancelled one
   is told where creation went.
 
-The import flow marks accounts migrated with `POST /api/core/v1/account-migrations`
-(`{"workosUserId": "..."}`) using Core's dedicated
-`FC_CORE_ACCOUNT_MIGRATION_API_TOKEN`. The first mark wins and is idempotent;
-there is no unset API, so clearing one is a manual, reviewed SQL change on
-Core's database. The route is served only on Core's loopback listener; the
-public edge does not proxy it.
+"Use the new Finite by default" is the user's own setting, shown on the
+dashboard home only while the switch is on. It calls Core's session-only
+`PUT /api/core/v1/me/front-door-preference` (`{"useNewFinite": bool}`), which
+changes only the caller's row: on records `migrated_at` once, off clears it.
+It is a routing preference, not a security boundary.
+
+The stable way back is `/dashboard/front-door` (finite.chat and the future
+import flow link here). `GET` opens this dashboard for the browser session
+(12h `finite-front-door-stay` cookie, honoured even with the setting on) and
+lands on the setting; `POST useNewFinite=true|false` saves it, clears that
+cookie, and sets a 30s `finite-front-door-fresh` cookie so the next loads read
+`/me` uncached. It is a route handler, never redirected, and 404s while the
+switch is off.
 
 ## Run locally
 
