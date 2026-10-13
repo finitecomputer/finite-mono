@@ -77,7 +77,9 @@ are [runtime-image.md](runtime-image.md); the lat2 deploy is
 Deploy lat2 with the dashboard list set to `*`. Agents that have not been
 upgraded report no finitechat plugin and stay on the hosted device.
 1. Activate the lat2 closure. Verify the running executables, hosted device
-   `/healthz`, and a dashboard sign-in.
+   `/healthz`, and a dashboard sign-in. Open the chat of one agent that is not
+   upgraded yet. It must load from the hosted device and get a reply. It must
+   not show "Chat is unavailable".
 2. On lat2, as root, record each person's view from a scratch copy of the
    snapshot. Never point it at the live state or the snapshot itself: an
    SQLite reader can add `-shm` files, and those would break the snapshot's
