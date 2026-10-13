@@ -194,29 +194,6 @@ fn service_route_credentials_must_be_distinct() {
     );
 }
 
-#[test]
-fn account_migration_credential_is_optional_and_never_shared() {
-    let auth = || CoreAuth::new(authenticator(), "service", "runner", "usage").unwrap();
-    assert_eq!(auth().account_migration_api_token(), None);
-    for shared in ["service", "runner", "usage", "  service  "] {
-        assert_eq!(
-            auth().with_account_migration_api_token(shared).err(),
-            Some(AuthConfigError::ServiceCredentialsMustBeDistinct),
-            "{shared:?} must not double as the account migration credential"
-        );
-    }
-    assert_eq!(
-        auth().with_account_migration_api_token("   ").err(),
-        Some(AuthConfigError::Missing(ACCOUNT_MIGRATION_TOKEN_ENV))
-    );
-    let configured = auth()
-        .with_account_migration_api_token(" migration ")
-        .unwrap();
-    assert_eq!(configured.account_migration_api_token(), Some("migration"));
-    // Later scoped credentials (Brain identity) are refused if they reuse it.
-    assert!(configured.credential_in_use("migration"));
-}
-
 fn runner_credential(
     credential_id: &str,
     token: &str,

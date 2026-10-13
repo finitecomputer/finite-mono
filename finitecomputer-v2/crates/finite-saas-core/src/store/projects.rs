@@ -9,7 +9,7 @@ impl CoreStore {
         postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
     }
 
-    /// `/me`'s visible projects plus the read-only account migration mark,
+    /// `/me`'s visible projects plus the read-only front-door preference,
     /// resolved from the same user lookup so `/me` keeps its query count.
     pub async fn visible_projects_and_migration_for_workos_user(
         &self,

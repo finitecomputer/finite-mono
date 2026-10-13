@@ -194,7 +194,6 @@ pub(crate) fn shared_route_core_auth(route_token: impl Into<String>) -> CoreAuth
         ]
         .into(),
         finite_private_usage_api_token: route_token_arc,
-        account_migration_api_token: None,
     }
 }
 
