@@ -413,6 +413,11 @@ export type CoreMe = {
   workos_user_id: string;
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
+  /**
+   * Read-only: when the new product's import flow marked this account
+   * migrated. Additive; an N-1 Core omits it, which reads as not migrated.
+   */
+  migrated_at?: string | null;
 };
 
 export type CoreMeResult = {

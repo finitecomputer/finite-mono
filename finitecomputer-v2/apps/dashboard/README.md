@@ -73,6 +73,35 @@ development may set `FC_SITES_ALLOW_LOCAL_OUTPUTS=1`; production ignores that
 flag so chat content cannot turn the dashboard into an iframe for a service on
 the user's own machine.
 
+## Front door
+
+`FC_FRONT_DOOR_ENABLED=true` turns finite.computer into a front door for the
+new Finite product. Any other value, or an invalid destination, keeps today's
+dashboard exactly. `FC_FRONT_DOOR_TARGET_URL` (default `https://finite.chat/`)
+and `FC_FRONT_DOOR_SIGNUP_URL` (default `https://finite.chat/auth/login`) must
+be https and off this dashboard's origin. When on:
+
+- After sign-in the `/dashboard` layout sends an account to the target unless
+  it has a legacy agent. Core's `/me` defines one: a Project with an active
+  runtime link, or a creation request that is `requested`, `launching`,
+  `running` without a runtime, or in a status the dashboard does not know.
+  A Core `migrated_at` sends the account away even with an agent. Operators
+  (the WorkOS operator organization), accounts whose `/me` cannot be read,
+  and owners of a Stripe checkout started before the flip stay. The layout
+  never wraps route handlers, so API, callback, logout, Sites, Google
+  Workspace, webhook and asset requests are never redirected. Legacy accounts
+  keep `returnTo` and see a session-dismissible "Try the new Finite" banner.
+- `/signup` redirects to the sign-up URL. New-agent entry points are hidden,
+  `/dashboard?new=1` explains the move, and the creation POST refuses before
+  touching Core. Core's creation API and in-flight launches are unchanged;
+  a checkout paid before the flip finishes through
+  `/dashboard/agent-creation-requests/complete`.
+
+The import flow marks accounts migrated with `POST /api/core/v1/account-migrations`
+(`{"workosUserId": "..."}`) using Core's dedicated
+`FC_CORE_ACCOUNT_MIGRATION_API_TOKEN`. The first mark wins and is idempotent;
+there is no unset API, so clearing one is a reviewed operator change.
+
 ## Run locally
 
 For local web chat development, use the real dashboard UI with the

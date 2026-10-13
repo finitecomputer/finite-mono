@@ -37,6 +37,16 @@
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
+      # Front door to the new Finite product (finite.chat). Off = today's
+      # dashboard exactly. "true" sends signed-in accounts without a legacy
+      # agent (or marked migrated in Core) to the target, /signup to the new
+      # sign-up screen, and stops legacy agent creation; operators, legacy
+      # agent owners, and anyone Core cannot be read for stay here. A target
+      # on this dashboard's own origin is refused and keeps the switch off.
+      # See finitecomputer-v2/apps/dashboard/README.md ("Front door").
+      FC_FRONT_DOOR_ENABLED = "false";
+      FC_FRONT_DOOR_TARGET_URL = "https://finite.chat/";
+      FC_FRONT_DOOR_SIGNUP_URL = "https://finite.chat/auth/login";
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s

@@ -25,6 +25,7 @@ import {
 } from "@/components/agent-onboarding-progress";
 import { AgentSidebar } from "@/components/agent-sidebar";
 import { FiniteBrand } from "@/components/finite-brand";
+import { FrontDoorBanner } from "@/components/front-door-banner";
 import { HostedChatProvider } from "@/components/hosted-chat-provider";
 import { SignOutLink } from "@/components/sign-out-link";
 import { activeNavigationMachine, type MachineNavItem } from "@/lib/dashboard-machine-navigation";
@@ -37,7 +38,11 @@ type DashboardShellProps = {
   children: React.ReactNode;
   viewerEmail?: string | null;
   isAdmin: boolean;
+  /** False once the front door moves agent creation to the new Finite. */
+  agentCreationOffered?: boolean;
   firstAgentAccount: boolean;
+  /** "Try the new Finite" destination for accounts that stay; null hides it. */
+  frontDoorBannerHref?: string | null;
   machines: MachineNavItem[];
   saasMode: boolean;
 };
@@ -217,6 +222,7 @@ function MachineSwitcher({
 function DashboardAppSection({
   children,
   activeMachine,
+  frontDoorBannerHref,
   machines,
   pathname,
   isAdmin,
@@ -227,6 +233,7 @@ function DashboardAppSection({
 }: {
   children: React.ReactNode;
   activeMachine: MachineNavItem | null;
+  frontDoorBannerHref?: string | null;
   machines: MachineNavItem[];
   pathname: string;
   isAdmin: boolean;
@@ -327,7 +334,10 @@ function DashboardAppSection({
       </header>
 
       <main ref={scrollRef} className="ocean-app-scroll">
-        <div className="ocean-app-content">{children}</div>
+        <div className="ocean-app-content">
+          {frontDoorBannerHref ? <FrontDoorBanner href={frontDoorBannerHref} /> : null}
+          {children}
+        </div>
       </main>
     </div>
   );
@@ -373,13 +383,17 @@ function OnboardingAppSection({
 }
 
 function AgentAppSection({
+  agentCreationOffered,
   children,
+  frontDoorBannerHref,
   isChatSurface,
   machine,
   machines,
   viewerEmail,
 }: {
+  agentCreationOffered: boolean;
   children: React.ReactNode;
+  frontDoorBannerHref?: string | null;
   isChatSurface: boolean;
   machine: MachineNavItem;
   machines: MachineNavItem[];
@@ -415,7 +429,7 @@ function AgentAppSection({
               creatingNewAgent={false}
               machines={machines}
               onNavigate={() => setMobileOpen(false)}
-              showNewAgent
+              showNewAgent={agentCreationOffered}
             />
           }
           mobileOpen={mobileOpen}
@@ -437,7 +451,12 @@ function AgentAppSection({
               <PanelLeftIcon className="size-4" />
             </button>
           ) : null}
-          {isChatSurface ? children : <div className="ocean-app-content">{children}</div>}
+          {isChatSurface ? children : (
+            <div className="ocean-app-content">
+              {frontDoorBannerHref ? <FrontDoorBanner href={frontDoorBannerHref} /> : null}
+              {children}
+            </div>
+          )}
         </main>
       </div>
     </HostedChatProvider>
@@ -447,7 +466,9 @@ function AgentAppSection({
 export function DashboardShell({
   children,
   isAdmin,
+  agentCreationOffered = true,
   firstAgentAccount,
+  frontDoorBannerHref,
   machines,
   saasMode,
   viewerEmail,
@@ -458,8 +479,11 @@ export function DashboardShell({
   const chatMachineId = dashboardChatMachineIdFromPath(pathname);
   const queryMachineId = searchParams.get("machine") ?? searchParams.get("machineId");
   const selectedMachineId = activeMachineId ?? queryMachineId;
+  // `?new=1` is the creation entry point; once creation has moved, tracked
+  // launches (`?creation=`) and first-agent progress still use this flow.
   const isNewAgentFlow = pathname === "/dashboard" && (
-    searchParams.get("new") === "1" || Boolean(searchParams.get("creation")) ||
+    (agentCreationOffered && searchParams.get("new") === "1") ||
+    Boolean(searchParams.get("creation")) ||
     (saasMode && firstAgentAccount)
   );
   const activeMachine = useMemo(
@@ -491,6 +515,8 @@ export function DashboardShell({
     return (
       <div className="ocean-shell ocean-shell--agent">
         <AgentAppSection
+          agentCreationOffered={agentCreationOffered}
+          frontDoorBannerHref={frontDoorBannerHref}
           isChatSurface={isChatSurface}
           machine={activeMachine}
           machines={machines}
@@ -506,6 +532,9 @@ export function DashboardShell({
     <div className="ocean-shell">
       <DashboardAppSection
         activeMachine={activeMachine}
+        // Full-height chat surfaces keep their layout; the banner rides on
+        // the home, overview and settings pages instead.
+        frontDoorBannerHref={chatMachineId ? null : frontDoorBannerHref}
         machines={machines}
         pathname={pathname}
         isAdmin={isAdmin}

@@ -163,6 +163,14 @@ Fleet scope requires both `--roll-all` and an explicit
    digest is the deploy record and the rollback target — then repeat steps 1-3
    for the new rev. podman pulls the pinned digest.
 
+5. **Front door switch** (dashboard image with the front door, Core with
+   migration 0042): set `FC_FRONT_DOOR_ENABLED = "true"` in
+   `modules/dashboard.nix`, commit to `main`, and repeat steps 1-3. Turning it
+   off is the same edit back to `"false"`; no data changes either way. Core's
+   optional `FC_CORE_ACCOUNT_MIGRATION_API_TOKEN` is unrelated to the flip.
+   Verify signed-out `/signup` redirects to the new sign-up URL and an
+   operator account still reaches `/dashboard/admin`.
+
 ### VERIFY
 
 1. Core health directly on the box:
