@@ -366,6 +366,16 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     let folded_digest =
         bridge.json(bridge.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
     assert_eq!(folded_digest, serde_json::to_value(&hosted_digest).unwrap());
+    let fold_status: Value = serde_json::from_slice(
+        &std::fs::read(PathBuf::from(&agent_home).join("direct/fold-status.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fold_status["origin"], "fold");
+    assert_eq!(fold_status["owner_account_id"], person.account());
+    assert_eq!(
+        fold_status["digests"][0], folded_digest,
+        "operators can read the fold digest"
+    );
 
     // The person sees the folded topic, renamed chat and message.
     let path = format!("/v1/app/state?room_id={room_id}&topic_id={topic_id}&chat_id={chat_id}");

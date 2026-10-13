@@ -1230,6 +1230,21 @@ fn fold_agent_device(home: &AgentHome) -> Result<(), CliError> {
     for suffix in ["-wal", "-shm"] {
         let _ = fs::remove_file(format!("{}{suffix}", staging.display()));
     }
+    // What the person sees right after the fold, as hashes, so operators can
+    // compare it with the hosted device from the host's /data mount without
+    // entering the agent.
+    let mut report = report;
+    let folded = DirectRuntime::open(home)?;
+    let digests = {
+        let inner = folded.lock()?;
+        inner
+            .engine
+            .room_ids()
+            .into_iter()
+            .map(|room_id| inner.engine.digest(&room_id))
+            .collect::<Vec<_>>()
+    };
+    report["digests"] = serde_json::to_value(digests).map_err(CliError::Serialize)?;
     write_private(
         dir.join(DIRECT_FOLD_STATUS_FILE),
         &serde_json::to_string_pretty(&report).map_err(CliError::Serialize)?,
