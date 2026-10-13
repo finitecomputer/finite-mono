@@ -1,3 +1,5 @@
+#[path = "http/direct_authorization.rs"]
+mod direct_authorization;
 #[path = "http/scoped_views.rs"]
 mod scoped_views;
 
