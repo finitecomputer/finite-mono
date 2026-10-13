@@ -40,14 +40,14 @@ use finitechat_client::{
     StoredAppMessage, StoredAppRoom, StoredAppRoomState, WelcomeAdmissionPolicy,
 };
 use finitechat_core::{
-    AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState, AppRoomSyncCursor,
-    AppSentMessage, AppTopicSummary, ChatMediaKind, FiniteChatCoreError, FiniteChatRuntime,
-    OpenOptions, OutboundAttachment,
+    AppAcceptedActivity, AppAction, AppBridgeActivityInput, AppBridgeSync, AppRoomState,
+    AppRoomSyncCursor, AppSentMessage, AppState, AppTopicSummary, ChatMediaKind,
+    FiniteChatCoreError, FiniteChatRuntime, OpenOptions, OutboundAttachment,
 };
 use finitechat_hermes::{
     HERMES_MESSAGE_PAYLOAD_TYPE_V1, HermesAckRequestV1, HermesActivityRequestV1,
-    HermesEditRequestV1, HermesMessagePayloadV1, HermesMessageStatusV1, HermesMessageTypeV1,
-    HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_METADATA_BYTES,
+    HermesAttachmentV1, HermesEditRequestV1, HermesMessagePayloadV1, HermesMessageStatusV1,
+    HermesMessageTypeV1, HermesPollEventV1, HermesSendRequestV1, MAX_HERMES_METADATA_BYTES,
     MAX_HERMES_POLL_TIMEOUT_MILLIS, MAX_HERMES_TEXT_BYTES,
 };
 use finitechat_http::{NostrProfileRecord, SyncWaitRequest, SyncWaitRoom};
@@ -69,6 +69,141 @@ use crate::cli::{
     HermesHomeChannelSetArgs, HermesInitArgs, HermesInstallArgs, HermesRekeyArgs,
     HermesRoomStatusArgs, HermesServeArgs,
 };
+
+#[path = "hermes_direct.rs"]
+mod direct;
+
+/// The chat backend behind the sidecar's loopback APIs: the agent's MLS
+/// Device, or the direct room log (`FINITECHAT_CHAT_TRANSPORT=direct`).
+trait SidecarRuntime: Send + Sync {
+    fn transport(&self) -> &'static str;
+    fn as_direct(&self) -> Option<&direct::DirectRuntime> {
+        None
+    }
+    fn start(&self) -> Result<AppState, CliError>;
+    fn state(&self) -> Result<AppState, CliError>;
+    fn poll_once(&self) -> Result<AppBridgeSync, CliError>;
+    fn wait_for_update(&self, timeout_millis: u64) -> Result<AppBridgeSync, CliError>;
+    /// The most recent stored decrypted events, oldest first.
+    fn recent_events(&self, limit: u32) -> Result<Vec<StoredAppEvent>, CliError>;
+    fn send_encoded_chat_message(
+        &self,
+        room_id: String,
+        plaintext: Vec<u8>,
+        preview: String,
+    ) -> Result<AppSentMessage, CliError>;
+    fn upload_bridge_attachment(
+        &self,
+        room_id: String,
+        attachment: OutboundAttachment,
+    ) -> Result<HermesAttachmentV1, CliError>;
+    fn append_ephemeral_activity(
+        &self,
+        input: AppBridgeActivityInput,
+    ) -> Result<AppAcceptedActivity, CliError>;
+    fn send_runtime_command_result(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, CliError>;
+    fn send_runtime_state_snapshot(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, CliError>;
+    fn room_sync_cursors(&self) -> Result<Vec<AppRoomSyncCursor>, CliError>;
+}
+
+/// The agent's MLS Device: today's transport.
+struct MlsRuntime {
+    runtime: Arc<FiniteChatRuntime>,
+    home: AgentHome,
+}
+
+impl SidecarRuntime for MlsRuntime {
+    fn transport(&self) -> &'static str {
+        "mls"
+    }
+
+    fn start(&self) -> Result<AppState, CliError> {
+        Ok(self.runtime.dispatch_and_wait(AppAction::StartRuntime)?)
+    }
+
+    fn state(&self) -> Result<AppState, CliError> {
+        Ok(self.runtime.state()?)
+    }
+
+    fn poll_once(&self) -> Result<AppBridgeSync, CliError> {
+        Ok(self.runtime.agent_bridge_poll_once()?)
+    }
+
+    fn wait_for_update(&self, timeout_millis: u64) -> Result<AppBridgeSync, CliError> {
+        Ok(self.runtime.agent_bridge_wait_for_update(timeout_millis)?)
+    }
+
+    fn recent_events(&self, limit: u32) -> Result<Vec<StoredAppEvent>, CliError> {
+        let (store, device, _) = open_agent(&self.home)?;
+        store
+            .load_app_events(device.device_ref(), limit)
+            .map_err(|error| CliError::Hermes(error.to_string()))
+    }
+
+    fn send_encoded_chat_message(
+        &self,
+        room_id: String,
+        plaintext: Vec<u8>,
+        preview: String,
+    ) -> Result<AppSentMessage, CliError> {
+        Ok(self
+            .runtime
+            .send_encoded_chat_message_and_wait(room_id, plaintext, preview)?)
+    }
+
+    fn upload_bridge_attachment(
+        &self,
+        room_id: String,
+        attachment: OutboundAttachment,
+    ) -> Result<HermesAttachmentV1, CliError> {
+        Ok(self
+            .runtime
+            .upload_bridge_attachment_and_wait(room_id, attachment)?)
+    }
+
+    fn append_ephemeral_activity(
+        &self,
+        input: AppBridgeActivityInput,
+    ) -> Result<AppAcceptedActivity, CliError> {
+        Ok(self.runtime.append_ephemeral_activity_and_wait(input)?)
+    }
+
+    fn send_runtime_command_result(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, CliError> {
+        Ok(self
+            .runtime
+            .send_runtime_command_result_and_wait(room_id, conversation_id, payload)?)
+    }
+
+    fn send_runtime_state_snapshot(
+        &self,
+        room_id: String,
+        conversation_id: Option<String>,
+        payload: Vec<u8>,
+    ) -> Result<String, CliError> {
+        Ok(self
+            .runtime
+            .send_runtime_state_snapshot_and_wait(room_id, conversation_id, payload)?)
+    }
+
+    fn room_sync_cursors(&self) -> Result<Vec<AppRoomSyncCursor>, CliError> {
+        Ok(self.runtime.room_sync_cursors()?)
+    }
+}
 
 const CONFIG_FILE: &str = "config.json";
 const HERMES_INBOX_FILE: &str = "hermes-inbox.json";
@@ -196,6 +331,7 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::HomeChannel { command } => cmd_home_channel(&home_dir, command, output),
         HermesCommand::Admission { command } => cmd_admission(&home_dir, command, output),
         HermesCommand::RoomStatus(args) => cmd_room_status(&home_dir, args, json_mode, output),
+        HermesCommand::DirectDigest => direct::cmd_direct_digest(&home_dir, output),
         HermesCommand::Rekey(args) => cmd_rekey(&home_dir, args, json_mode, output),
         HermesCommand::Poll => cmd_poll(&home_dir, read_request(request_json)?, output),
         HermesCommand::Ack => cmd_ack(&home_dir, read_request(request_json)?, output),
@@ -344,7 +480,7 @@ struct HermesServiceState {
     account_id: String,
     device_id: String,
     server_url: String,
-    runtime: Arc<FiniteChatRuntime>,
+    runtime: Arc<dyn SidecarRuntime>,
     inbox_lock: Arc<Mutex<()>>,
     running_lock: Arc<Mutex<()>>,
     bridge_updates: Arc<(Mutex<u64>, Condvar)>,
@@ -426,14 +562,7 @@ async fn prepare_hermes_service(
         .local_addr()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
-    seed_welcome_allowlist(home)?;
-    let runtime = open_agent_runtime(home)?;
-    // Service readiness means this Device is actually reachable for the
-    // Welcome-first product flow, not merely that its local SQLite file opens.
-    // StartRuntime publishes/replenishes KeyPackages and activates pending
-    // Welcomes on every resident-service start, which also makes restart the
-    // natural healing path after Chat/server interruption.
-    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    let runtime = open_sidecar_runtime(home_dir, home)?;
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
         account_id: home.config.account_id.clone(),
@@ -446,7 +575,14 @@ async fn prepare_hermes_service(
         joined_account_ids: Arc::new(Mutex::new(Vec::new())),
         server_stream: ServerStreamMonitor::default(),
     };
-    start_resident_bridge_sync(state.clone())?;
+    if let Some(direct) = state.runtime.as_direct() {
+        // Appends wake the Hermes and agentd streams directly; there is no
+        // server to sync from.
+        let signalled = state.clone();
+        direct.set_on_append(Box::new(move || signal_bridge_update(&signalled)));
+    } else {
+        start_resident_bridge_sync(state.clone())?;
+    }
     let started = HermesServiceStarted {
         service: "finitechat-hermes",
         version: env!("CARGO_PKG_VERSION"),
@@ -474,6 +610,33 @@ async fn prepare_hermes_service(
     })
 }
 
+/// Open the backend this start serves. Direct transport folds the MLS Device
+/// once; if that cannot complete, this start keeps serving MLS chat and says
+/// why, so the person's existing chat stays reachable.
+fn open_sidecar_runtime(
+    home_dir: &Path,
+    home: &AgentHome,
+) -> Result<Arc<dyn SidecarRuntime>, CliError> {
+    if direct::direct_transport_requested() {
+        match direct::DirectRuntime::open_or_fold(home) {
+            Ok(runtime) => return Ok(runtime),
+            Err(error) => direct::record_fold_failure(home_dir, &error),
+        }
+    }
+    seed_welcome_allowlist(home)?;
+    let runtime = MlsRuntime {
+        runtime: open_agent_runtime(home)?,
+        home: load_home(home_dir)?,
+    };
+    // Service readiness means this Device is actually reachable for the
+    // Welcome-first product flow, not merely that its local SQLite file opens.
+    // StartRuntime publishes/replenishes KeyPackages and activates pending
+    // Welcomes on every resident-service start, which also makes restart the
+    // natural healing path after Chat/server interruption.
+    runtime.start()?;
+    Ok(Arc::new(runtime))
+}
+
 async fn serve_prepared_hermes_service(prepared: PreparedHermesService) -> Result<(), CliError> {
     axum::serve(
         prepared.listener,
@@ -493,6 +656,7 @@ fn hermes_service_router(state: HermesServiceState) -> Router {
         .route("/v1/agentd/ack", post(agentd_service_ack))
         .route("/v1/agentd/result", post(agentd_service_result))
         .route("/v1/agentd/state", post(agentd_service_state))
+        .merge(direct::direct_app_router())
         .with_state(state)
 }
 
@@ -546,7 +710,7 @@ impl ServerStreamMonitor {
         }
     }
 
-    fn record_failure(&self, failed_unix_ms: u64, error: &FiniteChatCoreError) {
+    fn record_failure(&self, failed_unix_ms: u64, error: &dyn std::fmt::Display) {
         if let Ok(mut status) = self.0.lock() {
             status.state = "reconnecting";
             status.last_error = Some(bounded_error_summary(error));
@@ -568,7 +732,7 @@ impl ServerStreamMonitor {
 /// bodies, and this string rides every `/readyz` response.
 const SERVER_STREAM_ERROR_SUMMARY_CHARS: usize = 240;
 
-fn bounded_error_summary(error: &FiniteChatCoreError) -> String {
+fn bounded_error_summary(error: &dyn std::fmt::Display) -> String {
     let mut summary = error.to_string();
     if summary.chars().count() > SERVER_STREAM_ERROR_SUMMARY_CHARS {
         summary = summary
@@ -634,11 +798,11 @@ fn start_resident_bridge_sync(state: HermesServiceState) -> Result<(), CliError>
             loop {
                 let cycle_started_unix_ms = now_ms();
                 let result = if sync_immediately {
-                    state.runtime.agent_bridge_poll_once()
+                    state.runtime.poll_once()
                 } else {
                     state
                         .runtime
-                        .agent_bridge_wait_for_update(RESIDENT_BRIDGE_SYNC_INTERVAL_MILLIS)
+                        .wait_for_update(RESIDENT_BRIDGE_SYNC_INTERVAL_MILLIS)
                 };
                 match result {
                     Ok(bridge) => {
@@ -739,8 +903,11 @@ async fn hermes_service_readyz(
     let result = tokio::task::spawn_blocking(move || {
         let app = state.runtime.state()?;
         let room_cursors = state.runtime.room_sync_cursors()?;
+        let transport = state.runtime.transport();
         Ok(json!({
             "status": "ready",
+            "transport": transport,
+            "direct_fold": direct::read_fold_status(&state.agent_home),
             // The runtime's own status line names quarantined rooms (e.g.
             // "ready; 1 room needs repair"); mirrored verbatim so a
             // quarantined room is visible in the readiness probe without a
@@ -750,7 +917,11 @@ async fn hermes_service_readyz(
             // the resident sync loop. Distinct from the local
             // hermes<->sidecar bridge that hermes-bridge-status.json
             // describes; the two fail independently.
-            "server_stream": server_stream_status_json(&state.server_stream.snapshot()),
+            "server_stream": if transport == "direct" {
+                json!({ "state": "not_applicable" })
+            } else {
+                server_stream_status_json(&state.server_stream.snapshot())
+            },
             "room_cursors": room_cursors_summary_json(&room_cursors),
             "service": "finitechat-hermes",
             "version": env!("CARGO_PKG_VERSION"),
@@ -922,7 +1093,7 @@ fn handle_agentd_result(
         .validate_structure()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.result).map_err(CliError::Serialize)?;
-    let message_id = state.runtime.send_runtime_command_result_and_wait(
+    let message_id = state.runtime.send_runtime_command_result(
         delivery.room_id,
         delivery.conversation_id,
         payload,
@@ -938,7 +1109,7 @@ fn handle_agentd_state(
         .validate_limits()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let payload = serde_json::to_vec(&delivery.snapshot).map_err(CliError::Serialize)?;
-    let message_id = state.runtime.send_runtime_state_snapshot_and_wait(
+    let message_id = state.runtime.send_runtime_state_snapshot(
         delivery.room_id,
         delivery.conversation_id,
         payload,
@@ -979,8 +1150,8 @@ fn handle_hermes_service_action(
             let mut request: HermesSendRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
-            resolve_hermes_send_route(&state.runtime, &mut request)?;
-            let sent = send_hermes_request_with_runtime(&state.runtime, &request)?;
+            resolve_hermes_send_route(state.runtime.as_ref(), &mut request)?;
+            let sent = send_hermes_request_with_runtime(state.runtime.as_ref(), &request)?;
             update_running_after_send(&state.agent_home, &request, &sent.message_id)?;
             Ok(sent_message_value(&sent))
         }
@@ -988,8 +1159,8 @@ fn handle_hermes_service_action(
             let mut request: HermesEditRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
-            resolve_hermes_edit_route(&state.agent_home, &state.runtime, &mut request)?;
-            let sent = edit_hermes_request_with_runtime(&state.runtime, &request)?;
+            resolve_hermes_edit_route(&state.agent_home, state.runtime.as_ref(), &mut request)?;
+            let sent = edit_hermes_request_with_runtime(state.runtime.as_ref(), &request)?;
             update_running_after_edit(&state.agent_home, &request)?;
             Ok(sent_message_value(&sent))
         }
@@ -1070,7 +1241,7 @@ fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, Cl
             finalize: true,
             metadata: BTreeMap::new(),
         };
-        edit_hermes_request_with_runtime(&state.runtime, &recovery)?;
+        edit_hermes_request_with_runtime(state.runtime.as_ref(), &recovery)?;
         recovered += 1;
     }
     if recovered > 0 {
@@ -1085,9 +1256,9 @@ fn handle_hermes_service_activity(
 ) -> Result<Value, CliError> {
     let mut request: HermesActivityRequestV1 =
         serde_json::from_value(payload).map_err(CliError::Json)?;
-    resolve_hermes_activity_route(&state.runtime, &mut request)?;
+    resolve_hermes_activity_route(state.runtime.as_ref(), &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = state.runtime.append_ephemeral_activity_and_wait(input)?;
+    let accepted = state.runtime.append_ephemeral_activity(input)?;
     Ok(json!({ "accepted": true, "result": accepted }))
 }
 
@@ -1151,7 +1322,13 @@ fn collect_agentd_inbound(
 ) -> Result<Vec<RuntimeCommandDeliveryV1>, CliError> {
     let _guard = lock_service_mutex(&state.inbox_lock)?;
     let mut inbox = load_agentd_inbox(&state.agent_home)?;
-    recover_stored_agentd_events(home, &state.account_id, room_filter, &mut inbox)?;
+    recover_stored_agentd_events(
+        home,
+        state.runtime.as_ref(),
+        &state.account_id,
+        room_filter,
+        &mut inbox,
+    )?;
     Ok(inbox
         .events
         .iter()
@@ -1174,6 +1351,7 @@ fn collect_hermes_service_inbound_payload(
     recover_stored_hermes_events(
         &state.agent_home,
         home,
+        state.runtime.as_ref(),
         &state.account_id,
         request.room_id.as_deref(),
         &mut inbox,
@@ -1832,6 +2010,10 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     );
     let home = load_home(home_dir)?;
     let runtime = open_agent_runtime(&home)?;
+    let sidecar = MlsRuntime {
+        runtime: Arc::clone(&runtime),
+        home: load_home(home_dir)?,
+    };
     let started = Instant::now();
     let own_account = home.config.account_id.clone();
     let mut inbox = load_hermes_inbox(home_dir)?;
@@ -1874,6 +2056,7 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         recover_stored_hermes_events(
             home_dir,
             &home,
+            &sidecar,
             &own_account,
             request.room_id.as_deref(),
             &mut inbox,
@@ -1972,12 +2155,13 @@ fn save_agentd_inbox(home_dir: &Path, inbox: &AgentdInboxState) -> Result<(), Cl
 
 fn recover_stored_agentd_events(
     home: &AgentHome,
+    runtime: &dyn SidecarRuntime,
     own_account: &str,
     room_filter: Option<&str>,
     inbox: &mut AgentdInboxState,
 ) -> Result<(), CliError> {
     let mut changed = false;
-    for stored in load_recent_agent_app_events(home)? {
+    for stored in runtime.recent_events(HERMES_STORED_EVENT_RECOVERY_LIMIT)? {
         if let Some(room_id) = room_filter
             && room_id != stored.room_id
         {
@@ -2122,11 +2306,12 @@ fn enqueue_hermes_inbox_event(
 fn recover_stored_hermes_events(
     home_dir: &Path,
     home: &AgentHome,
+    runtime: &dyn SidecarRuntime,
     own_account: &str,
     room_filter: Option<&str>,
     inbox: &mut HermesInboxState,
 ) -> Result<(), CliError> {
-    let recent_events = load_recent_agent_app_events(home)?;
+    let recent_events = runtime.recent_events(HERMES_STORED_EVENT_RECOVERY_LIMIT)?;
     recover_stored_hermes_events_from_events(
         home_dir,
         home,
@@ -2180,13 +2365,6 @@ fn recover_stored_hermes_events_from_events(
         save_hermes_inbox(home_dir, inbox)?;
     }
     Ok(())
-}
-
-fn load_recent_agent_app_events(home: &AgentHome) -> Result<Vec<StoredAppEvent>, CliError> {
-    let (store, device, _) = open_agent(home)?;
-    store
-        .load_app_events(device.device_ref(), HERMES_STORED_EVENT_RECOVERY_LIMIT)
-        .map_err(|error| CliError::Hermes(error.to_string()))
 }
 
 /// Highest app-event seq the bridge has already handed to hermes (or skipped
@@ -2656,6 +2834,24 @@ fn materialize_blob_attachment(
         return Ok(path);
     }
 
+    if let Some(ciphertext_sha256) = reference.url.strip_prefix(direct::DIRECT_BLOB_URL_PREFIX) {
+        // A direct-transport upload: the ciphertext lives in this home.
+        let body =
+            fs::read(direct::direct_blob_path(home_dir, ciphertext_sha256)).map_err(|error| {
+                AttachmentMaterializationError::Permanent(format!(
+                    "direct attachment is missing: {error}"
+                ))
+            })?;
+        let downloaded = finish_blossom_download_http_response(
+            reference,
+            BlossomDownloadHttpResponse {
+                status: 200,
+                body: &body,
+            },
+        )
+        .map_err(classify_attachment_verification_error)?;
+        return write_materialized_attachment(&path, &downloaded.plaintext);
+    }
     let request = prepare_blossom_download_http_request(reference).map_err(|error| {
         AttachmentMaterializationError::Permanent(format!(
             "attachment reference is invalid: {error}"
@@ -2692,7 +2888,13 @@ fn materialize_blob_attachment(
         },
     )
     .map_err(classify_attachment_verification_error)?;
+    write_materialized_attachment(&path, &downloaded.plaintext)
+}
 
+fn write_materialized_attachment(
+    path: &Path,
+    plaintext: &[u8],
+) -> Result<PathBuf, AttachmentMaterializationError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             AttachmentMaterializationError::Retryable(format!(
@@ -2701,15 +2903,15 @@ fn materialize_blob_attachment(
         })?;
     }
     let tmp = path.with_extension("tmp");
-    fs::write(&tmp, &downloaded.plaintext).map_err(|error| {
+    fs::write(&tmp, plaintext).map_err(|error| {
         AttachmentMaterializationError::Retryable(format!("attachment cache write failed: {error}"))
     })?;
-    fs::rename(&tmp, &path).map_err(|error| {
+    fs::rename(&tmp, path).map_err(|error| {
         AttachmentMaterializationError::Retryable(format!(
             "attachment cache commit failed: {error}"
         ))
     })?;
-    Ok(path)
+    Ok(path.to_path_buf())
 }
 
 fn classify_attachment_http_error(status: u16) -> AttachmentMaterializationError {
@@ -2854,8 +3056,7 @@ fn cmd_send<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let mut request: HermesSendRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    let runtime = open_cli_mls_runtime(home_dir, &home)?;
     resolve_hermes_send_route(&runtime, &mut request)?;
     let sent = send_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_send(home_dir, &request, &sent.message_id)?;
@@ -2866,8 +3067,7 @@ fn cmd_edit<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
     let mut request: HermesEditRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    let runtime = open_cli_mls_runtime(home_dir, &home)?;
     resolve_hermes_edit_route(home_dir, &runtime, &mut request)?;
     let sent = edit_hermes_request_with_runtime(&runtime, &request)?;
     update_running_after_edit(home_dir, &request)?;
@@ -3011,8 +3211,7 @@ fn cmd_recover<W: Write>(home_dir: &Path, _request: Value, output: &mut W) -> Re
             &hermes_payload,
         )?;
         let home = load_home(home_dir)?;
-        let runtime = open_agent_runtime(&home)?;
-        runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+        let runtime = open_cli_mls_runtime(home_dir, &home)?;
         append_payload_to_room_with_runtime(
             &runtime,
             &recovery.room_id,
@@ -3061,7 +3260,7 @@ fn resolve_thread_id_route(
 /// Home default with a loud warning so the reply stays deliverable: a topic
 /// archived mid-session must never silently consume the user's message.
 fn resolve_route_fields(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     room_id: &str,
     conversation_id: Option<String>,
     segment_id: Option<String>,
@@ -3088,7 +3287,7 @@ fn resolve_route_fields(
 }
 
 fn resolve_hermes_send_route(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &mut HermesSendRequestV1,
 ) -> Result<(), CliError> {
     let (conversation_id, segment_id) = resolve_route_fields(
@@ -3105,7 +3304,7 @@ fn resolve_hermes_send_route(
 }
 
 fn resolve_hermes_activity_route(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &mut HermesActivityRequestV1,
 ) -> Result<(), CliError> {
     let (conversation_id, segment_id) = resolve_route_fields(
@@ -3139,7 +3338,7 @@ fn lookup_running_message(
 /// longer needs to remember outbound message routes.
 fn resolve_hermes_edit_route(
     home_dir: &Path,
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &mut HermesEditRequestV1,
 ) -> Result<(), CliError> {
     if request.conversation_id.is_some() || request.segment_id.is_some() {
@@ -3193,7 +3392,7 @@ fn resolve_hermes_edit_route(
 }
 
 fn send_hermes_request_with_runtime(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &HermesSendRequestV1,
 ) -> Result<AppSentMessage, CliError> {
     let request = prepare_hermes_send_attachments(runtime, request)?;
@@ -3224,7 +3423,7 @@ struct LoadedHermesAttachment {
 /// media message (and cannot leave earlier files from the same request
 /// partially uploaded just because a later path was invalid).
 fn prepare_hermes_send_attachments(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &HermesSendRequestV1,
 ) -> Result<HermesSendRequestV1, CliError> {
     request
@@ -3268,8 +3467,8 @@ fn prepare_hermes_send_attachments(
     }
 
     for attachment in loaded {
-        prepared.attachments[attachment.index] = runtime
-            .upload_bridge_attachment_and_wait(request.room_id.clone(), attachment.outbound)?;
+        prepared.attachments[attachment.index] =
+            runtime.upload_bridge_attachment(request.room_id.clone(), attachment.outbound)?;
     }
     prepared
         .validate_limits()
@@ -3360,7 +3559,7 @@ fn read_bounded_hermes_attachment(path: &str, prior_bytes: usize) -> Result<Vec<
 }
 
 fn edit_hermes_request_with_runtime(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     request: &HermesEditRequestV1,
 ) -> Result<AppSentMessage, CliError> {
     let hermes_payload = HermesMessagePayloadV1::from_edit(request)
@@ -3381,14 +3580,12 @@ fn edit_hermes_request_with_runtime(
 }
 
 fn append_payload_to_room_with_runtime(
-    runtime: &FiniteChatRuntime,
+    runtime: &dyn SidecarRuntime,
     room_id: &str,
     payload: Vec<u8>,
     preview: String,
 ) -> Result<AppSentMessage, CliError> {
-    runtime
-        .send_encoded_chat_message_and_wait(room_id.to_owned(), payload, preview)
-        .map_err(CliError::from)
+    runtime.send_encoded_chat_message(room_id.to_owned(), payload, preview)
 }
 
 fn write_sent_message<W: Write>(output: &mut W, sent: &AppSentMessage) -> Result<(), CliError> {
@@ -3504,11 +3701,10 @@ fn cmd_activity<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Re
     let mut request: HermesActivityRequestV1 =
         serde_json::from_value(request).map_err(CliError::Json)?;
     let home = load_home(home_dir)?;
-    let runtime = open_agent_runtime(&home)?;
-    runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    let runtime = open_cli_mls_runtime(home_dir, &home)?;
     resolve_hermes_activity_route(&runtime, &mut request)?;
     let input = app_bridge_activity_input(request)?;
-    let accepted = runtime.append_ephemeral_activity_and_wait(input)?;
+    let accepted = runtime.append_ephemeral_activity(input)?;
     crate::write_pretty_json(output, &json!({ "accepted": true, "result": accepted }))
 }
 
@@ -3740,6 +3936,23 @@ fn load_or_generate_agent_secret() -> Result<NostrSecretKey, CliError> {
 }
 
 type AgentDelivery = HttpRuntimeDelivery<ReqwestHttpRuntimeTransport>;
+
+/// One-shot CLI commands drive the MLS Device directly. In direct transport
+/// the resident service owns the room log, so they refuse instead.
+fn open_cli_mls_runtime(home_dir: &Path, home: &AgentHome) -> Result<MlsRuntime, CliError> {
+    if direct::direct_transport_requested() {
+        return Err(CliError::Hermes(
+            "direct chat transport is served by `finitechat hermes serve`; one-shot commands are unavailable"
+                .to_owned(),
+        ));
+    }
+    let runtime = MlsRuntime {
+        runtime: open_agent_runtime(home)?,
+        home: load_home(home_dir)?,
+    };
+    runtime.start()?;
+    Ok(runtime)
+}
 
 fn open_agent_runtime(home: &AgentHome) -> Result<Arc<FiniteChatRuntime>, CliError> {
     FiniteChatRuntime::open(agent_runtime_open_options(home)).map_err(CliError::from)
@@ -4181,7 +4394,7 @@ fn device_config(
     }
 }
 
-fn write_private(path: PathBuf, contents: &str) -> Result<(), CliError> {
+fn write_private(path: PathBuf, contents: impl AsRef<[u8]>) -> Result<(), CliError> {
     let parent = path.parent().ok_or_else(|| {
         CliError::Hermes(format!("private file {} has no parent", path.display()))
     })?;
@@ -4209,7 +4422,7 @@ fn write_private(path: PathBuf, contents: &str) -> Result<(), CliError> {
         .open(&temporary)
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let staged = file
-        .write_all(contents.as_bytes())
+        .write_all(contents.as_ref())
         .and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = staged {

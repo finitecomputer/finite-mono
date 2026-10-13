@@ -793,6 +793,10 @@ pub(crate) enum HermesCommand {
     /// Report one room's connection/pairing status.
     RoomStatus(HermesRoomStatusArgs),
 
+    /// Print hashes of the direct room log's topics, chats and transcripts
+    /// (no message text), for comparison with the hosted device.
+    DirectDigest,
+
     /// Advance one room's MLS epoch with a self-update Commit so a
     /// counterpart whose send ratchet was rewound starts fresh at
     /// generation 0. Refuses to run unless the local epoch matches the

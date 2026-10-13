@@ -11,7 +11,7 @@ name = "finitechat"
 path = "src/main.rs"
 
 [dependencies]
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 clap.workspace = true
 finite-identity.workspace = true
 finitechat-blob = { path = "../finitechat-blob" }
@@ -30,6 +30,12 @@ same-file.workspace = true
 thiserror.workspace = true
 time.workspace = true
 finitechat-delivery.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+nostr.workspace = true
+rusqlite.workspace = true
+sha2.workspace = true
 futures-util.workspace = true
 tokio.workspace = true
 
@@ -37,5 +43,4 @@ tokio.workspace = true
 finitechat-hermes = { path = "../finitechat-hermes" }
 finitechat-mls = { path = "../finitechat-mls" }
 finitechat-server = { path = "../finitechat-server" }
-sha2.workspace = true
 tempfile.workspace = true

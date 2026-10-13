@@ -1198,6 +1198,7 @@ name = "finitechat-cli"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "base64",
  "clap",
  "finite-identity",
  "finitechat-blob",
@@ -1211,8 +1212,12 @@ dependencies = [
  "finitechat-server",
  "finitechat-transport",
  "futures-util",
+ "getrandom 0.3.4",
+ "hex",
+ "nostr",
  "qrcode",
  "reqwest",
+ "rusqlite",
  "same-file",
  "serde",
  "serde_json",
