@@ -36,10 +36,10 @@ async fn account_migration_mark_keeps_the_first_timestamp() {
             .unwrap();
         assert_eq!(
             store
-                .account_migrated_at_for_workos_user("user_store_migration")
+                .visible_projects_and_migration_for_workos_user("user_store_migration")
                 .await
                 .unwrap(),
-            None
+            (Vec::new(), None)
         );
 
         let first = store
@@ -80,11 +80,20 @@ async fn account_migration_mark_keeps_the_first_timestamp() {
         );
         assert_eq!(
             store
-                .account_migrated_at_for_workos_user("user_store_migration")
+                .visible_projects_and_migration_for_workos_user("user_store_migration")
                 .await
                 .unwrap()
+                .1
                 .as_deref(),
             Some("2026-10-19T09:00:00Z")
+        );
+        // An account Core never linked reads as unmarked with no projects.
+        assert_eq!(
+            store
+                .visible_projects_and_migration_for_workos_user("user_never_linked")
+                .await
+                .unwrap(),
+            (Vec::new(), None)
         );
 
         // Row-scoped: the other account is untouched.

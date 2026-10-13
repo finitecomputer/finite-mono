@@ -68,17 +68,13 @@ async fn me_response_for_identity(
     state: &CoreApiState,
     identity: &VerifiedIdentity,
 ) -> Result<MeResponse, ApiError> {
-    let projects = state
+    let (projects, migrated_at) = state
         .store
-        .visible_projects_for_workos_user(&identity.workos_user_id)
+        .visible_projects_and_migration_for_workos_user(&identity.workos_user_id)
         .await?;
     let agent_creation_requests = state
         .store
         .agent_creation_requests_for_workos_user(&identity.workos_user_id)
-        .await?;
-    let migrated_at = state
-        .store
-        .account_migrated_at_for_workos_user(&identity.workos_user_id)
         .await?;
     Ok(MeResponse {
         email: identity.email.clone(),

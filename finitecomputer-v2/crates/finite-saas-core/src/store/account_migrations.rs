@@ -2,8 +2,9 @@
 //!
 //! The import flow records, once, that an account moved. Core never derives
 //! lifecycle, billing, or recovery behavior from the marker; the legacy
-//! dashboard's front door reads it through `/me` to stop offering the legacy
-//! surface to that account. There is deliberately no unset path here.
+//! dashboard's front door reads it through `/me` (folded into the user lookup
+//! in `projects.rs`) to stop offering the legacy surface to that account.
+//! There is deliberately no unset path here.
 use super::*;
 
 /// Outcome of an idempotent migration mark.
@@ -17,23 +18,6 @@ pub struct AccountMigrationMark {
 }
 
 impl CoreStore {
-    /// When this WorkOS account was marked migrated, if ever. Read-only.
-    pub async fn account_migrated_at_for_workos_user(
-        &self,
-        workos_user_id: &str,
-    ) -> CoreResult<Option<String>> {
-        let client = self.connection().await?;
-        let row = client
-            .query_opt(
-                "SELECT core_rfc3339(migrated_at) AS migrated_at
-                 FROM users WHERE workos_user_id = $1",
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?;
-        Ok(row.and_then(|row| row.get::<_, Option<String>>("migrated_at")))
-    }
-
     /// Record that a linked WorkOS account moved to the new product.
     ///
     /// Idempotent: the first mark wins and later calls return it unchanged.
