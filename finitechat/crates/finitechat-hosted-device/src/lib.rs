@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -342,6 +342,77 @@ impl HostedDeviceError {
 struct HealthResponse {
     status: &'static str,
     cached_devices: usize,
+}
+
+/// Hash what every hosted user sees in each room, read-only, for comparing
+/// with agents' direct room logs (see `finitechat hermes direct-digest`).
+/// One JSON object per user that has a chat store; no message text.
+pub fn digest_all_users(
+    data_root: &Path,
+    server_url: &str,
+) -> Result<Vec<Value>, HostedDeviceError> {
+    let users = data_root.join("users");
+    let mut entries = match fs::read_dir(&users) {
+        Ok(entries) => entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| HostedDeviceError::Task(error.to_string()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(HostedDeviceError::Task(error.to_string())),
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut digests = Vec::new();
+    for entry in entries {
+        let user_root = entry.path();
+        let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
+        let chat_data = user_root.join("chat");
+        if !path_exists(&identity_paths.identity_file())?
+            || !path_exists(&chat_data.join("client.sqlite3"))?
+        {
+            continue;
+        }
+        let identity = FiniteIdentity::load(&identity_paths)?;
+        let runtime = FiniteChatRuntime::open_for_class(
+            OpenOptions {
+                data_dir: chat_data.to_string_lossy().into_owned(),
+                server_url: server_url.to_owned(),
+                device_id: "hosted-web".to_owned(),
+                account_secret_hex: Some(hex::encode(identity.expose_secret_bytes())),
+                now_unix_seconds: None,
+            },
+            finitechat_core::CommandClass::ReadOnly,
+        )?;
+        let state = runtime.state()?;
+        let mut rooms = Vec::new();
+        for room in &state.rooms {
+            let mut failure = None;
+            let digest =
+                finitechat_core::room_digest(&room.room_id, &state.topics, |topic, chat| {
+                    match runtime.state_for_view(AppView {
+                        room_id: Some(room.room_id.clone()),
+                        topic_id: Some(topic.to_owned()),
+                        chat_id: Some(chat.to_owned()),
+                        limit: Some(u32::MAX),
+                        oldest_message_id: None,
+                    }) {
+                        Ok(view) => view.messages,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            Vec::new()
+                        }
+                    }
+                });
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
+            rooms.push(digest);
+        }
+        digests.push(json!({
+            "user_storage_id": entry.file_name().to_string_lossy(),
+            "account_id": state.identity.account_id,
+            "rooms": rooms,
+        }));
+    }
+    Ok(digests)
 }
 
 pub fn app(config: HostedDeviceConfig) -> Router {
