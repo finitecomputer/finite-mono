@@ -75,6 +75,9 @@ class Bridge(BaseHTTPRequestHandler):
             self.send(200, ATTACHMENT, {**ATTACHMENT_HEADERS, "x-bridge-private": "1"})
         elif route == "/v1/app/updates":
             self.stream("forever" in self.path)
+        elif route == "/v1/app/info" and "older-sidecar" in self.path:
+            # An older sidecar has no app routes at all.
+            self.send(404, b"", {})
         else:
             self.send(404, b'{"error":"unknown"}', {"content-type": "application/json"})
 
@@ -226,6 +229,22 @@ class DashboardBridgeProxyTests(unittest.TestCase):
         self.assertEqual(data, ERROR)
         self.assertEqual(response.getheader("content-type"), "application/json")
         self.assertEqual(len(Bridge.seen), 1)
+
+    def test_a_bridge_without_the_app_api_says_not_found(self):
+        response, data = self.request("GET", f"{BASE}/info?older-sidecar")
+        self.assertEqual(response.status, 404)
+        self.assertEqual(
+            json.loads(data),
+            {
+                "error": "Finite Chat direct transport is not served",
+                "error_kind": "not_found",
+                "retryable": False,
+            },
+        )
+        # The bridge's own JSON 404s still pass through unchanged.
+        response, data = self.request("GET", f"{BASE}/elsewhere")
+        self.assertEqual(response.status, 404)
+        self.assertEqual(data, b'{"error":"unknown"}')
 
     def test_update_stream_flushes_each_event_before_the_bridge_finishes(self):
         connection = self.connect()

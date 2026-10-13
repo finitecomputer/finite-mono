@@ -149,7 +149,9 @@ record transcript content.
 **Before people have chatted directly (canary, or a failed audit):**
 - Upgrade the agent forward to the previous artifact with the same wrapper. Its
   MLS store is untouched, so the agent serves MLS chat and the dashboard uses
-  the hosted device for it.
+  the hosted device for it. The direct image's dashboard plugin stays in the
+  Hermes home and reports `not_found` to the dashboard. Within 30 seconds of
+  the agent being healthy, check that the owner's chat loads.
 - Leave `direct/` in place. The next direct start refuses it, because MLS
   advanced past the fold, and keeps serving MLS chat. Move it aside
   (`direct.rolled-back-<time>`) before upgrading again; that start folds afresh.

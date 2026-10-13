@@ -117,4 +117,17 @@ async def bridge(request: Request, path: str):
         upstream = await client.send(outgoing, stream=True)
     except httpx.TransportError:
         return error(503, "Finite Chat bridge is unavailable", "bridge_unavailable", True)
+    if upstream.status_code == 404 and not is_json(upstream):
+        # A bridge without the app API answers its routes with a bare 404.
+        # That is an older sidecar under this plugin, which stays in the
+        # Hermes home when the agent is rolled back to an image without
+        # direct chat. Say so in the bridge's own envelope, so the dashboard
+        # keeps that agent's chat on the hosted device.
+        await upstream.aclose()
+        return error(404, "Finite Chat direct transport is not served", "not_found", False)
     return BridgeResponse(upstream)
+
+
+def is_json(response: httpx.Response) -> bool:
+    content_type = response.headers.get("content-type", "")
+    return content_type.split(";")[0].strip().lower() == "application/json"
