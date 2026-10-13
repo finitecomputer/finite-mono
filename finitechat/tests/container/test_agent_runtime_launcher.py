@@ -588,7 +588,9 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
                     {"display": {"platforms": {"finitechat": {"streaming": not expected}}}},
                     settings,
                 )
-                self.assertIs(reconciled["display"]["platforms"]["finitechat"]["streaming"], expected)
+                self.assertIs(
+                    reconciled["display"]["platforms"]["finitechat"]["streaming"], expected
+                )
 
     def test_gateway_launcher_does_not_persist_raw_finite_private_key(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
