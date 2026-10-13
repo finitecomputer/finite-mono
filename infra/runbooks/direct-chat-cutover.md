@@ -26,6 +26,9 @@ are [runtime-image.md](runtime-image.md); the lat2 deploy is
   MLS chat. The dashboard then uses the hosted device for it.
 - **The dashboard decides on the agent's own word only.** Core refusing a
   session, or an ingress 404, leaves chat unavailable. It never routes to MLS.
+  So once the list is `*`, an agent that is down or still starting shows
+  chat as unavailable until it answers, even before it is upgraded. The
+  browser retries by itself. Before, the hosted device still showed history.
 - **Unchanged and still required:** `finitechat-server`, the hosted device
   (people's keys, Brain and Sites identity, signing) and their backups.
   Attachments sent before the fold are still fetched and decrypted from the
