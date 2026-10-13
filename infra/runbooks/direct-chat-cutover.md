@@ -105,9 +105,11 @@ upgraded report no finitechat plugin and stay on the hosted device.
    `scripts/rollout-lat1-runtime-artifact --roll-project-id`.
 2. **Read its fold from the host.** Do not exec into the guest.
    ```sh
-   cat /data/finite-saas-runner/kata/<machine>/agent/direct/fold-status.json
+   cat /data/finite-saas-runner/kata/<agent runtime id>/agent/direct/fold-status.json
    ```
    `origin` must be `fold` and `owner_account_id` must be the owner's account.
+   `scripts/finite-status` on the host counts every Agent's record in its
+   Direct chat fold section (amber for pending, unrecorded or unreadable).
    - `pending` means the agent kept serving MLS chat. The `error` field says
      why, for example a room behind the chat server. Fix it and restart the
      agent.
@@ -130,7 +132,7 @@ upgraded report no finitechat plugin and stay on the hosted device.
 2. Per host, run `--roll-all --roll-canary-project-id <canary>` with the
    wrapper's prepare/execute plan. It is serial, about 2 minutes per agent.
 3. After each host:
-   - run `scripts/finite-status`;
+   - run `scripts/finite-status`; Direct chat fold must not be amber;
    - copy that host's `fold-status.json` files and run the audit;
    - for any room that is not intact, keep that agent upgraded but take it off
      the list by naming the other runtimes explicitly instead of `*`, then
