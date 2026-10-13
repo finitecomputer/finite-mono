@@ -117,6 +117,15 @@ explicit Hermes config and process environment still win.
 Pass `--service-url URL` to also write `FINITECHAT_HERMES_SERVICE_URL` for a
 supervisor-managed `finitechat hermes serve` process.
 
+The same install writes a hidden native dashboard plugin under `dashboard/`.
+While the plugin name is in `plugins.enabled`, `hermes serve` mounts it behind
+native auth at `/api/plugins/finitechat/v1/app/*` and relays those requests to
+the bridge's direct-transport `/v1/app/*` routes. The bridge address comes from
+the process's `FINITECHAT_HERMES_SERVICE_URL`, or `http://127.0.0.1:37633` when
+unset; `finitechat.env` does not apply. Only the body, the query and the Finite
+Chat request headers are forwarded, never Hermes credentials or cookies. The
+bridge checks the user-signed request assertion itself.
+
 For the supervised Rust bridge work, `finitechat hermes serve` starts the
 loopback service boundary and exposes `GET /healthz` plus `GET /readyz`. The
 plugin starts that service itself when no `FINITECHAT_HERMES_SERVICE_URL` is
