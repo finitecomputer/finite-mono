@@ -377,14 +377,20 @@ export class DirectChatBridge {
 }
 
 /**
- * A 404 the agent itself sent: FastAPI's `{"detail": …}` when native Hermes
- * has no finitechat plugin route, or the sidecar's `not_found` envelope when
- * it is serving MLS chat. Ingress 404s carry neither.
+ * A JSON 404 the agent itself sent; ingress 404s have no body.
+ * - Native Hermes without the plugin: `{"detail": "Plugin not found"}`. An
+ *   older image's enabled finitechat platform plugin, which has no dashboard
+ *   API, gets the headless `hermes serve` catch-all `{"error": …}` instead.
+ * - The sidecar serving MLS chat: its `not_found` envelope.
  */
 function agentSaysNotDirect(body: unknown) {
   if (!body || typeof body !== "object" || Array.isArray(body)) return false;
   const record = body as Record<string, unknown>;
-  return typeof record.detail === "string" || record.error_kind === "not_found";
+  return (
+    typeof record.detail === "string" ||
+    record.error_kind === "not_found" ||
+    (typeof record.error === "string" && record.error_kind === undefined)
+  );
 }
 
 /** Runtimes `FC_DIRECT_CHAT_RUNTIME_IDS` admits to direct chat probing. */

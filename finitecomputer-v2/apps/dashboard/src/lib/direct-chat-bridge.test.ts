@@ -89,6 +89,13 @@ test("concurrent first requests share one probe", async (context) => {
 test("agents that say they are not direct, or that this owner cannot reach, stay legacy", async (context) => {
   const cases: Array<[string, { info?: () => Response; mint?: () => never }]> = [
     ["plugin route missing", { info: () => Response.json({ detail: "Not Found" }, { status: 404 }) }],
+    ["older image: platform plugin without a dashboard API", {
+      // hermes 0.21 `hermes serve` catch-all for an enabled plugin with no routes.
+      info: () => Response.json(
+        { error: "Headless backend (hermes serve): web UI disabled — use `hermes dashboard` for the browser UI." },
+        { status: 404 }
+      ),
+    }],
     ["sidecar serving MLS chat", {
       info: () => Response.json(
         { error: "direct chat is not enabled", error_kind: "not_found", retryable: false },
@@ -133,6 +140,12 @@ test("failures that are not evidence never route an unknown agent to legacy", as
     ["Core transport failure", { mint: () => { throw new TypeError("fetch failed"); } }],
     ["hosted access not enabled", { mint: () => { throw new CoreFetchError("hosted access is not enabled", 409); } }],
     ["ingress has no route", { info: () => new Response(null, { status: 404 }) }],
+    ["a 404 envelope that is not not_found", {
+      info: () => Response.json(
+        { error: "Finite Chat bridge is unavailable", error_kind: "bridge_unavailable", retryable: true },
+        { status: 404 }
+      ),
+    }],
     ["non-JSON page", { info: () => new Response("<!doctype html>", { headers: { "content-type": "text/html" } }) }],
     ["JSON without transport", { info: () => Response.json({ ok: true }) }],
   ];
