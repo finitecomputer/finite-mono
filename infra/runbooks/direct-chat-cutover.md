@@ -86,8 +86,8 @@ upgraded report no finitechat plugin and stay on the hosted device.
    latest=/data/recovery-snapshots/hosted-web-chat/latest
    scratch=$(mktemp -d) && chmod 0700 "$scratch"
    cp -a "$latest/hosted-device" "$scratch/"
-   bin=$(systemctl show -p ExecStart --value finitechat-hosted-device.service \
-     | sed -n 's/.*path=\([^ ;]*\).*/\1/p')
+   bin=$(systemctl cat finitechat-hosted-device.service \
+     | sed -n 's/^ExecStart=\([^ ]*\).*/\1/p')
    "$bin" --data-root "$scratch/hosted-device" \
      --server-url https://chat.finite.computer digest > /root/hosted-digests.jsonl
    chmod 0600 /root/hosted-digests.jsonl && rm -rf "$scratch"
