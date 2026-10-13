@@ -68,6 +68,18 @@ test("agent creation POST refuses with a clear message once the front door is on
   assert.equal(response.headers.get("set-cookie"), null, "the saved draft is untouched");
   assert.equal(core.calls.length, 0, "no billing read, checkout or Core creation happens");
 
+  // Operators keep creation with the switch on (rollouts need fresh agents).
+  process.env.FC_DASHBOARD_DEV_ADMIN_EMAILS = "owner@example.test";
+  const operator = await createAgent(creationForm());
+  assert.equal(operator.status, 303);
+  assert.notEqual(
+    new URL(operator.headers.get("location") ?? "").searchParams.get("agentCreationError"),
+    frontDoorAgentCreationMovedMessage(frontDoorConfig())
+  );
+  assert.ok(core.calls.includes("GET /api/core/v1/me/billing"), core.calls.join(", "));
+  process.env.FC_DASHBOARD_DEV_ADMIN_EMAILS = "";
+  core.calls.length = 0;
+
   // Switch off: the same submission takes today's path (it reaches Core's
   // billing read instead of being refused).
   process.env.FC_FRONT_DOOR_ENABLED = "false";

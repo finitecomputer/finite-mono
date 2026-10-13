@@ -169,7 +169,10 @@ Fleet scope requires both `--roll-all` and an explicit
    off is the same edit back to `"false"`; no data changes either way. Core's
    optional `FC_CORE_ACCOUNT_MIGRATION_API_TOKEN` is unrelated to the flip.
    Verify signed-out `/signup` redirects to the new sign-up URL and an
-   operator account still reaches `/dashboard/admin`.
+   operator account still reaches `/dashboard/admin`. Admin pages need a
+   session in the operator org: an operator signed in under another org stays
+   on the legacy dashboard (WorkOS membership lookup) but must switch org to
+   see admin; if WorkOS cannot answer within 2s the account also stays.
 
 ### VERIFY
 

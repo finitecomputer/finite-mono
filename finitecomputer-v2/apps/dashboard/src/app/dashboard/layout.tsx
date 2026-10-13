@@ -19,10 +19,11 @@ import {
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import {
   frontDoorBannerHref,
-  frontDoorDecision,
   frontDoorOffersAgentCreation,
   loadFrontDoorConfig,
+  resolveFrontDoorRoute,
 } from "@/lib/front-door";
+import { workosOperatorMember } from "@/lib/workos-operator";
 
 export default async function DashboardLayout({
   children,
@@ -38,20 +39,39 @@ export default async function DashboardLayout({
   // dashboard pages, never to route handlers, so no API, callback, webhook
   // or asset request is ever redirected.
   const frontDoor = loadFrontDoorConfig();
-  const frontDoorRoute = frontDoorDecision(frontDoor, {
-    isAdmin: viewer.isAdmin,
-    workosUserId: core.account.workosUserId,
-    me: core.me,
-    coreUnavailable: !core.configured || Boolean(core.error),
-    paidSetupPending:
-      frontDoor.enabled &&
-      draftStartedStripeCheckout(
-        await unsealAgentOnboardingDraft(
-          (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
-          core.account.workosUserId
-        )
-      ),
-  });
+  const account = core.account;
+  const agentCreationOffered = frontDoorOffersAgentCreation(frontDoor, viewer.isAdmin);
+  const paidSetupPending =
+    frontDoor.enabled &&
+    draftStartedStripeCheckout(
+      await unsealAgentOnboardingDraft(
+        (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
+        account.workosUserId
+      )
+    );
+  const frontDoorRoute = await resolveFrontDoorRoute(
+    frontDoor,
+    {
+      isAdmin: viewer.isAdmin,
+      workosUserId: account.workosUserId,
+      me: core.me,
+      coreUnavailable: !core.configured || Boolean(core.error),
+      billing: billing.billing,
+      billingUnavailable: !billing.configured || Boolean(billing.error),
+      paidSetupPending,
+    },
+    {
+      // Only reached when the cached reads say "send away".
+      async reloadAccount() {
+        const fresh = await loadCoreMe({ cacheMode: "fresh" });
+        return { me: fresh.me, coreUnavailable: !fresh.configured || Boolean(fresh.error) };
+      },
+      isOperatorMember: async () =>
+        account.source === "workos" && account.workosUserId
+          ? workosOperatorMember(account.workosUserId)
+          : false,
+    }
+  );
   if (frontDoorRoute.kind === "redirect") {
     console.info("[front-door] redirecting account to the new Finite", {
       reason: frontDoorRoute.reason,
@@ -81,8 +101,13 @@ export default async function DashboardLayout({
   return (
     <DashboardShell
       isAdmin={viewer.isAdmin}
-      agentCreationOffered={frontDoorOffersAgentCreation(frontDoor)}
-      firstAgentAccount={Boolean(core.me && !core.error && coreProductProjects(core.me.projects).length === 0)}
+      agentCreationOffered={agentCreationOffered}
+      // Once creation has moved, an agentless account keeps the ordinary shell
+      // (its billing stays reachable) unless it is finishing a paid setup.
+      firstAgentAccount={Boolean(
+        core.me && !core.error && coreProductProjects(core.me.projects).length === 0 &&
+          (agentCreationOffered || paidSetupPending)
+      )}
       frontDoorBannerHref={frontDoorBannerHref(frontDoor, frontDoorRoute)}
       machines={machines}
       saasMode={core.configured}

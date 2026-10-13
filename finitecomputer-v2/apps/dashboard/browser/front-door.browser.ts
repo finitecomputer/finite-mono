@@ -6,15 +6,21 @@ import { test } from "node:test";
 import { chromium, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import { AGENT_DRAFT_COOKIE, sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
 
 const BANNER = "Try the new Finite.";
 const MOVED = "New agents live in the new Finite";
+const COOKIE_PASSWORD = "front-door-fixture-cookie-password-32-chars";
 
 type Scenario = {
   meStatus: number;
   projects: unknown[];
   requests: unknown[];
   migratedAt: string | null;
+  /** Legacy Stripe subscription status; null means no subscription. */
+  subscription: string | null;
+  /** Core still requires payment before a new agent (e.g. a cancelled checkout). */
+  requiresBilling: boolean;
 };
 
 function legacyProject() {
@@ -31,28 +37,46 @@ async function listen(server: http.Server) {
 }
 
 test("the front door routes accounts between the legacy dashboard and the new Finite", { timeout: 300_000 }, async (t) => {
-  const state: Scenario & { writes: string[]; meReads: number } = { meStatus: 200, projects: [], requests: [], migratedAt: null, writes: [], meReads: 0 };
+  const state: Scenario & { writes: string[]; meReads: number } = { meStatus: 200, projects: [], requests: [], migratedAt: null, subscription: null, requiresBilling: false, writes: [], meReads: 0 };
   const me = () => ({
     email: "owner@example.test", workos_user_id: "user_front_door", projects: state.projects,
     agent_creation_requests: state.requests, migrated_at: state.migratedAt,
   });
-  const billing = {
-    customer_org: { id: "org_front_door", owner_user_id: "user_front_door", name: "Front door fixture", billing_class: "standard" },
-    billing_account: null, agent_creation_entitlement: null, can_create_agent: true, requires_billing: false,
-  };
+  const billing = () => ({
+    customer_org: { id: "org_front_door", owner_user_id: "user_front_door", name: "Front door fixture", billing_class: "standard", created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" },
+    billing_account: state.subscription
+      ? { customer_org_id: "org_front_door", stripe_customer_id: "cus_front_door", stripe_subscription_id: "sub_front_door", subscription_status: state.subscription, cancel_at_period_end: false, created_at: "2026-10-01T00:00:00Z", updated_at: "2026-10-01T00:00:00Z" }
+      : null,
+    agent_creation_entitlement: null, can_create_agent: !state.requiresBilling, requires_billing: state.requiresBilling,
+  });
   const core = http.createServer((request, response) => {
     if (request.method !== "GET") state.writes.push(`${request.method} ${request.url}`);
     if (request.url === "/api/core/v1/me") state.meReads++;
     const unavailable = state.meStatus !== 200;
-    const data = request.url === "/api/core/v1/me" ? (unavailable ? null : me())
-      : request.url === "/api/core/v1/me/billing" ? billing
-      : request.url === "/api/core/v1/me/dashboard-summary" ? (unavailable ? null : { me: me(), billing, finite_private_usage: null })
+    let data: unknown = request.url === "/api/core/v1/me" ? (unavailable ? null : me())
+      : request.url === "/api/core/v1/me/billing" ? billing()
+      : request.url === "/api/core/v1/me/dashboard-summary" ? (unavailable ? null : { me: me(), billing: billing(), finite_private_usage: null })
       : null;
+    if (request.method === "POST" && request.url === "/api/core/v1/me/agent-creation-requests") {
+      // The paid draft's exact creation request, as Core would record it.
+      const project = { id: "project_paid", display_name: "Paid Agent", created_at: "2026-10-19T09:00:00Z", updated_at: "2026-10-19T09:00:00Z" };
+      const created = { id: "request_paid", customer_org_id: "org_front_door", owner_user_id: "user_front_door", project_id: project.id, idempotency_key: "front-door-paid-key", display_name: project.display_name, runner_class: "kata", status: "launching", agent_runtime_id: null, created_at: project.created_at, updated_at: project.updated_at };
+      state.projects = [{ project, runtime: null }];
+      state.requests = [created];
+      data = { project, request: created, reused: false };
+    }
     const status = data ? 200 : unavailable && request.url?.startsWith("/api/core/v1/me") ? state.meStatus : 404;
     response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify(data ?? { error: status === 404 ? "Unknown fixture route" : "Core is unavailable" }));
   });
   const corePort = await listen(core);
+  // Hosted Web Device stand-in: accepts the paid launch's chat bootstrap only.
+  const hostedDevice = http.createServer((request, response) => {
+    const bootstrap = request.method === "POST" && request.url === "/v1/app/agent-bindings/authorize-bootstrap";
+    response.writeHead(bootstrap ? 200 : 404, { "content-type": "application/json" });
+    response.end(JSON.stringify(bootstrap ? {} : { error: "Unknown fixture route" }));
+  });
+  const hostedDevicePort = await listen(hostedDevice);
   // Local stand-in for https://finite.chat; no external request is made.
   const newFinite = http.createServer((request, response) => {
     const signup = request.url?.startsWith("/auth/login");
@@ -75,7 +99,9 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
       FC_DASHBOARD_DEV_WORKOS_USER_ID: "user_front_door",
       FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: "front-door-fixture-access-token",
       FC_DASHBOARD_RUNTIME_MODE: "customer", FC_WORKOS_AUTH_ENABLED: "0",
-      WORKOS_COOKIE_PASSWORD: "front-door-fixture-cookie-password-32-chars",
+      WORKOS_COOKIE_PASSWORD: COOKIE_PASSWORD,
+      FC_HOSTED_WEB_DEVICE_URL: `http://127.0.0.1:${hostedDevicePort}`,
+      FINITECHAT_HOSTED_API_TOKEN: "front-door-fixture-hosted-token",
       FC_FRONT_DOOR_ENABLED: "true",
       FC_FRONT_DOOR_TARGET_URL: `${newFiniteOrigin}/`,
       FC_FRONT_DOOR_SIGNUP_URL: `${newFiniteOrigin}/auth/login`,
@@ -99,7 +125,7 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
     await sleep(300);
   }
   async function withPage(scenario: Partial<Scenario>, run: (page: Page) => Promise<void>, settle = true) {
-    Object.assign(state, { meStatus: 200, projects: [], requests: [], migratedAt: null }, scenario);
+    Object.assign(state, { meStatus: 200, projects: [], requests: [], migratedAt: null, subscription: null, requiresBilling: false }, scenario);
     if (settle) await settleLayoutRead();
     const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await context.newPage();
@@ -198,6 +224,62 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
       assert.equal(new URL(page.url()).pathname, "/dashboard");
     }));
 
+    await t.test("an agentless account still billed by a legacy subscription stays and can manage billing", async () => withPage({ subscription: "active" }, async (page) => {
+      await page.goto(`${origin}/dashboard`);
+      await page.getByRole("button", { name: "Manage billing" }).waitFor();
+      assert.equal(new URL(page.url()).origin, origin);
+      await page.getByRole("heading", { name: MOVED }).waitFor();
+      await page.getByText(BANNER).waitFor();
+      assert.equal(await page.getByLabel("Agent name").count(), 0, "no creation form is offered");
+    }));
+
+    await t.test("a migrated account stays while its legacy subscription can still bill", async () => withPage({ subscription: "past_due", migratedAt: "2026-10-19T09:00:00Z" }, async (page) => {
+      await page.goto(`${origin}/dashboard`);
+      await page.getByRole("button", { name: "Manage billing" }).waitFor();
+      assert.equal(new URL(page.url()).origin, origin);
+    }));
+
+    await t.test("once the legacy subscription is canceled, that agentless account goes to the new Finite", async () => withPage({ subscription: "canceled" }, async (page) => {
+      await expectNewFinite(page, "/dashboard");
+    }));
+
+    async function addSavedCheckout(page: Page) {
+      const now = Date.now();
+      const sealed = await sealAgentOnboardingDraft({
+        version: 1, workosUserId: "user_front_door", displayName: "Paid Agent", profilePictureUrl: null,
+        hostingTier: "standard", idempotencyKey: "front-door-paid-key", issuedAtMs: now - 60_000,
+        returnMachineId: null, stripeCheckoutStartedAtMs: now - 30_000,
+      }, { WORKOS_COOKIE_PASSWORD: COOKIE_PASSWORD });
+      await page.context().addCookies([{ name: AGENT_DRAFT_COOKIE, value: sealed, domain: "127.0.0.1", path: "/dashboard" }]);
+    }
+
+    await t.test("a cancelled saved checkout explains the move instead of a retry that cannot succeed", async () => withPage({ requiresBilling: true }, async (page) => {
+      await addSavedCheckout(page);
+      await page.goto(`${origin}/dashboard?new=1&billing=cancelled`);
+      await page.getByRole("heading", { name: "Checkout cancelled" }).waitFor();
+      await page.getByText("No charge was made.", { exact: true }).waitFor();
+      await page.getByRole("heading", { name: MOVED }).waitFor();
+      assert.equal(await page.getByRole("link", { name: "Retry agent setup" }).count(), 0);
+      assert.equal(await page.getByLabel("Agent name").count(), 0, "no creation form is offered");
+    }));
+
+    await t.test("a checkout paid before the flip completes into its own launch progress", async () => withPage({ subscription: "active" }, async (page) => {
+      await addSavedCheckout(page);
+      state.writes = [];
+      // The Stripe success return: the dashboard sends the saved setup
+      // through /complete, which creates the exact request and lands on its
+      // progress. Nothing on the way may send this new owner away.
+      await page.goto(`${origin}/dashboard?new=1&billing=success`);
+      await page.waitForURL((url) => url.pathname === "/dashboard" && url.searchParams.get("creation") === "request_paid");
+      await page.getByRole("heading", { name: "Starting your agent" }).waitFor();
+      // /complete builds its redirect from the request URL when no WorkOS base
+      // URL is configured; `next dev` reports that host as localhost.
+      assert.equal(new URL(page.url()).port, String(port), `still on the dashboard: ${page.url()}`);
+      assert.equal(await page.getByRole("heading", { name: MOVED }).count(), 0, "no 'moved' panel above the paid launch");
+      assert.deepEqual(state.writes, ["POST /api/core/v1/me/agent-creation-requests"], "exactly one creation, through /complete");
+      state.writes = [];
+    }));
+
     assert.deepEqual(state.writes, [], "routing never mutates Core");
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n--- dashboard output ---\n${output.slice(-4000)}`);
@@ -205,7 +287,7 @@ test("the front door routes accounts between the legacy dashboard and the new Fi
     await browser.close();
     dashboard.kill("SIGTERM");
     await once(dashboard, "exit");
-    for (const server of [core, newFinite]) {
+    for (const server of [core, newFinite, hostedDevice]) {
       server.closeAllConnections();
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

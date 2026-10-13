@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import type {
   CoreAgentCreationRequestSummary,
+  CoreBillingOverview,
+  CoreBillingSubscriptionStatus,
   CoreMe,
   CoreVisibleProject,
 } from "./core-client";
@@ -19,10 +21,14 @@ import {
   frontDoorDecision,
   frontDoorOffersAgentCreation,
   hasLegacyAgent,
+  legacySubscriptionNeedsDashboard,
+  resolveFrontDoorRoute,
   type FrontDoorAccount,
   type FrontDoorConfig,
+  type FrontDoorConfirmation,
 } from "./front-door";
 import { createFrontDoorBannerStore, FRONT_DOOR_BANNER_DISMISSED_KEY } from "./front-door-banner";
+import { WORKOS_OPERATOR_LOOKUP_TIMEOUT_MS, workosOperatorMember } from "./workos-operator";
 
 const ENABLED: FrontDoorConfig = {
   enabled: true,
@@ -84,15 +90,61 @@ function me(overrides: Partial<CoreMe> = {}): CoreMe {
   };
 }
 
+function billing(
+  subscription: { id?: string | null; status?: CoreBillingSubscriptionStatus | null } | null = null
+): CoreBillingOverview {
+  return {
+    customer_org: {
+      id: "org_owner",
+      owner_user_id: "user_owner",
+      name: "Owner",
+      billing_class: "standard",
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-01T00:00:00Z",
+    },
+    billing_account: subscription
+      ? {
+          customer_org_id: "org_owner",
+          stripe_customer_id: "cus_owner",
+          stripe_subscription_id: subscription.id === undefined ? "sub_owner" : subscription.id,
+          subscription_status: subscription.status ?? null,
+          cancel_at_period_end: false,
+          created_at: "2026-10-01T00:00:00Z",
+          updated_at: "2026-10-01T00:00:00Z",
+        }
+      : null,
+    can_create_agent: true,
+    requires_billing: !subscription,
+  };
+}
+
 function account(overrides: Partial<FrontDoorAccount> = {}): FrontDoorAccount {
   return {
     isAdmin: false,
     workosUserId: "user_owner",
     me: me(),
     coreUnavailable: false,
+    billing: billing(),
+    billingUnavailable: false,
     paidSetupPending: false,
     ...overrides,
   };
+}
+
+function confirmation(overrides: Partial<FrontDoorConfirmation> = {}) {
+  const calls = { reload: 0, operator: 0 };
+  const confirm: FrontDoorConfirmation = {
+    reloadAccount: async () => {
+      calls.reload++;
+      return { me: me(), coreUnavailable: false };
+    },
+    isOperatorMember: async () => {
+      calls.operator++;
+      return false;
+    },
+    ...overrides,
+  };
+  return { calls, confirm };
 }
 
 test("the front door is off unless FC_FRONT_DOOR_ENABLED is exactly true", () => {
@@ -106,8 +158,11 @@ test("the front door is off unless FC_FRONT_DOOR_ENABLED is exactly true", () =>
   for (const value of ["true", " TRUE ", "True"]) {
     assert.equal(frontDoorConfig({ ...PRODUCTION_ENV, FC_FRONT_DOOR_ENABLED: value }).enabled, true);
   }
-  assert.equal(frontDoorOffersAgentCreation(frontDoorConfig({})), true);
-  assert.equal(frontDoorOffersAgentCreation(ENABLED), false);
+  assert.equal(frontDoorOffersAgentCreation(frontDoorConfig({}), false), true);
+  assert.equal(frontDoorOffersAgentCreation(ENABLED, false), false);
+  // Operators keep creation (rollouts create throwaway fresh agents).
+  assert.equal(frontDoorOffersAgentCreation(ENABLED, true), true);
+  assert.equal(frontDoorOffersAgentCreation(frontDoorConfig({}), true), true);
 });
 
 test("front door destinations default to finite.chat and accept overrides", () => {
@@ -265,8 +320,47 @@ test("an unavailable or inconsistent account read fails safe to legacy", () => {
     account({ me: null }),
     account({ workosUserId: null }),
     account({ me: me({ workos_user_id: "user_someone_else" }) }),
+    // Without billing we cannot tell whether a legacy subscription still bills.
+    account({ billingUnavailable: true }),
+    account({ billing: null }),
+    account({ billingUnavailable: true, me: me({ migrated_at: "2026-10-19T09:00:00Z" }) }),
   ]) {
     assert.deepEqual(frontDoorDecision(ENABLED, candidate), { kind: "stay", reason: "account-unavailable" });
+  }
+});
+
+test("anyone still billed by a legacy subscription stays to reach Manage billing", () => {
+  for (const status of [
+    "active",
+    "past_due",
+    "trialing",
+    "unpaid",
+    "paused",
+    "incomplete",
+    null,
+    "some_future_status" as CoreBillingSubscriptionStatus,
+  ] as const) {
+    for (const candidate of [
+      me(),
+      me({ projects: [project("p", false)], agent_creation_requests: [request("failed")] }),
+      // Migrated accounts too, until the legacy subscription ends.
+      me({ migrated_at: "2026-10-19T09:00:00Z" }),
+    ]) {
+      const decision = frontDoorDecision(ENABLED, account({ me: candidate, billing: billing({ status }) }));
+      assert.deepEqual(decision, { kind: "stay", reason: "legacy-billing" }, `${status}`);
+      assert.equal(frontDoorBannerHref(ENABLED, decision), "https://finite.chat/");
+    }
+  }
+  // Ended subscriptions, or a customer with no subscription, no longer bill.
+  for (const subscription of [
+    { status: "canceled" as const },
+    { status: "incomplete_expired" as const },
+    { id: null, status: "active" as const },
+    { id: "  ", status: "active" as const },
+    null,
+  ]) {
+    assert.equal(legacySubscriptionNeedsDashboard(billing(subscription)), false);
+    assert.equal(frontDoorDecision(ENABLED, account({ billing: billing(subscription) })).kind, "redirect");
   }
 });
 
@@ -275,6 +369,91 @@ test("a checkout paid before the flip keeps its owner on legacy to finish", () =
     kind: "stay",
     reason: "paid-setup",
   });
+});
+
+test("a redirect is confirmed with a fresh account read before it happens", async () => {
+  // Stays never pay for confirmation.
+  const legacy = confirmation();
+  assert.deepEqual(
+    await resolveFrontDoorRoute(ENABLED, account({ me: me({ projects: [project("p", true)] }) }), legacy.confirm),
+    { kind: "stay", reason: "legacy-agent" }
+  );
+  const off = confirmation();
+  assert.equal((await resolveFrontDoorRoute(DISABLED, account(), off.confirm)).kind, "stay");
+  assert.deepEqual([legacy.calls, off.calls], [{ reload: 0, operator: 0 }, { reload: 0, operator: 0 }]);
+
+  // A cached read that predates a just-completed paid launch must not send
+  // the new owner away seconds after paying.
+  const launched = confirmation({
+    reloadAccount: async () => ({
+      me: me({ projects: [project("p", false)], agent_creation_requests: [request("requested")] }),
+      coreUnavailable: false,
+    }),
+  });
+  assert.deepEqual(await resolveFrontDoorRoute(ENABLED, account(), launched.confirm), {
+    kind: "stay",
+    reason: "legacy-agent",
+  });
+  for (const reloadAccount of [
+    async () => ({ me: null, coreUnavailable: true }),
+    async () => {
+      throw new Error("Core is unavailable");
+    },
+  ]) {
+    assert.deepEqual(await resolveFrontDoorRoute(ENABLED, account(), confirmation({ reloadAccount }).confirm), {
+      kind: "stay",
+      reason: "account-unavailable",
+    });
+  }
+
+  const confirmed = confirmation();
+  assert.deepEqual(await resolveFrontDoorRoute(ENABLED, account(), confirmed.confirm), {
+    kind: "redirect",
+    reason: "no-legacy-agent",
+    url: "https://finite.chat/",
+  });
+  assert.deepEqual(confirmed.calls, { reload: 1, operator: 1 });
+});
+
+test("an operator signed in under another organization is never sent away", async () => {
+  assert.deepEqual(
+    await resolveFrontDoorRoute(ENABLED, account(), confirmation({ isOperatorMember: async () => true }).confirm),
+    { kind: "stay", reason: "operator" }
+  );
+  // An unanswered membership lookup is treated as unknown, not as "no".
+  assert.deepEqual(
+    await resolveFrontDoorRoute(
+      ENABLED,
+      account(),
+      confirmation({
+        isOperatorMember: async () => {
+          throw new Error("WorkOS operator lookup timed out");
+        },
+      }).confirm
+    ),
+    { kind: "stay", reason: "account-unavailable" }
+  );
+});
+
+test("operator membership asks WorkOS for the operator org only, within a bound", async (t) => {
+  const asked: unknown[] = [];
+  const member = async (options: unknown) => {
+    asked.push(options);
+    return { data: [{ id: "om_1" }] };
+  };
+  assert.equal(await workosOperatorMember("user_owner", {}, member), false, "no operator org configured");
+  assert.equal(asked.length, 0);
+  const env = { FC_WORKOS_OPERATOR_ORG_ID: " org_operator " };
+  assert.equal(await workosOperatorMember("user_owner", env, member), true);
+  assert.deepEqual(asked, [
+    { userId: "user_owner", organizationId: "org_operator", statuses: ["active"], limit: 1 },
+  ]);
+  assert.equal(await workosOperatorMember("user_owner", env, async () => ({ data: [] })), false);
+
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = workosOperatorMember("user_owner", env, () => new Promise(() => {}));
+  t.mock.timers.tick(WORKOS_OPERATOR_LOOKUP_TIMEOUT_MS);
+  await assert.rejects(pending, /timed out/u);
 });
 
 test("the creation refusal names the configured destination", () => {
@@ -327,7 +506,9 @@ test("only the dashboard page layout can redirect, so no route handler loops", a
   const deciders: string[] = [];
   for (const file of files) {
     const source = await readFile(path.join(appDirectory, file), "utf8");
-    if (source.includes("frontDoorDecision")) deciders.push(file.split(path.sep).join("/"));
+    if (/\b(frontDoorDecision|resolveFrontDoorRoute)\b/u.test(source)) {
+      deciders.push(file.split(path.sep).join("/"));
+    }
   }
   // Next.js applies layouts to pages only; route handlers (API routes,
   // /callback, /logout, /site-auth, /google-workspace/*, the Stripe webhook,

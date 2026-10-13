@@ -85,22 +85,32 @@ be https and off this dashboard's origin. When on:
   it has a legacy agent. Core's `/me` defines one: a Project with an active
   runtime link, or a creation request that is `requested`, `launching`,
   `running` without a runtime, or in a status the dashboard does not know.
-  A Core `migrated_at` sends the account away even with an agent. Operators
-  (the WorkOS operator organization), accounts whose `/me` cannot be read,
-  and owners of a Stripe checkout started before the flip stay. The layout
-  never wraps route handlers, so API, callback, logout, Sites, Google
-  Workspace, webhook and asset requests are never redirected. Legacy accounts
-  keep `returnTo` and see a session-dismissible "Try the new Finite" banner.
-- `/signup` redirects to the sign-up URL. New-agent entry points are hidden,
-  `/dashboard?new=1` explains the move, and the creation POST refuses before
-  touching Core. Core's creation API and in-flight launches are unchanged;
-  a checkout paid before the flip finishes through
-  `/dashboard/agent-creation-requests/complete`.
+  A Core `migrated_at` sends the account away even with an agent.
+- These always stay: operators (an operator-org session, or active WorkOS
+  membership of `FC_WORKOS_OPERATOR_ORG_ID` from another org's session);
+  accounts whose `/me` or billing cannot be read; owners of a Stripe checkout
+  started before the flip; and anyone whose legacy Stripe subscription can
+  still bill (any status but `canceled`/`incomplete_expired`), migrated or
+  not, because "Manage billing" exists only here. Agentless accounts that stay
+  get the ordinary view with Billing rather than the first-agent flow.
+- A redirect is confirmed first with an uncached `/me` and the membership
+  lookup (2s bound); any failure keeps the account here. The layout never
+  wraps route handlers, so API, callback, logout, Sites, Google Workspace,
+  webhook and asset requests are never redirected. Accounts that stay keep
+  `returnTo` and see a session-dismissible "Try the new Finite" banner.
+- `/signup` redirects to the sign-up URL. For everyone but operators,
+  new-agent entry points are hidden, `/dashboard?new=1` explains the move,
+  and the creation POST refuses before touching Core. Core's creation API and
+  in-flight launches are unchanged; a checkout paid before the flip finishes
+  through `/dashboard/agent-creation-requests/complete`, and a cancelled one
+  is told where creation went.
 
 The import flow marks accounts migrated with `POST /api/core/v1/account-migrations`
 (`{"workosUserId": "..."}`) using Core's dedicated
 `FC_CORE_ACCOUNT_MIGRATION_API_TOKEN`. The first mark wins and is idempotent;
-there is no unset API, so clearing one is a reviewed operator change.
+there is no unset API, so clearing one is a manual, reviewed SQL change on
+Core's database. The route is served only on Core's loopback listener; the
+public edge does not proxy it.
 
 ## Run locally
 

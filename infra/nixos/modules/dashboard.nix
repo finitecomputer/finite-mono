@@ -40,8 +40,9 @@
       # Front door to the new Finite product (finite.chat). Off = today's
       # dashboard exactly. "true" sends signed-in accounts without a legacy
       # agent (or marked migrated in Core) to the target, /signup to the new
-      # sign-up screen, and stops legacy agent creation; operators, legacy
-      # agent owners, and anyone Core cannot be read for stay here. A target
+      # sign-up screen, and stops legacy agent creation for non-operators;
+      # operators, legacy agent owners, accounts still billed by a legacy
+      # subscription, and anyone Core cannot be read for stay here. A target
       # on this dashboard's own origin is refused and keeps the switch off.
       # See finitecomputer-v2/apps/dashboard/README.md ("Front door").
       FC_FRONT_DOOR_ENABLED = "false";

@@ -153,7 +153,7 @@ export default async function DashboardPage({
 
   const { core, billing, finitePrivateUsage } = await loadCoreDashboardSummary();
   const frontDoor = loadFrontDoorConfig();
-  const agentCreationOffered = frontDoorOffersAgentCreation(frontDoor);
+  const agentCreationOffered = frontDoorOffersAgentCreation(frontDoor, viewer.isAdmin);
   if (core.configured || !viewer.isAdmin) {
     const draft = await unsealAgentOnboardingDraft(
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
@@ -164,11 +164,22 @@ export default async function DashboardPage({
     // that was already paid for; otherwise it explains where creation went.
     const newAgentFlowRequested = requestedNewAgentFlow &&
       (agentCreationOffered || draftStartedStripeCheckout(draft));
-    const creationMovedRequested = requestedNewAgentFlow && !newAgentFlowRequested;
+    // A tracked launch (`?creation=`, e.g. a paid setup just completed) shows
+    // its own progress; the explanation is only for the bare entry point.
+    const creationMovedRequested = requestedNewAgentFlow && !newAgentFlowRequested &&
+      !trackedCreationRequestId;
+    // Once creation has moved, a saved checkout is retried only when Core
+    // confirms the payment; otherwise the retry could never succeed.
+    const paidSetupRetryable = draftStartedStripeCheckout(draft) &&
+      billing.billing?.customer_org.billing_class === "standard" &&
+      !billing.billing.requires_billing;
     // First login and resumed creation use the same flow as New agent. The
     // query flag is only an entry point for accounts that already have agents.
+    // Once creation has moved, an agentless account gets the ordinary view so
+    // its billing (Manage billing) stays reachable.
     const isNewAgentFlow = newAgentFlowRequested || Boolean(trackedCreationRequestId) ||
-      Boolean(core.me && !core.error && coreProjects.length === 0);
+      Boolean(core.me && !core.error && coreProjects.length === 0 &&
+        (agentCreationOffered || draftStartedStripeCheckout(draft)));
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
       coreInitialAgentCreationRequests(agentCreationRequests);
@@ -339,13 +350,13 @@ export default async function DashboardPage({
                 <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
               ) : null}
               {billingReturn.kind === "cancelled" ? (
-                <BillingCheckoutCancelledNotice />
+                <BillingCheckoutCancelledNotice canRestart={agentCreationOffered} />
               ) : null}
-              {draftStartedStripeCheckout(draft) && !agentCreationOffered ? (
+              {paidSetupRetryable && !agentCreationOffered ? (
                 // A checkout paid before the front door flipped still finishes
                 // its exact saved request; no new setup is offered.
                 <PaidAgentCreationRetryPanel
-                  error={agentCreationError ?? billing.error ?? null}
+                  error={agentCreationError ?? null}
                   name={draft.displayName}
                 />
               ) : !agentCreationOffered ? (
@@ -1209,7 +1220,7 @@ function BillingSyncTimeoutPanel({
   );
 }
 
-function BillingCheckoutCancelledNotice() {
+function BillingCheckoutCancelledNotice({ canRestart }: { canRestart: boolean }) {
   return (
     <section className="ocean-utility-card">
       <div className="ocean-utility-card__header">
@@ -1219,7 +1230,9 @@ function BillingCheckoutCancelledNotice() {
         <div>
           <h2 className="ocean-utility-card__title">Checkout cancelled</h2>
           <p className="text-sm text-muted-foreground">
-            No charge was made. Start checkout again whenever you are ready.
+            {canRestart
+              ? "No charge was made. Start checkout again whenever you are ready."
+              : "No charge was made."}
           </p>
         </div>
       </div>

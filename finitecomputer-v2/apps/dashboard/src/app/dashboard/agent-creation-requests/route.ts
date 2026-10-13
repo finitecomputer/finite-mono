@@ -20,7 +20,7 @@ import {
   loadCoreBillingOverview,
   requestCoreAgentCreation,
 } from "@/lib/core-client";
-import { getAccountAuthContext } from "@/lib/dashboard-auth";
+import { getAccountAuthContext, loadOptionalViewerContext } from "@/lib/dashboard-auth";
 import {
   frontDoorAgentCreationMovedMessage,
   frontDoorOffersAgentCreation,
@@ -65,11 +65,15 @@ function dashboardRedirect(
 
 export async function POST(request: Request) {
   const frontDoor = loadFrontDoorConfig();
-  if (!frontDoorOffersAgentCreation(frontDoor)) {
-    // Creation moved to the new product. Refuse before reading the form,
-    // touching the saved draft, starting checkout, or calling Core; Core's
-    // own creation API is unchanged. A checkout paid before the switch
-    // finishes through /dashboard/agent-creation-requests/complete instead.
+  if (
+    frontDoor.enabled &&
+    !frontDoorOffersAgentCreation(frontDoor, (await loadOptionalViewerContext()).isAdmin)
+  ) {
+    // Creation moved to the new product (operators excepted). Refuse before
+    // reading the form, touching the saved draft, starting checkout, or
+    // calling Core; Core's own creation API is unchanged. A checkout paid
+    // before the switch finishes through
+    // /dashboard/agent-creation-requests/complete instead.
     return dashboardRedirect(
       request,
       new Error(frontDoorAgentCreationMovedMessage(frontDoor))

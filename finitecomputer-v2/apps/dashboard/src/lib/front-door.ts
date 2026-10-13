@@ -15,6 +15,7 @@
 import {
   coreProductProjects,
   type CoreAgentCreationRequestSummary,
+  type CoreBillingOverview,
   type CoreMe,
 } from "./core-client";
 import { workosBaseUrl } from "./workos-auth";
@@ -31,7 +32,9 @@ export type FrontDoorConfig =
 export type FrontDoorStayReason =
   | "disabled"
   | "admin"
+  | "operator"
   | "account-unavailable"
+  | "legacy-billing"
   | "legacy-agent"
   | "paid-setup";
 
@@ -48,9 +51,24 @@ export type FrontDoorAccount = {
   me: CoreMe | null;
   /** Core is unconfigured or `/me` failed for this request. */
   coreUnavailable: boolean;
+  /** Core billing overview for this request; null when it was not loaded. */
+  billing: CoreBillingOverview | null;
+  /** Core is unconfigured or the billing read failed for this request. */
+  billingUnavailable: boolean;
   /** A Stripe checkout for a legacy agent started before the switch flipped. */
   paidSetupPending: boolean;
 };
+
+/** Checks made only before an account would be sent away. */
+export type FrontDoorConfirmation = {
+  /** An uncached Core `/me`; the layout's own read may be up to 30s stale. */
+  reloadAccount: () => Promise<Pick<FrontDoorAccount, "me" | "coreUnavailable">>;
+  /** Operator-organization membership regardless of this session's org. */
+  isOperatorMember: () => Promise<boolean>;
+};
+
+/** Stripe subscription states after which a legacy subscription stops billing. */
+const ENDED_SUBSCRIPTION_STATUSES = new Set<string>(["canceled", "incomplete_expired"]);
 
 export function frontDoorConfig(env: EnvSource = process.env): FrontDoorConfig {
   if ((env.FC_FRONT_DOOR_ENABLED ?? "").trim().toLowerCase() !== "true") {
@@ -94,9 +112,14 @@ export function loadFrontDoorConfig(): FrontDoorConfig {
   return config;
 }
 
-/** The legacy dashboard offers and accepts new agents only while the switch is off. */
-export function frontDoorOffersAgentCreation(config: FrontDoorConfig) {
-  return !config.enabled;
+/**
+ * The legacy dashboard offers and accepts new agents while the switch is off,
+ * and always for operators (rollouts create throwaway fresh agents). Whether
+ * other legacy users keep creation is an open product decision; today they
+ * do not.
+ */
+export function frontDoorOffersAgentCreation(config: FrontDoorConfig, isAdmin: boolean) {
+  return !config.enabled || isAdmin;
 }
 
 export function frontDoorAgentCreationMovedMessage(config: FrontDoorConfig) {
@@ -116,9 +139,17 @@ export function frontDoorDecision(
     account.coreUnavailable ||
     !me ||
     !account.workosUserId ||
-    me.workos_user_id !== account.workosUserId
+    me.workos_user_id !== account.workosUserId ||
+    account.billingUnavailable ||
+    !account.billing
   ) {
     return { kind: "stay", reason: "account-unavailable" };
+  }
+  // The Stripe portal ("Manage billing") lives only on this dashboard, and
+  // removing an agent does not cancel its subscription. Anyone still billed
+  // for the legacy product stays, migrated or not, until it ends.
+  if (legacySubscriptionNeedsDashboard(account.billing)) {
+    return { kind: "stay", reason: "legacy-billing" };
   }
   if (accountMigrated(me)) {
     return { kind: "redirect", reason: "migrated", url: config.targetUrl };
@@ -126,6 +157,47 @@ export function frontDoorDecision(
   if (hasLegacyAgent(me)) return { kind: "stay", reason: "legacy-agent" };
   if (account.paidSetupPending) return { kind: "stay", reason: "paid-setup" };
   return { kind: "redirect", reason: "no-legacy-agent", url: config.targetUrl };
+}
+
+/**
+ * Decide with the layout's cached reads, and confirm before ever sending an
+ * account away: a fresh `/me` (a cached read can predate a just-completed
+ * paid launch), then operator membership in any session org. Any failure
+ * while confirming keeps the account here.
+ */
+export async function resolveFrontDoorRoute(
+  config: FrontDoorConfig,
+  account: FrontDoorAccount,
+  confirm: FrontDoorConfirmation
+): Promise<FrontDoorDecision> {
+  const cached = frontDoorDecision(config, account);
+  if (cached.kind !== "redirect") return cached;
+  let decision: FrontDoorDecision;
+  try {
+    decision = frontDoorDecision(config, { ...account, ...(await confirm.reloadAccount()) });
+  } catch {
+    return { kind: "stay", reason: "account-unavailable" };
+  }
+  if (decision.kind !== "redirect") return decision;
+  try {
+    if (await confirm.isOperatorMember()) return { kind: "stay", reason: "operator" };
+  } catch {
+    return { kind: "stay", reason: "account-unavailable" };
+  }
+  return decision;
+}
+
+/**
+ * True while a legacy Stripe subscription can still bill: any subscription
+ * whose status is not `canceled` or `incomplete_expired` (unknown or missing
+ * statuses included).
+ */
+export function legacySubscriptionNeedsDashboard(
+  billing: Pick<CoreBillingOverview, "billing_account">
+) {
+  const subscription = billing.billing_account;
+  if (!subscription?.stripe_subscription_id?.trim()) return false;
+  return !ENDED_SUBSCRIPTION_STATUSES.has(subscription.subscription_status ?? "");
 }
 
 /** The "Try the new Finite" banner is shown only to accounts that stay. */
