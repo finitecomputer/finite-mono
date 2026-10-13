@@ -64,6 +64,7 @@ jobs:
       run_devfinity_smoke: ${{ steps.detect.outputs.run_devfinity_smoke }}
       run_brain_product_matrix: ${{ steps.detect.outputs.run_brain_product_matrix }}
       run_kata_nerdctl_candidate: ${{ steps.detect.outputs.run_kata_nerdctl_candidate }}
+      run_ronin_ci_evidence: ${{ steps.detect.outputs.run_ronin_ci_evidence }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -534,6 +535,8 @@ jobs:
           skipPush: true
       - name: Finite status contract
         run: nix develop --command just finite-status-contract
+      - name: Kata lifecycle lab contract
+        run: nix develop --command just kata-lifecycle-lab-contract
 
   nix-checks:
     name: Nix static contracts
@@ -626,6 +629,28 @@ jobs:
           skipPush: true
       - name: Build the candidate nerdctl and run its logger tests
         run: nix build --option builders '' --no-link --print-build-logs .#packages.x86_64-linux.kata-nerdctl-candidate
+
+  # FIN-174 offline evidence tool: Ruff and its own synthetic-fixture suite.
+  # This runs the tool's tests only; no Ronin workflow or input producer
+  # calls the validator.
+  ronin-ci-evidence:
+    name: Ronin CI evidence tool suite
+    needs: changes
+    if: needs.changes.outputs.run_ronin_ci_evidence == 'true'
+    runs-on: depot-ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
+      - name: Configure Cachix read-only cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Ruff and offline suite
+        run: nix develop --command just ronin-ci-evidence-check
 
   # Landing gate: builds the 15 scoped service packages through crane and
   # repopulates Cachix. select-harnesses defers this to landing events
@@ -942,6 +967,7 @@ jobs:
       - devfinity-smoke
       - brain-product-matrix
       - kata-nerdctl-candidate
+      - ronin-ci-evidence
     runs-on: depot-ubuntu-24.04
     env:
       CHANGES_RESULT: ${{ needs.changes.result }}
@@ -969,6 +995,8 @@ jobs:
       RESULT_BRAIN_PRODUCT_MATRIX: ${{ needs['brain-product-matrix'].result }}
       RUN_KATA_NERDCTL_CANDIDATE: ${{ needs.changes.outputs.run_kata_nerdctl_candidate }}
       RESULT_KATA_NERDCTL_CANDIDATE: ${{ needs['kata-nerdctl-candidate'].result }}
+      RUN_RONIN_CI_EVIDENCE: ${{ needs.changes.outputs.run_ronin_ci_evidence }}
+      RESULT_RONIN_CI_EVIDENCE: ${{ needs['ronin-ci-evidence'].result }}
     steps:
       - name: Require selected harnesses
         run: |
@@ -1014,6 +1042,7 @@ jobs:
           check_selected "devfinity smoke" "$RUN_DEVFINITY_SMOKE" "$RESULT_DEVFINITY_SMOKE"
           check_selected "Brain product matrix" "$RUN_BRAIN_PRODUCT_MATRIX" "$RESULT_BRAIN_PRODUCT_MATRIX"
           check_selected "Kata nerdctl candidate" "$RUN_KATA_NERDCTL_CANDIDATE" "$RESULT_KATA_NERDCTL_CANDIDATE"
+          check_selected "Ronin CI evidence tool suite" "$RUN_RONIN_CI_EVIDENCE" "$RESULT_RONIN_CI_EVIDENCE"
 
           case "$RUN_DASHBOARD_BROWSER" in
             true)

@@ -27,6 +27,12 @@ source-structure-check:
     cargo test --locked -p source-structure
     cargo run --quiet --locked -p source-structure
 
+# Ruff and the synthetic-fixture suite of the offline FIN-174 evidence tool.
+ronin-ci-evidence-check:
+    ruff format --check tools/ronin-ci-evidence
+    ruff check tools/ronin-ci-evidence
+    python3 -B -m unittest discover -s tools/ronin-ci-evidence -p 'test_*.py' -v
+
 # Formats all rust code
 fmt:
     cargo fmt --all
@@ -107,6 +113,9 @@ finite-status-contract:
 
 hosted-recovery-contract:
     just infra hosted-recovery-contract
+
+kata-lifecycle-lab-contract:
+    just infra kata-lifecycle-lab-contract
 
 sites-backup-contract:
     just infra sites-backup-contract

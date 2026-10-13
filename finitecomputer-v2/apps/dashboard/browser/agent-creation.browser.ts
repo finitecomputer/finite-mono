@@ -288,7 +288,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await page.goto(`http://127.0.0.1:${paidDashboardPort}/dashboard?new=1`);
       assert.equal(await page.getByLabel("Launch Code", { exact: true }).count(), 0);
       assert.equal(await page.getByRole("button", { name: "Use account access" }).count(), 0);
-      await page.getByRole("heading", { name: "Your own Finite Agent." }).waitFor();
+      // The form's mount effect focuses this heading once client handlers are ready.
+      // Wait for that public signal before the first client-only Continue action.
+      await page.getByRole("heading", { name: "Your own Finite Agent." })
+        .and(page.locator(":focus")).waitFor();
       await expectVisibleText(page, "Hosted Agent");
       await expectVisibleText(page, "$200 USD");
       await onboardingScreenshots(page, "plan");
@@ -309,10 +312,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(await page.locator('input[name="trialCode"]').inputValue(), "WORKSHOP-TRIAL");
 
       // Reject a form left open on the previous dashboard, without redeeming its code.
-      await page.locator('input[name="access"]').evaluate((input) => {
-        (input as HTMLInputElement).value = "launch-code";
-      });
+      // Submit the retained form in one browser task so a React render cannot
+      // restore the current access value between fixture mutation and capture.
       await page.locator('form[action="/dashboard/agent-creation-requests"]').evaluate((form) => {
+        const access = form.querySelector<HTMLInputElement>('input[name="access"]');
+        if (!access) throw new Error("legacy form fixture is missing access");
+        access.value = "launch-code";
         (form as HTMLFormElement).submit();
       });
       await page.waitForURL((url) => url.searchParams.has("agentCreationError"));
@@ -488,6 +493,23 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
     );
     dashboardOutput = collectOutput(dashboard);
     await waitForDashboard(dashboardPort, dashboardOutput);
+
+    // Warm the account snapshot while online, then navigate immediately after
+    // Core enters recovery. The Agent overview must not reuse that online state
+    // and omit the recovery observer until another navigation happens.
+    const newlyRecovering = visibleProject("project_payment", "Paid Agent", hostedDevice.runtimeStatusUrl, "payment-agent");
+    core.reset({ projects: [newlyRecovering], requests: [] });
+    await withSignedInPage(browser, dashboardPort, async (page) => {
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard`);
+      await page.getByText(/^Your agent is online\./).first().waitFor();
+      core.state.projects[0].runtime_recovery = "restart_pending";
+      core.state.projects[0].runtime!.runtime_status = "unknown";
+      await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_payment-agent`);
+      await expectVisibleText(page, "Waiting for your agent to be ready. Your home, data, and history are retained.");
+      assert.equal(await page.getByText(/^Your agent is online\./).count(), 0);
+      assert.equal(core.state.creationPosts.length, 0);
+      assert.equal(core.state.restartPosts.length, 0, "observing recovery must not request another restart");
+    });
 
     // Synthetic Core recovery states; no live WorkOS or Stripe calls.
     const recovering = visibleProject("project_payment", "Paid Agent", hostedDevice.runtimeStatusUrl, "payment-agent");
@@ -2189,7 +2211,9 @@ function startDashboard(
     : "fixture-browser-access-token";
   return spawn(
     process.execPath,
-    ["node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1", "--port", String(port)],
+    // Turbopack can return a framework HTML 404 while compiling concurrent
+    // routes. Use the same deterministic compiler as the Sites browser tests.
+    ["node_modules/next/dist/bin/next", "dev", "--webpack", "--hostname", "127.0.0.1", "--port", String(port)],
     {
       cwd: process.cwd(),
       env: {

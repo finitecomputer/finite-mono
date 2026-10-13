@@ -16,6 +16,20 @@ finite-status-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_runtime_route_status.py'
     cd .. && python3 -m unittest discover -s infra/nixos/tests -p 'test_finite_runtime_metrics.py'
 
+# Offline checks of the synthetic Kata guest-agent lifecycle lab: strict run
+# verdict, owned-runner fault injection, the freeze ordering model, and vet of
+# the in-container helper. Starts no container or VM.
+kata-lifecycle-lab-contract:
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_kata_lifecycle_*.py'
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_kata_freeze_model.py'
+    cd ../scripts/kata-lifecycle-lab && nix shell --inputs-from ../.. nixpkgs#go -c env CGO_ENABLED=0 GOTOOLCHAIN=local sh -c 'unformatted=$(gofmt -l .) && test -z "$unformatted" && go test -timeout 10s ttrpc.go proto.go ttrpc_test.go reply_race_test.go state.go state_test.go && GOOS=linux GOARCH=arm64 go vet ./... && GOOS=linux GOARCH=amd64 go vet ./...'
+
+# Builds the lab helper reproducibly (no build ID, trimmed paths) for linux/<arch>
+# to an absolute path and prints the sha256 an arm manifest must name.
+kata-lifecycle-lab-helper arch out:
+    cd ../scripts/kata-lifecycle-lab && nix shell --inputs-from ../.. nixpkgs#go -c env CGO_ENABLED=0 GOOS=linux GOARCH={{arch}} GOTOOLCHAIN=local go build -trimpath -ldflags=-buildid= -o {{out}} .
+    sha256sum {{out}} 2>/dev/null || shasum -a 256 {{out}}
+
 # Synthetic empty-target proof for the complete hosted Recovery Set contract.
 hosted-recovery-contract:
     cd .. && python3 -m unittest discover -s scripts/tests -p 'test_snapshot_sqlite.py'
