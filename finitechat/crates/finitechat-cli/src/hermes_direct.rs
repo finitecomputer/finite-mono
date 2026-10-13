@@ -515,6 +515,8 @@ impl DirectRuntime {
         let home_dir = home.dir.clone();
         if !DirectStore::exists(&home_dir) {
             fold_agent_device(home)?;
+        } else {
+            refuse_if_mls_advanced_after_fold(home)?;
         }
         Self::open(home)
     }
@@ -1275,6 +1277,49 @@ fn fold_agent_device(home: &AgentHome) -> Result<(), CliError> {
     Ok(())
 }
 
+/// A folded log is only valid while the MLS Device it came from stays where
+/// the fold left it. If an older image ran MLS chat again (a rollback), the
+/// room moved on without the log: refuse rather than serve a log that misses
+/// those messages. Moving `direct/` aside makes the next start fold again.
+fn refuse_if_mls_advanced_after_fold(home: &AgentHome) -> Result<(), CliError> {
+    if !home.dir.join(STORE_FILE).is_file() {
+        return Ok(());
+    }
+    let recorded = {
+        let store = DirectStore::open(&DirectStore::path(&home.dir))?;
+        if store.meta("origin")?.as_deref() != Some("fold") {
+            return Ok(());
+        }
+        store
+            .meta("fold_cursors")?
+            .and_then(|value| serde_json::from_str::<BTreeMap<String, u64>>(&value).ok())
+            .unwrap_or_default()
+    };
+    let runtime = FiniteChatRuntime::open_for_class(
+        agent_runtime_open_options(home),
+        finitechat_core::CommandClass::ReadOnly,
+    )?;
+    let advanced = runtime
+        .room_sync_cursors()?
+        .into_iter()
+        .filter(|cursor| {
+            recorded
+                .get(&cursor.room_id)
+                .is_some_and(|folded| cursor.last_applied_seq > *folded)
+        })
+        .map(|cursor| cursor.room_id)
+        .collect::<Vec<_>>();
+    if advanced.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::Hermes(format!(
+            "direct log refused: MLS chat advanced after the fold in {}; move {}/{DIRECT_DIR} aside to fold again",
+            advanced.join(", "),
+            home.dir.display()
+        )))
+    }
+}
+
 /// Sync the MLS Device until the server has nothing newer, then export.
 fn final_sync_and_export(home: &AgentHome) -> Result<DirectFoldExport, CliError> {
     let runtime = open_agent_runtime(home)?;
@@ -1371,6 +1416,15 @@ fn write_fold(
     store.set_meta("origin", "fold")?;
     store.set_meta("created_at", &now_unix_seconds().to_string())?;
     store.set_meta("owner_account_id", &owner)?;
+    let cursors = export
+        .rooms
+        .iter()
+        .map(|room| (room.room_id.clone(), room.last_applied_seq))
+        .collect::<BTreeMap<_, _>>();
+    store.set_meta(
+        "fold_cursors",
+        &serde_json::to_string(&cursors).map_err(CliError::Serialize)?,
+    )?;
     for profile in &export.profiles {
         store.upsert_profile(profile)?;
     }

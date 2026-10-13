@@ -481,4 +481,61 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     .unwrap();
     let operator: Value = serde_json::from_slice(&sink).unwrap();
     assert_eq!(operator["rooms"][0], digest);
+
+    // Rollback, then forward again: an older image runs MLS chat, so the
+    // room moves on without the folded log. The next direct start refuses
+    // the stale log and keeps serving MLS chat, saying why.
+    user.dispatch_and_wait(AppAction::SendChatMessage {
+        room_id: room_id.clone(),
+        topic_id: topic_id.clone(),
+        chat_id: chat_id.clone(),
+        text: "sent while rolled back".to_owned(),
+        metadata_json: None,
+    })
+    .unwrap();
+    // SAFETY: the running direct sidecars read the transport only at start.
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "mls") };
+    let request = json!({"timeout_millis": 2000}).to_string();
+    cli_json(&[
+        "hermes",
+        "--agent-home",
+        &agent_home,
+        "--request-json",
+        &request,
+        "poll",
+    ]);
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
+    let refused = Bridge {
+        url: spawn_sidecar(&agent_home, dir.path().join("ready-3.json")),
+        http: reqwest::blocking::Client::new(),
+    };
+    let info = refused
+        .http
+        .get(format!("{}/v1/app/info", refused.url))
+        .send()
+        .unwrap();
+    assert_eq!(info.status(), 404, "a stale direct log is not served");
+    let readyz: Value = reqwest::blocking::get(format!("{}/readyz", refused.url))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(readyz["transport"], "mls");
+    assert!(
+        readyz["direct_fold"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("MLS chat advanced after the fold")
+    );
+    // Moving the log aside folds again, now with the rolled-back message.
+    std::fs::rename(
+        PathBuf::from(&agent_home).join("direct"),
+        PathBuf::from(&agent_home).join("direct.rolled-back"),
+    )
+    .unwrap();
+    let refolded = Bridge {
+        url: spawn_sidecar(&agent_home, dir.path().join("ready-4.json")),
+        http: reqwest::blocking::Client::new(),
+    };
+    let state = refolded.json(refolded.get(&person, &path));
+    assert!(chat_messages(&state).contains(&"sent while rolled back".to_owned()));
 }
