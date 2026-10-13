@@ -487,6 +487,63 @@ export async function hostedDeviceRuntimeCommand(
   );
 }
 
+export type HostedDirectChatAuthorizationInput = {
+  agent_id: string;
+  method: "GET" | "POST";
+  /** The agent bridge path and query, starting `/v1/app/`. */
+  path: string;
+  /** SHA-256 hex of the exact request body bytes; present iff POST. */
+  body_sha256: string | null;
+};
+
+export type HostedDirectChatAuthorization = {
+  /** The user-signed NIP-01 request event (kind 27235). */
+  event: Record<string, unknown>;
+  /** The signer: the user's Finite Chat account id (64 hex). */
+  accountId: string;
+};
+
+const DIRECT_CHAT_AUTHORIZATION_KIND = 27235;
+const DIRECT_CHAT_AUTHORIZATION_TIMEOUT_MS = 5_000;
+
+/**
+ * Signs one direct agent-bridge request with the user's existing chat
+ * identity. The hosted device never mints an identity here; a missing one is
+ * a 409 `chat_identity_missing` envelope.
+ */
+export async function hostedDeviceDirectChatAuthorization(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: HostedDirectChatAuthorizationInput
+): Promise<HostedDirectChatAuthorization> {
+  const result = await hostedDeviceJson<unknown>(
+    config,
+    account,
+    "/v1/chat/direct-authorization",
+    { method: "POST", body: JSON.stringify({ version: 1, ...input }) },
+    DIRECT_CHAT_AUTHORIZATION_TIMEOUT_MS
+  );
+  const record = result && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : {};
+  const event = record.event && typeof record.event === "object" && !Array.isArray(record.event)
+    ? record.event as Record<string, unknown>
+    : null;
+  const accountId = typeof record.account_id === "string" ? record.account_id : "";
+  if (
+    !event ||
+    !HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId) ||
+    event.pubkey !== accountId ||
+    event.kind !== DIRECT_CHAT_AUTHORIZATION_KIND ||
+    typeof event.id !== "string" ||
+    typeof event.sig !== "string" ||
+    !Array.isArray(event.tags)
+  ) {
+    throw new HostedDeviceRequestError("Chat authorization is unavailable right now.", 502);
+  }
+  return { event, accountId };
+}
+
 export async function hostedDeviceUpdates(
   config: HostedDeviceConfig,
   account: AccountAuthContext,
@@ -617,6 +674,9 @@ export function hostedDeviceDiagnosticPath(path: string) {
   ) {
     return pathname;
   }
+  if (pathname === "/v1/chat/direct-authorization") {
+    return pathname;
+  }
   if (pathname.startsWith("/v1/brain/")) {
     return "/v1/brain/:operation";
   }
@@ -626,7 +686,8 @@ export function hostedDeviceDiagnosticPath(path: string) {
   return "/unknown";
 }
 
-async function hostedDeviceRequestError(response: Response) {
+/** Reads a failed hosted-device (or agent bridge) response's error envelope. */
+export async function hostedDeviceRequestError(response: Response) {
   const text = await response.text();
   try {
     const parsed = JSON.parse(text) as {

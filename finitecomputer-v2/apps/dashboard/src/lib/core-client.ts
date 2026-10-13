@@ -1123,6 +1123,25 @@ export async function createCoreHostedHermesSession(runtimeId: string, signal?: 
   return parseHostedHermesSession(grant);
 }
 
+/**
+ * Server-only native grant for a known account, used by the direct chat
+ * bridge. Core enforces the current Project owner when it mints the grant;
+ * the caller keeps the result in memory and never sends it to the browser.
+ */
+export async function createCoreHostedHermesSessionForAccount(
+  account: AccountAuthContext,
+  runtimeId: string,
+  signal?: AbortSignal
+) {
+  const id = requiredString(runtimeId, "Runtime id is required.");
+  const grant = await coreFetch<unknown>(
+    `/api/core/v1/me/runtimes/${encodeURIComponent(id)}/hosted-hermes-session`,
+    account,
+    { method: "POST", signal }
+  );
+  return parseHostedHermesSession(grant);
+}
+
 export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> {
   const status = coreBridgeStatus();
   if (!status.configured) {

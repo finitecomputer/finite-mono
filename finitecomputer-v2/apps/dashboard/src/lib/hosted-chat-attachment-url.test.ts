@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
+import { attachmentResponseHeaders, directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
+
+test("attachment downloads always carry the dashboard's own safety headers", () => {
+  const headers = attachmentResponseHeaders(new Headers({
+    "content-type": "text/html",
+    "content-length": "12",
+    "content-security-policy": "default-src *",
+    "x-content-type-options": "sniff",
+    "cache-control": "public, max-age=31536000",
+    "set-cookie": "agent=1",
+    "access-control-allow-origin": "*",
+  }));
+  assert.equal(headers.get("content-type"), "text/html");
+  assert.equal(headers.get("content-length"), "12");
+  assert.equal(headers.get("content-security-policy"), "sandbox");
+  assert.equal(headers.get("x-content-type-options"), "nosniff");
+  assert.equal(headers.get("cache-control"), "private, no-store");
+  assert.equal(headers.get("content-disposition"), "attachment");
+  assert.equal(headers.get("set-cookie"), null);
+  assert.equal(headers.get("access-control-allow-origin"), null);
+
+  const inline = attachmentResponseHeaders(new Headers({
+    "content-type": "image/png",
+    "content-disposition": "inline; filename=\"photo.png\"",
+  }));
+  assert.equal(inline.get("content-disposition"), "inline; filename=\"photo.png\"");
+});
 
 test("URL-only Hermes images can render from their HTTPS source", () => {
   const url = "https://v3b.fal.media/files/generated-image.png";

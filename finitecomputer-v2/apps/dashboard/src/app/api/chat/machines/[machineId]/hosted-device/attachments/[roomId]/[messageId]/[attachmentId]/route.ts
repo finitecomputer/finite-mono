@@ -1,3 +1,4 @@
+import { attachmentResponseHeaders } from "@/lib/hosted-chat-attachment-url";
 import {
   HostedWebChatError,
   streamHostedWebChatAttachment,
@@ -35,20 +36,10 @@ export async function GET(
       );
     }
 
-    const headers = new Headers({ "cache-control": "private, no-store" });
-    for (const name of [
-      "content-type",
-      "content-disposition",
-      "content-length",
-      "content-security-policy",
-      "x-content-type-options",
-    ]) {
-      const value = upstream.headers.get(name);
-      if (value) {
-        headers.set(name, value);
-      }
-    }
-    return new Response(upstream.body, { status: 200, headers });
+    return new Response(upstream.body, {
+      status: 200,
+      headers: attachmentResponseHeaders(upstream.headers),
+    });
   } catch (error) {
     const status = error instanceof HostedWebChatError ? error.status : 502;
     const message = error instanceof Error ? error.message : "Attachment is unavailable.";

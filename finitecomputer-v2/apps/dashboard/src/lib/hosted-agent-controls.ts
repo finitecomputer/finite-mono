@@ -1,6 +1,13 @@
 import { fetchRuntimeAgentNpub } from "@/lib/agent-contact";
 import { getAccountAuthContext } from "@/lib/dashboard-auth";
 import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
+import { directChatBridge, type DirectChatBridge } from "@/lib/direct-chat-bridge";
+import {
+  directChatRoomId,
+  directChatRuntimeCommand,
+  type DirectChatSession,
+} from "@/lib/direct-web-chat";
+import { HostedWebChatError } from "@/lib/hosted-web-chat-error";
 import {
   hostedDeviceAction,
   hostedDeviceConfig,
@@ -73,7 +80,10 @@ export class HostedAgentControlError extends Error {
 }
 
 export async function loadAgentConnections(machineId: string) {
-  const context = await hostedAgentContext(machineId);
+  return loadAgentConnectionsWithContext(await hostedAgentContext(machineId));
+}
+
+export async function loadAgentConnectionsWithContext(context: AgentCommandContext) {
   await claimOwner(context);
   return statusForContext(context);
 }
@@ -157,11 +167,19 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
   }
 }
 
-type AgentCommandContext = {
-  account: Awaited<ReturnType<typeof getAccountAuthContext>>;
-  config: NonNullable<ReturnType<typeof hostedDeviceConfig>>;
+export type AgentCommandContext = {
   roomId: string;
   targetAccountId: string;
+  runtimeCommand: (command: HostedRuntimeCommand) => Promise<HostedRuntimeCommandResponse>;
+};
+
+export type AgentCommandTarget = {
+  account: Awaited<ReturnType<typeof getAccountAuthContext>>;
+  config: NonNullable<ReturnType<typeof hostedDeviceConfig>>;
+  runtimeId: string;
+  projectId: string;
+  primaryUrl: string | null;
+  displayName: string;
 };
 
 async function hostedAgentContext(machineId: string): Promise<AgentCommandContext> {
@@ -177,17 +195,58 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
   if (!config) {
     throw new HostedAgentControlError("Connections are unavailable right now.", 503);
   }
+  return agentCommandContextFor({
+    account,
+    config,
+    runtimeId: access.machineId,
+    projectId: access.coreProject.project.id,
+    primaryUrl: access.primaryUrl,
+    displayName: access.displayName,
+  });
+}
+
+/**
+ * Runtime commands reach the agent through its chat target: the direct Finite
+ * Chat bridge for a direct agent, otherwise the Hosted Web Device binding.
+ */
+export async function agentCommandContextFor(
+  input: AgentCommandTarget,
+  bridge: DirectChatBridge = directChatBridge
+): Promise<AgentCommandContext> {
+  const { account, config } = input;
+  const access = { account, hosted: config, runtimeId: input.runtimeId, projectId: input.projectId };
+  const target = await bridge.resolve(access).catch((error: unknown) => {
+    throw agentControlError(error);
+  });
+  if (target.kind === "direct") {
+    const session: DirectChatSession = { bridge, access, target };
+    let roomId: string;
+    try {
+      roomId = directChatRoomId(session);
+    } catch (error) {
+      throw agentControlError(error);
+    }
+    return {
+      roomId,
+      targetAccountId: target.info.agentAccountId,
+      runtimeCommand: (command) =>
+        directChatRuntimeCommand(session, command).catch((error: unknown) => {
+          throw agentControlError(error);
+        }),
+    };
+  }
+  const runtimeCommand = (command: HostedRuntimeCommand) =>
+    hostedDeviceRuntimeCommand(config, account, command);
   try {
-    const bound = await hostedDeviceOpenAgentBinding(config, account, access.coreProject.project.id);
+    const bound = await hostedDeviceOpenAgentBinding(config, account, input.projectId);
     const binding = bound.hosted_agent_binding;
     if (!binding) {
       throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
     }
     return {
-      account,
-      config,
       roomId: binding.canonical_room_id,
       targetAccountId: binding.agent_account_id,
+      runtimeCommand,
     };
   } catch (error) {
     if (!(error instanceof HostedDeviceRequestError) || error.status !== 404) {
@@ -195,7 +254,7 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
     }
   }
 
-  const agentNpub = await fetchRuntimeAgentNpub(access.primaryUrl);
+  const agentNpub = await fetchRuntimeAgentNpub(input.primaryUrl);
   if (!agentNpub) {
     throw new HostedAgentControlError("This agent is still starting. Try again shortly.", 503);
   }
@@ -204,26 +263,35 @@ async function hostedAgentContext(machineId: string): Promise<AgentCommandContex
     await hostedDeviceAction(config, account, { StartRuntime: null });
   }
   const bound = await hostedDeviceEnsureAgentBinding(config, account, {
-    project_id: access.coreProject.project.id,
+    project_id: input.projectId,
     agent_npub: agentNpub,
-    display_name: `Chat with ${access.displayName}`,
+    display_name: `Chat with ${input.displayName}`,
   });
   const binding = bound.hosted_agent_binding;
   if (!binding) {
     throw new HostedAgentControlError("This agent is not available in chat yet.", 503);
   }
   return {
-    account,
-    config,
     roomId: binding.canonical_room_id,
     targetAccountId: binding.agent_account_id,
+    runtimeCommand,
   };
 }
 
+/** Chat-target product errors keep their status with Connections copy. */
+function agentControlError(error: unknown) {
+  if (!(error instanceof HostedWebChatError)) return error;
+  if (error.status === 401) {
+    return new HostedAgentControlError("Sign in again to manage this agent.", 401);
+  }
+  if (error.status >= 500) {
+    return new HostedAgentControlError("Connections are unavailable right now.", error.status);
+  }
+  return new HostedAgentControlError(error.message, error.status);
+}
+
 async function claimOwner(context: AgentCommandContext) {
-  const response = await hostedDeviceRuntimeCommand(
-    context.config,
-    context.account,
+  const response = await context.runtimeCommand(
     agentOwnerClaimCommand(context.roomId, context.targetAccountId)
   );
   assertCommandSucceeded(response);
@@ -261,7 +329,7 @@ async function sendCommand(
   schema: string,
   body: unknown
 ) {
-  const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
+  const response = await context.runtimeCommand({
     room_id: context.roomId,
     target_account_id: context.targetAccountId,
     command,

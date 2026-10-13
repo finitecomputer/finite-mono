@@ -15,7 +15,9 @@ inside v2 without an explicit compatibility contract and tested recovery boundar
 v2 owns:
 
 - WorkOS/account-auth dashboard for self-serve users
-- BoxOne-parity dashboard web chat through a Finite Chat Hosted Web Device
+- BoxOne-parity dashboard web chat directly to the agent's own Finite Chat
+  bridge (no MLS hosted device in the chat path; the Hosted Web Device signs
+  with the user's key and serves only legacy agents' chat)
 - product-owned connection UX through focused services, stable APIs, and skills;
   never through Runtime Management Pipe feature commands
 - Finite Sites publishing/list/preview and Finite Brain chat-surface integration (render cards; viewer components per the current product specification)
@@ -45,7 +47,8 @@ v2 depends on sibling product components in this monorepo:
 Do not add or preserve these as first-class v2 surfaces:
 
 - OpenCode
-- a dashboard-only chat transport separate from Finite Chat
+- a second, parallel chat transport, or a hidden fallback between the direct
+  Finite Chat bridge and the legacy Hosted Web Device
 - dashboard-to-runtime shell, filesystem, Kubernetes, or provider APIs
 - legacy dashboard-managed Published Apps in place of Finite Sites
 - `finitec publish`
