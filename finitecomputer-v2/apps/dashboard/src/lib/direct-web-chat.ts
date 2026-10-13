@@ -11,6 +11,7 @@ import { hostedRequesterAssertion } from "@/lib/hosted-requester-assertion";
 import { HostedWebChatError } from "@/lib/hosted-web-chat-error";
 import {
   HostedDeviceRequestError,
+  hostedDeviceOpenAgentBinding,
   hostedDeviceState,
   type HostedAgentBinding,
   type HostedChatAction,
@@ -22,8 +23,9 @@ import {
 /*
  * Web chat operations against an agent's own Finite Chat bridge. The agent
  * returns the same AppState JSON as the Hosted Web Device, so browser-facing
- * shapes do not change. Agent-binding open/ensure/bootstrap/recovery do not
- * exist here: the canonical room is the agent's own report.
+ * shapes do not change. Agent-binding ensure/bootstrap/recovery do not exist
+ * here: the canonical room is the agent's own report, or, when the agent
+ * holds several rooms, the hosted device's existing binding for the project.
  */
 
 const DIRECT_CHAT_TIMEOUT_MS = 15_000;
@@ -157,6 +159,27 @@ export function directChatRuntimeCommand(session: DirectChatSession, command: Ho
 }
 
 /** The canonical room; an empty agent is re-probed on the next request. */
+/**
+ * A direct session whose canonical room is settled. An agent with exactly
+ * one room names it; with several, the hosted device's existing binding for
+ * this project names the conversation the person has been using, and it must
+ * be one of the agent's rooms. Anything else stays unresolved and fails
+ * closed when used.
+ */
+export async function directChatSessionFor(
+  bridge: DirectChatBridge,
+  access: DirectChatAccess,
+  target: DirectChatTarget
+): Promise<DirectChatSession> {
+  const { info } = target;
+  if (info.canonicalRoomId || info.rooms.length < 2) return { bridge, access, target };
+  const bound = await hostedDeviceOpenAgentBinding(access.hosted, access.account, access.projectId)
+    .then((state) => state.hosted_agent_binding?.canonical_room_id ?? null)
+    .catch(() => null);
+  if (!bound || !info.rooms.includes(bound)) return { bridge, access, target };
+  return { bridge, access, target: { ...target, info: { ...info, canonicalRoomId: bound } } };
+}
+
 export function directChatRoomId(session: DirectChatSession) {
   try {
     return directChatCanonicalRoomId(session.target.info);

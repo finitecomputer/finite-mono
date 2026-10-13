@@ -19,6 +19,7 @@ import {
   directChatAction,
   directChatAttachment,
   directChatBootstrapState,
+  directChatSessionFor,
   directChatRoomId,
   directChatRuntimeCommand,
   directChatUpdates,
@@ -130,7 +131,7 @@ export function hostedWebChatOperations(bridge: DirectChatBridge = directChatBri
       projectId: context.projectId,
     };
     const target = await bridge.resolve(access);
-    return target.kind === "direct" ? { bridge, access, target } : null;
+    return target.kind === "direct" ? directChatSessionFor(bridge, access, target) : null;
   };
 
   return {

@@ -218,6 +218,35 @@ test("an ambiguous direct conversation fails closed instead of guessing a room",
   assert.deepEqual(world.agentRequests(), []);
 });
 
+test("an agent with several rooms uses the room the hosted device binding names", async (t) => {
+  const world = directWorld(t, {
+    "GET /v1/app/state": () => Response.json(fixtureState()),
+  }, {
+    info: () => Response.json(directInfo({ rooms: ["room-a", "room-b"], canonical_room_id: null })),
+    fallback: (request) =>
+      request.url === `${DEVICE_URL}/v1/app/agent-bindings/open`
+        ? Response.json({ ...fixtureState(), hosted_agent_binding: { canonical_room_id: "room-b" } })
+        : Response.json({ error: "not found" }, { status: 404 }),
+  });
+  const state = await directOperations().bootstrap(context);
+  assert.equal(state.hosted_agent_binding?.canonical_room_id, "room-b");
+  assert.deepEqual(world.agentRequests().map(bridgePath), ["GET /v1/app/state"]);
+});
+
+test("a binding naming a room the agent does not hold still fails closed", async (t) => {
+  directWorld(t, {}, {
+    info: () => Response.json(directInfo({ rooms: ["room-a", "room-b"], canonical_room_id: null })),
+    fallback: (request) =>
+      request.url === `${DEVICE_URL}/v1/app/agent-bindings/open`
+        ? Response.json({ ...fixtureState(), hosted_agent_binding: { canonical_room_id: "room-z" } })
+        : Response.json({ error: "not found" }, { status: 404 }),
+  });
+  await assert.rejects(
+    directOperations().bootstrap(context),
+    (error: unknown) => error instanceof HostedWebChatError && error.status === 409
+  );
+});
+
 test("bridge refusals keep their envelope for the proxy", async (t) => {
   const consoleError = console.error;
   console.error = () => {};

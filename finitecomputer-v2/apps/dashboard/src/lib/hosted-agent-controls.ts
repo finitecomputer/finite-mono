@@ -4,6 +4,7 @@ import { loadDashboardMachineAccess } from "@/lib/dashboard-machine-access";
 import { directChatBridge, type DirectChatBridge } from "@/lib/direct-chat-bridge";
 import {
   directChatRoomId,
+  directChatSessionFor,
   directChatRuntimeCommand,
   type DirectChatSession,
 } from "@/lib/direct-web-chat";
@@ -219,7 +220,7 @@ export async function agentCommandContextFor(
     throw agentControlError(error);
   });
   if (target.kind === "direct") {
-    const session: DirectChatSession = { bridge, access, target };
+    const session: DirectChatSession = await directChatSessionFor(bridge, access, target);
     let roomId: string;
     try {
       roomId = directChatRoomId(session);
