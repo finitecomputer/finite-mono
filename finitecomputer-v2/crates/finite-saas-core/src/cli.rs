@@ -24,6 +24,17 @@ pub(crate) async fn serve() -> Result<()> {
             bail!("FC_CORE_HOSTED_HERMES_ORIGINS_JSON must be UTF-8")
         }
     };
+    // Local harness only: trust a loopback ingress's temporary CA for the
+    // native session exchange. Production leaves this unset.
+    let native_sessions = match env::var("FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON") {
+        Ok(value) => NativeSessions::with_development_ingress(
+            DevelopmentIngress::from_json(&value).map_err(anyhow::Error::msg)?,
+        ),
+        Err(env::VarError::NotPresent) => NativeSessions::default(),
+        Err(env::VarError::NotUnicode(_)) => {
+            bail!("FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON must be UTF-8")
+        }
+    };
     let brain_identity =
         match finite_saas_core::brain_identity::BrainIdentityConfig::from_env(&auth) {
             Ok(config) => config,
@@ -36,11 +47,12 @@ pub(crate) async fn serve() -> Result<()> {
         };
     let store = postgres_store_from_env(ImportMode::Commit).await?;
     let agent_creation_placement = optional_agent_creation_placement()?;
-    let app = router_with_hosted_hermes_origins(
+    let app = router_with_hosted_hermes(
         store.clone(),
         auth.clone(),
         agent_creation_placement,
         hosted_hermes_origins.clone(),
+        native_sessions,
     )
     .layer(TraceLayer::new_for_http());
     // Mandatory listeners bind first so an optional listener can never take
