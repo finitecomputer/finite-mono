@@ -107,6 +107,9 @@ pub struct DirectRoomEngine {
     local_read_seq: BTreeMap<String, u64>,
     profiles: BTreeMap<String, AppProfileSummary>,
     activities: BTreeMap<String, DirectActivity>,
+    /// Running edits shown while a reply streams, keyed by (room, edited
+    /// message). Never durable: the final edit replaces them in the log.
+    drafts: BTreeMap<(String, String), ChatMessage>,
     max_seq: BTreeMap<String, u64>,
     rev: u64,
 }
@@ -121,6 +124,7 @@ impl DirectRoomEngine {
             local_read_seq: BTreeMap::new(),
             profiles: BTreeMap::new(),
             activities: BTreeMap::new(),
+            drafts: BTreeMap::new(),
             max_seq: BTreeMap::new(),
             rev: 0,
         }
@@ -182,11 +186,59 @@ impl DirectRoomEngine {
         let parsed = ParsedAppEvent::decode(event);
         if matches!(parsed.decoded, DecodedAppEvent::ChatMessage(_)) {
             self.clear_activities_for_sender(&room_id, &parsed.event.sender);
+            if let Some((message, _)) = project_chat_message(
+                room_id.clone(),
+                seq,
+                parsed.event.message_id.clone(),
+                parsed.event.sender.clone(),
+                parsed.event.plaintext.clone(),
+                parsed.event.timestamp_unix_seconds,
+                &self.owner,
+            ) && let Some(target) = message.edit_of_message_id
+            {
+                self.drafts.remove(&(room_id.clone(), target));
+            }
         }
         self.projection.apply_parsed_event(parsed, &self.owner);
         let max = self.max_seq.entry(room_id).or_default();
         *max = (*max).max(seq);
         self.rev += 1;
+    }
+
+    /// Keep a running edit of an earlier message as an ephemeral draft
+    /// instead of a durable event, so a streamed reply costs two log rows
+    /// (its first part and its final edit). Returns the edited message's id
+    /// and sequence when `plaintext` is such an edit; `None` means append it.
+    pub fn set_draft(
+        &mut self,
+        room_id: &str,
+        sender: &DeviceRef,
+        plaintext: &[u8],
+        now_unix_seconds: u64,
+    ) -> Option<(String, u64)> {
+        let (mut draft, _) = project_chat_message(
+            room_id.to_owned(),
+            0,
+            String::new(),
+            sender.clone(),
+            plaintext.to_vec(),
+            now_unix_seconds,
+            &self.owner,
+        )?;
+        if draft.status != ChatMessageStatus::Running {
+            return None;
+        }
+        let target_id = draft.edit_of_message_id.clone()?;
+        let target = self.projection.message(room_id, &target_id)?;
+        draft.seq = target.seq;
+        draft.message_id = format!("draft-{target_id}");
+        draft.conversation_id = target.conversation_id.clone();
+        draft.chat_id = target.chat_id.clone();
+        let seq = target.seq;
+        self.drafts
+            .insert((room_id.to_owned(), target_id.clone()), draft);
+        self.rev += 1;
+        Some((target_id, seq))
     }
 
     pub fn topics(&self) -> Vec<AppTopicSummary> {
@@ -1159,6 +1211,23 @@ impl DirectRoomEngine {
                 .messages_for_topic_window(&room_id, topic, count),
             _ => self.projection.messages_for_room_window(&room_id, count),
         };
+        // A streaming reply's latest running edit, collapsed onto its message
+        // by clients exactly like a durable edit row.
+        state.messages.extend(
+            self.drafts
+                .iter()
+                .filter(|((room, _), draft)| {
+                    room == &room_id
+                        && topic_id
+                            .as_ref()
+                            .is_none_or(|topic| draft.conversation_id.as_ref() == Some(topic))
+                        && chat_id
+                            .as_ref()
+                            .is_none_or(|chat| draft.chat_id.as_ref() == Some(chat))
+                })
+                .map(|(_, draft)| draft.clone()),
+        );
+        state.messages.sort_by(message_sort);
         let total = match (topic_id.as_deref(), chat_id.as_deref()) {
             (Some(topic), Some(chat)) => self.projection.chat_message_count(&room_id, topic, chat),
             (Some(topic), None) => self.projection.topic_message_count(&room_id, topic),
@@ -1883,6 +1952,103 @@ mod tests {
             assert_eq!(routed.conversation_id.as_deref(), Some(HOME_TOPIC_ID));
             assert!(!routed.is_mine);
         }
+    }
+
+    #[test]
+    fn streamed_replies_keep_running_edits_as_drafts_until_the_final_edit() {
+        let owner = DeviceRef {
+            account_id: "a".repeat(64),
+            device_id: DIRECT_WEB_DEVICE_ID.to_owned(),
+        };
+        let agent = DeviceRef {
+            account_id: "b".repeat(64),
+            device_id: "agent".to_owned(),
+        };
+        let mut engine = DirectRoomEngine::new(owner, agent.clone());
+        engine.upsert_room(DirectRoom {
+            room_id: "room-direct".to_owned(),
+            display_name: "Agent".to_owned(),
+            picture: None,
+        });
+        let mut log = MemoryLog::default();
+        engine.ensure_home_topic("room-direct", &mut log).unwrap();
+        let view = || AppView {
+            room_id: Some("room-direct".to_owned()),
+            topic_id: Some(HOME_TOPIC_ID.to_owned()),
+            chat_id: Some(HOME_CHAT_ID.to_owned()),
+            limit: None,
+            oldest_message_id: None,
+        };
+        let first = engine
+            .append_agent_event(
+                &mut log,
+                "room-direct",
+                agent_reply(
+                    "room-direct",
+                    HOME_TOPIC_ID,
+                    HOME_CHAT_ID,
+                    "Thinking ▉",
+                    HermesMessageStatusV1::Running,
+                    None,
+                ),
+            )
+            .unwrap();
+        let durable_before = log.events.len();
+        let draft = agent_reply(
+            "room-direct",
+            HOME_TOPIC_ID,
+            HOME_CHAT_ID,
+            "Thinking about it ▉",
+            HermesMessageStatusV1::Running,
+            Some(first.message_id.clone()),
+        );
+        assert_eq!(
+            engine.set_draft("room-direct", &agent, &draft, NOW),
+            Some((first.message_id.clone(), first.seq))
+        );
+        assert_eq!(log.events.len(), durable_before, "drafts are never durable");
+        let streaming = engine.state_for_view(view(), "ready", 0).unwrap().messages;
+        let shown = streaming.last().unwrap();
+        assert_eq!(shown.text, "Thinking about it ▉");
+        assert_eq!(
+            shown.edit_of_message_id.as_deref(),
+            Some(first.message_id.as_str())
+        );
+        // A first part is not a running edit, and a complete edit is durable.
+        let not_an_edit = agent_reply(
+            "room-direct",
+            HOME_TOPIC_ID,
+            HOME_CHAT_ID,
+            "x ▉",
+            HermesMessageStatusV1::Running,
+            None,
+        );
+        assert_eq!(
+            engine.set_draft("room-direct", &agent, &not_an_edit, NOW),
+            None
+        );
+        let final_edit = agent_reply(
+            "room-direct",
+            HOME_TOPIC_ID,
+            HOME_CHAT_ID,
+            "Done thinking",
+            HermesMessageStatusV1::Complete,
+            Some(first.message_id.clone()),
+        );
+        assert_eq!(
+            engine.set_draft("room-direct", &agent, &final_edit, NOW),
+            None
+        );
+        engine
+            .append_agent_event(&mut log, "room-direct", final_edit)
+            .unwrap();
+        let settled = engine.state_for_view(view(), "ready", 0).unwrap().messages;
+        assert!(
+            settled
+                .iter()
+                .all(|message| !message.message_id.starts_with("draft-"))
+        );
+        assert_eq!(settled.last().unwrap().text, "Done thinking");
     }
 
     #[test]

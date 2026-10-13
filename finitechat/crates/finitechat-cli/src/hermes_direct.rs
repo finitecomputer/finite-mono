@@ -36,6 +36,8 @@ use sha2::{Digest, Sha256};
 use super::*;
 
 pub(super) const CHAT_TRANSPORT_ENV: &str = "FINITECHAT_CHAT_TRANSPORT";
+/// Opt-in token streaming: running edits become ephemeral drafts.
+const DIRECT_STREAMING_ENV: &str = "FINITECHAT_DIRECT_STREAMING";
 const DIRECT_DIR: &str = "direct";
 const DIRECT_LOG_FILE: &str = "room-log.sqlite3";
 const DIRECT_BLOB_DIR: &str = "blobs";
@@ -69,6 +71,10 @@ pub(super) fn direct_transport_requested() -> bool {
 
 fn direct_dir(home_dir: &Path) -> PathBuf {
     home_dir.join(DIRECT_DIR)
+}
+
+fn direct_streaming_enabled() -> bool {
+    std::env::var(DIRECT_STREAMING_ENV).is_ok_and(|value| value.trim() == "1")
 }
 
 pub(super) fn direct_blob_path(home_dir: &Path, ciphertext_sha256: &str) -> PathBuf {
@@ -1137,6 +1143,18 @@ impl SidecarRuntime for DirectRuntime {
         plaintext: Vec<u8>,
         _preview: String,
     ) -> Result<AppSentMessage, CliError> {
+        if direct_streaming_enabled() {
+            let draft = self.lock()?.engine.set_draft(
+                &room_id,
+                &self.agent,
+                &plaintext,
+                now_unix_seconds(),
+            );
+            if let Some((message_id, seq)) = draft {
+                self.notify();
+                return Ok(AppSentMessage { message_id, seq });
+            }
+        }
         let event =
             self.mutate(|engine, log| engine.append_agent_event(log, &room_id, plaintext))?;
         Ok(AppSentMessage {
