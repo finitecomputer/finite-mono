@@ -223,6 +223,14 @@ const HERMES_PLUGIN_SIMPLEX_TOPICS: &str =
     include_str!("../../../integrations/hermes/finitechat/simplex_topics.py");
 const HERMES_PLUGIN_YAML: &str =
     include_str!("../../../integrations/hermes/finitechat/plugin.yaml");
+/// Native Hermes dashboard plugin that proxies `/api/plugins/<name>/v1/app/*`
+/// to the loopback bridge; Hermes mounts it only while `<name>` is enabled.
+const HERMES_DASHBOARD_MANIFEST: &str =
+    include_str!("../../../integrations/hermes/finitechat/dashboard/manifest.json");
+const HERMES_DASHBOARD_API: &str =
+    include_str!("../../../integrations/hermes/finitechat/dashboard/plugin_api.py");
+const HERMES_DASHBOARD_ENTRY: &str =
+    include_str!("../../../integrations/hermes/finitechat/dashboard/dist/index.js");
 const HERMES_PLUGIN_ENV_FILE: &str = "finitechat.env";
 const RESIDENT_BRIDGE_SYNC_INTERVAL_MILLIS: u64 = 10_000;
 const CREDENTIAL_VALIDITY_SECONDS: u64 = 90 * 24 * 60 * 60;
@@ -418,6 +426,27 @@ fn cmd_install<W: Write>(
     write_managed_plugin_file(
         &plugin_dir.join("plugin.yaml"),
         &plugin_yaml,
+        force,
+        &mut installed,
+    )?;
+    let dashboard_dir = plugin_dir.join("dashboard");
+    fs::create_dir_all(dashboard_dir.join("dist"))
+        .map_err(|error| CliError::Hermes(error.to_string()))?;
+    write_managed_plugin_file(
+        &dashboard_dir.join("manifest.json"),
+        &hermes_dashboard_manifest_for_install(&plugin_name),
+        force,
+        &mut installed,
+    )?;
+    write_managed_plugin_file(
+        &dashboard_dir.join("plugin_api.py"),
+        HERMES_DASHBOARD_API,
+        force,
+        &mut installed,
+    )?;
+    write_managed_plugin_file(
+        &dashboard_dir.join("dist").join("index.js"),
+        HERMES_DASHBOARD_ENTRY,
         force,
         &mut installed,
     )?;
@@ -3788,6 +3817,16 @@ fn hermes_plugin_yaml_for_install(plugin_name: &str) -> String {
     HERMES_PLUGIN_YAML.replacen("name: finitechat", &format!("name: {plugin_name}"), 1)
 }
 
+/// The dashboard plugin shares the platform plugin's name, so one
+/// `plugins.enabled` entry gates both. validate_plugin_name keeps it JSON-safe.
+fn hermes_dashboard_manifest_for_install(plugin_name: &str) -> String {
+    HERMES_DASHBOARD_MANIFEST.replacen(
+        "\"name\": \"finitechat\"",
+        &format!("\"name\": \"{plugin_name}\""),
+        1,
+    )
+}
+
 fn hermes_recommended_config(plugin_name: &str, home_dir: &Path) -> String {
     format!(
         "plugins:\n  enabled:\n    - {plugin_name}\ngateway:\n  platforms:\n    {platform_name}:\n      enabled: true\n      extra:\n        home: {home}\n",
@@ -4904,6 +4943,15 @@ mod tests {
         assert!(plugin_yaml.contains("  - pre_tool_call\n  - post_tool_call"));
         let adapter = fs::read_to_string(plugin_dir.join("adapter.py")).unwrap();
         assert!(adapter.contains("_RequesterContextBroker"));
+        let dashboard = plugin_dir.join("dashboard");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dashboard.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["name"], "finitechat");
+        assert_eq!(manifest["tab"]["hidden"], true);
+        assert_eq!(manifest["api"], "plugin_api.py");
+        let plugin_api = fs::read_to_string(dashboard.join("plugin_api.py")).unwrap();
+        assert!(plugin_api.contains("@router.api_route(\"/v1/app/{path:path}\""));
+        assert!(dashboard.join("dist").join("index.js").exists());
         assert!(
             summary["recommended_config"]
                 .as_str()
@@ -4914,6 +4962,35 @@ mod tests {
         assert!(env.contains(&format!("FINITECHAT_HOME={}", home.display())));
         assert!(env.contains("FINITECHAT_BIN=/usr/local/bin/finitechat"));
         assert!(env.contains("FINITECHAT_HERMES_SERVICE_URL=http://127.0.0.1:4321"));
+    }
+
+    #[test]
+    fn install_names_the_dashboard_plugin_after_the_platform_plugin() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("agent-home");
+        let plugins_dir = dir.path().join("plugins");
+        write_test_agent_config(&home);
+
+        let mut output = Vec::new();
+        cmd_install(
+            &home,
+            install_args(&[
+                "--plugins-dir",
+                &plugins_dir.display().to_string(),
+                "--plugin-name",
+                "finitechat-dev",
+                "--finitechat-bin",
+                "/bin/finitechat",
+            ]),
+            true,
+            &mut output,
+        )
+        .expect("install succeeds");
+
+        let manifest = plugins_dir.join("finitechat-dev/dashboard/manifest.json");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(manifest).unwrap()).unwrap();
+        assert_eq!(manifest["name"], "finitechat-dev");
     }
 
     #[test]
