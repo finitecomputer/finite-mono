@@ -6,6 +6,10 @@ pub struct MeResponse {
     pub workos_user_id: String,
     pub projects: Vec<PublicVisibleProject>,
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
+    /// Read-only: when the new product's import flow marked this account
+    /// migrated (`null` until then). Additive; N-1 Core responses omit it.
+    #[serde(default)]
+    pub migrated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

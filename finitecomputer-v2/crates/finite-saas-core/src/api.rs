@@ -53,6 +53,9 @@ use std::env;
 use subtle::ConstantTimeEq;
 mod errors;
 use errors::*;
+mod account_migration;
+use account_migration::mark_account_migrated;
+pub use account_migration::{AccountMigrationResponse, MarkAccountMigratedRequest};
 mod requests;
 pub use requests::*;
 mod views;
@@ -354,6 +357,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(admin_assign_finite_private_limit_profile),
         )
         .route("/api/core/v1/me", get(me))
+        .route(
+            "/api/core/v1/account-migrations",
+            post(mark_account_migrated),
+        )
         .route("/api/core/v1/me/dashboard-summary", get(dashboard_summary))
         .route(
             "/api/core/v1/me/finite-private/usage",

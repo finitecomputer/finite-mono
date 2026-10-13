@@ -256,6 +256,7 @@ async fn offboarding_phase_of(store: &TestDb, runtime_id: &str) -> serde_json::V
         .clone()
 }
 
+mod account_migrations;
 mod admin_runtime;
 mod billing_lifecycle;
 mod brain_identity;

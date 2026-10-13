@@ -26,6 +26,11 @@ const RUNNER_CREDENTIALS_ENV: &str = "FC_CORE_RUNNER_CREDENTIALS_JSON";
 
 const RUNNER_TOKEN_ENV_PREFIX: &str = "FC_CORE_RUNNER_CREDENTIAL_TOKEN_";
 
+/// Optional bearer held only by the new product's import flow. Unset means
+/// the account-migration route is unavailable; it never falls back to
+/// `FC_CORE_API_TOKEN`.
+pub const ACCOUNT_MIGRATION_TOKEN_ENV: &str = "FC_CORE_ACCOUNT_MIGRATION_API_TOKEN";
+
 const LEGACY_KATA_CREDENTIAL_ID: &str = "legacy-finite-kata-runner-1";
 
 const LEGACY_KATA_RUNNER_ID: &str = "finite-kata-runner-1";
@@ -84,7 +89,7 @@ struct RunnerCredentialEnvRecord {
 
 /// Authentication configuration for the Core HTTP boundary.
 ///
-/// The three opaque service credentials are deliberately separate route
+/// The opaque service credentials are deliberately separate route
 /// capabilities. WorkOS access tokens are never compared with any of them.
 #[derive(Clone)]
 pub struct CoreAuth {
@@ -92,6 +97,7 @@ pub struct CoreAuth {
     service_api_token: Arc<str>,
     runner_credentials: Arc<[RunnerCredential]>,
     finite_private_usage_api_token: Arc<str>,
+    account_migration_api_token: Option<Arc<str>>,
 }
 
 impl CoreAuth {
@@ -112,12 +118,16 @@ impl CoreAuth {
         if let Some(token) = optional_env("FC_CORE_RUNNER_API_TOKEN") {
             runner_credentials.push(legacy_kata_runner_credential(token));
         }
-        Self::new_internal(
+        let auth = Self::new_internal(
             workos,
             required_env("FC_CORE_API_TOKEN")?,
             runner_credentials,
             required_env("FC_FINITE_PRIVATE_USAGE_API_TOKEN")?,
-        )
+        )?;
+        match optional_env(ACCOUNT_MIGRATION_TOKEN_ENV) {
+            Some(token) => auth.with_account_migration_api_token(token),
+            None => Ok(auth),
+        }
     }
 
     pub fn new(
@@ -213,7 +223,23 @@ impl CoreAuth {
             service_api_token: service_api_token.into(),
             runner_credentials: validated.into(),
             finite_private_usage_api_token: finite_private_usage_api_token.into(),
+            account_migration_api_token: None,
         })
+    }
+
+    /// Enable the account-migration route with its own bearer. The token must
+    /// differ from every other Core credential so no existing caller gains
+    /// the capability.
+    pub fn with_account_migration_api_token(
+        mut self,
+        token: impl Into<String>,
+    ) -> Result<Self, AuthConfigError> {
+        let token = required_value(ACCOUNT_MIGRATION_TOKEN_ENV, token.into())?;
+        if self.credential_in_use(&token) {
+            return Err(AuthConfigError::ServiceCredentialsMustBeDistinct);
+        }
+        self.account_migration_api_token = Some(token.into());
+        Ok(self)
     }
 
     pub fn workos(&self) -> &WorkosAuthenticator {
@@ -259,13 +285,19 @@ impl CoreAuth {
         &self.finite_private_usage_api_token
     }
 
-    /// True when `token` equals any configured service, usage or Runner
-    /// credential (revoked Runner credentials included), so a new scoped
-    /// credential can be refused at startup if it would be shared.
+    pub(crate) fn account_migration_api_token(&self) -> Option<&str> {
+        self.account_migration_api_token.as_deref()
+    }
+
+    /// True when `token` equals any configured service, usage, account
+    /// migration or Runner credential (revoked Runner credentials included),
+    /// so a new scoped credential can be refused at startup if it would be
+    /// shared.
     pub(crate) fn credential_in_use(&self, token: &str) -> bool {
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
         token == self.service_api_token.as_ref()
             || token == self.finite_private_usage_api_token.as_ref()
+            || self.account_migration_api_token.as_deref() == Some(token)
             || self
                 .runner_credentials
                 .iter()

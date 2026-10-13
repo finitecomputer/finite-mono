@@ -76,6 +76,10 @@ async fn me_response_for_identity(
         .store
         .agent_creation_requests_for_workos_user(&identity.workos_user_id)
         .await?;
+    let migrated_at = state
+        .store
+        .account_migrated_at_for_workos_user(&identity.workos_user_id)
+        .await?;
     Ok(MeResponse {
         email: identity.email.clone(),
         workos_user_id: identity.workos_user_id.clone(),
@@ -84,6 +88,7 @@ async fn me_response_for_identity(
             .into_iter()
             .map(AgentCreationRequestSummary::from)
             .collect(),
+        migrated_at,
     })
 }
 

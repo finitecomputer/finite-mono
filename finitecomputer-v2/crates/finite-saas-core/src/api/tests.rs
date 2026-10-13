@@ -11,6 +11,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use tower::ServiceExt;
 mod account_email_change;
+mod account_migration;
 mod admin_authorization;
 mod agent_creation;
 mod agent_creation_control;

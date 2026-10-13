@@ -107,6 +107,11 @@ in
       #   FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER  https://brain.finite.computer
       #   FC_CORE_BRAIN_OBSERVATION_TOKEN      shared only with the dashboard
       #   FC_CORE_BRAIN_DESCRIPTION_TOKEN      shared only with Brain
+      #   Optional, not yet provisioned:
+      #   FC_CORE_ACCOUNT_MIGRATION_API_TOKEN  held only by the new product's
+      #                         import flow; authorizes POST
+      #                         /api/core/v1/account-migrations (loopback,
+      #                         not edge-routed). Unset = route answers 503.
       EnvironmentFile = "/etc/finite/core.env";
       Restart = "on-failure";
       RestartSec = 2;
