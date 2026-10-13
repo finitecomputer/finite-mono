@@ -57,6 +57,17 @@ fn position_between(lower: &str, upper: Option<&str>, suffix: &str) -> Option<St
     None
 }
 
+/// A position between two neighbours for one chat, with that chat's stable
+/// identity suffix (shared by the MLS runtime and the direct engine).
+pub(super) fn position_between_for_chat(
+    lower: &str,
+    upper: Option<&str>,
+    topic_id: &str,
+    chat_id: &str,
+) -> Option<String> {
+    position_between(lower, upper, &identity_suffix(topic_id, chat_id))
+}
+
 impl ChatProjectionState {
     pub(super) fn apply_chat_placement(&mut self, room: &str, seq: u64, value: ChatPlacementV1) {
         let key = (room.to_owned(), value.topic_id, value.chat_id);
