@@ -86,14 +86,17 @@ test("concurrent first requests share one probe", async (context) => {
   assert.equal(mints.length, 1);
 });
 
-test("agents without the bridge, on another transport, mid-fold, or without hosted access stay legacy", async (context) => {
+test("agents that say they are not direct, or that this owner cannot reach, stay legacy", async (context) => {
   const cases: Array<[string, { info?: () => Response; mint?: () => never }]> = [
     ["plugin route missing", { info: () => Response.json({ detail: "Not Found" }, { status: 404 }) }],
+    ["sidecar serving MLS chat", {
+      info: () => Response.json(
+        { error: "direct chat is not enabled", error_kind: "not_found", retryable: false },
+        { status: 404 }
+      ),
+    }],
     ["MLS transport", { info: () => Response.json({ transport: "mls", version: 1 }) }],
     ["pending fold", { info: () => Response.json(directInfo({ migration: { state: "pending", source: null } })) }],
-    ["non-JSON page", { info: () => new Response("<!doctype html>", { headers: { "content-type": "text/html" } }) }],
-    ["JSON without transport", { info: () => Response.json({ ok: true }) }],
-    ["hosted access not enabled", { mint: () => { throw new CoreFetchError("hosted access is not enabled", 409); } }],
     ["not this owner's runtime", { mint: () => { throw new CoreFetchError("agent runtime was not found", 404); } }],
   ];
   for (const [label, scenario] of cases) {
@@ -128,6 +131,10 @@ test("failures that are not evidence never route an unknown agent to legacy", as
     ["native rejects a fresh grant", { info: () => new Response(null, { status: 401 }) }],
     ["Core cannot reach native Hermes", { mint: () => { throw new CoreFetchError("native Hermes is unavailable", 503); } }],
     ["Core transport failure", { mint: () => { throw new TypeError("fetch failed"); } }],
+    ["hosted access not enabled", { mint: () => { throw new CoreFetchError("hosted access is not enabled", 409); } }],
+    ["ingress has no route", { info: () => new Response(null, { status: 404 }) }],
+    ["non-JSON page", { info: () => new Response("<!doctype html>", { headers: { "content-type": "text/html" } }) }],
+    ["JSON without transport", { info: () => Response.json({ ok: true }) }],
   ];
   for (const [label, scenario] of cases) {
     directWorld(context, {}, { info: scenario.info });

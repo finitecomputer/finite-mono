@@ -235,23 +235,33 @@ export class DirectChatBridge {
       response = await this.nativeGet(access, "/v1/app/info");
     } catch (error) {
       if (error instanceof HostedWebChatError) throw error;
-      if (error instanceof CoreFetchError && [403, 404, 409].includes(error.status)) {
-        // Core reports no hosted access for this owner/runtime: not direct.
-        return this.notDirect(access, seen, error.status === 409);
+      if (error instanceof CoreFetchError && [403, 404].includes(error.status)) {
+        // Core does not treat this account as the runtime's owner.
+        return this.notDirect(access, seen, false);
       }
+      // Hosted access off or not applied (409) says nothing about the agent's
+      // chat mode; an admitted runtime must not be guessed onto the MLS path.
       return this.unknown(access, seen);
     }
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
       if (response.status === 404) {
-        // Native Hermes accepted this grant and has no finitechat plugin route.
-        this.observe(access.runtimeId, { mode: "legacy", observedAtMs: this.now() });
-        return LEGACY;
-      }
-      if ([401, 403, 408, 429].includes(response.status) || response.status >= 500) {
+        let body: unknown = null;
+        try {
+          body = await boundedJson(response, DIRECT_CHAT_MAX_INFO_BYTES);
+        } catch {
+          body = null;
+        }
+        if (agentSaysNotDirect(body)) {
+          // Native Hermes without the finitechat plugin (an older image), or
+          // the sidecar still serving MLS chat because its fold is pending.
+          this.observe(access.runtimeId, { mode: "legacy", observedAtMs: this.now() });
+          return LEGACY;
+        }
+        // An ingress 404 has no route to this agent: no evidence either way.
         return this.unknown(access, seen);
       }
-      return this.notDirect(access, seen, true);
+      await response.body?.cancel().catch(() => undefined);
+      return this.unknown(access, seen);
     }
     let payload: unknown;
     try {
@@ -274,7 +284,7 @@ export class DirectChatBridge {
       this.observe(access.runtimeId, { mode: "legacy", observedAtMs: this.now() });
       return LEGACY;
     }
-    return this.notDirect(access, seen, true);
+    return this.unknown(access, seen);
   }
 
   /** Indirect evidence the agent is not direct; never overrides a direct agent. */
@@ -364,6 +374,17 @@ export class DirectChatBridge {
   private observe(runtimeId: string, observation: Observation) {
     boundedSet(this.observations, runtimeId, observation);
   }
+}
+
+/**
+ * A 404 the agent itself sent: FastAPI's `{"detail": …}` when native Hermes
+ * has no finitechat plugin route, or the sidecar's `not_found` envelope when
+ * it is serving MLS chat. Ingress 404s carry neither.
+ */
+function agentSaysNotDirect(body: unknown) {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return false;
+  const record = body as Record<string, unknown>;
+  return typeof record.detail === "string" || record.error_kind === "not_found";
 }
 
 /** Runtimes `FC_DIRECT_CHAT_RUNTIME_IDS` admits to direct chat probing. */
