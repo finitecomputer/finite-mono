@@ -17,7 +17,7 @@ sha256>`. These are the records a per-person export carries.
 
 | Table | Meaning |
 |---|---|
-| `direct_meta` | `schema_version`, `origin` (`fold` or `fresh`), `created_at`, `owner_account_id` (the person this log renders for), `fold_cursors` (room → MLS cursor at the fold) |
+| `direct_meta` | `schema_version`, `origin` (`fold` or `fresh`), `created_at`, `owner_account_id` (the person this log renders for), `fold_cursors` (room → MLS cursor at the fold), `last_view` (the room, topic and chat the person last opened) |
 | `direct_rooms` | `room_id`, `display_name`, `picture`, `read_seq` (the person's read mark), `next_seq` |
 | `direct_members` | room members' account ids |
 | `direct_events` | `room_id`, `seq`, `message_id`, `sender_account_id`, `sender_device_id`, `timestamp_unix_seconds`, `plaintext`, `origin` (`fold` or `direct`), `idempotency_key` |
@@ -75,7 +75,7 @@ The sidecar serves these loopback routes. Hermes `serve` exposes them as
 | Route | |
 |---|---|
 | `GET /v1/app/info` | `{transport, version, agent_id, agent_account_id, rooms, canonical_room_id, migration}`, unsigned |
-| `GET /v1/app/state?<AppView>` | the person's `AppState` |
+| `GET /v1/app/state?<AppView>` | the person's `AppState`. A view naming no room resumes `last_view`, or the only room at Home, as the Device's saved navigation did |
 | `GET /v1/app/updates?<AppView>` | SSE: `event: state`, `id: <rev>`, sent at once, then on every change or every 30 s |
 | `POST /v1/app/actions` | an `AppAction` → `AppState`. Covered: open, create topic, start chat, move, rename, archive, sends, load older, mark read, typing |
 | `POST /v1/app/new-chat` | `{room_id, topic_id, reason?, intent_key}`; idempotent per intent |

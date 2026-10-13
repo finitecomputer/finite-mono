@@ -461,6 +461,13 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     assert_eq!(result["status"], "succeeded");
     assert_eq!(result["body"], json!({"ok": true}));
 
+    // Where the person was is durable: a view naming no room resumes it.
+    bridge.json(bridge.post(
+        &person,
+        "/v1/app/actions",
+        &json!({"OpenChat": {"room_id": room_id, "topic_id": topic_id, "chat_id": chat_id}}),
+    ));
+
     // Digest is hashes only, and a second process sees the same durable log.
     let digest = bridge.json(bridge.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
     assert!(!digest.to_string().contains("hello direct"));
@@ -471,6 +478,11 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     let restarted_digest =
         restarted.json(restarted.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
     assert_eq!(restarted_digest, digest);
+    let landing = restarted.json(restarted.get(&person, "/v1/app/state"));
+    assert_eq!(landing["selected_room_id"], room_id.as_str());
+    assert_eq!(landing["selected_topic_id"], topic_id.as_str());
+    assert_eq!(landing["selected_chat_id"], chat_id.as_str());
+    assert!(chat_messages(&landing).iter().any(|text| text == "hello from Hermes"));
     let mut sink = Vec::new();
     finitechat_cli::run(
         ["hermes", "--agent-home", &agent_home, "direct-digest"]

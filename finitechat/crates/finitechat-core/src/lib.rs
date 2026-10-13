@@ -4,9 +4,9 @@ mod view;
 pub use view::AppView;
 mod direct;
 pub use direct::{
-    DIRECT_WEB_DEVICE_ID, DirectChatDigest, DirectEventDraft, DirectLog, DirectRequesterContext,
-    DirectRoom, DirectRoomDigest, DirectRoomEngine, DirectSelection, DirectTopicDigest,
-    new_chat_intent_id, room_digest,
+    DIRECT_WEB_DEVICE_ID, DirectChatDigest, DirectEventDraft, DirectLastView, DirectLog,
+    DirectRequesterContext, DirectRoom, DirectRoomDigest, DirectRoomEngine, DirectSelection,
+    DirectTopicDigest, new_chat_intent_id, room_digest,
 };
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

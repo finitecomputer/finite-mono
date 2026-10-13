@@ -21,8 +21,8 @@ use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use base64::Engine as _;
 use finitechat_core::{
     AppAcceptedActivity, AppBridgeAppliedEvent, AppProfileSummary, AppState, AppView,
-    DIRECT_WEB_DEVICE_ID, DirectEventDraft, DirectFoldExport, DirectLog, DirectRequesterContext,
-    DirectRoom, DirectRoomEngine, DirectSelection,
+    DIRECT_WEB_DEVICE_ID, DirectEventDraft, DirectFoldExport, DirectLastView, DirectLog,
+    DirectRequesterContext, DirectRoom, DirectRoomEngine, DirectSelection,
 };
 use finitechat_hermes::{HermesAttachmentKindV1, HermesAttachmentV1};
 use finitechat_proto::{
@@ -194,6 +194,46 @@ impl DirectStore {
             )
             .optional()
             .map_err(sql_error)
+    }
+
+    /// The person's view of everything durable, including where they were.
+    fn load_engine(
+        &self,
+        owner: DeviceRef,
+        agent: DeviceRef,
+    ) -> Result<DirectRoomEngine, CliError> {
+        let mut engine = DirectRoomEngine::new(owner, agent);
+        for (room, read_seq) in self.rooms()? {
+            let room_id = room.room_id.clone();
+            engine.upsert_room(room);
+            engine.set_read_seq(&room_id, read_seq);
+        }
+        for profile in self.profiles()? {
+            engine.upsert_profile(profile);
+        }
+        for event in self.all_events()? {
+            engine.apply(event);
+        }
+        // A view that no longer parses only loses the landing place.
+        engine.set_last_view(
+            self.meta("last_view")?
+                .and_then(|value| serde_json::from_str(&value).ok()),
+        );
+        Ok(engine)
+    }
+
+    fn set_last_view(&self, view: Option<&DirectLastView>) -> Result<(), CliError> {
+        match view {
+            Some(view) => self.set_meta(
+                "last_view",
+                &serde_json::to_string(view).map_err(CliError::Serialize)?,
+            ),
+            None => self
+                .conn
+                .execute("DELETE FROM direct_meta WHERE key = 'last_view'", [])
+                .map(|_| ())
+                .map_err(sql_error),
+        }
     }
 
     fn set_meta(&self, key: &str, value: &str) -> Result<(), CliError> {
@@ -532,18 +572,7 @@ impl DirectRuntime {
             account_id: owner_account,
             device_id: DIRECT_WEB_DEVICE_ID.to_owned(),
         };
-        let mut engine = DirectRoomEngine::new(owner, agent.clone());
-        for (room, read_seq) in store.rooms()? {
-            let room_id = room.room_id.clone();
-            engine.upsert_room(room);
-            engine.set_read_seq(&room_id, read_seq);
-        }
-        for profile in store.profiles()? {
-            engine.upsert_profile(profile);
-        }
-        for event in store.all_events()? {
-            engine.apply(event);
-        }
+        let engine = store.load_engine(owner, agent.clone())?;
         let polled_row_id = store.max_row_id()?;
         let origin = DirectOrigin {
             state: match store.meta("origin")?.as_deref() {
@@ -629,8 +658,16 @@ impl DirectRuntime {
                 .conn
                 .execute_batch("BEGIN IMMEDIATE")
                 .map_err(sql_error)?;
+            let last_view = engine.last_view().cloned();
             let mut log = StoreLog { store };
-            match f(engine, &mut log) {
+            match f(engine, &mut log).and_then(|value| {
+                if engine.last_view() != last_view.as_ref() {
+                    store
+                        .set_last_view(engine.last_view())
+                        .map_err(core_error)?;
+                }
+                Ok(value)
+            }) {
                 Ok(value) => {
                     store.conn.execute_batch("COMMIT").map_err(sql_error)?;
                     Ok(value)
@@ -657,19 +694,7 @@ impl DirectRuntime {
             account_id: inner.store.meta("owner_account_id")?.unwrap_or_default(),
             device_id: DIRECT_WEB_DEVICE_ID.to_owned(),
         };
-        let mut engine = DirectRoomEngine::new(owner, self.agent.clone());
-        for (room, read_seq) in inner.store.rooms()? {
-            let room_id = room.room_id.clone();
-            engine.upsert_room(room);
-            engine.set_read_seq(&room_id, read_seq);
-        }
-        for profile in inner.store.profiles()? {
-            engine.upsert_profile(profile);
-        }
-        for event in inner.store.all_events()? {
-            engine.apply(event);
-        }
-        inner.engine = engine;
+        inner.engine = inner.store.load_engine(owner, self.agent.clone())?;
         Ok(())
     }
 

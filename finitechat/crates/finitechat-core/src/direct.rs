@@ -63,6 +63,15 @@ pub struct DirectSelection {
     pub status: String,
 }
 
+/// The view the person last opened. A view naming no room resumes it, as the
+/// Device's saved navigation did.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DirectLastView {
+    pub room_id: String,
+    pub topic_id: Option<String>,
+    pub chat_id: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct DirectActivity {
     member: AppTypingMember,
@@ -115,6 +124,7 @@ pub struct DirectRoomEngine {
     /// Topic summaries for `rev`: each one walks every message, and a single
     /// action validates its route several times.
     topics_cache: std::sync::Mutex<Option<(u64, Vec<AppTopicSummary>)>>,
+    last_view: Option<DirectLastView>,
 }
 
 impl DirectRoomEngine {
@@ -131,6 +141,25 @@ impl DirectRoomEngine {
             max_seq: BTreeMap::new(),
             rev: 0,
             topics_cache: std::sync::Mutex::new(None),
+            last_view: None,
+        }
+    }
+
+    pub fn last_view(&self) -> Option<&DirectLastView> {
+        self.last_view.as_ref()
+    }
+
+    pub fn set_last_view(&mut self, view: Option<DirectLastView>) {
+        self.last_view = view;
+    }
+
+    fn remember_view(&mut self, selection: &DirectSelection) {
+        if let Some(room_id) = &selection.room_id {
+            self.last_view = Some(DirectLastView {
+                room_id: room_id.clone(),
+                topic_id: selection.topic_id.clone(),
+                chat_id: selection.chat_id.clone(),
+            });
         }
     }
 
@@ -597,6 +626,27 @@ impl DirectRoomEngine {
         requester: Option<&DirectRequesterContext>,
         log: &mut dyn DirectLog,
     ) -> Result<DirectSelection, FiniteChatCoreError> {
+        let navigates = matches!(
+            action,
+            AppAction::OpenRoom { .. }
+                | AppAction::OpenTopic { .. }
+                | AppAction::OpenChat { .. }
+                | AppAction::CreateTopic { .. }
+                | AppAction::StartTopicChat { .. }
+        );
+        let selection = self.execute_action(action, requester, log)?;
+        if navigates {
+            self.remember_view(&selection);
+        }
+        Ok(selection)
+    }
+
+    fn execute_action(
+        &mut self,
+        action: AppAction,
+        requester: Option<&DirectRequesterContext>,
+        log: &mut dyn DirectLog,
+    ) -> Result<DirectSelection, FiniteChatCoreError> {
         let selection = |room_id: String,
                          topic_id: Option<String>,
                          chat_id: Option<String>,
@@ -868,13 +918,15 @@ impl DirectRoomEngine {
         intent_key: &str,
     ) -> Result<DirectSelection, FiniteChatCoreError> {
         let chat_id = self.start_topic_chat_intent(log, room_id, topic_id, reason, intent_key)?;
-        Ok(DirectSelection {
+        let selection = DirectSelection {
             room_id: Some(room_id.to_owned()),
             topic_id: Some(topic_id.to_owned()),
             chat_id: Some(chat_id),
             oldest_message_id: None,
             status: "chat created".to_owned(),
-        })
+        };
+        self.remember_view(&selection);
+        Ok(selection)
     }
 
     fn move_chat(
@@ -1148,7 +1200,10 @@ impl DirectRoomEngine {
                     "a transcript view requires room_id".to_owned(),
                 ));
             }
-            return Ok(state);
+            return match self.resumed_view(&topics) {
+                Some(resumed) => self.state_for_view(resumed, status, now_ms),
+                None => Ok(state),
+            };
         };
         self.validate_room(&room_id).map_err(|_| {
             client_error_message("transcript room is not available on this Device".to_owned())
@@ -1255,6 +1310,37 @@ impl DirectRoomEngine {
         state.selected_topic_id = topic_id;
         state.selected_chat_id = chat_id;
         Ok(state)
+    }
+
+    /// The last opened view while it still exists, or else the only room at
+    /// Home, as on a fresh Device.
+    fn resumed_view(&self, topics: &[AppTopicSummary]) -> Option<AppView> {
+        let Some(last) = self
+            .last_view
+            .as_ref()
+            .filter(|last| self.rooms.contains_key(&last.room_id))
+        else {
+            return (self.rooms.len() == 1).then(|| AppView {
+                room_id: self.rooms.keys().next().cloned(),
+                ..AppView::default()
+            });
+        };
+        let topic_id = last.topic_id.clone().filter(|topic_id| {
+            topics.iter().any(|topic| {
+                topic.room_id == last.room_id && topic.topic_id == *topic_id && !topic.archived
+            })
+        });
+        let chat_id = topic_id.as_deref().and_then(|topic_id| {
+            last.chat_id
+                .clone()
+                .filter(|chat_id| self.chat_exists(&last.room_id, topic_id, chat_id))
+        });
+        Some(AppView {
+            room_id: Some(last.room_id.clone()),
+            topic_id,
+            chat_id,
+            ..AppView::default()
+        })
     }
 
     fn base_state(&self, topics: Vec<AppTopicSummary>, status: &str, now_ms: u64) -> AppState {
@@ -2154,5 +2240,122 @@ mod tests {
                 .to_string()
                 .contains("not available in direct transport")
         );
+    }
+
+    #[test]
+    fn a_view_naming_no_room_resumes_the_last_opened_chat() {
+        let owner = DeviceRef {
+            account_id: "a".repeat(64),
+            device_id: DIRECT_WEB_DEVICE_ID.to_owned(),
+        };
+        let agent = DeviceRef {
+            account_id: "b".repeat(64),
+            device_id: "agent".to_owned(),
+        };
+        let mut engine = DirectRoomEngine::new(owner, agent);
+        engine.upsert_room(DirectRoom {
+            room_id: "room-direct".to_owned(),
+            display_name: "Agent".to_owned(),
+            picture: None,
+        });
+        let mut log = MemoryLog::default();
+        engine.ensure_home_topic("room-direct", &mut log).unwrap();
+        let landing = |engine: &DirectRoomEngine| {
+            let state = engine
+                .state_for_view(AppView::default(), "connected", 0)
+                .unwrap();
+            (
+                state.selected_room_id,
+                state.selected_topic_id,
+                state.selected_chat_id,
+            )
+        };
+        // Nothing opened yet: the only room at Home, as on a fresh Device.
+        let (room, topic, _) = landing(&engine);
+        assert_eq!(room.as_deref(), Some("room-direct"));
+        assert_eq!(topic.as_deref(), Some(HOME_TOPIC_ID));
+
+        let created = engine
+            .execute(
+                AppAction::CreateTopic {
+                    room_id: "room-direct".to_owned(),
+                    title: "Trip".to_owned(),
+                },
+                None,
+                &mut log,
+            )
+            .unwrap();
+        let trip = created.topic_id.clone().unwrap();
+        let first = created.chat_id.clone().unwrap();
+        let second = engine
+            .new_chat(&mut log, "room-direct", &trip, None, "intent-second")
+            .unwrap()
+            .chat_id
+            .unwrap();
+        engine
+            .execute(
+                AppAction::OpenChat {
+                    room_id: "room-direct".to_owned(),
+                    topic_id: trip.clone(),
+                    chat_id: first.clone(),
+                },
+                None,
+                &mut log,
+            )
+            .unwrap();
+        // Reads and non-navigation actions leave it where the person was.
+        engine
+            .execute(
+                AppAction::MarkRoomRead {
+                    room_id: "room-direct".to_owned(),
+                },
+                None,
+                &mut log,
+            )
+            .unwrap();
+        engine
+            .state_for_view(
+                AppView {
+                    room_id: Some("room-direct".to_owned()),
+                    topic_id: Some(HOME_TOPIC_ID.to_owned()),
+                    ..AppView::default()
+                },
+                "connected",
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            landing(&engine),
+            (
+                Some("room-direct".to_owned()),
+                Some(trip.clone()),
+                Some(first.clone())
+            )
+        );
+        assert_eq!(
+            engine.last_view(),
+            Some(&DirectLastView {
+                room_id: "room-direct".to_owned(),
+                topic_id: Some(trip.clone()),
+                chat_id: Some(first.clone()),
+            })
+        );
+
+        // A remembered chat that is gone falls back to its topic's default;
+        // a room that is gone falls back to Home.
+        engine.set_last_view(Some(DirectLastView {
+            room_id: "room-direct".to_owned(),
+            topic_id: Some(trip.clone()),
+            chat_id: Some("missing".to_owned()),
+        }));
+        let (_, topic, chat) = landing(&engine);
+        assert_eq!(topic.as_deref(), Some(trip.as_str()));
+        assert!(chat == Some(first.clone()) || chat == Some(second.clone()));
+        engine.set_last_view(Some(DirectLastView {
+            room_id: "room-gone".to_owned(),
+            topic_id: None,
+            chat_id: None,
+        }));
+        assert_eq!(landing(&engine).1.as_deref(), Some(HOME_TOPIC_ID));
     }
 }
