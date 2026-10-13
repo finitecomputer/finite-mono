@@ -15,6 +15,12 @@ The log lives in `$FINITECHAT_HOME/direct/room-log.sqlite3` (WAL,
 `synchronous=FULL`). Encrypted attachment blobs live in `direct/blobs/<ciphertext
 sha256>`. These are the records a per-person export carries.
 
+Hermes and agentd delivery state (inbox cursors, leases, running replies) lives
+in `direct/` too. The first direct start copies the MLS sidecar's files, so
+folded history is not delivered again. After that the two never share a file:
+direct seqs continue past the MLS cursor, and a rolled-back sidecar reading
+them would skip every new MLS message.
+
 | Table | Meaning |
 |---|---|
 | `direct_meta` | `schema_version`, `origin` (`fold` or `fresh`), `created_at`, `owner_account_id` (the person this log renders for), `fold_cursors` (room → MLS cursor at the fold), `last_view` (the room, topic and chat the person last opened) |

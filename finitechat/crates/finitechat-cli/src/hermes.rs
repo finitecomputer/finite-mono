@@ -342,6 +342,12 @@ pub(crate) fn run<W: Write>(args: HermesArgs, output: &mut W) -> Result<(), CliE
         HermesCommand::DirectDigest => direct::cmd_direct_digest(&home_dir, output),
         HermesCommand::Rekey(args) => cmd_rekey(&home_dir, args, json_mode, output),
         HermesCommand::Poll => cmd_poll(&home_dir, read_request(request_json)?, output),
+        HermesCommand::Ack | HermesCommand::Release if direct::direct_transport_requested() => {
+            Err(CliError::Hermes(
+                "direct chat transport is served by `finitechat hermes serve`; one-shot commands are unavailable"
+                    .to_owned(),
+            ))
+        }
         HermesCommand::Ack => cmd_ack(&home_dir, read_request(request_json)?, output),
         HermesCommand::Release => cmd_release(&home_dir, read_request(request_json)?, output),
         HermesCommand::Send => cmd_send(&home_dir, read_request(request_json)?, output),
@@ -506,6 +512,10 @@ struct HermesServiceStarted {
 #[derive(Clone)]
 struct HermesServiceState {
     agent_home: PathBuf,
+    /// Where Hermes and agentd delivery state lives: inbox cursors, leases
+    /// and running replies. Direct chat keeps its own under `direct/`, so the
+    /// MLS sidecar's state is untouched for a rollback.
+    delivery_dir: PathBuf,
     account_id: String,
     device_id: String,
     server_url: String,
@@ -592,8 +602,13 @@ async fn prepare_hermes_service(
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let url = format!("http://{bound_addr}");
     let runtime = open_sidecar_runtime(home_dir, home)?;
+    let delivery_dir = match runtime.transport() {
+        "direct" => direct_delivery_dir(home_dir)?,
+        _ => home_dir.to_path_buf(),
+    };
     let state = HermesServiceState {
         agent_home: home_dir.to_path_buf(),
+        delivery_dir,
         account_id: home.config.account_id.clone(),
         device_id: home.config.device_id.clone(),
         server_url: home.config.server_url.clone(),
@@ -1098,12 +1113,12 @@ fn handle_agentd_ack(
     ack.validate_limits()
         .map_err(|error| CliError::Hermes(error.to_string()))?;
     let _guard = lock_service_mutex(&state.inbox_lock)?;
-    let mut inbox = load_agentd_inbox(&state.agent_home)?;
+    let mut inbox = load_agentd_inbox(&state.delivery_dir)?;
     let key = agentd_inbox_key(&ack.room_id, ack.seq, &ack.message_id);
     let before = inbox.events.len();
     inbox.events.retain(|event| event.key != key);
     if inbox.events.len() != before {
-        save_agentd_inbox(&state.agent_home, &inbox)?;
+        save_agentd_inbox(&state.delivery_dir, &inbox)?;
         signal_bridge_update(state);
     }
     Ok(json!({
@@ -1156,7 +1171,7 @@ fn handle_hermes_service_action(
         "ack" => {
             let result = {
                 let _guard = lock_service_mutex(&state.inbox_lock)?;
-                output_json_value(|output| cmd_ack(&state.agent_home, payload, output))
+                output_json_value(|output| cmd_ack(&state.delivery_dir, payload, output))
             };
             if result.is_ok() {
                 signal_bridge_update(state);
@@ -1166,7 +1181,7 @@ fn handle_hermes_service_action(
         "release" => {
             let result = {
                 let _guard = lock_service_mutex(&state.inbox_lock)?;
-                output_json_value(|output| cmd_release(&state.agent_home, payload, output))
+                output_json_value(|output| cmd_release(&state.delivery_dir, payload, output))
             };
             // A released entry is Pending again; wake the stream so it is
             // redelivered promptly instead of waiting out the poll interval.
@@ -1181,16 +1196,16 @@ fn handle_hermes_service_action(
             let _guard = lock_service_mutex(&state.running_lock)?;
             resolve_hermes_send_route(state.runtime.as_ref(), &mut request)?;
             let sent = send_hermes_request_with_runtime(state.runtime.as_ref(), &request)?;
-            update_running_after_send(&state.agent_home, &request, &sent.message_id)?;
+            update_running_after_send(&state.delivery_dir, &request, &sent.message_id)?;
             Ok(sent_message_value(&sent))
         }
         "edit" => {
             let mut request: HermesEditRequestV1 =
                 serde_json::from_value(payload).map_err(CliError::Json)?;
             let _guard = lock_service_mutex(&state.running_lock)?;
-            resolve_hermes_edit_route(&state.agent_home, state.runtime.as_ref(), &mut request)?;
+            resolve_hermes_edit_route(&state.delivery_dir, state.runtime.as_ref(), &mut request)?;
             let sent = edit_hermes_request_with_runtime(state.runtime.as_ref(), &request)?;
-            update_running_after_edit(&state.agent_home, &request)?;
+            update_running_after_edit(&state.delivery_dir, &request)?;
             Ok(sent_message_value(&sent))
         }
         "recover" => handle_hermes_service_recover(state),
@@ -1255,7 +1270,7 @@ fn handle_hermes_service_poll(
 
 fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, CliError> {
     let _guard = lock_service_mutex(&state.running_lock)?;
-    let running = load_hermes_running(&state.agent_home)?;
+    let running = load_hermes_running(&state.delivery_dir)?;
     let mut recovered = 0usize;
     for message in &running.messages {
         let recovery = HermesEditRequestV1 {
@@ -1274,7 +1289,7 @@ fn handle_hermes_service_recover(state: &HermesServiceState) -> Result<Value, Cl
         recovered += 1;
     }
     if recovered > 0 {
-        save_hermes_running(&state.agent_home, &HermesRunningState::default())?;
+        save_hermes_running(&state.delivery_dir, &HermesRunningState::default())?;
     }
     Ok(json!({ "recovered": recovered }))
 }
@@ -1350,8 +1365,9 @@ fn collect_agentd_inbound(
     limit: usize,
 ) -> Result<Vec<RuntimeCommandDeliveryV1>, CliError> {
     let _guard = lock_service_mutex(&state.inbox_lock)?;
-    let mut inbox = load_agentd_inbox(&state.agent_home)?;
+    let mut inbox = load_agentd_inbox(&state.delivery_dir)?;
     recover_stored_agentd_events(
+        &state.delivery_dir,
         home,
         state.runtime.as_ref(),
         &state.account_id,
@@ -1374,11 +1390,12 @@ fn collect_hermes_service_inbound_payload(
 ) -> Result<Value, CliError> {
     let limit = normalized_hermes_poll_limit(request);
     let _guard = lock_service_mutex(&state.inbox_lock)?;
-    let mut inbox = load_hermes_inbox(&state.agent_home)?;
+    let mut inbox = load_hermes_inbox(&state.delivery_dir)?;
     let joined = take_joined_accounts(state);
 
     recover_stored_hermes_events(
         &state.agent_home,
+        &state.delivery_dir,
         home,
         state.runtime.as_ref(),
         &state.account_id,
@@ -1386,7 +1403,7 @@ fn collect_hermes_service_inbound_payload(
         &mut inbox,
     )?;
     let events = lease_pending_hermes_inbox_events(
-        &state.agent_home,
+        &state.delivery_dir,
         &mut inbox,
         request.room_id.as_deref(),
         limit,
@@ -2084,6 +2101,7 @@ fn cmd_poll<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Result
         }
         recover_stored_hermes_events(
             home_dir,
+            home_dir,
             &home,
             &sidecar,
             &own_account,
@@ -2146,6 +2164,26 @@ fn cmd_release<W: Write>(home_dir: &Path, request: Value, output: &mut W) -> Res
     )
 }
 
+/// Direct chat's delivery state. The first direct start copies the MLS
+/// sidecar's, so folded history is not delivered again; after that the two
+/// never share a file, because direct seqs continue past the MLS cursor and
+/// a rolled-back sidecar would otherwise skip new MLS messages.
+fn direct_delivery_dir(home_dir: &Path) -> Result<PathBuf, CliError> {
+    let dir = home_dir.join("direct");
+    for name in [HERMES_INBOX_FILE, AGENTD_INBOX_FILE, HERMES_RUNNING_FILE] {
+        let target = dir.join(name);
+        if target.exists() {
+            continue;
+        }
+        match fs::read(home_dir.join(name)) {
+            Ok(contents) => write_private(target, contents)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(CliError::Hermes(error.to_string())),
+        }
+    }
+    Ok(dir)
+}
+
 fn load_hermes_inbox(home_dir: &Path) -> Result<HermesInboxState, CliError> {
     let path = home_dir.join(HERMES_INBOX_FILE);
     let raw = match fs::read_to_string(path) {
@@ -2183,6 +2221,7 @@ fn save_agentd_inbox(home_dir: &Path, inbox: &AgentdInboxState) -> Result<(), Cl
 }
 
 fn recover_stored_agentd_events(
+    delivery_dir: &Path,
     home: &AgentHome,
     runtime: &dyn SidecarRuntime,
     own_account: &str,
@@ -2238,7 +2277,7 @@ fn recover_stored_agentd_events(
         changed = true;
     }
     if changed {
-        save_agentd_inbox(&home.dir, inbox)?;
+        save_agentd_inbox(delivery_dir, inbox)?;
     }
     Ok(())
 }
@@ -2334,6 +2373,7 @@ fn enqueue_hermes_inbox_event(
 
 fn recover_stored_hermes_events(
     home_dir: &Path,
+    delivery_dir: &Path,
     home: &AgentHome,
     runtime: &dyn SidecarRuntime,
     own_account: &str,
@@ -2343,6 +2383,7 @@ fn recover_stored_hermes_events(
     let recent_events = runtime.recent_events(HERMES_STORED_EVENT_RECOVERY_LIMIT)?;
     recover_stored_hermes_events_from_events(
         home_dir,
+        delivery_dir,
         home,
         own_account,
         room_filter,
@@ -2353,6 +2394,7 @@ fn recover_stored_hermes_events(
 
 fn recover_stored_hermes_events_from_events(
     home_dir: &Path,
+    delivery_dir: &Path,
     home: &AgentHome,
     own_account: &str,
     room_filter: Option<&str>,
@@ -2384,14 +2426,14 @@ fn recover_stored_hermes_events_from_events(
             segment_id: None,
         };
         match hermes_poll_event_from_application_plaintext(context, &stored.plaintext)? {
-            Some(event) => enqueue_hermes_inbox_event(home_dir, inbox, event)?,
+            Some(event) => enqueue_hermes_inbox_event(delivery_dir, inbox, event)?,
             None => {
                 cursor_changed |= advance_hermes_inbox_cursor(inbox, &stored.room_id, stored.seq);
             }
         }
     }
     if cursor_changed {
-        save_hermes_inbox(home_dir, inbox)?;
+        save_hermes_inbox(delivery_dir, inbox)?;
     }
     Ok(())
 }
@@ -5926,6 +5968,7 @@ mod tests {
 
     fn recover_into(home: &AgentHome, inbox: &mut HermesInboxState, events: &[StoredAppEvent]) {
         recover_stored_hermes_events_from_events(
+            &home.dir,
             &home.dir,
             home,
             &home.config.account_id,

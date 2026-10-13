@@ -145,6 +145,21 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         "ack",
     ]);
 
+    // The MLS sidecar's delivery state, which a rolled-back image resumes.
+    let mls_delivery_state = || {
+        [
+            "hermes-inbox.json",
+            "agentd-inbox.json",
+            "hermes-running.json",
+        ]
+        .map(|name| std::fs::read_to_string(PathBuf::from(&agent_home).join(name)).ok())
+    };
+    let before_direct = mls_delivery_state();
+    assert!(
+        before_direct[0].is_some(),
+        "the MLS poll recorded its cursor"
+    );
+
     // Switch the agent to direct transport: the first start folds.
     // SAFETY: as above.
     unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
@@ -482,7 +497,11 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     assert_eq!(landing["selected_room_id"], room_id.as_str());
     assert_eq!(landing["selected_topic_id"], topic_id.as_str());
     assert_eq!(landing["selected_chat_id"], chat_id.as_str());
-    assert!(chat_messages(&landing).iter().any(|text| text == "hello from Hermes"));
+    assert!(
+        chat_messages(&landing)
+            .iter()
+            .any(|text| text == "hello from Hermes")
+    );
     let mut sink = Vec::new();
     finitechat_cli::run(
         ["hermes", "--agent-home", &agent_home, "direct-digest"]
@@ -505,10 +524,18 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         metadata_json: None,
     })
     .unwrap();
+    // Direct seqs run past the MLS cursor, so direct chat must not have
+    // moved the MLS sidecar's cursors: the rolled-back sidecar would skip
+    // every new MLS message.
+    assert_eq!(
+        mls_delivery_state(),
+        before_direct,
+        "direct chat leaves the MLS delivery state as it was"
+    );
     // SAFETY: the running direct sidecars read the transport only at start.
     unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "mls") };
-    let request = json!({"timeout_millis": 2000}).to_string();
-    cli_json(&[
+    let request = json!({"timeout_millis": 5000}).to_string();
+    let polled = cli_json(&[
         "hermes",
         "--agent-home",
         &agent_home,
@@ -516,6 +543,14 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         &request,
         "poll",
     ]);
+    assert!(
+        polled["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["text"] == "sent while rolled back"),
+        "the rolled-back sidecar hands new MLS messages to Hermes: {polled}"
+    );
     unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
     let refused = Bridge {
         url: spawn_sidecar(&agent_home, dir.path().join("ready-3.json")),
