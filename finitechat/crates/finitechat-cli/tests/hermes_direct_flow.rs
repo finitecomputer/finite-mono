@@ -8,8 +8,11 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
-use finitechat_core::{AppAction, FiniteChatRuntime, OpenOptions};
+use finitechat_core::{
+    AppAction, AppProfileSummary, AppView, FiniteChatRuntime, OpenOptions, room_digest,
+};
 use finitechat_mls::NOSTR_SECRET_KEY_BYTES;
+use finitechat_proto::npub_encode;
 use finitechat_server::{HttpServerState, http_router};
 use nostr::event::FinalizeEvent;
 use nostr::{EventBuilder, Keys, Kind, SecretKey, Tag};
@@ -221,23 +224,6 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         "--json",
     ]);
     let agent_account = init["account_id"].as_str().unwrap().to_owned();
-    let room_id = cli_json(&[
-        "app",
-        "--data-dir",
-        &agent_home,
-        "--server",
-        &server_url,
-        "--device-id",
-        "agent",
-        "--now",
-        &now_arg,
-        "create-room",
-        "--display-name",
-        "Direct Flow",
-    ])["selected_room_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
     let user = FiniteChatRuntime::open(OpenOptions {
         data_dir: dir.path().join("user").display().to_string(),
         server_url: server_url.clone(),
@@ -248,8 +234,9 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     .unwrap();
     let person = Person::new(USER_SECRET);
     assert_eq!(user.state().unwrap().identity.account_id, person.account());
-    user.dispatch_and_wait(AppAction::StartRuntime).unwrap();
-    cli_json(&[
+    // As agent binding does today: the hosted device creates the room and
+    // admits the agent, whose KeyPackages its resident start published.
+    let agent_start = [
         "app",
         "--data-dir",
         &agent_home,
@@ -259,15 +246,30 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         "agent",
         "--now",
         &now_arg,
-        "add-member",
-        "--room-id",
-        &room_id,
-        "--account-id",
-        &person.account(),
-        "--display-name",
-        "Person",
-    ]);
-    user.dispatch_and_wait(AppAction::StartRuntime).unwrap();
+        "start",
+    ];
+    cli_json(&agent_start);
+    let room_id = user
+        .dispatch_and_wait(AppAction::CreateRoom {
+            display_name: "Direct Flow".to_owned(),
+        })
+        .unwrap()
+        .selected_room_id
+        .unwrap();
+    user.dispatch_and_wait(AppAction::AddRoomMembers {
+        room_id: room_id.clone(),
+        profiles: vec![AppProfileSummary {
+            account_id: agent_account.clone(),
+            npub: npub_encode(&agent_account).unwrap(),
+            display_name: "Agent".to_owned(),
+            about: None,
+            picture: None,
+            stale: true,
+            is_agent: true,
+        }],
+    })
+    .unwrap();
+    cli_json(&agent_start);
     let topic = user
         .dispatch_and_wait(AppAction::CreateTopic {
             room_id: room_id.clone(),
@@ -347,6 +349,23 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         .json()
         .unwrap();
     assert_eq!(readyz["transport"], "direct");
+
+    // The hosted device and the folded log show the person the same room.
+    let topics = user.state().unwrap().topics;
+    let hosted_digest = room_digest(&room_id, &topics, |topic, chat| {
+        user.state_for_view(AppView {
+            room_id: Some(room_id.clone()),
+            topic_id: Some(topic.to_owned()),
+            chat_id: Some(chat.to_owned()),
+            limit: Some(u32::MAX),
+            oldest_message_id: None,
+        })
+        .unwrap()
+        .messages
+    });
+    let folded_digest =
+        bridge.json(bridge.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
+    assert_eq!(folded_digest, serde_json::to_value(&hosted_digest).unwrap());
 
     // The person sees the folded topic, renamed chat and message.
     let path = format!("/v1/app/state?room_id={room_id}&topic_id={topic_id}&chat_id={chat_id}");

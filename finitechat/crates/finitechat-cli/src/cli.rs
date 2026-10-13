@@ -152,6 +152,15 @@ pub(crate) enum AppCommand {
         room_id: Option<String>,
     },
 
+    /// Print hashes of what this Device shows in each room (topics, chats,
+    /// placement, archive state, every transcript row) without message text.
+    /// Read-only; compare with `finitechat hermes direct-digest` on the agent.
+    Digest {
+        /// Digest only this room.
+        #[arg(long, allow_hyphen_values = true)]
+        room_id: Option<String>,
+    },
+
     /// Start the runtime and print the resulting state.
     Start,
 
@@ -250,6 +259,7 @@ impl AppCommand {
             // the store on first run; a read-only open requires an existing,
             // schema-current store, so this stays a writer open.
             Self::Identity => CommandClass::Writer,
+            Self::Digest { .. } => CommandClass::ReadOnly,
             Self::Start => CommandClass::Writer,
             // `wait` applies sync hints to the store when an update lands.
             Self::Wait { .. } => CommandClass::Writer,

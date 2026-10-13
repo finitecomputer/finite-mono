@@ -453,6 +453,7 @@ impl DirectRoomEngine {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn send_text(
         &mut self,
         log: &mut dyn DirectLog,

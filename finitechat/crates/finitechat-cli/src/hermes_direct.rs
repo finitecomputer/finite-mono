@@ -1413,7 +1413,7 @@ pub(super) fn record_fold_failure(home_dir: &Path, error: &CliError) {
     if fs::create_dir_all(&dir).is_ok() {
         let _ = write_private(
             dir.join(DIRECT_FOLD_STATUS_FILE),
-            &json!({
+            json!({
                 "origin": "pending",
                 "error": error.to_string(),
                 "at_unix_seconds": now_unix_seconds(),
