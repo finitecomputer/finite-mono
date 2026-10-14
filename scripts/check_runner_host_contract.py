@@ -27,7 +27,7 @@ EXPECTED_MAX_SANDBOXES = {
     "finite-lat-3": "32",
     "finite-lat-4": "32",
     "finite-lat-5": "32",
-    "finite-lat-7": "1",  # Bootstrap canary; capacity awaits qualification.
+    "finite-lat-7": "8",  # Qualified host ceiling; bootstrap overrides to one.
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"

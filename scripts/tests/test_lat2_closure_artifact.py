@@ -117,6 +117,34 @@ class Lat2ClosureArtifactTests(unittest.TestCase):
                 result = self.run_deploy(artifact, "--validate-only")
             self.assertNotEqual(result.returncode, 0)
 
+    def test_invalid_application_revision_is_refused_before_remote_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            artifact = Path(temp)
+            write_manifest(artifact, {**VALID_MANIFEST, "application_rev": "main"})
+            result = self.run_deploy(artifact, "--validate-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid application_rev", result.stderr)
+
+    def test_application_revision_is_reported_and_ancestry_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            artifact = root / "artifact"
+            artifact.mkdir()
+            write_valid_artifact(artifact)
+            write_manifest(artifact, {**VALID_MANIFEST, "application_rev": "e" * 40})
+            shims = root / "bin"
+            shims.mkdir()
+            calls = root / "git-calls"
+            write_shim(shims, "git", 'printf "%s\\n" "$*" >> "$GIT_CALLS"\n')
+            result = subprocess.run(
+                [str(DEPLOY), str(artifact), "--validate-only"], cwd=ROOT,
+                env={**os.environ, "PATH": str(shims) + os.pathsep + os.environ["PATH"],
+                     "GIT_CALLS": str(calls)}, text=True, capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("application_rev=" + "e" * 40, result.stdout)
+            self.assertIn("merge-base --is-ancestor " + "e" * 40 + " " + "a" * 40, calls.read_text())
+
     def test_captured_storage_ids_gate_the_build_script(self) -> None:
         # Gate B contract: the committed lat2 storage identity is captured
         # and placeholder-free, and the build guard that refuses an

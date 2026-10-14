@@ -13,6 +13,13 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane/v0.23.4";
+    # Keep app-plane releases explicit: adding a Runner's network peer must
+    # not also deploy every application change since the last platform wave.
+    # Advance this pin with the coordinated app-plane rollout.
+    lat2-app-source = {
+      url = "github:finitecomputer/finite-mono/d1e45b9cd01e8663260247b091f72272ea840279";
+      flake = false;
+    };
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
@@ -65,6 +72,7 @@
       self,
       nixpkgs,
       crane,
+      lat2-app-source,
       hermes-nixpkgs,
       hermes-agent,
       nixpkgs-lat3,
@@ -84,6 +92,12 @@
         craneLib = crane.mkLib finitePackagePkgsLinux;
         sourceRoot = ./.;
       };
+      lat2PackagesLinux = import ./infra/nixos/packages.nix {
+        pkgs = finitePackagePkgsLinux;
+        craneLib = crane.mkLib finitePackagePkgsLinux;
+        # fileset requires a path value; the lock keeps this source immutable.
+        sourceRoot = /. + builtins.unsafeDiscardStringContext lat2-app-source.outPath;
+      };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
       # FIN-162 qualification only; no host or fixture imports it.
       kataNerdctlCandidateLinux = import ./infra/nixos/kata-nerdctl-candidate.nix {
@@ -102,7 +116,12 @@
       };
       runnerSpecialArgs = {
         finitePackages = finitePackagesLinux;
+        finitePackagesRevision = null;
         kataPackages = kataPackagesLinux;
+      };
+      lat2SpecialArgs = runnerSpecialArgs // {
+        finitePackages = lat2PackagesLinux;
+        finitePackagesRevision = lat2-app-source.rev;
       };
       lat3Modules = [
         disko.nixosModules.disko
@@ -149,17 +168,24 @@
         revisionModule
         ./infra/nixos/modules/secrets.nix
         ./infra/nixos/hosts/finite-lat-2
+        {
+          # The dashboard is part of the application release, including its
+          # digest and runtime environment. Retain it with the Rust services
+          # when a host-only change follows a newer application release.
+          disabledModules = [ ./infra/nixos/modules/dashboard.nix ];
+          imports = [ (lat2-app-source + "/infra/nixos/modules/dashboard.nix") ];
+        }
       ];
 
       lat2Unguarded = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = runnerSpecialArgs;
+        specialArgs = lat2SpecialArgs;
         modules = lat2Modules;
       };
 
       lat2 = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = runnerSpecialArgs // {
+        specialArgs = lat2SpecialArgs // {
           unguardedInstallBootLoader = lat2Unguarded.config.system.build.installBootLoader;
         };
         modules = lat2Modules ++ [ ./infra/nixos/hosts/finite-lat-2/esp-guard.nix ];
