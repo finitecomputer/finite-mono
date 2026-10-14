@@ -168,6 +168,13 @@
         revisionModule
         ./infra/nixos/modules/secrets.nix
         ./infra/nixos/hosts/finite-lat-2
+        {
+          # The dashboard is part of the application release, including its
+          # digest and runtime environment. Retain it with the Rust services
+          # when a host-only change follows a newer application release.
+          disabledModules = [ ./infra/nixos/modules/dashboard.nix ];
+          imports = [ (lat2-app-source + "/infra/nixos/modules/dashboard.nix") ];
+        }
       ];
 
       lat2Unguarded = nixpkgs-lat3.lib.nixosSystem {

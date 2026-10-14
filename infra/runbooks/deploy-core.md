@@ -26,12 +26,13 @@ facts only; they are not current deploy or destructive rebuild authority.
 ## Deploy flow — prebuilt immutable mono rev
 
 The reviewed mono revision pins the host configuration and its dependencies.
-Lat2's Rust applications use the separate `lat2-app-source` input in
+Lat2's applications use the separate `lat2-app-source` input in
 `flake.nix`/`flake.lock`. This lets a Runner network expansion retain the
 deployed Core, Chat, Hosted Device, Brain, and Identity generation. The artifact
 records both `rev` (host) and `application_rev`; monitoring reports the
 application revision separately from the NixOS system profile revision.
-The dashboard remains a digest-pinned GHCR container in `modules/dashboard.nix`.
+The dashboard's module, including its GHCR image digest and environment, comes
+from `infra/nixos/modules/dashboard.nix` at that same application revision.
 
 For an application release, advance `lat2-app-source` to the exact reviewed
 mono commit and update its lock entry in the rollout PR. Follow the Runner-first
@@ -45,7 +46,7 @@ dry activation before an infrastructure-only switch.
 
 - The change (Core source and/or the dashboard digest bump) is merged to
   `main` — you deploy a committed rev, not a working tree.
-- For a Core or other Rust application release, the committed
+- For a Core, dashboard or other application release, the committed
   `lat2-app-source` pin includes that change. Building a later host revision
   alone does not advance the application source.
 - Before deploying the RuntimeSpec generation, verify the Core Nix module
@@ -174,8 +175,9 @@ Fleet scope requires both `--roll-all` and an explicit
 
 4. **Dashboard image bump:** edit `image = "...@sha256:..."` in
    `infra/nixos/modules/dashboard.nix`, commit to `main` — the committed
-   digest is the deploy record and the rollback target — then repeat steps 1-3
-   for the new rev. podman pulls the pinned digest.
+   digest is the deploy record and the rollback target. Advance `lat2-app-source`
+   to the reviewed application commit containing that digest, then repeat steps
+   1-3 for the rollout revision. Podman pulls the pinned digest.
 
 ### VERIFY
 
@@ -217,7 +219,8 @@ Fleet scope requires both `--roll-all` and an explicit
 2. Deliberate path: build/download the previous known-good full mono rev with
    the same closure-artifact workflow, then copy/switch/verify its exact
    `SYSTEM` path with `just deploy-lat2-closure` (and, for a dashboard-only
-   regression, first revert the digest in `modules/dashboard.nix`).
+   regression, first revert the digest in `modules/dashboard.nix` and advance
+   the application pin to that reviewed fix).
 3. Re-run VERIFY.
 
 After the epoch-aware Core has accepted traffic, the previous N-1 closure is

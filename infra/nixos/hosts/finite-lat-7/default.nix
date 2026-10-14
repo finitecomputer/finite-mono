@@ -1,7 +1,8 @@
 # Dedicated lat7 Runner, captured 2026-10-14 in New York.
 # Delivered hardware: 192 GB RAM, two 480 GB SATA boot SSDs and two
-# 1.92 TB NVMe data drives. Limit admission to one targeted canary until
-# recovery and workload qualification justify a higher ceiling.
+# 1.92 TB NVMe data drives. Eight 4-vCPU / 8-GiB guests leave conservative
+# CPU and shared-memory headroom. Bootstrap overrides admission to one
+# targeted canary until recovery and end-to-end qualification pass.
 {
   config,
   finitePackages,
@@ -57,7 +58,7 @@ in
     sourceHostId = "finite-lat-7";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.6";
-    maxSandboxes = 1;
+    maxSandboxes = 8;
   };
 
   finite.metrics = {

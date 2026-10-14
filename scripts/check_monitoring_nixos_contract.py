@@ -214,6 +214,9 @@ def nix_eval() -> dict[str, Any]:
           craneLib = flake.inputs.crane.mkLib appPkgs;
           sourceRoot = /. + builtins.unsafeDiscardStringContext flake.inputs.lat2-app-source.outPath;
         };
+        pinnedDashboard = (import
+          (flake.inputs.lat2-app-source + "/infra/nixos/modules/dashboard.nix")
+          {}).virtualisation.oci-containers.containers.finite-saas-dashboard;
         datasourceNames =
           map (datasource: datasource.name)
             cfg.services.grafana.provision.datasources.settings.datasources;
@@ -234,6 +237,12 @@ def nix_eval() -> dict[str, Any]:
           revision = flake.inputs.lat2-app-source.rev;
           hostRevision = lat2.system.configurationRevision;
           metrics = lat2.finite.metrics.staticVersionMetrics;
+          dashboard = {
+            expectedImage = pinnedDashboard.image;
+            actualImage = lat2.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
+            expectedEnvironment = pinnedDashboard.environment;
+            actualEnvironment = lat2.virtualisation.oci-containers.containers.finite-saas-dashboard.environment;
+          };
           services = builtins.mapAttrs (unit: package: {
             expected = toString package;
             actual = lat2.systemd.services.${unit}.serviceConfig.ExecStart;
@@ -797,6 +806,11 @@ def check_ubuntu_contract() -> None:
 def main() -> int:
     contract = nix_eval()
     apps = contract["lat2Applications"]
+    dashboard = apps["dashboard"]
+    require(dashboard["actualImage"] == dashboard["expectedImage"],
+            "lat2 dashboard image must use the locked application source")
+    require(dashboard["actualEnvironment"] == dashboard["expectedEnvironment"],
+            "lat2 dashboard environment must use the locked application source")
     for unit, paths in apps["services"].items():
         require(
             paths["actual"].startswith(paths["expected"] + "/bin/"),
