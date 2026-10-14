@@ -98,3 +98,27 @@ Identity descriptions are off until optional settings are added, per
 the report route and descriptions; stored associations and scopes stay in
 Core and are ignored by the older binary. Hosted Agents keep their pinned
 Runtime; this release needs no Runtime upgrade.
+
+### fbrain 0.7.1, Personal Brain setup and descriptions v2
+
+Deploy Core and Brain in a lat2 closure retaining the current dashboard pin,
+then qualify and upgrade the Runtime, then deploy the new dashboard pin.
+Sync existing Agents' managed skills after the dashboard setup button is
+available. Publish the CLI only after the new Brain server is live. No Core or
+Brain schema changes. The Brain server now
+creates a Personal Brain from an owner-signed `POST /v1/brains` carrying the
+Agent's signed consent; the older server refused every Personal Brain
+creation. Organization Brain IDs shaped like `personal-<16 hex>` are now
+refused for every client. Folder Key Grant records stop counting as
+participation in the access report, including records stored earlier.
+Fielded 0.6.0 and 0.7.0 clients otherwise keep working.
+
+Core descriptions v2 describe participating keys without a sharing scope;
+that disclosure cannot be recalled by a rollback (see
+[the runbook](runbooks/brain-identity-descriptions.md)). Rolling the server
+back stops Personal Brain creation; Personal Brains already created remain.
+
+The dashboard's **Set up Personal Brain** needs a Runtime whose Brain plugin
+and `fbrain` 0.7.1 provide `brain personal-agent-consent`; an older Runtime
+reports that the Agent needs an update. `fbrain open personal` selects only a
+Brain where the key is owner or Personal Agent from 0.7.1 on.

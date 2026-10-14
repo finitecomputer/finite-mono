@@ -8,7 +8,7 @@ use finite_brain_core::{
     SafeRelativePath, UserId, required_folder_key_recipients,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
-use nostr::{Kind, Tag};
+use nostr::{Keys, Kind, Tag};
 
 use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
@@ -499,32 +499,44 @@ pub(crate) fn admin_access_change_event_with_note(
         change_fields.push(&nonce);
     }
     let change_id = deterministic_id("access-change", &change_fields);
-    let validation = AdminAccessChangeValidation {
-        brain_id: BrainId::new(brain_id.to_owned())
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-        change_id,
-        action,
-        admin_npub: auth.npub,
-        folder_id: folder_id
-            .map(|id| FolderId::new(id.to_owned()))
-            .transpose()
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-        target_npub: target_npub.map(ToOwned::to_owned),
-        key_version,
-        note: note.map(ToOwned::to_owned),
-        // The signed event's Nostr timestamp is produced from the process
-        // clock in `sign_event`; derive the payload timestamp from that same
-        // clock so the server's canonical event validation cannot reject a
-        // stale `FBRAIN_NOW` test/config value.
-        created_at: crate::timestamp_from_unix(unix_timestamp()),
-    };
+    let brain_id = BrainId::new(brain_id.to_owned())
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let folder_id = folder_id
+        .map(|id| FolderId::new(id.to_owned()))
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    sign_admin_access_change(&keys, unix_timestamp(), |created_at| {
+        AdminAccessChangeValidation {
+            brain_id,
+            change_id,
+            action,
+            admin_npub: auth.npub,
+            folder_id,
+            target_npub: target_npub.map(ToOwned::to_owned),
+            key_version,
+            note: note.map(ToOwned::to_owned),
+            created_at,
+        }
+    })
+}
+
+/// Sign an access change at one process-clock second. The server expects the
+/// payload `createdAt` to be the event's Nostr `created_at`, so both come from
+/// `created_at_unix`: separate clock reads can straddle a second boundary, and
+/// a stale `FBRAIN_NOW` test/config value would never match.
+fn sign_admin_access_change(
+    keys: &Keys,
+    created_at_unix: u64,
+    validation_at: impl FnOnce(String) -> AdminAccessChangeValidation,
+) -> Result<serde_json::Value, CliError> {
+    let validation = validation_at(crate::timestamp_from_unix(created_at_unix));
     let payload = AdminAccessChangePayload::new(&validation);
     let event = sign_event(
-        &keys,
+        keys,
         Kind::Custom(APP_SPECIFIC_KIND),
         payload.canonical_json(),
         admin_access_change_tags(&validation)?,
-        unix_timestamp(),
+        created_at_unix,
         Some("admin-access-change"),
     )?;
     serde_json::from_str(&event.as_json()).map_err(CliError::from)
@@ -654,4 +666,55 @@ pub(crate) fn update_local_folders_after_delete(
         );
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use finite_brain_core::validate_admin_access_change_event;
+    use nostr::Event;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    use super::*;
+
+    /// Far from the wall clock, so any other clock read disagrees with it.
+    const SIGNED_AT: u64 = 1_780_000_000;
+
+    /// `folder create --access restricted` for one Folder, stamped `created_at`.
+    fn set_folder_access(keys: &Keys, created_at: String) -> AdminAccessChangeValidation {
+        AdminAccessChangeValidation {
+            brain_id: BrainId::new("personal-a".to_owned()).unwrap(),
+            change_id: "access-change-0123456789abcdef".to_owned(),
+            action: AdminAccessAction::SetFolderAccessMode,
+            admin_npub: NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+            folder_id: Some(FolderId::new("control-folder".to_owned()).unwrap()),
+            target_npub: None,
+            key_version: Some(1),
+            note: None,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn access_change_payload_and_event_share_one_clock_second() {
+        let keys = Keys::generate();
+        let signed = sign_admin_access_change(&keys, SIGNED_AT, |created_at| {
+            set_folder_access(&keys, created_at)
+        })
+        .unwrap();
+
+        // Rebuild the server's expectation: `createdAt` is the event's own
+        // Nostr `created_at`, never a separately sampled client clock.
+        let event: Event = serde_json::from_value(signed).unwrap();
+        let server_created_at =
+            OffsetDateTime::from_unix_timestamp(i64::try_from(event.created_at.as_secs()).unwrap())
+                .unwrap()
+                .format(&Rfc3339)
+                .unwrap();
+        validate_admin_access_change_event(&event, &set_folder_access(&keys, server_created_at))
+            .expect("the server accepts the signed access change");
+        assert_eq!(event.created_at.as_secs(), SIGNED_AT);
+    }
 }
