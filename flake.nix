@@ -116,6 +116,7 @@
       };
       runnerSpecialArgs = {
         finitePackages = finitePackagesLinux;
+        finitePackagesRevision = null;
         kataPackages = kataPackagesLinux;
       };
       lat2SpecialArgs = runnerSpecialArgs // {

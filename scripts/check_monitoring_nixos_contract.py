@@ -206,6 +206,7 @@ def nix_eval() -> dict[str, Any]:
       let
         flake = builtins.getFlake (toString ./.);
         cfg = flake.nixosConfigurations.finite-monitoring.config;
+        lat1 = flake.nixosConfigurations.finite-lat-1.config;
         lat2 = flake.nixosConfigurations.finite-lat-2.config;
         appPkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
         pinnedApps = import ./infra/nixos/packages.nix {
@@ -225,6 +226,10 @@ def nix_eval() -> dict[str, Any]:
             cfg.services.prometheus.scrapeConfigs
         );
       in {
+        lat1Applications = {
+          hostRevision = lat1.system.configurationRevision;
+          metrics = lat1.finite.metrics.staticVersionMetrics;
+        };
         lat2Applications = {
           revision = flake.inputs.lat2-app-source.rev;
           hostRevision = lat2.system.configurationRevision;
@@ -801,13 +806,19 @@ def main() -> int:
         "finite-saas-core", "finitechat-server", "finitechat-hosted-device", "finite-brain",
         "nixos-system-profile",
     ):
-        metric = next(
-            line for line in apps["metrics"].splitlines()
-            if line.startswith("finite_component_build_info{")
-            and f'component="{component}"' in line
-        )
-        revision = apps["hostRevision"] if component == "nixos-system-profile" else apps["revision"]
-        require_contains(metric, f'git_sha="{revision or ""}"', f"lat2 {component} revision")
+        for host in ("lat1", "lat2"):
+            host_apps = contract[f"{host}Applications"]
+            metric = next(
+                line for line in host_apps["metrics"].splitlines()
+                if line.startswith("finite_component_build_info{")
+                and f'component="{component}"' in line
+            )
+            revision = (
+                host_apps["hostRevision"]
+                if host == "lat1" or component == "nixos-system-profile"
+                else host_apps["revision"]
+            )
+            require_contains(metric, f'git_sha="{revision or ""}"', f"{host} {component} revision")
 
     require(
         contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname"

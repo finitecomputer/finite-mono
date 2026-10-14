@@ -6,7 +6,7 @@
 {
   config,
   finitePackages,
-  finitePackagesRevision ? null,
+  finitePackagesRevision,
   lib,
   pkgs,
   ...
