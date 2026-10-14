@@ -60,3 +60,6 @@
 .brain-empty-chat { margin-top: 20px; gap: 8px; min-height: 44px; padding: 10px 16px; border-radius: 999px; background: var(--foreground); color: var(--background); font-size: 15px; font-weight: 500; }
 .brain-empty-chat:hover { opacity: .85; }
 .brain-empty-state button:hover { border-radius: 999px; background: var(--foreground); color: var(--background); }
+.brain-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 20px; }
+.brain-empty-actions .brain-empty-chat { margin-top: 0; }
+.brain-empty-state .brain-empty-secondary, .brain-empty-state .brain-empty-secondary:hover { border: 1px solid var(--border); background: transparent; color: var(--foreground); }

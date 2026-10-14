@@ -78,7 +78,7 @@ impl BrainStore {
             .optional()?;
         if let Some(existing_brain_id) = existing_brain_id {
             if existing_brain_id != output.brain.id.as_str() {
-                return Err(StoreError::BrokenInvariant {
+                return Err(StoreError::PersonalBrainConflict {
                     reason: "user already has a personal brain".to_owned(),
                 });
             }
@@ -91,13 +91,27 @@ impl BrainStore {
                 .optional()?;
             return match existing_agent {
                 Some(existing_agent) if existing_agent == agent_npub.as_str() => Ok(()),
-                Some(_) => Err(StoreError::BrokenInvariant {
+                Some(_) => Err(StoreError::PersonalBrainConflict {
                     reason: "personal brain already has a different personal agent".to_owned(),
                 }),
-                None => Err(StoreError::BrokenInvariant {
+                None => Err(StoreError::PersonalBrainConflict {
                     reason: "personal brain already exists without a personal agent".to_owned(),
                 }),
             };
+        }
+        // One Agent serves one Personal Brain; personal_agents.agent_npub is
+        // also UNIQUE as the final guard.
+        let agent_brain_id = tx
+            .query_row(
+                "SELECT brain_id FROM personal_agents WHERE agent_npub = ?1",
+                params![agent_npub.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if agent_brain_id.is_some() {
+            return Err(StoreError::PersonalBrainConflict {
+                reason: "agent is already the personal agent of another personal brain".to_owned(),
+            });
         }
 
         let audit_id = format!("{}-personal-agent-established", output.brain.id);

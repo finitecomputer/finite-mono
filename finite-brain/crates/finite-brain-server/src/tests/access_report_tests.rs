@@ -114,7 +114,7 @@ fn core_answer(
         source: None,
     };
     CoreDescriptionsResponse {
-        version: crate::core_descriptions::DESCRIPTIONS_VERSION.to_owned(),
+        version: crate::core_descriptions::DESCRIPTIONS_VERSION_V2.to_owned(),
         brain_id: request.brain_id.clone(),
         checked_at: "2026-05-02T00:00:00Z".to_owned(),
         results: request
@@ -137,7 +137,15 @@ fn core_answer(
                         email: (*owner).to_owned(),
                         source: "coreAccountContact".to_owned(),
                         observed_at: "2026-05-01T00:00:00Z".to_owned(),
-                        human_public_keys_hex: Vec::new(),
+                        // Requested human keys plus one outside the request,
+                        // which an older Core may name and Brain must drop.
+                        human_public_keys_hex: request
+                            .keys
+                            .iter()
+                            .filter(|other| matches!(known.get(*other), Some(Known::Human(_))))
+                            .cloned()
+                            .chain(["f".repeat(64)])
+                            .collect(),
                     }),
                     source: Some(source("finiteRuntimeRecord")),
                     ..bare(key, "resolved")
@@ -579,6 +587,11 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
         agent["description"]["responsibleAccount"]["email"],
         "owner@acme.example"
     );
+    let hints = agent["description"]["responsibleAccount"]["humanPublicKeysHex"]
+        .as_array()
+        .unwrap();
+    assert!(hints.contains(&serde_json::json!(hex_of(&cast.mailbox))));
+    assert!(!hints.contains(&serde_json::json!("f".repeat(64))));
 
     let shared = row(&report, &cast.shared);
     assert_eq!(shared["brainRole"], "member");
@@ -874,12 +887,12 @@ async fn access_report_keeps_every_row_when_core_cannot_describe() {
                 Ok(core_answer(&partial, &known))
             }),
         ),
-        // Another protocol version.
+        // A protocol version this Brain does not know.
         (
             "unavailable",
             lookup_fn(|request| {
                 let mut answer = core_answer(request, &BTreeMap::new());
-                answer.version = "finite-core-brain-identity-descriptions-v2".to_owned();
+                answer.version = "finite-core-brain-identity-descriptions-v3".to_owned();
                 Ok(answer)
             }),
         ),

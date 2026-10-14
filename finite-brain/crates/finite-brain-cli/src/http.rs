@@ -597,6 +597,18 @@ pub(crate) fn absolute_server_url(server_url: &str, path: &str) -> String {
     )
 }
 
+/// The Brain origin this CLI signs into request authorization: the public
+/// base URL when requests travel through the configured transport.
+pub(crate) fn signed_brain_origin(
+    env: &CliEnvironment,
+    args: &[String],
+) -> Result<String, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    Ok(authorization_url_for_request(env, &server_url, "/")
+        .trim_end_matches('/')
+        .to_owned())
+}
+
 fn authorization_url_for_request(env: &CliEnvironment, server_url: &str, path: &str) -> String {
     let uses_configured_transport = env
         .server_url
