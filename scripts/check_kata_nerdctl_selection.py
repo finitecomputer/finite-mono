@@ -34,7 +34,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ["finite-lat-3", "finite-lat-4", "finite-lat-5"]
+HOSTS = ["finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"]
 HOST_SYSTEM = "x86_64-linux"
 FIXTURE = "scripts/proofs/hosted-hermes-lifecycle-tools.nix"
 FIXTURE_SYSTEMS = ["x86_64-linux", "aarch64-linux"]

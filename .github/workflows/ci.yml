@@ -577,6 +577,11 @@ jobs:
           nix develop --command just lat5-runner-rollout-contract
           nix eval --raw .#nixosConfigurations.finite-lat-5.config.system.build.toplevel.drvPath
           nix eval --raw .#nixosConfigurations.finite-lat-5.config.system.build.diskoScript.drvPath
+      - name: lat7 Runner-only closure rollout contract
+        run: |
+          nix develop --command just lat7-runner-rollout-contract
+          nix eval --raw .#nixosConfigurations.finite-lat-7.config.system.build.toplevel.drvPath
+          nix eval --raw .#nixosConfigurations.finite-lat-7.config.system.build.diskoScript.drvPath
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
       - name: Kata Runner host anti-drift contract

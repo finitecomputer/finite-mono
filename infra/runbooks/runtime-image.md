@@ -140,7 +140,7 @@ Recovery Readiness.
 The runner does **not** read an image tag directly. On each active NixOS Kata
 host (lat3, lat4, and lat5) the env is `/etc/finite/runner.env` (secrets bootstrap —
 `infra/nixos/README.md`; template:
-`infra/nixos/hosts/finite-lat-{3,4,5}/runner.env.example`). The pin is:
+`infra/nixos/hosts/finite-lat-{3,4,5,7}/runner.env.example`). The pin is:
 
 - **`FC_RUNNER_RUNTIME_ARTIFACT_ID`** (e.g.
   `finite-agent-runtime-canary-20260702-41b0c6d`) — product launches fetch

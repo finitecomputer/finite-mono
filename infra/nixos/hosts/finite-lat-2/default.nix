@@ -98,6 +98,7 @@ in
       finite-lat-3 = "https://agents-lat3.finite.computer";
       finite-lat-4 = "https://agents-lat4.finite.computer";
       finite-lat-5 = "https://agents-lat5.finite.computer";
+      finite-lat-7 = "https://agents-lat7.finite.computer";
     };
   };
   services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig = ''
@@ -240,6 +241,14 @@ in
         endpoint = "64.34.93.213:51820";
         persistentKeepalive = 25;
       }
+      {
+        # finite-lat-7: public half of its unique OS bootstrap key.
+        # .6 is the remaining usable address in this /29; .7 is broadcast.
+        publicKey = "unTcFY/UDM+QtEcvZsmLKXhl9BmO/kb5n3awrzMbDFw=";
+        allowedIPs = [ "10.254.3.6/32" ];
+        endpoint = "64.34.89.107:51820";
+        persistentKeepalive = 25;
+      }
     ];
   };
 
@@ -299,6 +308,16 @@ in
         -s 10.254.3.5/32 -d 10.254.3.1/32 -i wg-finite \
         -p tcp --dport 18790 \
         -m comment --comment finite-lat5-identity \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.6/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 14200 \
+        -m comment --comment finite-lat7-core \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.6/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 18790 \
+        -m comment --comment finite-lat7-identity \
         -j nixos-fw-accept
     '';
   };
