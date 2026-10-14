@@ -165,7 +165,7 @@ else:
         'FBRAIN_CONFIG_DIR',
         'FBRAIN_WORKING_TREE_ROOT',
         "A Working Tree remembers the server",
-        "bootstrap-personal",
+        "**Set up Personal Brain**",
         "role `personal_agent`",
         "do not require exact",
         "`remoteChanges[].actorNpub`",
@@ -377,6 +377,7 @@ else:
     for retired_contract in (
         "/brain setup",
         "personal-brain-bootstrap-authorizations",
+        "bootstrap-personal",
         "role `member`",
     ):
         if retired_contract in brain_text:

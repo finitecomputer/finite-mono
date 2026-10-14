@@ -68,6 +68,9 @@ pub enum StoreError {
     MissingRequiredGrant { recipient_user_id: String },
     /// Stored state would violate Brain, member, admin, access, or grant rules.
     BrokenInvariant { reason: String },
+    /// The owner already has another Personal Brain, or the Agent is already
+    /// another Personal Brain's Personal Agent.
+    PersonalBrainConflict { reason: String },
     /// A sync record is malformed or violates request semantics.
     InvalidRecord { reason: String },
     /// A sync record lost optimistic concurrency.
@@ -101,6 +104,7 @@ impl fmt::Display for StoreError {
                 write!(f, "missing required grant for {recipient_user_id}")
             }
             Self::BrokenInvariant { reason } => write!(f, "broken invariant: {reason}"),
+            Self::PersonalBrainConflict { reason } => write!(f, "{reason}"),
             Self::InvalidRecord { reason } => write!(f, "invalid record: {reason}"),
             Self::Conflict {
                 reason,
@@ -3170,7 +3174,7 @@ fn map_brain_insert_error(brain: &Brain) -> impl FnOnce(rusqlite::Error) -> Stor
                     .as_deref()
                     .is_some_and(|message| message.contains("brains.owner_user_id")) =>
         {
-            StoreError::BrokenInvariant {
+            StoreError::PersonalBrainConflict {
                 reason: "user already has a personal brain".to_owned(),
             }
         }
@@ -3505,6 +3509,57 @@ mod tests {
     }
 
     #[test]
+    fn one_agent_serves_one_personal_brain_and_retries_stay_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let mut store = BrainStore::open(temp.path().join("one-agent.sqlite3")).unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let first_owner = UserId::new("npub-first-owner").unwrap();
+        let first =
+            bootstrap_personal_brain("personal-first", "First", "npub-first-owner").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &first,
+                &[],
+                &agent,
+                &first_owner,
+                "2026-10-05T00:00:00Z",
+            )
+            .unwrap();
+        // A lost response retried with the same Brain and Agent succeeds again.
+        store
+            .create_personal_brain_bootstrap(
+                &first,
+                &[],
+                &agent,
+                &first_owner,
+                "2026-10-05T00:00:01Z",
+            )
+            .unwrap();
+
+        let second_owner = UserId::new("npub-second-owner").unwrap();
+        let second =
+            bootstrap_personal_brain("personal-second", "Second", "npub-second-owner").unwrap();
+        let error = store
+            .create_personal_brain_bootstrap(
+                &second,
+                &[],
+                &agent,
+                &second_owner,
+                "2026-10-05T00:00:02Z",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::PersonalBrainConflict { ref reason }
+                if reason == "agent is already the personal agent of another personal brain"
+        ));
+        assert!(matches!(
+            store.load_brain(&BrainId::new("personal-second").unwrap()),
+            Err(StoreError::MissingBrain { .. })
+        ));
+    }
+
+    #[test]
     fn competing_personal_bootstraps_leave_one_brain_and_one_truthful_loser() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("competing-personal-brain.sqlite3");
@@ -3548,7 +3603,7 @@ mod tests {
         assert!(results.iter().any(|result| {
             matches!(
                 result,
-                Err(StoreError::BrokenInvariant { reason })
+                Err(StoreError::PersonalBrainConflict { reason })
                     if reason == "user already has a personal brain"
             )
         }));

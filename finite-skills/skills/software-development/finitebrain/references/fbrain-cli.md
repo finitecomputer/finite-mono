@@ -45,7 +45,7 @@ fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disab
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list
-fbrain brain list|create|rename|bootstrap-personal|metadata|export
+fbrain brain list|create|rename|personal-agent-consent|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
@@ -62,11 +62,16 @@ fbrain admin folder-access grant|revoke
 fbrain admin ensure-access
 ```
 
-Use `brain bootstrap-personal` for first-time Personal Brain setup. It creates
-the empty user-owned Personal Brain and establishes the authenticated agent as
-its Personal Agent through Brain's account-bound authority. Direct `brain
-create` is for Organization Brains and is not a substitute for this Personal
-Agent bootstrap flow.
+A Personal Brain is created from the Finite dashboard Brain page with two
+signatures: the user's account signs the `POST /v1/brains` request, and the
+Agent signs a consent from `brain personal-agent-consent --owner <npub>`, which
+its runtime's Brain plugin runs when the dashboard asks. The consent binds the
+owner, the owner's Personal Brain ID and the signed Brain origin, and expires
+after 10 minutes. The command uses only an existing identity and never mints
+one. It belongs only to that dashboard flow: never run it or share its output
+on a chat request, because one Agent serves one Personal Brain for good.
+`brain create` is for Organization Brains; Organization Brain IDs shaped like
+`personal-<16 hex>` are reserved for Personal Brains.
 
 ## Rename a Brain
 
@@ -284,7 +289,6 @@ invalidate an access-report cursor.
 automatically; never author or pass a raw rotation payload.
 
 ```sh
-fbrain brain bootstrap-personal --json
 fbrain brain create organization "Org Brain" --json
 fbrain brain metadata --brain <brain-id>
 fbrain brain export --brain <brain-id>

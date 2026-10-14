@@ -1,4 +1,7 @@
-"""Brain-owned metadata projection. Native Hermes authenticates before routing."""
+"""Brain-owned metadata projection and Personal Brain agent consent.
+
+Native Hermes authenticates before routing.
+"""
 
 import asyncio
 import re
@@ -22,6 +25,11 @@ MAX_BRAINS = 100
 MAX_METADATA_READS = 32
 MAX_FOLDERS = 500
 ROLES = {"owner", "personal_agent", "admin", "member", "guest", "invited"}
+NPUB = re.compile(r"npub1[023456789acdefghjklmnpqrstuvwxyz]{58}")
+PERSONAL_BRAIN_ID = re.compile(r"personal-[0-9a-f]{16}")
+CONSENT_VERSION = "finite-brain-personal-agent-consent-v1"
+MAX_CONSENT_TAGS = 32
+MAX_CONSENT_CONTENT = 8192
 
 
 async def read_overview():
@@ -88,6 +96,80 @@ async def read_overview():
     return {"version": 1, "brains": brains}
 
 
+def hex_text(value, length):
+    if not isinstance(value, str) or not re.fullmatch(f"[0-9a-f]{{{length}}}", value):
+        raise InvalidInventory()
+    return value
+
+
+def integer(value):
+    if type(value) is not int:
+        raise InvalidInventory()
+    return value
+
+
+def consent_event(value):
+    event = record(value)
+    hex_text(event.get("id"), 64)
+    hex_text(event.get("pubkey"), 64)
+    hex_text(event.get("sig"), 128)
+    text(event.get("content"), MAX_CONSENT_CONTENT)
+    integer(event.get("created_at"))
+    integer(event.get("kind"))
+    tags = event.get("tags")
+    if not isinstance(tags, list) or len(tags) > MAX_CONSENT_TAGS:
+        raise InvalidInventory()
+    for tag in tags:
+        if not isinstance(tag, list) or not all(isinstance(item, str) for item in tag):
+            raise InvalidInventory()
+    # The Brain server verifies the signature; pass the event through unchanged.
+    return event
+
+
+async def read_personal_agent_consent(owner_npub):
+    # The owner comes from the URL path: refuse anything but an npub before
+    # running the CLI. A validated npub can never look like a flag, so it is
+    # passed as its own argument (this command takes no equals form).
+    if not NPUB.fullmatch(owner_npub):
+        raise InvalidInventory()
+    output = record(
+        await read_json(
+            "fbrain", "brain", "personal-agent-consent", "--owner", owner_npub, "--json"
+        )
+    )
+    agent_npub = output.get("agentNpub")
+    brain_id = output.get("brainId")
+    if (
+        output.get("version") != CONSENT_VERSION
+        or output.get("ownerNpub") != owner_npub
+        or not isinstance(agent_npub, str)
+        or not NPUB.fullmatch(agent_npub)
+        or agent_npub == owner_npub
+        or not isinstance(brain_id, str)
+        or not PERSONAL_BRAIN_ID.fullmatch(brain_id)
+    ):
+        raise InvalidInventory()
+    return {
+        "version": 1,
+        "agentNpub": agent_npub,
+        "ownerNpub": owner_npub,
+        "brainId": brain_id,
+        "consent": consent_event(output.get("consent")),
+    }
+
+
 @router.get("/overview")
 async def overview(request: Request):
     return await inventory_response(request, read_overview)
+
+
+@router.get("/personal-agent-consent/{owner_npub}")
+async def personal_agent_consent(request: Request, owner_npub: str):
+    """The Agent's short-lived consent to be this owner's Personal Brain agent.
+
+    The dashboard pairs it with the owner's own signed creation request, and
+    the Brain server checks both signatures against its own records.
+    """
+    return await inventory_response(
+        request, lambda: read_personal_agent_consent(owner_npub)
+    )
