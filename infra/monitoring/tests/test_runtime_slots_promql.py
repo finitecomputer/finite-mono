@@ -73,7 +73,8 @@ def main():
         ("empty host", 900, [], {}),
         ("one host missing", 900, active[2:], {"finite-lat-4": 32, "finite-lat-5": 1, "finite-lat-7": 1}),
         ("lat5 and lat7 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 32}),
-        ("lat7 over canary ceiling", 900, [runtime("finite-lat-7", "new", 2)], {"finite-lat-7": 2}),
+        ("lat7 at qualified ceiling", 900, [runtime("finite-lat-7", "new", 8)], {"finite-lat-7": 8}),
+        ("lat7 over qualified ceiling", 900, [runtime("finite-lat-7", "new", 9)], {"finite-lat-7": 9}),
         (
             "over ceiling",
             900,
