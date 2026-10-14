@@ -25,15 +25,29 @@ facts only; they are not current deploy or destructive rebuild authority.
 
 ## Deploy flow — prebuilt immutable mono rev
 
-Deploying a release IS pinning the flake: the mono rev you build is the rev
-the host runs (binaries + config together). The dashboard is the exception —
-it deploys as a digest-pinned GHCR container, so bumping it is an edit to
-`modules/dashboard.nix`.
+The reviewed mono revision pins the host configuration and its dependencies.
+Lat2's Rust applications use the separate `lat2-app-source` input in
+`flake.nix`/`flake.lock`. This lets a Runner network expansion retain the
+deployed Core, Chat, Hosted Device, Brain, and Identity generation. The artifact
+records both `rev` (host) and `application_rev`; monitoring reports the
+application revision separately from the NixOS system profile revision.
+The dashboard remains a digest-pinned GHCR container in `modules/dashboard.nix`.
+
+For an application release, advance `lat2-app-source` to the exact reviewed
+mono commit and update its lock entry in the rollout PR. Follow the Runner-first
+compatibility and backup gates in [platform-rollout.md](platform-rollout.md).
+Package recipes and platform inputs still come from the host revision, so a
+retained source pin alone is not proof of unchanged binaries: compare every
+candidate application executable store path with the running one and review
+dry activation before an infrastructure-only switch.
 
 ### PRECONDITIONS
 
 - The change (Core source and/or the dashboard digest bump) is merged to
   `main` — you deploy a committed rev, not a working tree.
+- For a Core or other Rust application release, the committed
+  `lat2-app-source` pin includes that change. Building a later host revision
+  alone does not advance the application source.
 - Before deploying the RuntimeSpec generation, verify the Core Nix module
   carries the same non-secret `FINITE_SITES_API`,
   `FINITE_BRAIN_SERVER_URL`, and `FINITE_BRAIN_PUBLIC_BASE_URL` values in

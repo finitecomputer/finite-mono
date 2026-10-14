@@ -6,6 +6,7 @@
 {
   config,
   finitePackages,
+  finitePackagesRevision ? null,
   lib,
   pkgs,
   ...
@@ -14,6 +15,7 @@ let
   healthMetricsDirectory = "/run/finite-monitoring";
   revision =
     if config.system.configurationRevision == null then "" else config.system.configurationRevision;
+  applicationRevision = if finitePackagesRevision == null then revision else finitePackagesRevision;
   prometheusEscape = lib.replaceStrings [ "\\" "\"" "\n" ] [ "\\\\" "\\\"" "\\n" ];
   versionMetric =
     {
@@ -119,7 +121,7 @@ in
       {
         component = "finite-saas-core";
         version = finitePackages.finite-saas-core.version;
-        gitSha = revision;
+        gitSha = applicationRevision;
         source = "nix";
       }
       {
@@ -131,19 +133,19 @@ in
       {
         component = "finitechat-server";
         version = finitePackages.finitechat-server.version;
-        gitSha = revision;
+        gitSha = applicationRevision;
         source = "nix";
       }
       {
         component = "finitechat-hosted-device";
         version = finitePackages.finitechat-hosted-device.version;
-        gitSha = revision;
+        gitSha = applicationRevision;
         source = "nix";
       }
       {
         component = "finite-brain";
         version = finitePackages.finite-brain.version;
-        gitSha = revision;
+        gitSha = applicationRevision;
         source = "nix";
       }
       {
@@ -154,7 +156,7 @@ in
       {
         component = "finite-saas-runner";
         version = finitePackages.finite-saas-runner.version;
-        gitSha = revision;
+        gitSha = applicationRevision;
         source = "nix";
       }
       {

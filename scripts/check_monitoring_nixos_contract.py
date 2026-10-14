@@ -206,6 +206,13 @@ def nix_eval() -> dict[str, Any]:
       let
         flake = builtins.getFlake (toString ./.);
         cfg = flake.nixosConfigurations.finite-monitoring.config;
+        lat2 = flake.nixosConfigurations.finite-lat-2.config;
+        appPkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
+        pinnedApps = import ./infra/nixos/packages.nix {
+          pkgs = appPkgs;
+          craneLib = flake.inputs.crane.mkLib appPkgs;
+          sourceRoot = /. + builtins.unsafeDiscardStringContext flake.inputs.lat2-app-source.outPath;
+        };
         datasourceNames =
           map (datasource: datasource.name)
             cfg.services.grafana.provision.datasources.settings.datasources;
@@ -218,6 +225,21 @@ def nix_eval() -> dict[str, Any]:
             cfg.services.prometheus.scrapeConfigs
         );
       in {
+        lat2Applications = {
+          revision = flake.inputs.lat2-app-source.rev;
+          hostRevision = lat2.system.configurationRevision;
+          metrics = lat2.finite.metrics.staticVersionMetrics;
+          services = builtins.mapAttrs (unit: package: {
+            expected = toString package;
+            actual = lat2.systemd.services.${unit}.serviceConfig.ExecStart;
+          }) {
+            finite-saas-core = pinnedApps.finite-saas-core;
+            finitechat-server = pinnedApps.finitechat-server;
+            finitechat-hosted-device = pinnedApps.finitechat-hosted-device;
+            finite-brain-app = pinnedApps.finite-brain;
+            finite-identity = pinnedApps.finite-identity;
+          };
+        };
         hostName = cfg.networking.hostName;
         release = cfg.system.nixos.release;
         firewallTcp = cfg.networking.firewall.allowedTCPPorts;
@@ -769,6 +791,23 @@ def check_ubuntu_contract() -> None:
 
 def main() -> int:
     contract = nix_eval()
+    apps = contract["lat2Applications"]
+    for unit, paths in apps["services"].items():
+        require(
+            paths["actual"].startswith(paths["expected"] + "/bin/"),
+            f"lat2 {unit} must use the locked application source",
+        )
+    for component in (
+        "finite-saas-core", "finitechat-server", "finitechat-hosted-device", "finite-brain",
+        "nixos-system-profile",
+    ):
+        metric = next(
+            line for line in apps["metrics"].splitlines()
+            if line.startswith("finite_component_build_info{")
+            and f'component="{component}"' in line
+        )
+        revision = apps["hostRevision"] if component == "nixos-system-profile" else apps["revision"]
+        require_contains(metric, f'git_sha="{revision or ""}"', f"lat2 {component} revision")
 
     require(
         contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname"

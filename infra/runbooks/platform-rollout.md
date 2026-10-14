@@ -46,6 +46,10 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
 
 - **Deployed rev:** the change-set is merged to `main`; CI is green at exactly
   that revision (merge-commit SHA, not your local tree).
+- **App-plane source:** the rollout's `lat2-app-source` pin includes the
+  intended application changes. The artifact records this as `application_rev`
+  separately from the host configuration revision; update the pin through
+  [deploy-core.md](deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
 - **Preflight census clean:** `scripts/rollout_preflight.py` (see
   [#682](https://github.com/finitecomputer/finite-mono/pull/682)) exits 0 —
   every `runtime_control_requests.status` inside the legacy four values

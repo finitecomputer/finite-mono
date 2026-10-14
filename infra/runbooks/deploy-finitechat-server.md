@@ -20,8 +20,9 @@ carried onto the app-plane host per that discipline. Deploys now use a
 prebuilt immutable mono rev. Production evaluation/build happens in the
 `Lat2 NixOS Closure` workflow
 on a Depot-managed x86_64 Linux runner; the deploy script copies that exact
-artifact to lat2 and switches it only after the explicit activation step. The flake builds
-`finitechat-server` from that pinned rev.
+artifact to lat2 and switches it only after the explicit activation step. The
+flake builds `finitechat-server` from its locked `lat2-app-source` revision,
+recorded as `application_rev` in the artifact.
 
 ## The contract gate (applies to EVERY server deploy)
 
@@ -34,6 +35,8 @@ must report `server_contract_version`, `server_version`, the Nix-derived
 
 - The server commit to deploy is on mono `main`; local
   `cargo test -p finitechat-server` suites pass.
+- The rollout revision's `lat2-app-source` pin includes that server commit;
+  advance it through the shared [application release procedure](deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
 - You know the expected post-deploy `/health` payload (contract version,
   automatically derived Chat source fingerprint).
 - The reviewed revision has a successful `Lat2 NixOS Closure` workflow artifact
