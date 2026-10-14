@@ -8,11 +8,12 @@ the presentation baseline. These are metadata reads, without inference.
 
 Every entry/manual Refresh obtains a fresh account-authorized native Hermes grant
 through the existing `/api/agents/{runtime}/hermes-access` flow. The browser calls
-one fixed native GET route:
+these fixed native GET routes:
 
 | Product owner | Native route | Local supported read |
 | --- | --- | --- |
 | FiniteBrain | `/api/plugins/finite-brain/overview` | `fbrain brain list --json --existing-identity`, then `fbrain brain metadata --brain=ID --json --existing-identity` |
+| FiniteBrain | `/api/plugins/finite-brain/identities/{brain_id}` | `fbrain brain list --json --existing-identity` (the Agent must already belong to the Brain), then `fbrain access list --brain ID --json` |
 | Finite Sites | `/api/plugins/finite-sites/overview` | `fsite project list --output json --existing-identity` |
 
 Native Hermes authenticates before plugin routing and respects disabled plugins.
@@ -21,7 +22,8 @@ The shared bounded subprocess reader is sealed into Hermes' Python environment;
 it contains no product inventory or authorization policy. Both full and minimal
 Hermes packages include the product plugins. No mutable plugin installation,
 Core product API/storage, Management Pipe feature reports, or shell endpoint is
-introduced. Requests accept no profile, identity, server, command or query input.
+introduced. Requests accept no profile, identity, server, command or query input;
+the identities route takes only a Brain ID path segment.
 
 The CLI signer remains in the Runtime's existing Finite Home. The optional
 `--existing-identity` flag on these reads refuses to mint a missing identity;
@@ -38,6 +40,11 @@ unavailable.” An empty folder array means zero metadata folders. Mounted/linke
 folders, invite codes, members, key grants, content, local sync and decryptability
 are excluded. At most 100 list rows and 32 metadata requests are allowed; a larger
 inventory fails explicitly instead of silently truncating.
+
+The identities route is for Brain admins (Brain enforces this). It projects each
+key's npub, role and Folder IDs/states and, only when Core resolved the key, its
+kind, name, email and responsible account email. Unresolved keys carry no contact
+fields. See the [access report contract](../../finite-brain/docs/brain-access-report-v1.md).
 
 Sites projects Project Repositories that actually have a Site. Source-only
 repositories are counted separately. Name, URL, site visibility, publication

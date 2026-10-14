@@ -15,7 +15,10 @@ Core account-owner check. Unauthorized requests fail before any source lookup.
 
 `fbrain access list --brain <exact-id>` renders the report; `--json` returns the
 same facts. Existing Chat agents use this CLI result through the FiniteBrain
-skill. There is no new Chat message protocol or dashboard roster screen.
+skill. There is no new Chat message protocol. The dashboard Brain page shows
+admins a read-only roster through the Agent's Brain plugin: each key's role,
+Folders, and, only when Core resolved it, kind, name, email and responsible
+account email.
 
 The full report, including shared account contact, is admin-only in v1. Ordinary
 metadata visibility does not confer access to every Folder or private contact.

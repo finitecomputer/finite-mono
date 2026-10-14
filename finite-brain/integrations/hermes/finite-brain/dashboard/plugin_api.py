@@ -21,6 +21,7 @@ router = APIRouter()
 MAX_BRAINS = 100
 MAX_METADATA_READS = 32
 MAX_FOLDERS = 500
+MAX_IDENTITIES = 1024
 ROLES = {"owner", "personal_agent", "admin", "member", "guest", "invited"}
 
 
@@ -91,3 +92,64 @@ async def read_overview():
 @router.get("/overview")
 async def overview(request: Request):
     return await inventory_response(request, read_overview)
+
+
+def optional_text(value):
+    return None if value is None else text(value)
+
+
+async def read_identities(brain_id):
+    # The browser supplies only a Brain ID. The Agent's signer and the fixed
+    # commands stay Agent-owned; Brain enforces admin authority on the report.
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{0,127}", brain_id):
+        raise AccessUnverified()
+    # `access list` mints a missing identity, so first prove with the
+    # overview's no-mint read that this Agent already belongs to the Brain.
+    listing = record(
+        await read_json("fbrain", "brain", "list", "--json", "--existing-identity")
+    )
+    if not any(
+        item.get("brainId") == brain_id and item.get("role") != "invited"
+        for item in records(listing.get("brains"), MAX_BRAINS)
+    ):
+        raise AccessUnverified()
+    report = record(
+        await read_json("fbrain", "access", "list", "--brain", brain_id, "--json")
+    )
+    if (
+        report.get("version") != "finite-brain-access-report-v1"
+        or report.get("brainId") != brain_id
+    ):
+        raise InvalidInventory()
+    identities = []
+    for row in records(report.get("identities"), MAX_IDENTITIES):
+        # Name, email and owner exist only when Core resolved this key.
+        description = record(row.get("description"))
+        if description.get("state") != "resolved":
+            description = {}
+        owner = description.get("responsibleAccount")
+        identities.append(
+            {
+                "npub": text(row.get("npub"), 128),
+                "role": text(row.get("brainRole"), 64),
+                "kind": optional_text(description.get("kind")),
+                "name": optional_text(description.get("displayName")),
+                "email": optional_text(description.get("accountEmail")),
+                "ownerEmail": None
+                if owner is None
+                else text(record(owner).get("email")),
+                "folders": [
+                    {
+                        "id": text(folder.get("folderId"), 256),
+                        "state": text(folder.get("state"), 64),
+                    }
+                    for folder in records(row.get("folders"), MAX_FOLDERS)
+                ],
+            }
+        )
+    return {"version": 1, "brainId": brain_id, "identities": identities}
+
+
+@router.get("/identities/{brain_id}")
+async def identities(request: Request, brain_id: str):
+    return await inventory_response(request, lambda: read_identities(brain_id))
