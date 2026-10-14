@@ -6,9 +6,9 @@ use super::*;
 use crate::brain_identity::{
     BrainAccountObservationRequest, BrainAccountObservationResponse, BrainIdentityConfig,
     BrainIdentityDescriptionsRequest, BrainIdentityDescriptionsResponse, DESCRIPTION_BUDGET,
-    DESCRIPTION_CREDENTIAL_HEADER, DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION,
-    MAX_DESCRIPTION_BODY_BYTES, MAX_DESCRIPTION_RESPONSE_BYTES, MAX_OBSERVATION_BODY_BYTES,
-    OBSERVATION_CREDENTIAL_HEADER, OBSERVATION_ISSUER, OBSERVATION_PATH, OBSERVATION_VERSION,
+    DESCRIPTION_CREDENTIAL_HEADER, DESCRIPTIONS_PATH, MAX_DESCRIPTION_BODY_BYTES,
+    MAX_DESCRIPTION_RESPONSE_BYTES, MAX_OBSERVATION_BODY_BYTES, OBSERVATION_CREDENTIAL_HEADER,
+    OBSERVATION_ISSUER, OBSERVATION_PATH, OBSERVATION_VERSION,
 };
 use crate::store::BrainObservationError;
 use axum::body::Bytes;
@@ -125,8 +125,9 @@ async fn describe_identities(
     )
     .await
     .map_err(|_| ApiError::service_unavailable("identity description budget exceeded"))??;
+    // Echo the validated request version: it names the disclosure policy used.
     let response = BrainIdentityDescriptionsResponse {
-        version: DESCRIPTIONS_VERSION.to_string(),
+        version: request.version.clone(),
         brain_id: request.brain_id.clone(),
         checked_at,
         results,

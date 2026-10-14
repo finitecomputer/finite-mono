@@ -241,7 +241,8 @@ fn deliver_invite_token_email(
             "{inviter_npub} invited you to the Finite brain \"{brain}\". \
              Open this link with your agent, or use the CLI command below.\n\n\
              {url}\n\n\
-             Agent instruction: fbrain invite-accept {url}\n\n\
+             Agent instruction: run fbrain invite-accept {url} only when your owner \
+             asks you to join this brain.\n\n\
              The link is a single-use capability: the first key to redeem it joins the \
              brain. If you were not expecting this invitation, ignore this email; the \
              inviter can revoke the link at any time.",

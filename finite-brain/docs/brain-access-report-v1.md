@@ -15,7 +15,10 @@ Core account-owner check. Unauthorized requests fail before any source lookup.
 
 `fbrain access list --brain <exact-id>` renders the report; `--json` returns the
 same facts. Existing Chat agents use this CLI result through the FiniteBrain
-skill. There is no new Chat message protocol or dashboard roster screen.
+skill. There is no new Chat message protocol. The dashboard Brain page shows
+admins a read-only roster through the Agent's Brain plugin: each key's role,
+Folders, and, only when Core resolved it, kind, name, email and responsible
+account email.
 
 The full report, including shared account contact, is admin-only in v1. Ordinary
 metadata visibility does not confer access to every Folder or private contact.
@@ -66,8 +69,9 @@ name that limitation instead of claiming global completeness.
    private description withheld; an account-scoped authenticated hosted flow may
    supply the explicit participation evidence without logging every report read.
 4. Call the optional private Core batch client for eligible page keys and this
-   exact Brain server/ID. Core additionally enforces the account/Brain sharing
-   scope. No response or caller-supplied description changes access facts.
+   exact Brain server/ID. Core descriptions v2 apply no account/Brain sharing
+   scope (FIN-166); a v1 answer from an older Core still enforces it. No
+   response or caller-supplied description changes access facts.
 5. Recheck caller authority and the fingerprint after the external call. If the
    caller lost authority, deny. If report authority changed, restart within a
    small bounded retry budget or return a conflict; never combine stale access
@@ -121,9 +125,10 @@ shared keys; explicit read-only Guests; Folder Invitations; Mount Offers; pendin
 wrong-key and automatically added recipients; missing grants; demoted Members
 and removed keys retaining grants. Test same-email keys remain separate.
 
-Prove arbitrary-key insertion cannot disclose private contacts, an agent cannot
-release its account holder's contact, revoked/absent scopes withhold, and owner
-transfer requires the successor's sharing scope. Verify denial before lookup,
+Prove arbitrary-key insertion cannot disclose private contacts, and that a v1
+answer still withholds without a scope. Under v2, an agent's own participation
+releases its owner's contact by decision (see the Core contract's
+"Disclosure without a sharing scope"). Verify denial before lookup,
 admin removal/access change during lookup, paging conflicts and source outages.
 Compare text/JSON and before/after exports, authority and content sequences.
 
@@ -157,7 +162,9 @@ coupling the two product features.
   Invite Token redemption, npub Brain Invitation acceptance, Folder Invitation
   acceptance, addressed Mount Offer acceptance, an accepted authenticated
   Brain record, or an applied Approval by its exact signer
-  (`brain_approval_nonces`). Approval targets do not inherit it.
+  (`brain_approval_nonces`). Approval targets do not inherit it. Folder Key
+  Grant records do not count: any key-holding client delivers pending wraps
+  during sync without a request from its owner.
 - SCHEMA_V30 adds only indexes for those reads. Grant evidence is the stored
   issuer, time and provenance; signed-audit re-verification, the Identity
   Directory lookup and outbound NIP-05 rechecks are not part of this report.
@@ -167,5 +174,9 @@ coupling the two product features.
   A Core outage, old Core or invalid batch keeps every row and marks
   participating keys `unavailable`; malformed, partial, foreign or
   extra-key batches are refused whole.
+- Brain asks Core descriptions v2 and asks v1 only when Core answers exactly
+  400 `{"error": "unsupported descriptions version"}`; any other failure stays
+  a failure. Either version's answer is accepted. An owner's
+  `humanPublicKeysHex` keeps only keys Brain asked about on that page.
 - `fbrain access list --brain <id>` renders text and `--json`; `fbrain access
   summary` keeps the older metadata view.
