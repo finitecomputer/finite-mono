@@ -17,7 +17,7 @@
     # not also deploy every application change since the last platform wave.
     # Advance this pin with the coordinated app-plane rollout.
     lat2-app-source = {
-      url = "github:finitecomputer/finite-mono/d1e45b9cd01e8663260247b091f72272ea840279";
+      url = "github:finitecomputer/finite-mono/979ef56d4e3f0e6e95ec7f629cdba61b94a299c9";
       flake = false;
     };
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
