@@ -163,6 +163,7 @@ CONTRACT: dict[str, Any] = {
             "207.188.7.157": "finite-lat-3",
             "152.236.34.15": "finite-lat-4",
             "64.34.93.213": "finite-lat-5",
+            "64.34.89.107": "finite-lat-7",
         },
     },
     "hosts": {
@@ -214,6 +215,15 @@ CONTRACT: dict[str, Any] = {
             "recovery": False,
             # Nix kataHostAddress: where Agent contact endpoints are published.
             "kata_host_address": "10.254.3.5",
+        },
+        "finite-lat-7": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
+            "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.6",
         },
     },
     "thresholds": {

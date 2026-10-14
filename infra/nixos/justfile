@@ -140,7 +140,7 @@ lat1-healthcheck-contract:
     cd ../.. && python3 scripts/check_lat1_healthcheck_contract.py
 
 # Anti-drift contract: all Kata Runner configurations render one shared
-# runner-role module. This includes retired lat1 and active lat3/lat4/lat5;
+# runner-role module. This includes retired lat1 and active lat3/lat4/lat5/lat7;
 # evaluated env and unit fragments may differ only in the declared per-host set.
 runner-host-contract:
     cd ../.. && python3 scripts/check_runner_host_contract.py
@@ -197,3 +197,31 @@ install-lat5-from-artifact artifact_dir target_host *args:
 lat5-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence
     cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap
+
+# lat7 provisioning and artifact validation.
+nixos-build-lat7-closure rev out_dir="target/lat7-nixos-closure":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/build-lat7-nixos-closure-artifact {{ quote(rev) }} {{ quote(out_dir) }}
+
+[positional-arguments]
+deploy-lat7-closure artifact_dir *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/deploy-lat7-closure-cache "$@"
+
+[positional-arguments]
+install-lat7-from-artifact artifact_dir target_host *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    repo_root="$(cd ../.. && pwd)"
+    cd "$repo_root"
+    exec scripts/install-lat7-from-artifact "$artifact_dir" "$target_host" "$@"
+
+lat7-runner-rollout-contract:
+    cd ../.. && bash -n scripts/build-lat7-nixos-closure-artifact scripts/deploy-lat7-closure-cache scripts/install-lat7-from-artifact infra/nixos/scripts/capture-lat7-host-evidence
+    cd ../.. && python3 -m unittest scripts.tests.test_lat7_closure_artifact scripts.tests.test_lat7_bootstrap

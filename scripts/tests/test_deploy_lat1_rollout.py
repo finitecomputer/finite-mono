@@ -93,7 +93,7 @@ def provider_fact(
     principal = f"npub1{runtime}principal"
     work_root = (
         "/data/finite-saas-runner"
-        if host in {"finite-lat-3", "finite-lat-4", "finite-lat-5"}
+        if host in {"finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"}
         else "/var/lib/finite-saas-runner"
     )
     return {

@@ -1346,7 +1346,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         # finite-lat-4 publishes .4; the old allowlist expected .3 and refused
         # every lat4 Agent before trying the request.
         principal = "npub1" + "q" * 58
-        for host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
+        for host in ("finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"):
             nix = (ROOT / "infra" / "nixos" / "hosts" / host / "default.nix").read_text()
             published = re.search(r'kataHostAddress = "([0-9.]+)";', nix)[1]
             endpoint = f"http://{published}:49155/contact"

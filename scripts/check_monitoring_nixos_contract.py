@@ -44,8 +44,9 @@ LAT_DASHBOARD_HOSTS = (
     "finite-lat-3",
     "finite-lat-4",
     "finite-lat-5",
+    "finite-lat-7",
 )
-LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-5]"
+LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-57]"
 
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",
@@ -177,6 +178,16 @@ LAT_LOG_UNITS = {
         "systemd-networkd.service",
         "wireguard-wg-finite.service",
     ],
+    "finite-lat-7": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd-persistent-storage.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
 }
 
 LAT_ROLES = {
@@ -186,6 +197,7 @@ LAT_ROLES = {
     "finite-lat-2": "app",
     "finite-lat-4": "runner",
     "finite-lat-5": "runner",
+    "finite-lat-7": "runner",
 }
 
 
@@ -289,6 +301,12 @@ def nix_eval() -> dict[str, Any]:
             envFiles = flake.nixosConfigurations.finite-lat-5.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-5.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
             activation = flake.nixosConfigurations.finite-lat-5.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-7 = {
+            config = flake.nixosConfigurations.finite-lat-7.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-7.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-7.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-7.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }
