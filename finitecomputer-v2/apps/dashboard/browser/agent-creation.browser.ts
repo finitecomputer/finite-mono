@@ -12,6 +12,8 @@ import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
 
 const CORE_TOKEN = "browser-core-token";
 const HOSTED_DEVICE_TOKEN = "browser-hosted-device-token";
+// The owner's hosted chat account: 64 hex, as the hosted device mints it.
+const BROWSER_USER_ACCOUNT_ID = "5a".repeat(32);
 const SITES_VIEWER_SESSION_TOKEN = "browser-sites-viewer-session-token";
 const AGENT_NPUB = "npub1browseragentprincipal";
 const AGENT_PICTURE_URL = "https://chat.example/blobs/browser-agent-picture.png";
@@ -382,6 +384,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       assert.equal(core.state.creationResults.size, 1, "paid retry must reuse the original Project");
       assert.equal((core.state.creationPosts[1] as Record<string, unknown>).idempotencyKey,
         (core.state.creationPosts[0] as Record<string, unknown>).idempotencyKey);
+      for (const creationPost of core.state.creationPosts) {
+        assert.equal((creationPost as Record<string, unknown>).ownerChatAccountId, BROWSER_USER_ACCOUNT_ID,
+          "every creation names the owner's chat account");
+      }
       const post = core.state.creationPosts[0] as Record<string, unknown>;
       assert.equal(post.displayName, "Paid Return Bot");
       assert.equal(post.launchCode, "");
@@ -2730,7 +2736,7 @@ function initialHostedChatState(): FakeHostedChatState {
   return {
     rev: 1,
     identity: {
-      account_id: "browser-user-account",
+      account_id: BROWSER_USER_ACCOUNT_ID,
       device_id: "hosted-web",
     },
     rooms: [],
@@ -2745,7 +2751,7 @@ function initialHostedChatState(): FakeHostedChatState {
     profiles: [],
     devices: [
       {
-        account_id: "browser-user-account",
+        account_id: BROWSER_USER_ACCOUNT_ID,
         device_id: "hosted-web",
         active: true,
         current_device: true,
@@ -2753,7 +2759,7 @@ function initialHostedChatState(): FakeHostedChatState {
         room_count: 1,
       },
       {
-        account_id: "browser-user-account",
+        account_id: BROWSER_USER_ACCOUNT_ID,
         device_id: "electron-browser-proof",
         active: true,
         current_device: false,
@@ -2971,7 +2977,7 @@ function hostedMessage(
     message_id: `message_${seq}`,
     conversation_id: "home",
     chat_id: "chat_browser_agent",
-    sender_account_id: isMine ? "browser-user-account" : "agent-account-browser",
+    sender_account_id: isMine ? BROWSER_USER_ACCOUNT_ID : "agent-account-browser",
     sender_display_name: isMine ? "You" : "Completed Oslo Bot",
     text,
     display_content: text,

@@ -780,8 +780,10 @@ impl DirectRuntime {
     }
 
     /// The signer must be the person this log projects for. A fresh room
-    /// with no known person accepts its first verified signer, as owner
-    /// claim does.
+    /// with no known person takes its owner only from the people Core named
+    /// (`FINITECHAT_OWNER_NPUBS`). With none named, nobody can claim it: code
+    /// inside the agent can reach this bridge too, and could otherwise sign
+    /// first with a key of its own.
     fn authorize_signer(&self, signer: &str) -> Result<(), AppApiError> {
         let inner = self
             .lock()
@@ -796,7 +798,12 @@ impl DirectRuntime {
             ));
         }
         let claimable = owner_npubs_from_env();
-        if !claimable.is_empty() && !claimable.contains(signer) {
+        if claimable.is_empty() {
+            return Err(AppApiError::Forbidden(
+                "this agent's chat has no owner; Core names the owner when the agent is created",
+            ));
+        }
+        if !claimable.contains(signer) {
             return Err(AppApiError::Forbidden(
                 "this person cannot use this agent's chat",
             ));

@@ -61,9 +61,14 @@ read.
 room shared by several people needs exactly one of them in
 `FINITECHAT_OWNER_NPUBS`; otherwise the fold refuses.
 
-**A fresh agent** (no MLS store) gets one room and a Home topic. The owner is
-`FINITECHAT_OWNER_NPUBS`; failing that, the first verified signer claims the
-room.
+**A fresh agent** (no MLS store) gets one room and a Home topic. Its owner is
+the account Core names in `FINITECHAT_OWNER_NPUBS`. If Core names several
+accounts, the first of them to sign claims the room. If Core names none, the
+room has no owner and every request is refused. Code inside the agent can
+reach the bridge, so it must not be able to claim the room by signing first.
+The dashboard therefore refuses to create an agent without its owner's
+account. To repair such an agent, set the variable in its runtime spec and
+restart it.
 
 **Fold status.** `direct/fold-status.json` records the outcome and the post-fold
 digests, so operators can compare them with `finitechat-hosted-device digest`

@@ -12,6 +12,7 @@ import {
   hostedDeviceDirectChatAuthorization,
   hostedDeviceHeaders,
   hostedDeviceOwnerChatAccountId,
+  OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE,
   hostedDeviceProfileImage,
   hostedDeviceRuntimeCommand,
   hostedDeviceState,
@@ -59,35 +60,37 @@ test("hostedDeviceOwnerChatAccountId reads the pre-minted identity account id", 
   );
 });
 
-test("hostedDeviceOwnerChatAccountId fails open for agent creation", async (context) => {
+test("hostedDeviceOwnerChatAccountId refuses agent creation without a usable owner", async (context) => {
   const originalFetch = global.fetch;
   context.after(() => {
     global.fetch = originalFetch;
   });
+  const refused = (error: unknown) =>
+    error instanceof Error && error.message === OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE;
 
-  // No hosted-device config: nothing to fetch, no account id.
-  assert.equal(await hostedDeviceOwnerChatAccountId(null, verifiedAccount), null);
+  // No hosted-device config: no owner, so no agent.
+  await assert.rejects(hostedDeviceOwnerChatAccountId(null, verifiedAccount), refused);
 
-  // Transport failure: warn and continue without the owner identity.
+  // Transport failure: the attempt fails before Core creates anything.
   global.fetch = (async () => {
     throw new Error("connect refused");
   }) as typeof fetch;
-  assert.equal(
-    await hostedDeviceOwnerChatAccountId(
+  await assert.rejects(
+    hostedDeviceOwnerChatAccountId(
       { baseUrl: "https://device.internal", apiToken: "secret" },
       verifiedAccount
     ),
-    null
+    refused
   );
 
-  // A state payload without a 64-hex account id is unusable, not fatal.
+  // A state payload without a 64-hex account id names no owner.
   global.fetch = (async () => Response.json({ identity: { account_id: "npub1not-hex" } })) as typeof fetch;
-  assert.equal(
-    await hostedDeviceOwnerChatAccountId(
+  await assert.rejects(
+    hostedDeviceOwnerChatAccountId(
       { baseUrl: "https://device.internal", apiToken: "secret" },
       verifiedAccount
     ),
-    null
+    refused
   );
 });
 

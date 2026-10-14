@@ -85,12 +85,14 @@ test("Launch Code issuance requests default to Standard and carry explicit Confi
 });
 
 test("agent creation payload cannot submit provider placement", () => {
+  const ownerChatAccountId = "cd".repeat(32);
   const staleInput = {
     displayName: "Moss",
     launchCode: "launch-fixture",
     idempotencyKey: "request-fixture",
     hostingTier: "confidential" as const,
     profilePictureUrl: "https://chat.example/profile.png",
+    ownerChatAccountId,
     runnerClass: "phala",
   };
   const body = coreAgentCreationRequestBody(staleInput);
@@ -100,6 +102,7 @@ test("agent creation payload cannot submit provider placement", () => {
     idempotencyKey: "request-fixture",
     hostingTier: "confidential",
     profilePictureUrl: "https://chat.example/profile.png",
+    ownerChatAccountId,
   });
   assert.equal("runnerClass" in body, false);
   assert.deepEqual(
@@ -108,17 +111,19 @@ test("agent creation payload cannot submit provider placement", () => {
       launchCode: "",
       idempotencyKey: "request-without-picture",
       hostingTier: "standard",
+      ownerChatAccountId,
     }),
     {
       displayName: "Moss",
       launchCode: "",
       idempotencyKey: "request-without-picture",
       hostingTier: "standard",
+      ownerChatAccountId,
     }
   );
 });
 
-test("agent creation payload carries the owner chat account id only when known", () => {
+test("agent creation payload always carries the owner chat account id", () => {
   const ownerChatAccountId = "ab".repeat(32);
   assert.deepEqual(
     coreAgentCreationRequestBody({
@@ -136,16 +141,20 @@ test("agent creation payload carries the owner chat account id only when known",
       ownerChatAccountId,
     }
   );
-  // Fail-open launches (hosted device unreachable) omit the key entirely so
-  // Core leases the runtime without FINITECHAT_OWNER_NPUBS.
-  const failOpen = coreAgentCreationRequestBody({
-    displayName: "Moss",
-    launchCode: "launch-fixture",
-    idempotencyKey: "request-owner-npub-absent",
-    hostingTier: "standard",
-    ownerChatAccountId: null,
-  });
-  assert.equal("ownerChatAccountId" in failOpen, false);
+  // An ownerless agent's chat is unusable, so the payload refuses to omit it.
+  for (const ownerChatAccountId of ["", "   "]) {
+    assert.throws(
+      () =>
+        coreAgentCreationRequestBody({
+          displayName: "Moss",
+          launchCode: "launch-fixture",
+          idempotencyKey: "request-owner-npub-absent",
+          hostingTier: "standard",
+          ownerChatAccountId,
+        }),
+      /requires the owner's chat account/u
+    );
+  }
 });
 
 test("coreBridgeStatus requires the Core URL but not a service token for user routes", () => {

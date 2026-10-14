@@ -651,21 +651,25 @@ export type CoreAgentCreationInput = {
    * Owner hosted-chat account id (64 hex), pre-minted via the hosted-device
    * app state before the creation request so a runner lease can never race
    * the identity mint. Core injects it into the runtime spec environment as
-   * FINITECHAT_OWNER_NPUBS at lease time.
+   * FINITECHAT_OWNER_NPUBS at lease time. Required: without it the agent's
+   * chat has no owner and nobody can use it.
    */
-  ownerChatAccountId?: string | null;
+  ownerChatAccountId: string;
 };
 
 export function coreAgentCreationRequestBody(input: CoreAgentCreationInput) {
   const profilePictureUrl = optionalString(input.profilePictureUrl);
   const ownerChatAccountId = optionalString(input.ownerChatAccountId);
+  if (!ownerChatAccountId) {
+    throw new Error("Agent creation requires the owner's chat account.");
+  }
   return {
     displayName: input.displayName,
     launchCode: input.launchCode,
     idempotencyKey: input.idempotencyKey,
     hostingTier: input.hostingTier,
     ...(profilePictureUrl ? { profilePictureUrl } : {}),
-    ...(ownerChatAccountId ? { ownerChatAccountId } : {}),
+    ownerChatAccountId,
   };
 }
 
@@ -679,34 +683,17 @@ export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
     throw new Error("Sign in again to create an agent.");
   }
 
-  const post = (body: CoreAgentCreationInput) =>
-    coreFetch<CoreAgentCreationResult>("/api/core/v1/me/agent-creation-requests", account, {
+  // Never retried without the owner: an ownerless agent's chat is unusable.
+  const result = await coreFetch<CoreAgentCreationResult>(
+    "/api/core/v1/me/agent-creation-requests",
+    account,
+    {
       method: "POST",
-      body: JSON.stringify(coreAgentCreationRequestBody(body)),
-    });
-  try {
-    const result = await post(input);
-    invalidateCoreReadCache();
-    return result;
-  } catch (error) {
-    // An N-1 Core predating owner-npub granting has no `ownerChatAccountId`
-    // field and rejects the unknown key at JSON deserialization (axum data
-    // error, 422). Agent creation must never depend on the chat grant, so
-    // retry once without it; every other failure propagates unchanged.
-    if (
-      optionalString(input.ownerChatAccountId) &&
-      error instanceof CoreFetchError &&
-      error.status === 422
-    ) {
-      console.warn(
-        "Core rejected ownerChatAccountId (pre-owner-npub Core); retrying agent creation without the chat grant"
-      );
-      const result = await post({ ...input, ownerChatAccountId: null });
-      invalidateCoreReadCache();
-      return result;
+      body: JSON.stringify(coreAgentCreationRequestBody(input)),
     }
-    throw error;
-  }
+  );
+  invalidateCoreReadCache();
+  return result;
 }
 
 export async function linkCoreStripeCustomer(stripeCustomerId: string) {

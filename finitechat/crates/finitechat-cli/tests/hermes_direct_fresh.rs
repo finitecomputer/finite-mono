@@ -1,7 +1,7 @@
 //! Direct transport for an agent created after the cutover: no MLS history,
 //! so the first start creates the room and its Home topic. The owner is the
-//! one Core names, or the first verified signer when Core names none. Its
-//! own test binary, because the transport is selected by process environment.
+//! one Core names; with none named, nobody can claim the chat. Its own test
+//! binary, because the transport is selected by process environment.
 
 mod direct_support;
 
@@ -60,11 +60,11 @@ fn a_new_agent_starts_direct_with_one_home_topic_for_its_owner() {
         url: spawn_sidecar(&agent_home, dir.path().join("ready-1.json")),
         http: reqwest::blocking::Client::new(),
     };
-    let info = info(&bridge);
-    assert_eq!(info["transport"], "direct");
-    assert_eq!(info["migration"]["state"], "fresh");
-    assert_eq!(info["agent_account_id"], agent_account);
-    let room_id = info["canonical_room_id"].as_str().unwrap().to_owned();
+    let fresh = info(&bridge);
+    assert_eq!(fresh["transport"], "direct");
+    assert_eq!(fresh["migration"]["state"], "fresh");
+    assert_eq!(fresh["agent_account_id"], agent_account);
+    let room_id = fresh["canonical_room_id"].as_str().unwrap().to_owned();
 
     assert_eq!(bridge.get(&stranger, "/v1/app/state").status(), 403);
     let state = bridge.json(bridge.get(&person, &format!("/v1/app/state?room_id={room_id}")));
@@ -97,8 +97,8 @@ fn a_new_agent_starts_direct_with_one_home_topic_for_its_owner() {
         "Home"
     );
 
-    // Core named no owner: the first verified signer becomes the owner, and
-    // nobody else can use the chat afterwards.
+    // Core named no owner: no signer can claim the chat, because code inside
+    // the agent can reach the bridge and sign first with a key of its own.
     // SAFETY: as above; the first sidecar is not used again.
     unsafe { std::env::remove_var("FINITECHAT_OWNER_NPUBS") };
     let unclaimed_home = dir.path().join("unclaimed").display().to_string();
@@ -107,8 +107,29 @@ fn a_new_agent_starts_direct_with_one_home_topic_for_its_owner() {
         url: spawn_sidecar(&unclaimed_home, dir.path().join("ready-3.json")),
         http: reqwest::blocking::Client::new(),
     };
-    let claimed = unclaimed.json(unclaimed.get(&person, "/v1/app/state"));
+    for signer in [&stranger, &person] {
+        let refused = unclaimed.get(signer, "/v1/app/state");
+        assert_eq!(refused.status(), 403);
+        assert!(refused.text().unwrap().contains("has no owner"));
+    }
+    assert_eq!(info(&unclaimed)["transport"], "direct");
+
+    // Naming several possible owners lets exactly one of them claim it.
+    // SAFETY: as above; earlier sidecars are not used again.
+    unsafe {
+        std::env::set_var(
+            "FINITECHAT_OWNER_NPUBS",
+            format!("{},{}", person.account(), "c".repeat(64)),
+        )
+    };
+    let named_home = dir.path().join("named").display().to_string();
+    init_agent(&named_home, &server_url);
+    let named = Bridge {
+        url: spawn_sidecar(&named_home, dir.path().join("ready-4.json")),
+        http: reqwest::blocking::Client::new(),
+    };
+    assert_eq!(named.get(&stranger, "/v1/app/state").status(), 403);
+    let claimed = named.json(named.get(&person, "/v1/app/state"));
     assert_eq!(claimed["identity"]["account_id"], person.account());
-    assert_eq!(unclaimed.get(&stranger, "/v1/app/state").status(), 403);
-    assert_eq!(unclaimed.get(&person, "/v1/app/state").status(), 200);
+    assert_eq!(named.get(&person, "/v1/app/state").status(), 200);
 }

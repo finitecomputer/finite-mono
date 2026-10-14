@@ -340,35 +340,41 @@ export async function hostedDeviceState(
 
 const HOSTED_CHAT_ACCOUNT_ID_PATTERN = /^[0-9a-f]{64}$/u;
 
+export const OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE =
+  "Chat isn't ready to set up a new agent right now. Try again in a moment.";
+
 /**
- * The owner's hosted-chat account id (64 hex) for agent-creation granting.
- * Reading app state pre-mints the hosted chat identity on first contact, so a
- * runner lease can never race the mint. Fail-open by contract: any transport,
- * config, or shape problem returns null (with a warning) because agent
- * creation must never be bricked by chat identity availability; Core simply
- * leases the runtime without FINITECHAT_OWNER_NPUBS in that case.
+ * The owner's hosted-chat account id (64 hex) that Core gives the new agent as
+ * FINITECHAT_OWNER_NPUBS. Reading app state pre-mints the hosted chat identity
+ * on first contact, so a runner lease can never race the mint.
+ *
+ * Required: an agent created without its owner has a chat nobody may claim,
+ * because code inside the agent could otherwise claim it first. Any config,
+ * transport or shape problem throws before Core creates anything, so a retry
+ * with the same idempotency key starts clean.
  */
 export async function hostedDeviceOwnerChatAccountId(
   config: HostedDeviceConfig | null,
   account: AccountAuthContext
-): Promise<string | null> {
+): Promise<string> {
   if (!config) {
-    return null;
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
   }
+  let accountId = "";
   try {
     const state = await hostedDeviceState(config, account);
-    const accountId = state.identity?.account_id?.trim().toLowerCase() ?? "";
-    if (!HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId)) {
-      console.warn("Hosted chat identity had no usable account id for agent creation");
-      return null;
-    }
-    return accountId;
+    accountId = state.identity?.account_id?.trim().toLowerCase() ?? "";
   } catch (error) {
     console.warn("Could not pre-mint the hosted chat identity for agent creation", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
   }
+  if (!HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId)) {
+    console.warn("Hosted chat identity had no usable account id for agent creation");
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
+  }
+  return accountId;
 }
 
 export async function hostedDeviceBrainIdentityProvider(
