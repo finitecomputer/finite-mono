@@ -143,17 +143,17 @@
     "lat2-app-source": {
       "flake": false,
       "locked": {
-        "lastModified": 1792015415,
-        "narHash": "sha256-2dUcokb/+0JUtwtPXTriRQyC+GgQisZwnD7ypgQElCM=",
+        "lastModified": 1792084035,
+        "narHash": "sha256-zfTcj8x/8b5v9ldo2S1t7Wg/J6c8RcK9vRVHj30+5A8=",
         "owner": "finitecomputer",
         "repo": "finite-mono",
-        "rev": "979ef56d4e3f0e6e95ec7f629cdba61b94a299c9",
+        "rev": "3491d3091611e8b06330ddfea8cc44a71c4b32eb",
         "type": "github"
       },
       "original": {
         "owner": "finitecomputer",
         "repo": "finite-mono",
-        "rev": "979ef56d4e3f0e6e95ec7f629cdba61b94a299c9",
+        "rev": "3491d3091611e8b06330ddfea8cc44a71c4b32eb",
         "type": "github"
       }
     },
