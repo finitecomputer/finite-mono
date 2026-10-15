@@ -263,7 +263,11 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                     printf '%s\n' "$FAKE_PROBE_REPORT"
                     exit "${FAKE_PROBE_STATUS:-0}"
                   fi
-                  verdict="${FAKE_PROBE_VERDICT:-operable}"
+                  if [[ -n ${FAKE_PROBE_VERDICTS:-} ]]; then
+                    verdict="$(jq -r --arg runtime "$runtime" '.[$runtime] // "operable"' <<<"$FAKE_PROBE_VERDICTS")"
+                  else
+                    verdict="${FAKE_PROBE_VERDICT:-operable}"
+                  fi
                   reason="$(jq -cn --arg verdict "$verdict" --arg reason "${FAKE_PROBE_REASON:-}" 'if $verdict == "operable" then null elif $reason == "" then "probe_finding" else $reason end')"
                   jq -cn \
                     --arg project "$project" \
@@ -918,34 +922,30 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 self.assertEqual(events[-1]["probe_skipped"], 1)
                 self.assertEqual(events[-1]["absent_count"], 0)
 
-    def test_probe_unavailable_keeps_core_state_behavior(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            temp = Path(directory)
-            env, log, state_root, plan_hash = self.single_entry_environment(temp)
-            env["FAKE_PROBE_STATUS"] = "1"
-
-            executed = self.execute_single_entry(env, plan_hash)
-            self.assertEqual(executed.returncode, 0, executed.stderr)
-            self.assertIn("lifecycle probe unavailable", executed.stdout)
-            calls = log.read_text(encoding="utf-8").splitlines()
-            self.assertTrue(
-                any(
-                    "--expected-agent-runtime-id" in call and "--plan-only" not in call
-                    for call in calls
-                ),
-                calls,
-            )
-            events = [
-                event
-                for event in self.read_events(state_root, plan_hash)
-                if event["phase"] == "execute"
-            ]
-            probe_events = [
-                event for event in events if event["event"] == "entry_lifecycle_probe"
-            ]
-            self.assertEqual(len(probe_events), 1, events)
-            self.assertEqual(probe_events[0]["status"], "unavailable")
-            self.assertEqual(events[-1]["status"], "success")
+    def test_probe_unavailable_holds_without_enqueuing_even_with_override(self) -> None:
+        for probe_exit in (1, 124, 255):
+            for override in (False, True):
+                with self.subTest(probe_exit=probe_exit, override=override), tempfile.TemporaryDirectory() as directory:
+                    env, log, state_root, plan_hash = self.single_entry_environment(Path(directory))
+                    env["FAKE_PROBE_STATUS"] = str(probe_exit)
+                    args = ["--execute-plan-hash", plan_hash, *self.actor_args(), "--roll-project-id", "project-a"]
+                    if override:
+                        args.append("--probe-override")
+                    executed = self.run_rollout(*args, env=env)
+                    self.assertEqual(executed.returncode, 0, executed.stderr)
+                    self.assertIn("lifecycle probe unavailable", executed.stdout)
+                    self.assertIn("deliberately skipping", executed.stdout)
+                    calls = log.read_text().splitlines()
+                    self.assertFalse(any("--expected-agent-runtime-id" in call and "--plan-only" not in call for call in calls), calls)
+                    events = [event for event in self.read_events(state_root, plan_hash) if event["phase"] == "execute"]
+                    probe_events = [event for event in events if event["event"] == "entry_lifecycle_probe"]
+                    self.assertEqual(len(probe_events), 1, events)
+                    self.assertEqual(probe_events[0]["status"], "skipped")
+                    self.assertEqual(probe_events[0]["verdict"], "unknown")
+                    self.assertEqual(probe_events[0]["reason"], "probe_unavailable")
+                    self.assertEqual(events[-1]["probe_skipped"], 1)
+                    self.assertEqual(events[-1]["passed_count"], 0)
+                    self.assertEqual(events[-1]["status"], "success")
 
     def test_probe_report_shape_mismatch_fails_closed(self) -> None:
         # The probe exited 0 but spoke garbage: fail CLOSED for upgrade
@@ -1095,6 +1095,124 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
                 self.assertEqual(summarized.returncode, 0, summarized.stderr)
                 self.assertIn("terminal=success", summarized.stdout)
                 self.assertIn("probe_overridden=1", summarized.stdout)
+
+    def test_probe_override_keeps_unknown_held_without_enqueuing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root, plan_hash = self.single_entry_environment(temp)
+            env["FAKE_PROBE_VERDICT"] = "unknown"
+            env["FAKE_PROBE_REASON"] = "task_list_error"
+
+            executed = self.run_rollout(
+                "--execute-plan-hash",
+                plan_hash,
+                *self.actor_args(),
+                "--roll-project-id",
+                "project-a",
+                "--probe-override",
+                env=env,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("deliberately skipping", executed.stdout)
+            self.assertIn("unknown", executed.stdout)
+            self.assertNotIn("overrode the lifecycle probe gate", executed.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            self.assertTrue(
+                any("provider-lifecycle-probe-v1" in call for call in calls)
+            )
+            self.assertFalse(
+                any(
+                    "--expected-agent-runtime-id" in call
+                    and "--plan-only" not in call
+                    for call in calls
+                ),
+                calls,
+            )
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(len(probe_events), 1, events)
+            self.assertEqual(probe_events[0]["status"], "skipped")
+            self.assertEqual(probe_events[0]["verdict"], "unknown")
+            self.assertEqual(probe_events[0]["reason"], "task_list_error")
+            self.assertEqual(
+                probe_events[0]["probe"]["schema"], "finite.lifecycle-probe.v1"
+            )
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["planned_count"], 1)
+            self.assertEqual(events[-1]["passed_count"], 0)
+            self.assertEqual(events[-1]["failed_count"], 0)
+            self.assertEqual(events[-1]["absent_count"], 0)
+            self.assertEqual(events[-1]["probe_skipped"], 1)
+            self.assertEqual(events[-1]["probe_overridden"], 0)
+
+    def test_mixed_held_and_operable_cohort_counts_only_operable_as_passed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            entries = [
+                plan_entry("project-a", "runtime-a", "kata-a"),
+                plan_entry("project-b", "runtime-b", "kata-b"),
+            ]
+            facts = [
+                provider_fact("project-a", "runtime-a", "kata-a"),
+                provider_fact("project-b", "runtime-b", "kata-b"),
+            ]
+            env, log, state_root = self.fake_ssh_environment(
+                temp, rollout_report(entries), facts
+            )
+            scope = (
+                "--roll-project-id",
+                "project-a",
+                "--roll-project-id",
+                "project-b",
+            )
+            prepared, plan_hash = self.prepare(env, *scope)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            env["FAKE_PROBE_VERDICTS"] = json.dumps({"runtime-a": "unknown"})
+            log.write_text("", encoding="utf-8")
+
+            executed = self.run_rollout(
+                "--execute-plan-hash",
+                plan_hash,
+                *self.actor_args(),
+                *scope,
+                env=env,
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            calls = log.read_text(encoding="utf-8").splitlines()
+            exact = [
+                call
+                for call in calls
+                if "--expected-agent-runtime-id" in call
+                and "--plan-only" not in call
+            ]
+            self.assertEqual(len(exact), 1, calls)
+            self.assertIn("--project-id project-b", exact[0])
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            probe_events = [
+                event for event in events if event["event"] == "entry_lifecycle_probe"
+            ]
+            self.assertEqual(
+                {(event["agent_runtime_id"], event["status"], event["verdict"])
+                 for event in probe_events},
+                {("runtime-a", "skipped", "unknown"), ("runtime-b", "succeeded", "operable")},
+            )
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["planned_count"], 2)
+            self.assertEqual(events[-1]["passed_count"], 1)
+            self.assertEqual(events[-1]["failed_count"], 0)
+            self.assertEqual(events[-1]["absent_count"], 0)
+            self.assertEqual(events[-1]["probe_skipped"], 1)
+            self.assertEqual(events[-1]["probe_overridden"], 0)
 
     def test_probe_override_does_not_bypass_plan_drift_refusal(self) -> None:
         # The override only relaxes the probe gate: provider-fact drift
