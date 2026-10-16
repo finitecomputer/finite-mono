@@ -202,6 +202,19 @@ impl SupervisorHandle {
         })
     }
 
+    /// True while the first process spawned for `name` is still running: it
+    /// has not exited, failed to spawn or been restarted.
+    pub async fn first_process_running(&self, name: &str) -> bool {
+        self.status
+            .read()
+            .await
+            .processes
+            .get(name)
+            .is_some_and(|status| {
+                status.restart_count == 0 && matches!(status.state, ProcessState::Running { .. })
+            })
+    }
+
     pub async fn status(&self) -> SupervisorStatus {
         self.status.read().await.clone()
     }
@@ -441,6 +454,23 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn first_process_running_turns_false_once_the_process_restarts() {
+        let handle = start_supervisor(
+            sleeping_process("sidecar"),
+            sleeping_process("health"),
+            sleeping_process("hermes"),
+            None,
+        );
+        wait_for_running(&handle, "hermes").await;
+        assert!(handle.first_process_running("hermes").await);
+        assert!(!handle.first_process_running("missing").await);
+
+        handle.restart_hermes().await.unwrap();
+        assert!(!handle.first_process_running("hermes").await);
+        handle.shutdown().await;
     }
 
     #[tokio::test]

@@ -236,7 +236,12 @@ pub async fn run_daemon(config: DaemonConfig) -> Result<(), AgentdError> {
     );
 
     let readiness = tokio::select! {
-        result = wait_for_bridge(&bridge, config.bridge_ready_timeout) => result.map(|()| true),
+        result = wait_for_bridge(
+            &bridge,
+            &supervisor,
+            config.bridge_ready_timeout,
+            config.bridge_ready_timeout.min(EXITED_BRIDGE_READY_TIMEOUT),
+        ) => result.map(|()| true),
         signal = tokio::signal::ctrl_c() => signal.map(|()| false).map_err(AgentdError::from),
         _ = sigterm.recv() => Ok(false),
     };
@@ -823,7 +828,7 @@ fn sidecar_spec(config: &DaemonConfig) -> ProcessSpec {
         environment.insert("FINITECHAT_ADMISSION_DEFAULT".to_owned(), default.clone());
     }
     ProcessSpec {
-        name: "finitechat",
+        name: SIDECAR_PROCESS,
         program: config.finitechat_bin.clone(),
         args: vec![
             "hermes".to_owned(),
@@ -903,10 +908,16 @@ fn spawn_delivery_stream(bridge: BridgeClient, tx: mpsc::Sender<RuntimeCommandDe
 /// Bridge cold start reprocesses retained room history before serving, so
 /// time-to-ready scales with data size and host I/O, not just spawn speed.
 /// 2026-08-18: a ~15k-message room needed ~55s on lat3 and boot-looped
-/// against the old 30s deadline; 180s gives large rooms headroom while a
-/// truly dead bridge still fails (and is retried) within minutes.
-/// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides this default.
-const DEFAULT_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
+/// against the old 30s deadline. 2026-10-16: a larger history passed 180s
+/// and boot-looped the same way, so a bridge whose first process is still
+/// alive now gets 30 minutes. A bridge that has exited keeps
+/// [`EXITED_BRIDGE_READY_TIMEOUT`], so a truly dead bridge still fails (and
+/// is retried) within minutes.
+/// `FINITE_AGENTD_BRIDGE_READY_TIMEOUT_SECS` overrides this default and also
+/// caps the exited-bridge limit.
+const DEFAULT_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(1800);
+const EXITED_BRIDGE_READY_TIMEOUT: Duration = Duration::from_secs(180);
+const SIDECAR_PROCESS: &str = "finitechat";
 
 fn bridge_ready_timeout_from_value(value: Option<&str>) -> Result<Duration, AgentdError> {
     let Some(raw) = value.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -924,14 +935,29 @@ fn bridge_ready_timeout_from_value(value: Option<&str>) -> Result<Duration, Agen
     Ok(Duration::from_secs(secs))
 }
 
-async fn wait_for_bridge(bridge: &BridgeClient, timeout: Duration) -> Result<(), AgentdError> {
+/// Waits until the bridge serves readiness. Fails after `timeout`, or after
+/// `exited_timeout` once the first bridge process is no longer running.
+async fn wait_for_bridge(
+    bridge: &BridgeClient,
+    supervisor: &SupervisorHandle,
+    timeout: Duration,
+    exited_timeout: Duration,
+) -> Result<(), AgentdError> {
     let mut retry = Duration::from_millis(50);
-    let deadline = tokio::time::Instant::now() + timeout;
+    let started = tokio::time::Instant::now();
     loop {
         if bridge.wait_until_ready().await.is_ok() {
+            eprintln!(
+                "finite-agentd: Finite Chat bridge ready after {}s",
+                started.elapsed().as_secs()
+            );
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
+        let waited = started.elapsed();
+        if waited >= timeout
+            || (waited >= exited_timeout
+                && !supervisor.first_process_running(SIDECAR_PROCESS).await)
+        {
             return Err(AgentdError::Transport(
                 "Finite Chat bridge did not become ready".to_owned(),
             ));
@@ -1017,14 +1043,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bridge_ready_timeout_defaults_to_180s_and_validates_override() {
+    fn bridge_ready_timeout_defaults_to_1800s_and_validates_override() {
         assert_eq!(
             bridge_ready_timeout_from_value(None).unwrap(),
-            Duration::from_secs(180)
+            Duration::from_secs(1800)
         );
         assert_eq!(
             bridge_ready_timeout_from_value(Some("  ")).unwrap(),
-            Duration::from_secs(180)
+            Duration::from_secs(1800)
         );
         assert_eq!(
             bridge_ready_timeout_from_value(Some("45")).unwrap(),
@@ -1033,6 +1059,56 @@ mod tests {
         assert!(bridge_ready_timeout_from_value(Some("0")).is_err());
         assert!(bridge_ready_timeout_from_value(Some("-5")).is_err());
         assert!(bridge_ready_timeout_from_value(Some("soon")).is_err());
+    }
+
+    fn unready_bridge() -> BridgeClient {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        BridgeClient::new(format!("http://{address}")).unwrap()
+    }
+
+    fn shell_process(name: &'static str, script: &str) -> ProcessSpec {
+        ProcessSpec {
+            name,
+            program: PathBuf::from("/bin/sh"),
+            args: vec!["-c".to_owned(), script.to_owned()],
+            environment: BTreeMap::new(),
+        }
+    }
+
+    async fn bridge_wait_with_sidecar(script: &str, timeout: Duration) -> Duration {
+        let supervisor = start_supervisor(
+            shell_process(SIDECAR_PROCESS, script),
+            shell_process("health", "exec sleep 30"),
+            shell_process("hermes", "exec sleep 30"),
+            None,
+        );
+        let started = std::time::Instant::now();
+        let result = wait_for_bridge(
+            &unready_bridge(),
+            &supervisor,
+            timeout,
+            Duration::from_millis(200),
+        )
+        .await;
+        let waited = started.elapsed();
+        supervisor.shutdown().await;
+        assert!(result.is_err());
+        waited
+    }
+
+    #[tokio::test]
+    async fn live_bridge_process_gets_the_full_ready_timeout() {
+        let waited = bridge_wait_with_sidecar("exec sleep 30", Duration::from_secs(2)).await;
+        assert!(waited >= Duration::from_secs(2), "{waited:?}");
+    }
+
+    #[tokio::test]
+    async fn exited_bridge_process_fails_at_the_exited_timeout() {
+        let waited = bridge_wait_with_sidecar("exit 1", Duration::from_secs(30)).await;
+        assert!(waited >= Duration::from_millis(200), "{waited:?}");
+        assert!(waited < Duration::from_secs(10), "{waited:?}");
     }
 
     #[test]
