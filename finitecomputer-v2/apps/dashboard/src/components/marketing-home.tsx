@@ -38,6 +38,9 @@ export function MarketingHome() {
           <a href="/login?returnTo=/dashboard" className={styles.secondaryButton}>
             Sign in
           </a>
+          <a href="/code" className={styles.tertiaryLink}>
+            Enter organization launch code
+          </a>
         </div>
       </section>
     </main>
