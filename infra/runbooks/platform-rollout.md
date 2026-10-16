@@ -195,7 +195,7 @@ product probe. A layer is green only when both agree.
    vocabulary preserved unless deliberately exercising the new one; no
    unexpected non-terminal rows.
 6. **Launch one throwaway fresh agent** end-to-end (create → chat turn →
-   reply arrives in-thread). Pin flips affect new launches only, which makes
+   reply arrives in-thread). Promotion affects new launches only, which makes
    this the only check that exercises what you actually shipped. Keep an eye
    out for replies landing home-chat (fallback engaged ≠ lost message; still
    investigate why the route didn't resolve).
