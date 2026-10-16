@@ -171,3 +171,18 @@
     transition: none;
   }
 }
+
+.tertiaryLink {
+  justify-self: center;
+  padding: 0.25rem;
+  color: rgb(0 0 0 / 0.6);
+  font-size: 0.75rem;
+  text-underline-offset: 3px;
+}
+
+.tertiaryLink:hover { color: #090909; }
+.tertiaryLink:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+  border-radius: 2px;
+}
