@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # October 14 Brain identity roster and Personal Brain setup, built from
-    # f55b3d55 (October 12 release source plus Brain 0.7.1); excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/38625451031
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:e0efd70473a361a4a66f8d4fd26d1cb5925ab52eb4a58d52e25c3d5c54c376e1";
+    # Organization launch-code setup on the retained production generation,
+    # built from 404737fe; excludes unrelated trial-archive migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/38924002203
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:c398350ce57141f04ec7d78f77068ec019e703c17651136e0e5d3f9f05fa2df0";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
