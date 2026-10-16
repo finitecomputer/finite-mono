@@ -645,7 +645,7 @@ export type CoreAgentCreationInput = {
   displayName: string;
   launchCode: string;
   idempotencyKey: string;
-  hostingTier: "standard" | "confidential";
+  hostingTier?: "standard" | "confidential";
   profilePictureUrl?: string | null;
   /**
    * Owner hosted-chat account id (64 hex), pre-minted via the hosted-device
