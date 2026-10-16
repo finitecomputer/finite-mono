@@ -42,7 +42,7 @@ use crate::{
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 pub use hosted_access::runtime_router;
 use hosted_access::{hosted_access, hosted_route_targets, hosted_session, set_hosted_access};
@@ -53,6 +53,9 @@ use std::env;
 use subtle::ConstantTimeEq;
 mod errors;
 use errors::*;
+mod front_door;
+use front_door::set_front_door_preference;
+pub use front_door::{FrontDoorPreferenceRequest, FrontDoorPreferenceResponse};
 mod requests;
 pub use requests::*;
 mod views;
@@ -354,6 +357,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(admin_assign_finite_private_limit_profile),
         )
         .route("/api/core/v1/me", get(me))
+        .route(
+            "/api/core/v1/me/front-door-preference",
+            put(set_front_door_preference),
+        )
         .route("/api/core/v1/me/dashboard-summary", get(dashboard_summary))
         .route(
             "/api/core/v1/me/finite-private/usage",

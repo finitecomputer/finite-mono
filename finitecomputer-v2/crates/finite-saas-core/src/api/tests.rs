@@ -17,6 +17,7 @@ mod agent_creation_control;
 mod brain_identity;
 mod finite_private_keys;
 mod finite_private_usage;
+mod front_door_preference;
 mod hosted_access;
 mod identity_authorization;
 mod launch_code_tiers;

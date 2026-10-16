@@ -73,6 +73,53 @@ development may set `FC_SITES_ALLOW_LOCAL_OUTPUTS=1`; production ignores that
 flag so chat content cannot turn the dashboard into an iframe for a service on
 the user's own machine.
 
+## Front door
+
+`FC_FRONT_DOOR_ENABLED=true` turns finite.computer into a front door for the
+new Finite product. Any other value, or an invalid destination, keeps today's
+dashboard exactly. `FC_FRONT_DOOR_TARGET_URL` (default `https://finite.chat/`)
+and `FC_FRONT_DOOR_SIGNUP_URL` (default `https://finite.chat/auth/login`) must
+be https and off this dashboard's origin. When on:
+
+- After sign-in the `/dashboard` layout sends an account to the target unless
+  it has a legacy agent. Core's `/me` defines one: a Project with an active
+  runtime link, or a creation request that is `requested`, `launching`,
+  `running` without a runtime, or in a status the dashboard does not know.
+  A user who turned on "Use the new Finite by default" (Core `migrated_at`)
+  is sent away even with an agent.
+- These always stay: operators (an operator-org session, or active WorkOS
+  membership of `FC_WORKOS_OPERATOR_ORG_ID` from another org's session);
+  accounts whose `/me` or billing cannot be read; owners of a Stripe checkout
+  started before the flip; and anyone whose legacy Stripe subscription can
+  still bill (any status but `canceled`/`incomplete_expired`), migrated or
+  not, because "Manage billing" exists only here. Agentless accounts that stay
+  get the ordinary view with Billing rather than the first-agent flow.
+- A redirect is confirmed first with an uncached `/me` and the membership
+  lookup (2s bound); any failure keeps the account here. The layout never
+  wraps route handlers, so API, callback, logout, Sites, Google Workspace,
+  webhook and asset requests are never redirected. Accounts that stay keep
+  `returnTo` and see a session-dismissible "Try the new Finite" banner.
+- `/signup` redirects to the sign-up URL. For everyone but operators,
+  new-agent entry points are hidden, `/dashboard?new=1` explains the move,
+  and the creation POST refuses before touching Core. Core's creation API and
+  in-flight launches are unchanged; a checkout paid before the flip finishes
+  through `/dashboard/agent-creation-requests/complete`, and a cancelled one
+  is told where creation went.
+
+"Use the new Finite by default" is the user's own setting, shown on the
+dashboard home only while the switch is on. It calls Core's session-only
+`PUT /api/core/v1/me/front-door-preference` (`{"useNewFinite": bool}`), which
+changes only the caller's row: on records `migrated_at` once, off clears it.
+It is a routing preference, not a security boundary.
+
+The stable way back is `/dashboard/front-door` (finite.chat and the future
+import flow link here). `GET` opens this dashboard for the browser session
+(12h `finite-front-door-stay` cookie, honoured even with the setting on) and
+lands on the setting; `POST useNewFinite=true|false` saves it, clears that
+cookie, and sets a 30s `finite-front-door-fresh` cookie so the next loads read
+`/me` uncached. It is a route handler, never redirected, and 404s while the
+switch is off.
+
 ## Run locally
 
 For local web chat development, use the real dashboard UI with the

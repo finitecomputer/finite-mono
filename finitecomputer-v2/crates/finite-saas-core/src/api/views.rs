@@ -6,6 +6,11 @@ pub struct MeResponse {
     pub workos_user_id: String,
     pub projects: Vec<PublicVisibleProject>,
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
+    /// Read-only here: when this user turned on "use the new Finite by
+    /// default" (`null` while off); set through `/me/front-door-preference`.
+    /// Additive; N-1 Core responses omit it.
+    #[serde(default)]
+    pub migrated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
