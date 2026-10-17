@@ -86,6 +86,10 @@ const HERMES_PLUGIN_ADAPTER: &str =
     include_str!("../../../integrations/hermes/finitechat/adapter.py");
 const HERMES_PLUGIN_SIMPLEX_TOPICS: &str =
     include_str!("../../../integrations/hermes/finitechat/simplex_topics.py");
+const HERMES_PLUGIN_SLASH_POLICY: &str =
+    include_str!("../../../integrations/hermes/finitechat/slash_policy.py");
+const HERMES_PLUGIN_SLASH_POLICY_DATA: &str =
+    include_str!("../../../integrations/hermes/finitechat/slash_policy.json");
 const HERMES_PLUGIN_YAML: &str =
     include_str!("../../../integrations/hermes/finitechat/plugin.yaml");
 const HERMES_PLUGIN_ENV_FILE: &str = "finitechat.env";
@@ -275,6 +279,18 @@ fn cmd_install<W: Write>(
     write_managed_plugin_file(
         &plugin_dir.join("simplex_topics.py"),
         HERMES_PLUGIN_SIMPLEX_TOPICS,
+        force,
+        &mut installed,
+    )?;
+    write_managed_plugin_file(
+        &plugin_dir.join("slash_policy.py"),
+        HERMES_PLUGIN_SLASH_POLICY,
+        force,
+        &mut installed,
+    )?;
+    write_managed_plugin_file(
+        &plugin_dir.join("slash_policy.json"),
+        HERMES_PLUGIN_SLASH_POLICY_DATA,
         force,
         &mut installed,
     )?;
@@ -4682,6 +4698,10 @@ mod tests {
         assert!(plugin_dir.join("__init__.py").exists());
         assert!(plugin_dir.join("adapter.py").exists());
         assert!(plugin_dir.join("simplex_topics.py").exists());
+        assert!(plugin_dir.join("slash_policy.py").exists());
+        let slash_policy = fs::read_to_string(plugin_dir.join("slash_policy.json")).unwrap();
+        let slash_policy: serde_json::Value = serde_json::from_str(&slash_policy).unwrap();
+        assert_eq!(slash_policy["update"]["tier"], "restricted");
         assert!(!plugin_dir.join("specialization.py").exists());
         assert!(plugin_dir.join("plugin.yaml").exists());
         assert!(plugin_dir.join(HERMES_PLUGIN_ENV_FILE).exists());

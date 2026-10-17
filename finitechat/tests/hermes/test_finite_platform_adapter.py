@@ -294,6 +294,9 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         self.assertEqual(entry["required_env"], ["FINITECHAT_HOME"])
         self.assertEqual(entry["allowed_users_env"], "FINITECHAT_ALLOWED_USERS")
         self.assertEqual(entry["cron_deliver_env_var"], "FINITECHAT_HOME_CHANNEL")
+        # Finite manages the runtime image; Hermes /update is a second layer
+        # behind the adapter's slash policy.
+        self.assertFalse(entry["allow_update_command"])
         self.assertEqual(ctx.registered_tools, [])
         self.assertEqual(ctx.registered_commands, [])
         self.assertEqual(

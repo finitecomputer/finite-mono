@@ -1,0 +1,217 @@
+{
+  "agents": {
+    "tier": "unlisted"
+  },
+  "approvals": {
+    "tier": "restricted",
+    "reason": "Approval settings can't be changed from chat."
+  },
+  "approve": {
+    "tier": "unlisted"
+  },
+  "bg": {
+    "tier": "available"
+  },
+  "blueprint": {
+    "tier": "restricted"
+  },
+  "branch": {
+    "tier": "unlisted"
+  },
+  "btw": {
+    "tier": "suggested"
+  },
+  "bundles": {
+    "tier": "restricted"
+  },
+  "busy": {
+    "tier": "restricted"
+  },
+  "codex-runtime": {
+    "tier": "restricted"
+  },
+  "commands": {
+    "tier": "restricted",
+    "reason": "Type / in the message box to see the commands you can use."
+  },
+  "compress": {
+    "tier": "available"
+  },
+  "context": {
+    "tier": "available"
+  },
+  "curator": {
+    "tier": "restricted"
+  },
+  "debug": {
+    "tier": "restricted",
+    "reason": "It uploads your agent's logs to a public paste service. Contact Finite support instead."
+  },
+  "deny": {
+    "tier": "unlisted"
+  },
+  "diff": {
+    "tier": "restricted"
+  },
+  "egress": {
+    "tier": "restricted"
+  },
+  "fast": {
+    "tier": "restricted"
+  },
+  "footer": {
+    "tier": "restricted"
+  },
+  "goal": {
+    "tier": "available"
+  },
+  "heartbeat": {
+    "tier": "not_recommended"
+  },
+  "help": {
+    "tier": "restricted",
+    "reason": "Type / in the message box to see the commands you can use."
+  },
+  "init": {
+    "tier": "restricted"
+  },
+  "insights": {
+    "tier": "restricted"
+  },
+  "kanban": {
+    "tier": "restricted"
+  },
+  "learn": {
+    "tier": "available"
+  },
+  "loop": {
+    "tier": "restricted",
+    "reason": "Recurring command loops aren't available in Finite chat."
+  },
+  "memory": {
+    "tier": "restricted"
+  },
+  "moa": {
+    "tier": "restricted"
+  },
+  "model": {
+    "tier": "not_recommended"
+  },
+  "new": {
+    "tier": "suggested"
+  },
+  "pause": {
+    "tier": "not_recommended"
+  },
+  "personality": {
+    "tier": "available"
+  },
+  "plan": {
+    "tier": "available"
+  },
+  "platform": {
+    "tier": "restricted"
+  },
+  "profile": {
+    "tier": "restricted"
+  },
+  "queue": {
+    "tier": "available"
+  },
+  "reasoning": {
+    "tier": "available"
+  },
+  "refine": {
+    "tier": "unlisted"
+  },
+  "reload-mcp": {
+    "tier": "restricted"
+  },
+  "reload-skills": {
+    "tier": "available"
+  },
+  "restart": {
+    "tier": "restricted",
+    "reason": "Finite manages your agent's software and restarts."
+  },
+  "resume": {
+    "tier": "unlisted"
+  },
+  "retry": {
+    "tier": "available"
+  },
+  "review": {
+    "tier": "unlisted"
+  },
+  "rollback": {
+    "tier": "restricted"
+  },
+  "save": {
+    "tier": "restricted",
+    "reason": "Exporting from chat isn't supported yet."
+  },
+  "sessions": {
+    "tier": "unlisted"
+  },
+  "sethome": {
+    "tier": "restricted"
+  },
+  "skills": {
+    "tier": "restricted"
+  },
+  "start": {
+    "tier": "restricted"
+  },
+  "status": {
+    "tier": "suggested"
+  },
+  "steer": {
+    "tier": "suggested"
+  },
+  "stop": {
+    "tier": "suggested"
+  },
+  "subgoal": {
+    "tier": "unlisted"
+  },
+  "suggestions": {
+    "tier": "restricted"
+  },
+  "title": {
+    "tier": "restricted",
+    "reason": "Rename chats from the sidebar."
+  },
+  "topic": {
+    "tier": "restricted"
+  },
+  "topup": {
+    "tier": "restricted",
+    "reason": "Billing is managed in your Finite account."
+  },
+  "undo": {
+    "tier": "not_recommended"
+  },
+  "update": {
+    "tier": "restricted",
+    "reason": "Finite manages your agent's software and restarts."
+  },
+  "usage": {
+    "tier": "available"
+  },
+  "verbose": {
+    "tier": "restricted"
+  },
+  "version": {
+    "tier": "available"
+  },
+  "voice": {
+    "tier": "restricted"
+  },
+  "whoami": {
+    "tier": "restricted"
+  },
+  "yolo": {
+    "tier": "restricted",
+    "reason": "Approval settings can't be changed from chat."
+  }
+}
