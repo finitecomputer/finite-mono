@@ -497,16 +497,30 @@ def run_model_smoke(
     )
     deadline = time.monotonic() + 180
     last_state: dict[str, Any] | None = None
+    state_read_retries = 0
+    last_read_error = ""
     while time.monotonic() < deadline:
-        state = docker_user_app(
-            image=image,
-            user_volume=user_volume,
-            server_url=server_url,
-            args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
-            env=env,
-            timeout=60,
-            docker_extra_args=docker_extra_args,
-        )
+        try:
+            state = docker_user_app(
+                image=image,
+                user_volume=user_volume,
+                server_url=server_url,
+                args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
+                env=env,
+                timeout=60,
+                docker_extra_args=docker_extra_args,
+            )
+        except SmokeFailure as exc:
+            # A disconnected hint stream does not tell us whether the reply
+            # arrived. Retry observation within the original deadline; never
+            # resend the message or accept a reply we did not actually read.
+            if "SSE hint stream read failed:" not in str(exc):
+                raise
+            last_read_error = str(exc)
+            state_read_retries += 1
+            ensure_container_running(agent_container)
+            time.sleep(2)
+            continue
         last_state = state
         for message in state.get("messages") or []:
             text = str(message.get("text") or "")
@@ -517,6 +531,7 @@ def run_model_smoke(
                     "prompt_message_id": first_matching_mine_message_id(sent, prompt),
                     "reply_message_id": message.get("message_id"),
                     "reply_text": text,
+                    "state_read_retries": state_read_retries,
                 }
         time.sleep(2)
     sample = [
@@ -529,6 +544,7 @@ def run_model_smoke(
     ]
     raise SmokeFailure(
         f"expected Hermes reply {expected!r} not found; recent messages={sample!r}\n"
+        f"state read retries={state_read_retries}; last read error={last_read_error}\n"
         f"agent container logs (tail):\n{agent_log_tail(agent_container)}\n"
         # The observation side fails silently without this (2026-08-18 depot
         # hunt): the user runtime's full last view shows whether the room
