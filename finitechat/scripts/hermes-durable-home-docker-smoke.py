@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -36,6 +37,12 @@ INFERENCE_CREDENTIAL_ENV_NAMES = (
     "OPENAI_API_KEY",
     "FINITECHAT_HERMES_API_KEY",
 )
+# A dropped SSE hint stream says nothing about whether the reply arrived, so
+# the reply poll may read state again. More drops than this in one phase fail
+# qualification: an image whose stream drops often must not pass.
+MAX_STATE_READ_RETRIES_PER_PHASE = 2
+SSE_READ_FAILURE = "SSE hint stream read failed:"
+MODEL_SMOKE_PHASES = ("before_restart", "after_restart")
 
 
 class SmokeFailure(RuntimeError):
@@ -483,7 +490,11 @@ def run_model_smoke(
     env: dict[str, str],
     agent_container: str,
     docker_extra_args: list[str] | None = None,
+    phase: str = "model",
+    state_read_retries: dict[str, int] | None = None,
 ) -> dict[str, Any]:
+    retries = state_read_retries if state_read_retries is not None else {}
+    retries[phase] = 0
     prompt = f"Reply with exactly: {expected}"
     started = time.monotonic()
     sent = docker_user_app(
@@ -498,15 +509,32 @@ def run_model_smoke(
     deadline = time.monotonic() + 180
     last_state: dict[str, Any] | None = None
     while time.monotonic() < deadline:
-        state = docker_user_app(
-            image=image,
-            user_volume=user_volume,
-            server_url=server_url,
-            args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
-            env=env,
-            timeout=60,
-            docker_extra_args=docker_extra_args,
-        )
+        try:
+            state = docker_user_app(
+                image=image,
+                user_volume=user_volume,
+                server_url=server_url,
+                args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
+                env=env,
+                timeout=60,
+                docker_extra_args=docker_extra_args,
+            )
+        except SmokeFailure as exc:
+            # Read state again after a dropped hint stream, up to the cap.
+            # Never resend the prompt or accept a reply that was not read.
+            if SSE_READ_FAILURE not in str(exc):
+                raise
+            retries[phase] += 1
+            if retries[phase] > MAX_STATE_READ_RETRIES_PER_PHASE:
+                raise SmokeFailure(
+                    f"SSE hint stream read failed {retries[phase]} times while polling for "
+                    f"{expected!r}; the cap is {MAX_STATE_READ_RETRIES_PER_PHASE} per phase\n"
+                    f"last read error: {exc}\n"
+                    f"agent container logs (tail):\n{agent_log_tail(agent_container)}"
+                ) from exc
+            ensure_container_running(agent_container)
+            time.sleep(2)
+            continue
         last_state = state
         for message in state.get("messages") or []:
             text = str(message.get("text") or "")
@@ -517,6 +545,7 @@ def run_model_smoke(
                     "prompt_message_id": first_matching_mine_message_id(sent, prompt),
                     "reply_message_id": message.get("message_id"),
                     "reply_text": text,
+                    "state_read_retries": retries[phase],
                 }
         time.sleep(2)
     sample = [
@@ -527,8 +556,13 @@ def run_model_smoke(
         }
         for message in ((last_state or {}).get("messages") or [])[-8:]
     ]
+    message_count = len((last_state or {}).get("messages") or [])
+    # The first line is what the published report keeps, so it counts the
+    # messages instead of quoting them. The job log gets the sample below.
     raise SmokeFailure(
-        f"expected Hermes reply {expected!r} not found; recent messages={sample!r}\n"
+        f"expected Hermes reply {expected!r} not found; {message_count} messages observed\n"
+        f"recent messages={sample!r}\n"
+        f"state read retries={retries[phase]}\n"
         f"agent container logs (tail):\n{agent_log_tail(agent_container)}\n"
         # The observation side fails silently without this (2026-08-18 depot
         # hunt): the user runtime's full last view shows whether the room
@@ -559,6 +593,31 @@ def _bounded_state_summary(state: dict[str, Any] | None, limit: int = 4000) -> s
     }
     rendered = json.dumps(summary, sort_keys=True)
     return rendered[:limit]
+
+
+def write_step_summary(state_read_retries: dict[str, int]) -> None:
+    """Show each phase's SSE retry count in the GitHub job summary."""
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not summary_path:
+        return
+    lines = ["Durable smoke SSE state read retries:"]
+    for phase in MODEL_SMOKE_PHASES:
+        count = state_read_retries.get(phase)
+        shown = "not run" if count is None else str(count)
+        lines.append(
+            f"- {phase.replace('_', ' ')}: {shown} (cap {MAX_STATE_READ_RETRIES_PER_PHASE})"
+        )
+    with open(summary_path, "a", encoding="utf-8") as summary:
+        summary.write("\n".join(lines) + "\n")
+
+
+def artifact_failure_text(exc: BaseException) -> str:
+    """The first line of a failure, for a report that CI may publish.
+
+    Later lines can carry Agent logs. They reach only the job log, where
+    GitHub masks registered secrets; artifacts are not masked.
+    """
+    return str(exc).splitlines()[0][:500] if str(exc) else type(exc).__name__
 
 
 def write_stop_script(path: Path, *, container: str, volumes: list[str]) -> None:
@@ -610,6 +669,7 @@ def main() -> int:
             "inference_credential_present": any(
                 env.get(name) for name in INFERENCE_CREDENTIAL_ENV_NAMES
             ),
+            "state_read_retries": {},
         },
         "steps": [],
     }
@@ -685,6 +745,8 @@ def main() -> int:
             expected="durable docker before restart ok",
             env=env,
             agent_container=name,
+            phase="before_restart",
+            state_read_retries=report["facts"]["state_read_retries"],
         )
         report["facts"]["model_smoke_before_restart"] = before_model
         step("model.before_restart", reply_message_id=before_model.get("reply_message_id"))
@@ -717,6 +779,8 @@ def main() -> int:
             expected="durable docker after restart ok",
             env=env,
             agent_container=name,
+            phase="after_restart",
+            state_read_retries=report["facts"]["state_read_retries"],
         )
         report["facts"]["model_smoke_after_restart"] = after_model
         report["facts"]["welcome_admission_after_restart"] = True
@@ -733,14 +797,19 @@ def main() -> int:
         return 0
     except Exception as exc:
         report["status"] = "failed"
-        report["failure"] = str(exc)
+        report["failure"] = artifact_failure_text(exc)
+        write_report()
         # Failures leave the agent container's inner state invisible
         # otherwise (2026-08-18: a reply-timeout gave no hint whether inbound
-        # delivery or inference failed). Keep a bounded tail in the report.
-        report["agent_log_tail"] = agent_log_tail(name)[-8000:]
-        write_report()
+        # delivery or inference failed). The bounded tail goes to the job log
+        # only, because CI may publish the report as an artifact.
+        print(
+            f"agent container logs (tail):\n{agent_log_tail(name)[-8000:]}",
+            file=sys.stderr,
+        )
         raise
     finally:
+        write_step_summary(report["facts"]["state_read_retries"])
         if not keep_running:
             docker_container_rm(name)
             for volume in cleanup_volumes:

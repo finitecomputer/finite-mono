@@ -19,6 +19,7 @@ PHALA_ADAPTER = Path("finitecomputer-v2/crates/finite-saas-runner/src/phala.rs")
 
 CANONICAL_DOCKERFILE_ANCHORS = (
     "ARG RUST_TOOLCHAIN",
+    "ARG REQUESTER_DIAGNOSTICS=off",
     "FROM rust:${RUST_TOOLCHAIN}-trixie AS finite-rust-builder",
     "COPY finite-mail ./finite-mail",
     "COPY .finite-hermes-nix-store/nix/store /nix/store",
@@ -38,6 +39,11 @@ CANONICAL_DOCKERFILE_ANCHORS = (
     "ENV FINITE_BRAIN_SERVER_URL=https://brain.finite.computer",
     "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer",
     'ENTRYPOINT ["/opt/agent-entrypoint.sh"]',
+    "FROM runtime AS runtime-requester-diagnostics-off",
+    "FROM runtime AS runtime-requester-diagnostics-on",
+    'LABEL computer.finite.runtime.diagnostic="brain-requester-lease"',
+    "ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1",
+    "FROM runtime-requester-diagnostics-${REQUESTER_DIAGNOSTICS}",
 )
 
 CANONICAL_WORKFLOW_ANCHORS = (
@@ -48,7 +54,26 @@ CANONICAL_WORKFLOW_ANCHORS = (
     "playwright pdf file:///tmp/probe.html /tmp/pdf-probes/probe-playwright.pdf",
     'subprocess.run(["playwright", "pdf", Path("/tmp/probe.html").resolve().as_uri(), "/tmp/pdf-probes/probe-python.pdf"], check=True)',
     'pdftotext "$pdf" - | grep -Fq "html2pdf probe"',
+    'test "${FINITECHAT_REQUESTER_DIAGNOSTICS-absent}" = "$EXPECTED_REQUESTER_DIAGNOSTICS"',
+    "      - name: Keep a diagnostic image a non-production canary",
+    "inputs.requester_diagnostics != true",
 )
+# The Brain requester-lease diagnostic reaches an image only through the
+# REQUESTER_DIAGNOSTICS build argument, which selects the final stage. The
+# default ("off") ends on the runtime stage unchanged; "on" adds exactly the
+# flag and a label naming the diagnostic, for a non-production canary.
+REQUESTER_DIAGNOSTICS_GUARD_STEP = (
+    "name: Keep a diagnostic image a non-production canary"
+)
+REQUESTER_DIAGNOSTICS_FLAG = "FINITECHAT_REQUESTER_DIAGNOSTICS"
+REQUESTER_DIAGNOSTICS_LABEL = "computer.finite.runtime.diagnostic"
+REQUESTER_DIAGNOSTICS_STAGES = {
+    "off": [],
+    "on": [
+        'LABEL computer.finite.runtime.diagnostic="brain-requester-lease"',
+        "ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1",
+    ],
+}
 
 WORKFLOW_BUILD_OR_PUBLISH = (
     re.compile(r"\bdocker\s+(?:build|buildx|push|tag)\b", re.IGNORECASE),
@@ -165,6 +190,110 @@ def workflow_execution_text(text: str) -> str:
     return "\n".join(selected)
 
 
+def dockerfile_stages(dockerfile: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
+    """Split a Dockerfile into global instructions and (FROM line, body) stages."""
+    instructions = [
+        line.strip()
+        for line in dockerfile.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    preamble: list[str] = []
+    stages: list[tuple[str, list[str]]] = []
+    for line in instructions:
+        if line.startswith("FROM "):
+            stages.append((line, []))
+        elif stages:
+            stages[-1][1].append(line)
+        else:
+            preamble.append(line)
+    return preamble, stages
+
+
+def _requester_diagnostics_stage(
+    dockerfile: str, value: str | None
+) -> list[str] | None:
+    """The selected final stage's own lines, or None if it is not resolvable."""
+    preamble, stages = dockerfile_stages(dockerfile)
+    if value is None:
+        defaults = [
+            line.split("=", 1)[1]
+            for line in preamble
+            if line.startswith("ARG REQUESTER_DIAGNOSTICS=")
+        ]
+        value = defaults[0] if defaults else ""
+    if (
+        not stages
+        or stages[-1][0]
+        != "FROM runtime-requester-diagnostics-${REQUESTER_DIAGNOSTICS}"
+    ):
+        return None
+    selected = f"FROM runtime AS runtime-requester-diagnostics-{value}"
+    return next((body for line, body in stages if line == selected), None)
+
+
+def requester_diagnostics_env(dockerfile: str, value: str | None) -> str | None:
+    """The flag value set by the selected stage's own lines.
+
+    ``value=None`` uses the Dockerfile default, as a build without the
+    argument does. This reads only the selected stage's own lines, not the
+    configuration it inherits; `requester_diagnostics_violations` covers the
+    rest of the file by allowing the flag exactly once, in the "on" stage.
+    """
+    body = _requester_diagnostics_stage(dockerfile, value)
+    for line in body or []:
+        if line.startswith(f"ENV {REQUESTER_DIAGNOSTICS_FLAG}="):
+            return line.split("=", 1)[1]
+    return None
+
+
+def requester_diagnostics_label(dockerfile: str, value: str | None) -> str | None:
+    body = _requester_diagnostics_stage(dockerfile, value)
+    for line in body or []:
+        if line.startswith(f"LABEL {REQUESTER_DIAGNOSTICS_LABEL}="):
+            return line.split("=", 1)[1].strip('"')
+    return None
+
+
+def requester_diagnostics_violations(dockerfile: str) -> list[str]:
+    violations: list[str] = []
+    preamble, stages = dockerfile_stages(dockerfile)
+    if "ARG REQUESTER_DIAGNOSTICS=off" not in preamble:
+        violations.append(
+            "REQUESTER_DIAGNOSTICS must be a global build argument that defaults to off"
+        )
+    if not stages or stages[-1] != (
+        "FROM runtime-requester-diagnostics-${REQUESTER_DIAGNOSTICS}",
+        [],
+    ):
+        violations.append(
+            "the final stage must be selected by REQUESTER_DIAGNOSTICS and add nothing"
+        )
+    for value, expected in REQUESTER_DIAGNOSTICS_STAGES.items():
+        from_line = f"FROM runtime AS runtime-requester-diagnostics-{value}"
+        bodies = [body for line, body in stages if line == from_line]
+        if bodies != [expected]:
+            violations.append(
+                f"the REQUESTER_DIAGNOSTICS={value} stage must be exactly {expected!r}"
+            )
+    if dockerfile.count(REQUESTER_DIAGNOSTICS_FLAG) != 1:
+        violations.append(
+            f"{REQUESTER_DIAGNOSTICS_FLAG} may appear only in the "
+            "REQUESTER_DIAGNOSTICS=on stage"
+        )
+    return violations
+
+
+def workflow_guard_violations(workflow: str) -> list[str]:
+    """The diagnostic guard must be the job's first step, before any setup."""
+    steps = re.findall(r"^      - (.*)$", workflow, re.MULTILINE)
+    if not steps or steps[0] != REQUESTER_DIAGNOSTICS_GUARD_STEP:
+        return [
+            "the requester diagnostics guard must be the first step of the job, "
+            "before checkout and setup"
+        ]
+    return []
+
+
 def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[str]:
     files = list(files if files is not None else tracked_files(root))
     file_set = set(files)
@@ -186,6 +315,10 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
                 violations.append(
                     f"{CANONICAL_DOCKERFILE}: missing canonical Runtime anchor {anchor!r}"
                 )
+        violations.extend(
+            f"{CANONICAL_DOCKERFILE}: {violation}"
+            for violation in requester_diagnostics_violations(dockerfile)
+        )
         if re.search(r"FROM rust:\d", dockerfile):
             violations.append(
                 f"{CANONICAL_DOCKERFILE}: the Rust version must come from "
@@ -216,6 +349,10 @@ def check_repository(root: Path, files: Iterable[Path] | None = None) -> list[st
                 violations.append(
                     f"{CANONICAL_WORKFLOW}: missing canonical Runtime workflow anchor {anchor!r}"
                 )
+        violations.extend(
+            f"{CANONICAL_WORKFLOW}: {violation}"
+            for violation in workflow_guard_violations(workflow)
+        )
 
     if PHALA_ADAPTER in file_set:
         adapter = active_text(

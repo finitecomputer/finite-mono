@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import sys
 import tempfile
+import textwrap
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[5]
 CHECKER = (
@@ -38,6 +41,11 @@ CANONICAL_WORKFLOW = check_runtime_image_contract.CANONICAL_WORKFLOW
 CANONICAL_WORKFLOW_ANCHORS = check_runtime_image_contract.CANONICAL_WORKFLOW_ANCHORS
 PHALA_ADAPTER = check_runtime_image_contract.PHALA_ADAPTER
 check_repository = check_runtime_image_contract.check_repository
+requester_diagnostics_env = check_runtime_image_contract.requester_diagnostics_env
+requester_diagnostics_label = check_runtime_image_contract.requester_diagnostics_label
+requester_diagnostics_violations = (
+    check_runtime_image_contract.requester_diagnostics_violations
+)
 
 
 class RuntimeImageContractTests(unittest.TestCase):
@@ -87,7 +95,9 @@ class RuntimeImageContractTests(unittest.TestCase):
 
     def test_rust_builder_contains_every_workspace_member(self) -> None:
         dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
-        builder = dockerfile.split("AS finite-rust-builder", 1)[1].split("\nFROM ", 1)[0]
+        builder = dockerfile.split("AS finite-rust-builder", 1)[1].split("\nFROM ", 1)[
+            0
+        ]
         # Directory copies must preserve the root workspace's relative paths.
         copied = [
             Path(source)
@@ -204,6 +214,322 @@ class RuntimeImageContractTests(unittest.TestCase):
                 for item in self.violations()
             )
         )
+
+    def dockerfile_with_requester_diagnostics(self, old: str, new: str) -> None:
+        dockerfile = "\n".join(CANONICAL_DOCKERFILE_ANCHORS)
+        self.assertIn(old, dockerfile)
+        self.write(CANONICAL_DOCKERFILE, dockerfile.replace(old, new))
+
+    def assert_requester_diagnostics_violation(self) -> None:
+        self.assertTrue(
+            any("REQUESTER_DIAGNOSTICS" in item for item in self.violations()),
+            self.violations(),
+        )
+
+    def test_normal_build_leaves_requester_diagnostics_absent(self) -> None:
+        dockerfile = (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8")
+        self.assertIsNone(requester_diagnostics_env(dockerfile, None))
+        self.assertIsNone(requester_diagnostics_env(dockerfile, "off"))
+        self.assertEqual(requester_diagnostics_env(dockerfile, "on"), "1")
+        self.assertEqual(
+            requester_diagnostics_label(dockerfile, "on"), "brain-requester-lease"
+        )
+        self.assertIsNone(requester_diagnostics_label(dockerfile, None))
+
+    def real_sources(self) -> tuple[str, str]:
+        return (
+            (ROOT / CANONICAL_DOCKERFILE).read_text(encoding="utf-8"),
+            (ROOT / CANONICAL_WORKFLOW).read_text(encoding="utf-8"),
+        )
+
+    def test_actual_sources_pass_the_contract(self) -> None:
+        dockerfile, workflow = self.real_sources()
+        self.assertEqual(requester_diagnostics_violations(dockerfile), [])
+        self.write(CANONICAL_DOCKERFILE, dockerfile)
+        self.write(CANONICAL_WORKFLOW, workflow)
+        self.assertEqual(self.violations(), [])
+
+    def test_mutations_of_the_actual_sources_are_rejected(self) -> None:
+        dockerfile, workflow = self.real_sources()
+        start = workflow.index(
+            "      - name: Keep a diagnostic image a non-production canary"
+        )
+        guard = workflow[start : workflow.index("\n      - ", start) + 1]
+        promote = "      - name: Promote the same saved build to production tags"
+        off_stage = "FROM runtime AS runtime-requester-diagnostics-off"
+        mutations = {
+            "flag set in the runtime stage": (
+                CANONICAL_DOCKERFILE,
+                dockerfile.replace(
+                    off_stage, f"ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1\n\n{off_stage}"
+                ),
+            ),
+            "default switched on": (
+                CANONICAL_DOCKERFILE,
+                dockerfile.replace(
+                    "ARG REQUESTER_DIAGNOSTICS=off", "ARG REQUESTER_DIAGNOSTICS=on"
+                ),
+            ),
+            "off stage adds a line": (
+                CANONICAL_DOCKERFILE,
+                dockerfile.replace(off_stage, f"{off_stage}\nENV EXTRA=1"),
+            ),
+            "guard removed": (CANONICAL_WORKFLOW, workflow.replace(guard, "")),
+            "guard moved after the build": (
+                CANONICAL_WORKFLOW,
+                workflow.replace(guard, "").replace(promote, guard + promote),
+            ),
+        }
+        for name, (path, mutated) in mutations.items():
+            with self.subTest(mutation=name):
+                self.write(CANONICAL_DOCKERFILE, dockerfile)
+                self.write(CANONICAL_WORKFLOW, workflow)
+                original = dockerfile if path == CANONICAL_DOCKERFILE else workflow
+                self.assertNotEqual(mutated, original)
+                self.write(path, mutated)
+                self.assertNotEqual(self.violations(), [])
+
+    def test_guard_is_the_first_step_of_the_job(self) -> None:
+        _, workflow = self.real_sources()
+        steps = re.findall(r"^      - (.*)$", workflow, re.MULTILINE)
+        self.assertEqual(
+            steps[0], "name: Keep a diagnostic image a non-production canary"
+        )
+        guard = self.workflow_step("Keep a diagnostic image a non-production canary")
+        self.assertNotIn("uses:", guard)
+        self.assertNotIn("secrets.", guard)
+        self.assertNotIn("vars.", guard)
+
+    def test_image_that_sets_the_flag_outside_the_build_argument_fails(self) -> None:
+        self.dockerfile_with_requester_diagnostics(
+            "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer",
+            "ENV FINITE_BRAIN_PUBLIC_BASE_URL=https://brain.finite.computer\n"
+            "ENV FINITECHAT_REQUESTER_DIAGNOSTICS=1",
+        )
+        self.assert_requester_diagnostics_violation()
+
+    def test_requester_diagnostics_default_on_fails(self) -> None:
+        self.dockerfile_with_requester_diagnostics(
+            "ARG REQUESTER_DIAGNOSTICS=off", "ARG REQUESTER_DIAGNOSTICS=on"
+        )
+        self.assert_requester_diagnostics_violation()
+
+    def test_requester_diagnostics_off_stage_must_stay_empty(self) -> None:
+        self.dockerfile_with_requester_diagnostics(
+            "FROM runtime AS runtime-requester-diagnostics-off",
+            "FROM runtime AS runtime-requester-diagnostics-off\nENV EXTRA=1",
+        )
+        self.assert_requester_diagnostics_violation()
+
+    def test_final_stage_must_be_selected_by_the_build_argument(self) -> None:
+        self.dockerfile_with_requester_diagnostics(
+            "FROM runtime-requester-diagnostics-${REQUESTER_DIAGNOSTICS}",
+            "FROM runtime-requester-diagnostics-on",
+        )
+        self.assert_requester_diagnostics_violation()
+
+    def test_builder_refuses_a_production_diagnostic_image(self) -> None:
+        with self.assertRaises(SystemExit) as raised:
+            build_runtime_image.validate_requester_diagnostics(
+                "ghcr.io/finitecomputer/agent-runtime:2026-09-28.diagnostic.1",
+                requester_diagnostics=True,
+                publish_production=True,
+            )
+        self.assertIn("non-production canary", str(raised.exception))
+
+    def test_builder_refuses_a_diagnostic_image_without_diagnostic_version(
+        self,
+    ) -> None:
+        for image_ref in (
+            "ghcr.io/finitecomputer/agent-runtime:2026-09-28.1",
+            "ghcr.io/finitecomputer/agent-runtime",
+            "registry.example:5000/diagnostic/agent-runtime:2026-09-28.1",
+        ):
+            with (
+                self.subTest(image_ref=image_ref),
+                self.assertRaises(SystemExit) as raised,
+            ):
+                build_runtime_image.validate_requester_diagnostics(
+                    image_ref, requester_diagnostics=True, publish_production=False
+                )
+            self.assertIn("diagnostic", str(raised.exception))
+
+    def test_builder_accepts_normal_builds_and_diagnostic_canaries(self) -> None:
+        validate = build_runtime_image.validate_requester_diagnostics
+        validate(
+            "ghcr.io/finitecomputer/agent-runtime:2026-09-28.1",
+            requester_diagnostics=False,
+            publish_production=True,
+        )
+        validate(
+            "ghcr.io/finitecomputer/agent-runtime:2026-09-28.brain-requester-diagnostic.1",
+            requester_diagnostics=True,
+            publish_production=False,
+        )
+        self.assertEqual(
+            build_runtime_image.requester_diagnostics_build_args(False),
+            ["--build-arg", "REQUESTER_DIAGNOSTICS=off"],
+        )
+        self.assertEqual(
+            build_runtime_image.requester_diagnostics_build_args(True),
+            ["--build-arg", "REQUESTER_DIAGNOSTICS=on"],
+        )
+
+    def test_builder_main_refuses_before_building(self) -> None:
+        args = build_runtime_image.argparse.Namespace(
+            engine="depot",
+            image_ref="ghcr.io/finitecomputer/agent-runtime:2026-09-28.diagnostic.1",
+            context_dir=None,
+            platform="linux/amd64",
+            no_cache=False,
+            push=False,
+            save=False,
+            metadata_file=None,
+            report=None,
+            requester_diagnostics=True,
+            publish_production=True,
+        )
+        with (
+            mock.patch.object(build_runtime_image, "parse_args", return_value=args),
+            mock.patch.object(build_runtime_image, "build_image") as build,
+            mock.patch.object(build_runtime_image, "repo_metadata") as metadata,
+            self.assertRaises(SystemExit),
+        ):
+            build_runtime_image.main()
+        build.assert_not_called()
+        metadata.assert_not_called()
+
+    def workflow_step(self, name: str) -> str:
+        workflow = (ROOT / CANONICAL_WORKFLOW).read_text(encoding="utf-8")
+        steps = {
+            step.splitlines()[0].removeprefix("name: "): step
+            for step in workflow.split("\n      - ")[1:]
+        }
+        return steps[name]
+
+    def run_workflow_step(self, name: str, **env: str) -> int:
+        step = self.workflow_step(name)
+        script = textwrap.dedent(step.split("run: |\n", 1)[1])
+        return subprocess.run(
+            ["bash", "-e", "-c", script], env=env, capture_output=True, check=False
+        ).returncode
+
+    def test_workflow_refuses_diagnostic_production_and_unmarked_versions(self) -> None:
+        workflow = (ROOT / CANONICAL_WORKFLOW).read_text(encoding="utf-8")
+        self.assertIn(
+            "      requester_diagnostics:\n        description: ",
+            workflow,
+        )
+        guard = "Keep a diagnostic image a non-production canary"
+        self.assertLess(
+            workflow.index(f"- name: {guard}"),
+            workflow.index("- name: Build, save, pull, and validate the runtime image"),
+        )
+        for diagnostics, production, version, expected in (
+            ("false", "true", "2026-09-28.1", 0),
+            ("false", "false", "2026-09-28.1", 0),
+            ("true", "false", "2026-09-28.brain-requester-diagnostic.1", 0),
+            ("true", "true", "2026-09-28.brain-requester-diagnostic.1", 1),
+            ("true", "false", "2026-09-28.1", 1),
+        ):
+            with self.subTest(
+                diagnostics=diagnostics, production=production, version=version
+            ):
+                self.assertEqual(
+                    self.run_workflow_step(
+                        guard,
+                        REQUESTER_DIAGNOSTICS=diagnostics,
+                        PUBLISH_PRODUCTION=production,
+                        VERSION=version,
+                    ),
+                    expected,
+                )
+        promote = self.workflow_step("Promote the same saved build to production tags")
+        self.assertIn("inputs.requester_diagnostics != true", promote.splitlines()[2])
+
+    def test_workflow_in_image_assertion_matches_the_input(self) -> None:
+        build = self.workflow_step("Build, save, pull, and validate the runtime image")
+        self.assertIn(
+            "REQUESTER_DIAGNOSTICS: ${{ inputs.requester_diagnostics }}", build
+        )
+        self.assertIn(
+            '-e "EXPECTED_REQUESTER_DIAGNOSTICS=$expected_requester_diagnostics"', build
+        )
+        assertion = 'test "${FINITECHAT_REQUESTER_DIAGNOSTICS-absent}" = "$EXPECTED_REQUESTER_DIAGNOSTICS"'
+        self.assertIn(assertion, build)
+        self.assertIn(assertion, CANONICAL_WORKFLOW_ANCHORS)
+        self.assertIn(
+            '{{index .Config.Labels "computer.finite.runtime.diagnostic"}}\')" '
+            '= "$expected_diagnostic_label"',
+            build,
+        )
+        # The expectation block the step computes from the input.
+        prelude = build.split("run: |\n", 1)[1].split("finitecomputer-v2/scripts/", 1)[
+            0
+        ]
+        for diagnostics, flag, expected, label in (
+            ("false", None, "absent", ""),
+            ("true", "1", "1", "brain-requester-lease"),
+        ):
+            probe = (
+                textwrap.dedent(prelude).replace(
+                    'test -z "$(git status --porcelain)"', ""
+                )
+                + 'test "$expected_requester_diagnostics" = "$WANT_EXPECTED"\n'
+                + 'test "$expected_diagnostic_label" = "$WANT_LABEL"\n'
+                + 'case " ${build_flags[*]-} " in *" --requester-diagnostics "*) on=true ;; *) on=false ;; esac\n'
+                + 'test "$on" = "$REQUESTER_DIAGNOSTICS"\n'
+            )
+            env = {
+                "REQUESTER_DIAGNOSTICS": diagnostics,
+                "PUBLISH_PRODUCTION": "false",
+                "DEPOT_PROJECT_ID": "project",
+                "IMAGE": "image",
+                "VERSION": "v",
+                "WANT_EXPECTED": expected,
+                "WANT_LABEL": label,
+            }
+            with self.subTest(diagnostics=diagnostics):
+                result = subprocess.run(
+                    ["bash", "-e", "-c", probe],
+                    env=env,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                container_env = {"EXPECTED_REQUESTER_DIAGNOSTICS": expected}
+                if flag is not None:
+                    container_env["FINITECHAT_REQUESTER_DIAGNOSTICS"] = flag
+                self.assertEqual(
+                    subprocess.run(
+                        ["sh", "-ec", assertion], env=container_env
+                    ).returncode,
+                    0,
+                )
+                mismatched = {**container_env, "FINITECHAT_REQUESTER_DIAGNOSTICS": "1"}
+                if flag is None:
+                    self.assertNotEqual(
+                        subprocess.run(
+                            ["sh", "-ec", assertion], env=mismatched
+                        ).returncode,
+                        0,
+                    )
+
+    def test_smoke_report_is_uploaded_on_failure_by_itself(self) -> None:
+        workflow = (ROOT / CANONICAL_WORKFLOW).read_text(encoding="utf-8")
+        steps = {
+            step.splitlines()[0].removeprefix("name: "): step
+            for step in workflow.split("\n      - ")[1:]
+            if "actions/upload-artifact" in step
+        }
+        self.assertNotIn("if:", steps["Upload build report"])
+        failure_upload = steps["Upload durable smoke failure report"]
+        self.assertIn("if: failure()", failure_upload)
+        paths = failure_upload.split("path:", 1)[1].split()
+        self.assertEqual(
+            paths[0], "finitechat/target/runtime-image-durable-smoke/report.json"
+        )
+        self.assertEqual(paths[1:], ["if-no-files-found:", "ignore"])
 
     def test_phala_readonly_workflow_passes_but_build_lane_fails(self) -> None:
         workflow = Path(".github/workflows/phala-readonly-preflight.yml")

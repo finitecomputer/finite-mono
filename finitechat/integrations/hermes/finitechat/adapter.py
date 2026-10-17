@@ -8,8 +8,10 @@ encryption, and attachment materialization.
 from __future__ import annotations
 
 import asyncio
+import builtins
 import contextlib
 import contextvars
+import functools
 import hashlib
 import json
 import logging
@@ -17,12 +19,16 @@ import os
 import re
 import shlex
 import shutil
+import stat
+import sys
 import threading
 import time
+import types
 import urllib.error
 import urllib.parse
 import urllib.request
 import weakref
+from collections import deque
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -64,6 +70,20 @@ REQUESTER_CONTEXT_V2_DIR = "requester-context-v2"
 REQUESTER_CONTEXT_TTL_SECS = 15 * 60
 REQUESTER_CONTEXT_VERSION = 1
 REQUESTER_CONTEXT_V2_VERSION = 2
+# Opt-in Brain requester-lease diagnostic (FIN-117). Normal images leave it
+# unset. Only a non-production diagnostic canary image, scoped to one Agent
+# Runtime, sets it (infra/runbooks/runtime-image.md). Its records go to a
+# private directory under /tmp, outside the durable /data chat state.
+REQUESTER_DIAGNOSTICS_ENV = "FINITECHAT_REQUESTER_DIAGNOSTICS"
+REQUESTER_DIAGNOSTICS_DIR = Path("/tmp/finitechat-requester-diagnostics")
+REQUESTER_DIAGNOSTICS_FILE = "trace.log"
+# One owner per process, kept in sys.modules so plugin rediscovery, which
+# evicts and re-imports this module, finds the same worker and sink.
+_REQUESTER_DIAGNOSTICS_OWNER_KEY = "_finitechat_requester_diagnostics_owner"
+_REQUESTER_DIAGNOSTICS_QUEUE_LIMIT = 256
+_REQUESTER_DIAGNOSTICS_MAX_BYTES = 16 * 1024 * 1024
+_REQUESTER_DIAGNOSTICS_IDLE_SECS = (0.05, 1.0)
+_REQUESTER_DIAGNOSTICS_REOPEN_SECS = 5.0
 _AUTHENTICATED_FINITE_TURN_USER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "finitechat_authenticated_turn_user", default=None
 )
@@ -217,6 +237,269 @@ def _load_local_env_defaults(path: Path | None = None) -> None:
 _load_local_env_defaults()
 
 
+def _requester_sink_open(directory: str, name: str) -> int | None:
+    """Open the trace file only if it is this user's private regular file.
+
+    The worker creates the directory with mode 0700. A directory or file that
+    is a symlink, belongs to another user, or grants any group or other
+    access is refused, and so is a file with a second name (a hard link).
+    Nothing is written to a refused sink. The worker changes no permissions
+    on a path it did not create. The checks run on each open, on the opened
+    descriptors; an open descriptor keeps its file.
+    """
+    uid = os.geteuid()
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        return None
+    try:
+        listed = os.lstat(directory)
+        if not stat.S_ISDIR(listed.st_mode) or listed.st_uid != uid or listed.st_mode & 0o077:
+            return None
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        opened = os.fstat(dir_fd)
+        if (
+            (opened.st_dev, opened.st_ino) != (listed.st_dev, listed.st_ino)
+            or not stat.S_ISDIR(opened.st_mode)
+            or opened.st_uid != uid
+            or opened.st_mode & 0o077
+        ):
+            return None
+        fd = os.open(
+            name,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            0o600,
+            dir_fd=dir_fd,
+        )
+    except OSError:
+        return None
+    finally:
+        os.close(dir_fd)
+    try:
+        info = os.fstat(fd)
+        if (
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == uid
+            and info.st_nlink == 1
+            and not info.st_mode & 0o077
+        ):
+            return fd
+    except OSError:
+        pass
+    os.close(fd)
+    return None
+
+
+def _requester_sink_write(fd: int, line: bytes, cap: int) -> bool:
+    """Append one line unless it would take the file past the cap.
+
+    The cap is measured on the file itself, so a full file from an earlier
+    process accepts nothing and a restart gets no new allowance.
+    """
+    if os.fstat(fd).st_size + len(line) > cap:
+        return False
+    os.write(fd, line)
+    return True
+
+
+def _requester_diagnostics_worker(owner: Any) -> None:
+    """Drain every registered ring into the one sink until the owner stops."""
+    fd: int | None = None
+    reopen_at = 0.0
+    pid = os.getpid()
+    idle, max_idle = owner.idle_secs
+    try:
+        while not owner.stopped:
+            owner.busy = True
+            handled = 0
+            with owner.lock:
+                owner.entries = [entry for entry in owner.entries if entry[0]() is not None]
+                entries = list(owner.entries)
+            for ref, marker in entries:
+                producer = ref()
+                ring = producer._ring if producer is not None else None
+                producer = None
+                while ring:
+                    try:
+                        at, stage, gate = ring.popleft()
+                    except IndexError:
+                        break
+                    handled += 1
+                    try:
+                        if fd is None and time.monotonic() >= reopen_at:
+                            fd = owner.open_sink(owner.directory, owner.name)
+                            if fd is None:
+                                reopen_at = time.monotonic() + owner.reopen_secs
+                        if fd is None:
+                            continue
+                        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(at))
+                        line = (
+                            f"{stamp}.{int(at * 1000) % 1000:03d}Z [DEBUG-fbrain-requester] "
+                            f"stage={stage} gate={gate} pid={pid} marker={marker:x}\n"
+                        )
+                        try:
+                            owner.write_line(fd, line.encode("ascii"), owner.max_bytes)
+                        except OSError:
+                            with contextlib.suppress(OSError):
+                                os.close(fd)
+                            fd = None
+                            reopen_at = time.monotonic() + owner.reopen_secs
+                    except Exception:
+                        pass
+            owner.busy = False
+            if handled:
+                idle = owner.idle_secs[0]
+            else:
+                time.sleep(idle)
+                idle = min(idle * 2, max_idle)
+    finally:
+        owner.busy = False
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+
+
+def _requester_diagnostics_after_fork(owner: Any) -> None:
+    # The child touches no inherited lock: it only reads the entry list and
+    # switches every registered producer off.
+    owner.forked = True
+    owner.worker = None
+    for ref, _ in owner.entries:
+        producer = ref()
+        if producer is not None:
+            producer.after_fork_in_child()
+
+
+def _isolated(function: Any, **names: Any) -> Any:
+    """Rebind a function to minimal globals so it keeps no module instance alive."""
+    return types.FunctionType(
+        function.__code__, {"__builtins__": builtins, **names}, function.__name__
+    )
+
+
+def _requester_diagnostics_owner() -> Any:
+    """The process's one owner of the diagnostic worker and sink.
+
+    It survives plugin rediscovery. It holds each module instance's producer
+    only by weak reference, and its code runs with minimal globals, so it
+    keeps no module instance alive longer than that instance's ring needs.
+    """
+    existing = sys.modules.get(_REQUESTER_DIAGNOSTICS_OWNER_KEY)
+    if existing is not None:
+        return existing
+    owner: Any = types.ModuleType(_REQUESTER_DIAGNOSTICS_OWNER_KEY)
+    owner.lock = threading.Lock()
+    owner.entries = []
+    owner.worker = None
+    owner.forked = False
+    owner.stopped = False
+    owner.busy = False
+    owner.directory = str(REQUESTER_DIAGNOSTICS_DIR)
+    owner.name = REQUESTER_DIAGNOSTICS_FILE
+    owner.max_bytes = _REQUESTER_DIAGNOSTICS_MAX_BYTES
+    owner.reopen_secs = _REQUESTER_DIAGNOSTICS_REOPEN_SECS
+    owner.idle_secs = _REQUESTER_DIAGNOSTICS_IDLE_SECS
+    owner.open_sink = _isolated(_requester_sink_open, os=os, stat=stat)
+    owner.write_line = _isolated(_requester_sink_write, os=os)
+    owner.run = _isolated(_requester_diagnostics_worker, os=os, time=time, contextlib=contextlib)
+    owner = sys.modules.setdefault(_REQUESTER_DIAGNOSTICS_OWNER_KEY, owner)
+    if hasattr(os, "register_at_fork") and not getattr(owner, "fork_registered", False):
+        owner.fork_registered = True
+        os.register_at_fork(
+            after_in_child=functools.partial(_isolated(_requester_diagnostics_after_fork), owner)
+        )
+    return owner
+
+
+class _RequesterDiagnostics:
+    """Record fixed requester-lease reason codes without touching chat delivery.
+
+    A turn or tool hook reads the clock and appends one fixed record
+    (timestamp, stage, gate) to this module instance's bounded ring.
+    `deque.append` takes no Python-level lock, and the producer never starts
+    a thread or calls `logging`. The process's one owner runs the only worker,
+    which drains every registered ring into the one sink. If the worker is
+    missing or stalled, the ring overwrites its oldest record and chat
+    carries on. A forked child has the diagnostic off. The marker is the
+    identity of this module instance's ContextVar object, which tells a
+    reloaded hook module apart from the one the connected adapter uses. It is
+    never a user, session, tool-call or credential value.
+    """
+
+    def __init__(self) -> None:
+        self._ring: deque[tuple[float, str, str]] = deque(maxlen=_REQUESTER_DIAGNOSTICS_QUEUE_LIMIT)
+        self._enabled = False
+        self._started = False
+        self._forked = False
+        self._owner: Any = None
+
+    def start(self) -> None:
+        """Turn the diagnostic on when the flag is set. Runs at registration.
+
+        Registration is the only place a worker starts, outside every turn
+        and hook path. Later calls on this instance do nothing.
+        """
+        if self._started or self._forked:
+            return
+        self._started = True
+        if os.environ.get(REQUESTER_DIAGNOSTICS_ENV) != "1":
+            return
+        try:
+            owner = _requester_diagnostics_owner()
+            if owner.forked:
+                return
+            self._owner = owner
+            self._enabled = True
+            with owner.lock:
+                owner.entries.append((weakref.ref(self), id(_AUTHENTICATED_FINITE_TURN_USER)))
+                worker = owner.worker
+                if worker is None or not worker.is_alive():
+                    worker = threading.Thread(
+                        target=owner.run,
+                        args=(owner,),
+                        name="finitechat-requester-diagnostics",
+                        daemon=True,
+                    )
+                    worker.start()
+                    owner.worker = worker
+        except Exception:
+            # Without a worker the ring keeps only the newest records.
+            return
+
+    def emit(self, stage: str, gate: str = "") -> None:
+        # The clock read and this append are the producer's whole work.
+        if self._enabled:
+            self._ring.append((time.time(), stage, gate))
+
+    def flush(self, timeout: float) -> bool:
+        """Wait until the worker has handled every record. Used by tests."""
+        deadline = time.monotonic() + timeout
+        while self._ring or (self._owner is not None and self._owner.busy):
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def after_fork_in_child(self) -> None:
+        # The child gets a fresh ring and no worker; it touches nothing the
+        # parent's worker may hold.
+        self._forked = True
+        self._enabled = False
+        self._ring = deque(maxlen=_REQUESTER_DIAGNOSTICS_QUEUE_LIMIT)
+
+
+_REQUESTER_DIAGNOSTICS = _RequesterDiagnostics()
+
+
+def _requester_diagnostic(stage: str, gate: str = "") -> None:
+    _REQUESTER_DIAGNOSTICS.emit(stage, gate)
+
+
 class _RequesterContextBroker:
     """Lease authenticated Finite sender context to turn-local subprocesses.
 
@@ -232,11 +515,12 @@ class _RequesterContextBroker:
         self._lock = threading.Lock()
         self._leases: dict[str, dict[str, tuple[int, int]]] = {}
         self._clear_on_start()
+        _requester_diagnostic("broker_created")
 
     def before_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
             return
-        session_key, user_id = _active_finite_session()
+        session_key, user_id = _active_finite_session(diagnostic_stage="pre_tool")
         if session_key is None or user_id is None:
             return
         lease_id = _requester_context_lease_id(kwargs)
@@ -249,32 +533,36 @@ class _RequesterContextBroker:
                 count + 1,
                 now + REQUESTER_CONTEXT_TTL_SECS,
             )
-            self._write(
+            written = self._write(
                 session_key=session_key,
                 user_id=user_id,
                 expires_at_unix=now + REQUESTER_CONTEXT_TTL_SECS,
             )
+        _requester_diagnostic(*written)
 
     def after_tool_call(self, **kwargs: Any) -> None:
         if str(kwargs.get("tool_name") or "") != "terminal":
             return
-        session_key, _ = _active_finite_session()
+        session_key, _ = _active_finite_session(diagnostic_stage="post_tool")
         if session_key is None:
             return
         lease_id = _requester_context_lease_id(kwargs)
+        removed: bool | None = None
         with self._lock:
             session_leases = self._leases.get(session_key)
             if session_leases is None:
-                self._remove(session_key)
-                return
-            count, expires_at = session_leases.get(lease_id, (0, 0))
-            if count <= 1:
-                session_leases.pop(lease_id, None)
+                removed = self._remove(session_key)
             else:
-                session_leases[lease_id] = (count - 1, expires_at)
-            if not session_leases:
-                self._leases.pop(session_key, None)
-                self._remove(session_key)
+                count, expires_at = session_leases.get(lease_id, (0, 0))
+                if count <= 1:
+                    session_leases.pop(lease_id, None)
+                else:
+                    session_leases[lease_id] = (count - 1, expires_at)
+                if not session_leases:
+                    self._leases.pop(session_key, None)
+                    removed = self._remove(session_key)
+        if removed is not None:
+            _requester_diagnostic("removed" if removed else "remove_failed")
 
     def _clear_on_start(self) -> None:
         try:
@@ -310,7 +598,13 @@ class _RequesterContextBroker:
         except OSError:
             pass
 
-    def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> None:
+    def _write(self, *, session_key: str, user_id: str, expires_at_unix: int) -> tuple[str, str]:
+        """Write the v1 lease, then the v2 lease when available.
+
+        Returns the diagnostic stage and the lease formats it covers, for the
+        caller to report after it leaves the broker lock.
+        """
+        written = ("write_failed", "v1")
         try:
             self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
             final_path = self.root / _requester_context_filename(session_key)
@@ -329,8 +623,10 @@ class _RequesterContextBroker:
                 handle.flush()
                 os.fsync(handle.fileno())
             temp_path.replace(final_path)
+            written = ("written", "v1")
             requester_context = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.get()
             if requester_context is not None:
+                written = ("write_failed", "v2")
                 email, sites_assertion = requester_context
                 self._write_v2(
                     session_key=session_key,
@@ -339,8 +635,10 @@ class _RequesterContextBroker:
                     sites_assertion=sites_assertion,
                     expires_at_unix=expires_at_unix,
                 )
+                written = ("written", "v1_v2")
         except OSError as exc:
             logger.warning("[finitechat] could not write requester context lease: %s", exc)
+        return written
 
     def _write_v2(
         self,
@@ -372,10 +670,14 @@ class _RequesterContextBroker:
             os.fsync(handle.fileno())
         temp_path.replace(final_path)
 
-    def _remove(self, session_key: str) -> None:
+    def _remove(self, session_key: str) -> bool:
+        removed = True
         for root in (self.root, self.root_v2):
-            with contextlib.suppress(OSError):
+            try:
                 (root / _requester_context_filename(session_key)).unlink(missing_ok=True)
+            except OSError:
+                removed = False
+        return removed
 
 
 def _requester_context_root() -> Path:
@@ -396,15 +698,22 @@ def _requester_context_lease_id(kwargs: dict[str, Any]) -> str:
     )
 
 
-def _active_finite_session() -> tuple[str | None, str | None]:
+def _active_finite_session(*, diagnostic_stage: str = "") -> tuple[str | None, str | None]:
     try:
         from gateway.session_context import get_session_env
     except ImportError:
+        if diagnostic_stage:
+            _requester_diagnostic(diagnostic_stage, "session_api_unavailable")
         return None, None
     platform = str(get_session_env("HERMES_SESSION_PLATFORM", "") or "").strip()
     session_key = str(get_session_env("HERMES_SESSION_KEY", "") or "").strip()
     user_id = str(get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
     authenticated_turn_user = _AUTHENTICATED_FINITE_TURN_USER.get()
+    if diagnostic_stage and _REQUESTER_DIAGNOSTICS._enabled:
+        _requester_diagnostic(
+            diagnostic_stage,
+            _requester_gate(platform, session_key, user_id, authenticated_turn_user),
+        )
     if (
         # Pinned Hermes maps plugin platforms that are not enum members to
         # LOCAL. The adapter-owned ContextVar below is the Finite marker;
@@ -416,6 +725,23 @@ def _active_finite_session() -> tuple[str | None, str | None]:
     ):
         return None, None
     return session_key, user_id
+
+
+def _requester_gate(
+    platform: str, session_key: str, user_id: str, authenticated_turn_user: str | None
+) -> str:
+    """Name the first `_active_finite_session` check that rejects, as a fixed code."""
+    if platform not in {FINITE_PLATFORM_NAME, Platform.LOCAL.value}:
+        return "foreign_platform"
+    if not session_key:
+        return "missing_session"
+    if FINITE_ACCOUNT_ID_PATTERN.fullmatch(user_id) is None:
+        return "invalid_user"
+    if authenticated_turn_user is None:
+        return "missing_turn"
+    if authenticated_turn_user != user_id:
+        return "sender_mismatch"
+    return "accepted"
 
 
 def _authenticated_requester_for_event(event: MessageEvent) -> str | None:
@@ -584,6 +910,7 @@ class FiniteChatAdapter(BasePlatformAdapter):
         requester_context = _authenticated_requester_context_for_event(event)
         context_token = _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.set(requester_context)
         try:
+            _requester_diagnostic("turn", "authenticated" if requester else "unauthenticated")
             await super()._process_message_background(event, session_key)
         finally:
             _AUTHENTICATED_FINITE_REQUESTER_CONTEXT.reset(context_token)
@@ -2467,12 +2794,14 @@ _BRAIN_APPROVAL_FILINGS = _BrainApprovalFilings()
 
 
 def register(ctx) -> None:
+    _REQUESTER_DIAGNOSTICS.start()
     register_hook = getattr(ctx, "register_hook", None)
     if callable(register_hook):
         requester_context = _RequesterContextBroker()
         register_hook("pre_tool_call", requester_context.before_tool_call)
         register_hook("post_tool_call", requester_context.after_tool_call)
         register_hook("post_tool_call", _BRAIN_APPROVAL_FILINGS.after_tool_call)
+        _requester_diagnostic("hooks_registered")
     ctx.register_platform(
         name=FINITE_PLATFORM_NAME,
         label="Finite Chat",
