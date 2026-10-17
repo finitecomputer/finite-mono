@@ -43,6 +43,10 @@ pub struct HostedHermesLifecycle {
     source_host: String,
     work_root: PathBuf,
     core: CoreHttpAgentCreationQueue,
+    /// Verb and target of the mutation this invocation began and could not
+    /// confirm. Only a failed `stop` of one exact container may be resolved
+    /// in-process; everything else waits for a new invocation.
+    unresolved: Mutex<Option<(String, String)>>,
 }
 
 impl std::fmt::Debug for HostedHermesLifecycle {
@@ -60,6 +64,20 @@ impl HostedHermesLifecycle {
         namespace: String,
         root: &Path,
     ) -> Self {
+        Self::for_mutation_test(nerdctl, namespace, root, "http://127.0.0.1:0")
+    }
+
+    /// Like `for_failed_mutation_test`, with Core route eligibility served at
+    /// `core_url`, so fenced mutations can also succeed. Proxy stops are
+    /// recorded in `root/proxy.log`; an empty route projection never starts
+    /// the proxy or writes its configuration.
+    #[cfg(test)]
+    pub(crate) fn for_mutation_test(
+        nerdctl: PathBuf,
+        namespace: String,
+        root: &Path,
+        core_url: &str,
+    ) -> Self {
         Self {
             config: HostedHermesConfig {
                 public_origin: "https://unused.invalid".into(),
@@ -71,8 +89,8 @@ impl HostedHermesLifecycle {
             namespace,
             source_host: "finite-lat-1".into(),
             work_root: root.into(),
-            core: CoreHttpAgentCreationQueue::new("http://127.0.0.1:0", "unused-test-token")
-                .unwrap(),
+            core: CoreHttpAgentCreationQueue::new(core_url, "unused-test-token").unwrap(),
+            unresolved: Mutex::new(None),
         }
     }
 
@@ -105,6 +123,7 @@ impl HostedHermesLifecycle {
                 RUNNER_UNIT,
                 PROXY_UNIT,
             )?),
+            unresolved: Mutex::new(None),
         })
     }
 
@@ -197,6 +216,18 @@ impl HostedHermesLifecycle {
             .map(|name| self.projection(Some(name)))
             .transpose()?;
         guard.begin_mutation(removal.is_some())?;
+        // For `stop` the final argument is the exact container; other verbs
+        // are recorded only so they can never be mistaken for a stop.
+        let target = command
+            .args
+            .last()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        *self
+            .unresolved
+            .lock()
+            .map_err(|_| refused("mutation record is poisoned"))? =
+            Some((verb.unwrap_or_default().to_owned(), target));
         if let Some(successor) = successor {
             self.publish(successor, &guard)?;
         }
@@ -207,6 +238,10 @@ impl HostedHermesLifecycle {
             return Ok(output);
         }
         guard.finish_mutation()?;
+        *self
+            .unresolved
+            .lock()
+            .map_err(|_| refused("mutation record is poisoned"))? = None;
         if removal.is_none() && self.reconcile_locked(&guard).is_err() {
             guard.stop_proxy()?;
             eprintln!(
@@ -214,6 +249,47 @@ impl HostedHermesLifecycle {
             );
         }
         Ok(output)
+    }
+
+    /// Resolve this invocation's failed `stop` of exactly `container` once
+    /// the caller has proven that its compute is gone. A stop retains port
+    /// ownership, so a settled failed stop leaves the same provider state a
+    /// successful one would. `proof` runs again inside the fence, between two
+    /// checks that the Runner cgroup holds only this process; the proxy is
+    /// stopped before the marker is cleared, exactly as a successor
+    /// invocation would do, and routes are then republished from a fresh
+    /// projection. Any other unresolved mutation is refused.
+    pub(crate) fn resolve_failed_stop(
+        &self,
+        container: &str,
+        proof: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        let guard = self
+            .guard
+            .lock()
+            .map_err(|_| refused("fence lock is poisoned"))?;
+        let mut unresolved = self
+            .unresolved
+            .lock()
+            .map_err(|_| refused("mutation record is poisoned"))?;
+        if !unresolved
+            .as_ref()
+            .is_some_and(|(verb, target)| verb == "stop" && target == container)
+        {
+            return Err(refused(
+                "only this invocation's failed stop of the same container can be resolved",
+            ));
+        }
+        guard.resolve_own_failed_mutation(proof)?;
+        *unresolved = None;
+        drop(unresolved);
+        if self.reconcile_locked(&guard).is_err() {
+            guard.stop_proxy()?;
+            eprintln!(
+                "hosted Hermes routes unavailable after a resolved failed stop; ingress is stopped"
+            );
+        }
+        Ok(())
     }
 
     /// Same-image upgrades must still add the native port to an old container.
@@ -444,5 +520,115 @@ mod observation_tests {
         assert!(!root.join("status.next.json").exists());
         assert!(!root.join("mutation-in-progress").exists());
         assert!(write_observation(&root.join("absent"), &record).is_err());
+    }
+}
+
+#[cfg(test)]
+mod failed_stop_resolution_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A provider whose inventory is empty, whose stop/start fail the way the
+    /// production stop did, and whose rename succeeds.
+    fn lifecycle(root: &Path) -> HostedHermesLifecycle {
+        let nerdctl = root.join("nerdctl-fake");
+        std::fs::write(
+            &nerdctl,
+            "#!/bin/sh\nshift 2\ncase \"$1\" in\n  namespace) exit 0 ;;\n  rename) exit 0 ;;\n  *) echo 'rpc error: code = Unavailable desc = ttrpc: closed' >&2; exit 1 ;;\nesac\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&nerdctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        HostedHermesLifecycle::for_failed_mutation_test(nerdctl, "finite".into(), root)
+    }
+
+    fn run(hosted: &HostedHermesLifecycle, args: &[&str]) -> Output {
+        let mut full = vec![OsString::from("--namespace"), OsString::from("finite")];
+        full.extend(args.iter().map(OsString::from));
+        let command = PlannedCommand {
+            program: hosted.nerdctl.clone(),
+            cwd: None,
+            args: full,
+            env: Vec::new(),
+        };
+        hosted
+            .execute(&command, Duration::from_secs(10), |command, timeout| {
+                let child = Command::new(&command.program)
+                    .args(&command.args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                wait_with_captured_output(child, &command.program, timeout)
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn only_the_failed_stop_of_the_same_container_resolves_and_only_when_proven() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let hosted = lifecycle(root);
+        let marker = root.join("mutation-in-progress");
+        assert!(
+            hosted
+                .resolve_failed_stop("finite-kata-a", || Ok(()))
+                .is_err()
+        );
+
+        assert!(
+            !run(&hosted, &["stop", "--time", "180", "finite-kata-a"])
+                .status
+                .success()
+        );
+        assert!(marker.exists());
+        assert!(
+            hosted
+                .resolve_failed_stop("finite-kata-b", || Ok(()))
+                .is_err()
+        );
+        assert!(
+            hosted
+                .resolve_failed_stop("finite-kata-a", || Err(refused("VM still alive")))
+                .is_err()
+        );
+        assert!(marker.exists(), "an unproven stop stays fenced");
+
+        hosted
+            .resolve_failed_stop("finite-kata-a", || Ok(()))
+            .unwrap();
+        assert!(!marker.exists());
+        let log = std::fs::read_to_string(root.join("proxy.log")).unwrap();
+        assert!(
+            log.starts_with("stop marker=true\n"),
+            "the proxy stops before the marker clears: {log}"
+        );
+        // Resolution is single-use.
+        assert!(
+            hosted
+                .resolve_failed_stop("finite-kata-a", || Ok(()))
+                .is_err()
+        );
+        // Fenced mutations work again in this invocation.
+        assert!(
+            run(&hosted, &["rename", "finite-kata-a", "finite-kata-c"])
+                .status
+                .success()
+        );
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn other_failed_mutations_stay_fenced_until_a_new_invocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let hosted = lifecycle(root);
+        assert!(!run(&hosted, &["start", "finite-kata-a"]).status.success());
+        assert!(
+            hosted
+                .resolve_failed_stop("finite-kata-a", || Ok(()))
+                .is_err()
+        );
+        assert!(root.join("mutation-in-progress").exists());
+        assert!(!root.join("proxy.log").exists());
     }
 }
