@@ -58,6 +58,9 @@ LEGACY_UNITS = {
 # NixOS modules that provide a same-named systemd unit when enabled.
 NIXOS_SERVICE_UNITS = ("caddy", "postgresql")
 
+# NixOS modules whose systemd unit name differs from the module name.
+NIXOS_RENAMED_SERVICE_UNITS = {"openssh": "sshd"}
+
 TABLE_REF = re.compile(r"\b(?:FROM|JOIN|INTO|UPDATE|TRUNCATE)\s+([a-z][a-z0-9_]*)")
 CATALOG_PREFIXES = ("pg_", "sqlite_")
 
@@ -227,6 +230,9 @@ def authority_units() -> set[str]:
         for service in NIXOS_SERVICE_UNITS:
             if re.search(rf"services\.{service}(\.enable = true| = \{{)", text):
                 units.add(service)
+        for module, unit in NIXOS_RENAMED_SERVICE_UNITS.items():
+            if re.search(rf"services\.{module}(\.enable = true| = \{{)", text):
+                units.add(unit)
         # Per-db replicator units are finite-litestream-<db.name>; the db names
         # are authored in the host config (modules/finite-litestream.nix).
         if "finite.litestream" in text:
