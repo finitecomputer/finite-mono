@@ -9,10 +9,10 @@ use finite_saas_runner::{
     AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
     DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL,
-    DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT, DockerConfig, DockerLauncher, EnclaviaConfig,
-    EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher, KataRetirementConfig,
-    PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher,
-    durable_state_manifest_sha256,
+    DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT, DEFAULT_KATA_RESTART_FENCE_QUIET, DockerConfig,
+    DockerLauncher, EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig,
+    KataLauncher, KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource,
+    RunOnceOutcome, RuntimeLauncher, durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -417,6 +417,8 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 hosted_hermes: hosted_hermes.clone(),
                 host_root: PathBuf::from("/"),
                 failed_stop_settle_timeout: DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT,
+                ctr_bin: optional_path("FC_RUNNER_KATA_CTR_BIN", "ctr"),
+                restart_fence_quiet: DEFAULT_KATA_RESTART_FENCE_QUIET,
             });
             let outcome = run_once_with_launcher(
                 queue,

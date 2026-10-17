@@ -54,6 +54,16 @@ const MAX_KATA_RECOVERY_FENCE_OPERATIONS: usize = 32;
 /// production failures; this bounds a slower teardown.
 pub const DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 const KATA_FAILED_STOP_SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
+/// containerd's restart monitor reconciles, applies every queued change, then
+/// sleeps 10 s (the hosts do not override it); one cycle was observed at
+/// 14.01 s. Three 16 s intervals, the reviewed Pancake guard's constant, let
+/// any start decided before the fence apply visibly (it bumps the restart
+/// count before creating a task) inside the window.
+pub const DEFAULT_KATA_RESTART_FENCE_QUIET: Duration = Duration::from_secs(48);
+const RESTART_STATUS_LABEL: &str = "containerd.io/restart.status";
+const RESTART_POLICY_LABEL: &str = "containerd.io/restart.policy";
+const RESTART_COUNT_LABEL: &str = "containerd.io/restart.count";
+const RESTART_EXPLICITLY_STOPPED_LABEL: &str = "containerd.io/restart.explicitly-stopped";
 /// Leads every control failure message that leaves the Agent's canonical
 /// compute down or unverified, so Core and operators see it at once.
 const AGENT_DOWN_PREFIX: &str = "Agent down: operator recovery required";
@@ -161,6 +171,12 @@ pub struct KataConfig {
     /// How long a stop whose CLI failed may take to show its VM gone while
     /// provider state already says the compute is down.
     pub failed_stop_settle_timeout: Duration,
+    /// `ctr`, used only to fence containerd's restart monitor off a container
+    /// whose failed stop is about to be accepted (nerdctl cannot set labels).
+    pub ctr_bin: PathBuf,
+    /// How long, after that fence is written, the container must show no
+    /// restart, no new task and no VM before the stop is accepted.
+    pub restart_fence_quiet: Duration,
 }
 
 impl Default for KataConfig {
@@ -200,6 +216,8 @@ impl Default for KataConfig {
             hosted_hermes: None,
             host_root: PathBuf::from("/"),
             failed_stop_settle_timeout: DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT,
+            ctr_bin: PathBuf::from("ctr"),
+            restart_fence_quiet: DEFAULT_KATA_RESTART_FENCE_QUIET,
         }
     }
 }
@@ -1092,18 +1110,28 @@ impl KataLauncher {
     }
 
     fn stop_compute(&self, container_name: &str) -> Result<(), RunnerError> {
-        self.stop_compute_as(container_name, None)
+        // Pin the identity before stopping, so a failed stop is judged
+        // against exactly the container that was asked to stop.
+        let expected_id = self
+            .inspect(container_name)
+            .ok()
+            .flatten()
+            .map(|inspected| inspected.id);
+        self.stop_compute_fenced(container_name, expected_id.as_deref())
+            .map(|_| ())
     }
 
-    /// Stop `container_name`; `expected_id`, when the caller validated the
-    /// container before stopping it, pins that exact container identity.
-    fn stop_compute_as(
+    /// Stop `container_name`, whose identity the caller pinned before the
+    /// stop. `Some(fence)` means the stop CLI failed and the stop was
+    /// accepted only behind a restart-monitor fence the caller must recheck
+    /// before it lets another writer use the same `/data`.
+    fn stop_compute_fenced(
         &self,
         container_name: &str,
         expected_id: Option<&str>,
-    ) -> Result<(), RunnerError> {
+    ) -> Result<Option<RestartFence>, RunnerError> {
         let error = match self.stop_command(container_name) {
-            Ok(()) => return Ok(()),
+            Ok(()) => return Ok(None),
             Err(error) => error,
         };
         // A stop that failed at the CLI level may still have stopped the
@@ -1111,9 +1139,13 @@ impl KataLauncher {
         // exited, a grace-expired escalation severs the shim channel only
         // after teardown began, and a dead guest agent makes Kata kill the VM
         // while its shim lingers. Believe proven provider and host state, not
-        // the CLI exit.
+        // the CLI exit, and only after containerd can no longer restart it.
         let still_running = match self.settle_failed_stop(container_name, expected_id) {
-            Ok(host) => return self.accept_failed_stop(container_name, expected_id, error, host),
+            Ok(_) => {
+                return self
+                    .fence_and_accept_failed_stop(container_name, expected_id, error)
+                    .map(Some);
+            }
             Err(UnsettledStop::StillRunning(reason)) => reason,
             // Not running, yet not proven gone. Another stop would be a
             // no-op that reports success, so it proves nothing: fail.
@@ -1130,11 +1162,135 @@ impl KataLauncher {
         // Still running: one bounded retry with a fresh full grace. Anything
         // that cannot be proven stopped afterwards is a genuine failure.
         match self.stop_command(container_name) {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(None),
             Err(retry_error) => match self.settle_failed_stop(container_name, expected_id) {
-                Ok(host) => self.accept_failed_stop(container_name, expected_id, retry_error, host),
+                Ok(_) => self
+                    .fence_and_accept_failed_stop(container_name, expected_id, retry_error)
+                    .map(Some),
                 Err(_) => Err(retry_error),
             },
+        }
+    }
+
+    /// The VM is gone, but containerd's restart monitor runs outside the
+    /// Runner and may already have decided to start the container again: a
+    /// stop can fail before nerdctl marks it explicitly stopped. Fence the
+    /// monitor for exactly this container, then require a quiet window with
+    /// no restart, no new task and no VM before accepting the stop.
+    fn fence_and_accept_failed_stop(
+        &self,
+        container_name: &str,
+        expected_id: Option<&str>,
+        error: RunnerError,
+    ) -> Result<RestartFence, RunnerError> {
+        let fenced = self
+            .fence_restart_monitor(container_name, expected_id)
+            .and_then(|fence| {
+                self.observe_restart_quiet(container_name, &fence)
+                    .map(|host| (fence, host))
+            });
+        let (fence, host) = fenced.map_err(|reason| {
+            RunnerError::RuntimeLaunch(format!(
+                "{error}; its VM was gone but the stop could not be accepted behind a restart fence: {reason}"
+            ))
+        })?;
+        self.accept_failed_stop(container_name, &fence, error, host)?;
+        Ok(fence)
+    }
+
+    /// Mark the container explicitly stopped through containerd (nerdctl
+    /// cannot write labels), read it back through the provider, and record
+    /// the restart count every later sample must still show.
+    fn fence_restart_monitor(
+        &self,
+        container_name: &str,
+        expected_id: Option<&str>,
+    ) -> Result<RestartFence, String> {
+        let container_id = expected_id
+            .filter(|id| failed_stop::valid_sandbox_id(id))
+            .ok_or_else(|| format!("{container_name} has no pinned containerd ID to fence"))?
+            .to_string();
+        let label = PlannedCommand {
+            program: self.config.ctr_bin.clone(),
+            cwd: None,
+            args: vec![
+                OsString::from("--namespace"),
+                OsString::from(self.config.namespace.trim()),
+                OsString::from("containers"),
+                OsString::from("label"),
+                OsString::from(&container_id),
+                OsString::from(format!("{RESTART_EXPLICITLY_STOPPED_LABEL}=true")),
+            ],
+            env: Vec::new(),
+        };
+        self.run_checked(label, self.config.command_timeout)
+            .map_err(|error| format!("writing the restart fence failed: {error}"))?;
+        let inspected = self
+            .inspect(container_name)
+            .map_err(|error| format!("cannot read the restart fence back: {error}"))?
+            .ok_or_else(|| format!("{container_name} disappeared while it was fenced"))?;
+        let fence = RestartFence {
+            container_id,
+            count: inspected
+                .config
+                .labels
+                .get(RESTART_COUNT_LABEL)
+                .cloned()
+                .unwrap_or_default(),
+        };
+        match restart_fence_violation(&inspected, &fence) {
+            None => Ok(fence),
+            Some(violation) => Err(format!("restart fence not in force: {violation}")),
+        }
+    }
+
+    /// Every sample from the fence write until the quiet window has passed
+    /// must prove the VM gone with the fence still holding; any change ends
+    /// the attempt. Returns the last sample's host evidence.
+    fn observe_restart_quiet(
+        &self,
+        container_name: &str,
+        fence: &RestartFence,
+    ) -> Result<failed_stop::SandboxHostState, String> {
+        let started = Instant::now();
+        loop {
+            let host = match self.sample_failed_stop_fenced(
+                container_name,
+                Some(&fence.container_id),
+                Some(fence),
+            ) {
+                FailedStopSample::Settled(host) => host,
+                FailedStopSample::Running(reason)
+                | FailedStopSample::Pending(reason)
+                | FailedStopSample::Refused(reason) => {
+                    return Err(format!("changed during the restart quiet window: {reason}"));
+                }
+            };
+            let elapsed = started.elapsed();
+            if elapsed >= self.config.restart_fence_quiet {
+                return Ok(host);
+            }
+            std::thread::sleep(
+                KATA_FAILED_STOP_SAMPLE_INTERVAL.min(self.config.restart_fence_quiet - elapsed),
+            );
+        }
+    }
+
+    /// Before another writer is allowed onto the same `/data`, the fenced
+    /// container must still be stopped, fenced, unrestarted and VM-free.
+    fn recheck_restart_fence(
+        &self,
+        container_name: &str,
+        fence: &RestartFence,
+    ) -> Result<(), RunnerError> {
+        match self.sample_failed_stop_fenced(container_name, Some(&fence.container_id), Some(fence))
+        {
+            FailedStopSample::Settled(_) => Ok(()),
+            FailedStopSample::Running(reason)
+            | FailedStopSample::Pending(reason)
+            | FailedStopSample::Refused(reason) => Err(RunnerError::RuntimeLaunch(format!(
+                "the fenced old compute {container_name} changed after its failed stop was accepted: {reason}"
+            ))),
         }
     }
 
@@ -1170,6 +1326,15 @@ impl KataLauncher {
         container_name: &str,
         expected_id: Option<&str>,
     ) -> FailedStopSample {
+        self.sample_failed_stop_fenced(container_name, expected_id, None)
+    }
+
+    fn sample_failed_stop_fenced(
+        &self,
+        container_name: &str,
+        expected_id: Option<&str>,
+        fence: Option<&RestartFence>,
+    ) -> FailedStopSample {
         let inspected = match self.inspect(container_name) {
             Ok(inspected) => inspected,
             Err(error) => {
@@ -1179,17 +1344,32 @@ impl KataLauncher {
             }
         };
         let (sandbox_id, durable_root) = match inspected.as_ref() {
-            // Provider record gone. Without a pinned identity there is no
-            // sandbox to examine; the provider's word is all there is.
-            None => match expected_id {
-                Some(id) => (id.to_string(), None),
-                None => return FailedStopSample::Settled(Default::default()),
+            // Provider record gone: examine the pinned sandbox. Without a
+            // pinned identity there is nothing to prove, so fail closed. A
+            // fenced container must not vanish while it is fenced.
+            None => match (expected_id, fence) {
+                (Some(id), None) => (id.to_string(), None),
+                (_, Some(_)) => {
+                    return FailedStopSample::Refused(format!(
+                        "{container_name} disappeared while it was fenced"
+                    ));
+                }
+                (None, None) => {
+                    return FailedStopSample::Refused(format!(
+                        "{container_name} is gone and its identity was never pinned"
+                    ));
+                }
             },
             Some(inspected) => {
                 if expected_id.is_some_and(|id| id != inspected.id) {
                     return FailedStopSample::Refused(format!(
                         "{container_name} is no longer the container that was stopped"
                     ));
+                }
+                if let Some(violation) =
+                    fence.and_then(|fence| restart_fence_violation(inspected, fence))
+                {
+                    return FailedStopSample::Refused(violation);
                 }
                 if matches!(
                     inspected.state.status.as_str(),
@@ -1237,21 +1417,26 @@ impl KataLauncher {
         FailedStopSample::Settled(host)
     }
 
-    /// A failed stop whose VM is proven gone completed the stop. On hosted
-    /// Hermes hosts the failed command fenced every later provider mutation
-    /// in this invocation; resolve exactly that stop, re-proving inside the
-    /// fence. If the fence cannot be resolved the stop stays failed.
+    /// A failed stop whose VM is proven gone behind a held restart fence
+    /// completed the stop. On hosted Hermes hosts the failed command fenced
+    /// every later provider mutation in this invocation; resolve exactly that
+    /// stop, re-proving VM and restart fence inside the lifecycle fence. If it
+    /// cannot be resolved the stop stays failed.
     fn accept_failed_stop(
         &self,
         container_name: &str,
-        expected_id: Option<&str>,
+        fence: &RestartFence,
         error: RunnerError,
         host: failed_stop::SandboxHostState,
     ) -> Result<(), RunnerError> {
         if let Some(hosted) = self.config.hosted_hermes.as_ref() {
             hosted
                 .resolve_failed_stop(container_name, || {
-                    match self.sample_failed_stop(container_name, expected_id) {
+                    match self.sample_failed_stop_fenced(
+                        container_name,
+                        Some(&fence.container_id),
+                        Some(fence),
+                    ) {
                         FailedStopSample::Settled(_) => Ok(()),
                         FailedStopSample::Running(reason)
                         | FailedStopSample::Refused(reason)
@@ -1277,7 +1462,8 @@ impl KataLauncher {
             )
         };
         eprintln!(
-            "warning: Kata stop of {container_name} failed ({error}), but provider and host state prove its VM is gone; treating the compute as stopped{lingering}"
+            "warning: Kata stop of {container_name} failed ({error}), but provider and host state prove its VM is gone and containerd's restart monitor stayed fenced (explicitly-stopped, restart count {:?}); treating the compute as stopped{lingering}",
+            fence.count
         );
         Ok(())
     }
@@ -2955,18 +3141,29 @@ impl RuntimeLauncher for KataLauncher {
         )?;
         write_kata_env_file(&candidate_plan.env_file, &replacement_environment.entries)?;
         // A stop whose CLI failed counts only when provider and host state
-        // prove this exact container's VM gone; on hosted Hermes hosts that
-        // also resolves the fence for exactly this stop. The candidate is a
-        // new container with its own task bundle and ports, so a shim that
+        // prove this exact container's VM gone behind a restart-monitor fence
+        // that held through a quiet window; on hosted Hermes hosts that also
+        // resolves the lifecycle fence for exactly this stop. The candidate is
+        // a new container with its own task bundle and ports, so a shim that
         // outlived a dead guest cannot block it. Otherwise the stop's own
         // error is kept, and the restore below never starts the old compute
         // while its VM is not proven gone.
-        let stop = self.stop_compute_as(&canonical_name, Some(&inspected.id));
-        if let Err(error) = stop {
-            let _ = std::fs::remove_file(&candidate_plan.env_file);
-            let restore = self.restore_previous_compute(&canonical_plan, &old_npub);
-            return Err(runtime_upgrade_failure(error, restore.err()));
-        }
+        let old_fence = match self
+            .stop_compute_fenced(&canonical_name, Some(&inspected.id))
+            .and_then(|fence| match fence {
+                // Last look before a second VM may share /data.
+                Some(fence) => self
+                    .recheck_restart_fence(&canonical_name, &fence)
+                    .map(|()| Some(fence)),
+                None => Ok(None),
+            }) {
+            Ok(fence) => fence,
+            Err(error) => {
+                let _ = std::fs::remove_file(&candidate_plan.env_file);
+                let restore = self.restore_previous_compute(&canonical_plan, &old_npub);
+                return Err(runtime_upgrade_failure(error, restore.err()));
+            }
+        };
 
         let candidate_launch = self.run_checked(
             kata_upgrade_run_command(
@@ -3025,6 +3222,15 @@ impl RuntimeLauncher for KataLauncher {
                     self.discard_candidate_and_restore(&candidate_name, &canonical_plan, &old_npub);
                 return Err(runtime_upgrade_failure(error, rollback.err()));
             }
+        }
+        // A restart the fence did not stop would mean two VMs on one /data:
+        // keep the old compute, drop the candidate.
+        if let Some(fence) = old_fence.as_ref()
+            && let Err(error) = self.recheck_restart_fence(&canonical_name, fence)
+        {
+            let rollback =
+                self.discard_candidate_and_restore(&candidate_name, &canonical_plan, &old_npub);
+            return Err(runtime_upgrade_failure(error, rollback.err()));
         }
 
         // Keep the old container intact and stopped until the target image has
@@ -4855,6 +5061,58 @@ impl UnsettledStop {
     }
 }
 
+/// containerd's restart monitor fenced off one exact container, with the
+/// restart count observed right after the fence was read back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestartFence {
+    container_id: String,
+    count: String,
+}
+
+/// Why `inspected` no longer shows `fence` holding, if it does not. The
+/// monitor only manages containers carrying a restart status label; for
+/// those, only `unless-stopped` honours explicitly-stopped. A queued start
+/// raises the restart count before it creates a task, and a created task
+/// leaves the stopped states.
+fn restart_fence_violation(inspected: &KataInspect, fence: &RestartFence) -> Option<String> {
+    let labels = &inspected.config.labels;
+    if inspected.id != fence.container_id {
+        return Some("the container identity changed".to_string());
+    }
+    if labels.contains_key(RESTART_STATUS_LABEL) {
+        let policy = labels
+            .get(RESTART_POLICY_LABEL)
+            .map(String::as_str)
+            .unwrap_or_default();
+        if policy != "unless-stopped" {
+            return Some(format!(
+                "restart policy {policy:?} does not honour explicitly-stopped"
+            ));
+        }
+    }
+    if labels
+        .get(RESTART_EXPLICITLY_STOPPED_LABEL)
+        .map(String::as_str)
+        != Some("true")
+    {
+        return Some("the explicitly-stopped label is not true".to_string());
+    }
+    let count = labels
+        .get(RESTART_COUNT_LABEL)
+        .map(String::as_str)
+        .unwrap_or_default();
+    if count != fence.count {
+        return Some(format!(
+            "the restart count moved from {:?} to {count:?}",
+            fence.count
+        ));
+    }
+    if !matches!(inspected.state.status.as_str(), "exited" | "") {
+        return Some(format!("the task is now {:?}", inspected.state.status));
+    }
+    None
+}
+
 fn unsettled_stop_failure(error: RunnerError, reason: &str) -> RunnerError {
     RunnerError::RuntimeLaunch(format!(
         "{error}; the stopped compute was not proven gone: {reason}"
@@ -5165,11 +5423,22 @@ record() {
   recovery="$(field_or_empty "$name" recovery)"
   public="$(field_or_empty "$name" public)"; secret="$(field_or_empty "$name" secret)"
   environment="$(python3 -c 'import json,sys; print(json.dumps([line.rstrip("\n") for line in open(sys.argv[1], encoding="utf-8")]))' "$root/$name.env-file")"
-  printf '{"Id":"%s","Name":"%s","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}' "$(container_id "$name")" "$name" "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$image" "$environment" "$status" "$mount"
+  policy="$(field_or_empty "$name" restart-policy)"; policy="${policy:-unless-stopped}"
+  stopped="$(field_or_empty "$name" explicitly-stopped)"; stopped="${stopped:-false}"
+  count="$(field_or_empty "$name" restart-count)"
+  printf '{"Id":"%s","Name":"%s","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s","containerd.io/restart.policy":"%s","containerd.io/restart.status":"running","containerd.io/restart.explicitly-stopped":"%s","containerd.io/restart.count":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}' "$(container_id "$name")" "$name" "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$policy" "$stopped" "$count" "$image" "$environment" "$status" "$mount"
 }
 case "$cmd" in
   info|pull) exit 0 ;;
-  namespace) echo finite ;;
+  namespace)
+    if [ -f "$root/namespace-restarts-old" ]; then
+      # A late restart applied while the hosted fence republishes routes,
+      # after the failed stop was accepted and before the candidate starts.
+      old="$(cat "$root/namespace-restarts-old")"
+      write_field "$old" restart-count 1; write_field "$old" status running
+      rm -f "$root/namespace-restarts-old"
+    fi
+    echo finite ;;
   ps)
     for image in "$root"/*.image; do
       if [ -f "$image" ]; then
@@ -5208,7 +5477,7 @@ case "$cmd" in
       echo "mkdir /run/containerd/io.containerd.runtime.v2.task/finite/$(container_id "$name"): file exists" >&2
       exit 1
     fi
-    write_field "$name" status running ;;
+    write_field "$name" status running; write_field "$name" explicitly-stopped false ;;
   restart)
     for name in "$@"; do :; done
     if [ -f "$root/restart-fails" ]; then
@@ -5216,7 +5485,7 @@ case "$cmd" in
       echo "mkdir /run/containerd/io.containerd.runtime.v2.task/finite/$(container_id "$name"): file exists" >&2
       exit 1
     fi
-    write_field "$name" status running ;;
+    write_field "$name" status running; write_field "$name" explicitly-stopped false ;;
   stop)
     time=""
     prev=""
@@ -5229,6 +5498,15 @@ case "$cmd" in
       echo "injected stuck stop" >&2
       exit 42
     fi
+    if [ -f "$root/$name.stop-fails-early" ]; then
+      # nerdctl stop fails in its network cleanup, before containerutil.Stop
+      # marks the container explicitly stopped; the guest exits on its own.
+      write_field "$name" status exited
+      echo "time=\"2026-10-17T02:56:03Z\" level=fatal msg=\"failed to remove network\"" >&2
+      exit 1
+    fi
+    # containerutil.Stop marks the container explicitly stopped before Kill.
+    write_field "$name" explicitly-stopped true
     if [ -f "$root/$name.stop-dead-guest-agent" ]; then
       # Lat3 2026-10-17: the guest agent stopped answering mid-stop, Kata
       # killed QEMU and kept its shim alive holding the stopped task, and
@@ -5269,11 +5547,11 @@ case "$cmd" in
       echo "failed to delete task: rpc error: code = Unavailable desc = ttrpc: closed" >&2
       exit 1
     fi
-    rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.recovery" "$root/$name.public" "$root/$name.secret" "$root/$name.env-file" "$root/$name.port" "$root/$name.id" "$root/$name.hermes-port"
+    rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.recovery" "$root/$name.public" "$root/$name.secret" "$root/$name.env-file" "$root/$name.port" "$root/$name.id" "$root/$name.hermes-port" "$root/$name.restart-policy" "$root/$name.explicitly-stopped" "$root/$name.restart-count"
     ;;
   rename)
     from="$1"; to="$2"
-    for suffix in image status artifact schema project source mount request recovery public secret env-file port id hermes-port wedged; do
+    for suffix in image status artifact schema project source mount request recovery public secret env-file port id hermes-port wedged restart-policy explicitly-stopped restart-count; do
       if [ -f "$root/$from.$suffix" ]; then mv "$root/$from.$suffix" "$root/$to.$suffix"; fi
     done
     ;;
@@ -5315,6 +5593,13 @@ case "$cmd" in
     write_field "$name" secret "$secret"; cp "$env_file" "$root/$name.env-file"
     cp "$env_file" "$root/last-run.env-file"
     write_field "$name" port "$(cat "$root/candidate-port")"
+    if [ -f "$root/run-restarts-old" ]; then
+      # containerd's restart monitor applying a start it queued earlier: it
+      # raises the restart count, then creates and starts the old task.
+      old="$(cat "$root/run-restarts-old")"
+      write_field "$old" restart-count 1; write_field "$old" status running
+      rm -f "$root/run-restarts-old"
+    fi
     if [ -f "$root/also-create" ]; then
       # A second create that never started: the same image and /data bind,
       # labelled for the request named in also-create.request.
@@ -5335,9 +5620,35 @@ esac
         bin
     }
 
+    /// `ctr` against the same fake provider state as `fake_nerdctl`. It
+    /// writes the restart fence label; every other command (the retirement
+    /// task listing) succeeds with empty output.
     fn fake_ctr(root: &Path) -> PathBuf {
         let bin = root.join("ctr-fake");
-        write_executable(&bin, "#!/bin/sh\nexit 0\n");
+        write_executable(
+            &bin,
+            r#"#!/bin/sh
+set -eu
+root="$(dirname "$0")/fake-state"
+if [ "${1:-}" = "--namespace" ]; then shift 2; fi
+if [ "${1:-} ${2:-}" != "containers label" ]; then exit 0; fi
+id="$3"; label="$4"
+mkdir -p "$root"
+printf 'ctr-label %s %s\n' "$id" "$label" >> "$root/commands.log"
+name=""
+for idfile in "$root"/*.id; do
+  if [ -f "$idfile" ] && [ "$(cat "$idfile")" = "$id" ]; then name="$(basename "$idfile" .id)"; fi
+done
+if [ -z "$name" ]; then echo "container \"$id\" in namespace \"finite\": not found" >&2; exit 1; fi
+if [ -f "$root/ctr-label-fails" ]; then echo "injected label failure" >&2; exit 1; fi
+if [ -f "$root/ctr-label-ignored" ]; then exit 0; fi
+case "$label" in
+  containerd.io/restart.explicitly-stopped=*) printf '%s' "${label#*=}" > "$root/$name.explicitly-stopped" ;;
+  *) echo "unsupported fake label $label" >&2; exit 2 ;;
+esac
+echo "$label"
+"#,
+        );
         bin
     }
 
@@ -5618,6 +5929,8 @@ esac
             durable_tree_quiescence_window: Duration::from_millis(50),
             host_root: fake_host_root(temp.path()),
             failed_stop_settle_timeout: Duration::from_millis(300),
+            ctr_bin: fake_ctr(temp.path()),
+            restart_fence_quiet: Duration::from_millis(200),
             ..KataConfig::default()
         };
         let launcher = KataLauncher::new(config);
@@ -7595,6 +7908,12 @@ esac
                 provider_mutations(&fake_state)[0],
                 format!("stop --time 30 {}", plan.container_name)
             );
+            let log = commands(&fake_state);
+            assert!(
+                log.find(&fence_line(&plan.container_name)).expect(&log)
+                    < log.find("\nrun ").expect(&log),
+                "the restart fence precedes the candidate: {log}"
+            );
             assert_eq!(
                 provider_mutations(&fake_state)[4],
                 format!("rm --force {rollback}")
@@ -7747,6 +8066,391 @@ esac
         );
         assert!(fence_root.join("mutation-in-progress").exists());
         assert_eq!(mutation_verbs(&fake_state), vec!["stop"]);
+    }
+
+    fn commands(fake_state: &Path) -> String {
+        std::fs::read_to_string(fake_state.join("commands.log")).unwrap()
+    }
+
+    fn fence_line(container_name: &str) -> String {
+        format!(
+            "ctr-label {} containerd.io/restart.explicitly-stopped=true",
+            fake_container_id(container_name)
+        )
+    }
+
+    /// Upgrade a hosted fixture whose old container's stop fails; returns the
+    /// error, the fixture directory, the fence root and the fake state.
+    fn hosted_failed_stop_upgrade(
+        request: &str,
+        prepare: impl FnOnce(&mut KataLauncher, &KataLaunchPlan, &Path),
+    ) -> (String, tempfile::TempDir, PathBuf, PathBuf) {
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let core = EmptyRouteTargets::start();
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let fence_root = hosted_fixture(&mut launcher, &temp, &core.url());
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        prepare(&mut launcher, &plan, &fake_state);
+        let error = launcher
+            .upgrade_runtime(&upgrade_lease(request), &RuntimeRestartOptions::default())
+            .unwrap_err()
+            .to_string();
+        (error, temp, fence_root, fake_state)
+    }
+
+    #[test]
+    fn kata_upgrade_early_stop_failure_is_accepted_only_behind_the_restart_fence() {
+        // nerdctl can fail before it marks the container explicitly stopped.
+        // The Runner then writes that mark itself through containerd, reads it
+        // back, and holds a quiet window before any candidate may start.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let core = EmptyRouteTargets::start();
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let fence_root = hosted_fixture(&mut launcher, &temp, &core.url());
+        launcher.config.restart_fence_quiet = Duration::from_millis(600);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.stop-fails-early", plan.container_name)),
+            "1",
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        let facts = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_early_stop_failure"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(facts.runtime_artifact_id, "artifact-v2");
+        assert!(started.elapsed() >= Duration::from_millis(600));
+        let log = commands(&fake_state);
+        let fence = log.find(&fence_line(&plan.container_name)).expect(&log);
+        let run = log.find("\nrun ").expect(&log);
+        assert!(fence < run, "the fence precedes the candidate: {log}");
+        assert!(!fence_root.join("mutation-in-progress").exists());
+        assert_eq!(
+            mutation_verbs(&fake_state),
+            vec!["stop", "run", "rename", "rename", "rm"]
+        );
+    }
+
+    #[test]
+    fn kata_failed_stop_without_a_restart_fence_stays_fenced_and_reports_agent_down() {
+        // The fence cannot be written, does not read back, or cannot hold
+        // under the container's restart policy: no candidate, no restore
+        // start. The read-back itself refuses, before any quiet window.
+        for (case, expected) in [
+            ("ctr-label-fails", "writing the restart fence failed"),
+            (
+                "ctr-label-ignored",
+                "restart fence not in force: the explicitly-stopped label is not true",
+            ),
+            (
+                "always-policy",
+                "restart fence not in force: restart policy \"always\" does not honour explicitly-stopped",
+            ),
+        ] {
+            let (error, _temp, fence_root, kept) = hosted_failed_stop_upgrade(
+                &format!("runtime_ctl_fence_{}", case.replace('-', "_")),
+                |_, plan, fake_state| {
+                    std::fs::write(
+                        fake_state.join(format!("{}.stop-fails-early", plan.container_name)),
+                        "1",
+                    )
+                    .unwrap();
+                    match case {
+                        "always-policy" => std::fs::write(
+                            fake_state.join(format!("{}.restart-policy", plan.container_name)),
+                            "always",
+                        )
+                        .unwrap(),
+                        flag => std::fs::write(fake_state.join(flag), "1").unwrap(),
+                    }
+                },
+            );
+            assert!(
+                reports_agent_down(&error)
+                    && error.contains(expected)
+                    && error.contains("could not be accepted behind a restart fence"),
+                "{case}: {error}"
+            );
+            assert!(fence_root.join("mutation-in-progress").exists(), "{case}");
+            assert_eq!(mutation_verbs(&kept), vec!["stop"], "{case}");
+        }
+    }
+
+    #[test]
+    fn kata_failed_stop_aborts_when_anything_changes_during_the_restart_quiet_window() {
+        for (case, expected) in [
+            ("count", "restart count moved"),
+            ("task", "the task is now \"created\""),
+            ("qemu", "qemu-system-x86_64 pid 3431144"),
+            ("label", "explicitly-stopped label is not true"),
+        ] {
+            let (error, _temp, fence_root, kept) = hosted_failed_stop_upgrade(
+                &format!("runtime_ctl_quiet_{case}"),
+                |launcher, plan, fake_state| {
+                    launcher.config.restart_fence_quiet = Duration::from_secs(5);
+                    dead_guest_stop(launcher, fake_state, &plan.container_name);
+                    let state = fake_state.to_path_buf();
+                    let name = plan.container_name.clone();
+                    let host = launcher.config.host_root.clone();
+                    let line = fence_line(&name);
+                    std::thread::spawn(move || {
+                        let started = Instant::now();
+                        while !std::fs::read_to_string(state.join("commands.log"))
+                            .unwrap_or_default()
+                            .contains(&line)
+                        {
+                            if started.elapsed() > Duration::from_secs(20) {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        std::thread::sleep(Duration::from_millis(300));
+                        match case {
+                            "count" => {
+                                std::fs::write(state.join(format!("{name}.restart-count")), "1")
+                            }
+                            "task" => {
+                                std::fs::write(state.join(format!("{name}.status")), "created")
+                            }
+                            "label" => std::fs::write(
+                                state.join(format!("{name}.explicitly-stopped")),
+                                "false",
+                            ),
+                            _ => {
+                                let dir = host.join("proc/3431144");
+                                std::fs::create_dir_all(&dir).unwrap();
+                                std::fs::write(
+                                    dir.join("cmdline"),
+                                    format!(
+                                        "qemu-system-x86_64\0-name\0sandbox-{}\0",
+                                        fake_container_id(&name)
+                                    ),
+                                )
+                            }
+                        }
+                        .unwrap();
+                    });
+                },
+            );
+            assert!(
+                reports_agent_down(&error)
+                    && error.contains("changed during the restart quiet window")
+                    && error.contains(expected),
+                "{case}: {error}"
+            );
+            assert!(fence_root.join("mutation-in-progress").exists(), "{case}");
+            assert!(!commands(&kept).contains("\nrun "), "{case}");
+        }
+    }
+
+    #[test]
+    fn kata_upgrade_drops_the_candidate_if_the_fenced_old_compute_restarts() {
+        // A start the monitor queued before the fence and applied after the
+        // quiet window: the candidate is removed and the old compute kept.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let core = EmptyRouteTargets::start();
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        hosted_fixture(&mut launcher, &temp, &core.url());
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        dead_guest_stop(&launcher, &fake_state, &plan.container_name);
+        std::fs::write(fake_state.join("run-restarts-old"), &plan.container_name).unwrap();
+        let request = "runtime_ctl_old_restarted";
+
+        let error = launcher
+            .upgrade_runtime(&upgrade_lease(request), &RuntimeRestartOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("changed after its failed stop was accepted")
+                && error.contains("restart count moved")
+                && !reports_agent_down(&error),
+            "{error}"
+        );
+        let candidate = kata_upgrade_helper_name(&plan.container_name, "candidate", request);
+        assert_eq!(
+            provider_mutations(&fake_state),
+            vec![
+                format!("stop --time 30 {}", plan.container_name),
+                provider_mutations(&fake_state)[1].clone(),
+                format!("stop --time 30 {candidate}"),
+                format!("rm --force {candidate}"),
+            ]
+        );
+        assert_eq!(
+            std::fs::read_to_string(fake_state.join(format!("{}.image", plan.container_name)))
+                .unwrap(),
+            OLD_TEST_IMAGE
+        );
+    }
+
+    #[test]
+    fn kata_upgrade_rechecks_the_fence_right_before_the_candidate_starts() {
+        let (error, _temp, _fence_root, fake_state) =
+            hosted_failed_stop_upgrade("runtime_ctl_late_restart", |launcher, plan, fake_state| {
+                dead_guest_stop(launcher, fake_state, &plan.container_name);
+                std::fs::write(
+                    fake_state.join("namespace-restarts-old"),
+                    &plan.container_name,
+                )
+                .unwrap();
+            });
+        assert!(
+            error.contains("changed after its failed stop was accepted")
+                && error.contains("restart count moved"),
+            "{error}"
+        );
+        // The old compute restarted on its own, so it is verified, not down.
+        assert!(!reports_agent_down(&error), "{error}");
+        assert_eq!(mutation_verbs(&fake_state), vec!["stop"]);
+    }
+
+    #[test]
+    fn kata_failed_stop_acceptance_reproves_inside_the_hosted_fence() {
+        // The hosted resolution must look again, inside the fence, rather
+        // than trust the sample taken before it.
+        for change in ["qemu", "count"] {
+            let core = EmptyRouteTargets::start();
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, 1);
+            let fence_root = hosted_fixture(&mut launcher, &temp, &core.url());
+            write_fake_container(
+                &fake_state,
+                &plan.container_name,
+                OLD_TEST_IMAGE,
+                "artifact-v1",
+                "",
+                1,
+                &plan.state_root,
+            );
+            dead_guest_stop(&launcher, &fake_state, &plan.container_name);
+            let error = launcher.stop_command(&plan.container_name).unwrap_err();
+            let id = fake_container_id(&plan.container_name);
+            let fence = launcher
+                .fence_restart_monitor(&plan.container_name, Some(&id))
+                .unwrap();
+            let host = match launcher.sample_failed_stop_fenced(
+                &plan.container_name,
+                Some(&id),
+                Some(&fence),
+            ) {
+                FailedStopSample::Settled(host) => host,
+                _ => panic!("the fixture must start settled"),
+            };
+            let qemu = match change {
+                "qemu" => Some(live_qemu(&launcher, &plan.container_name)),
+                _ => {
+                    std::fs::write(
+                        fake_state.join(format!("{}.restart-count", plan.container_name)),
+                        "1",
+                    )
+                    .unwrap();
+                    None
+                }
+            };
+
+            let refused = launcher
+                .accept_failed_stop(&plan.container_name, &fence, error, host.clone())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                refused.contains("hosted lifecycle fence stayed unresolved")
+                    && refused.contains("no longer proven gone"),
+                "{change}: {refused}"
+            );
+            assert!(fence_root.join("mutation-in-progress").exists(), "{change}");
+            assert!(!fence_root.join("proxy.log").exists(), "{change}");
+
+            // The same call succeeds once the host is clean again.
+            match qemu {
+                Some(qemu) => std::fs::remove_dir_all(qemu).unwrap(),
+                None => std::fs::write(
+                    fake_state.join(format!("{}.restart-count", plan.container_name)),
+                    "",
+                )
+                .unwrap(),
+            }
+            launcher
+                .accept_failed_stop(
+                    &plan.container_name,
+                    &fence,
+                    RunnerError::RuntimeLaunch("stop failed".to_string()),
+                    host,
+                )
+                .unwrap();
+            assert!(
+                !fence_root.join("mutation-in-progress").exists(),
+                "{change}"
+            );
+        }
+    }
+
+    #[test]
+    fn paused_or_unpinned_containers_never_count_as_stopped() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, fake_state) = test_launcher(&temp, 1);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            1,
+            &plan.state_root,
+        );
+        let id = fake_container_id(&plan.container_name);
+        for status in ["running", "paused", "pausing"] {
+            std::fs::write(
+                fake_state.join(format!("{}.status", plan.container_name)),
+                status,
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    launcher.sample_failed_stop(&plan.container_name, Some(&id)),
+                    FailedStopSample::Running(_)
+                ),
+                "{status}"
+            );
+        }
+        // Gone from the provider with no identity pinned: nothing is proven.
+        assert!(matches!(
+            launcher.sample_failed_stop("finite-kata-never-pinned", None),
+            FailedStopSample::Refused(_)
+        ));
     }
 
     #[test]

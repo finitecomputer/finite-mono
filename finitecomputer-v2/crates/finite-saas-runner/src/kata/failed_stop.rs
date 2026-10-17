@@ -174,8 +174,10 @@ fn program_name(arg: &[u8]) -> String {
     base.strip_suffix("-wrapped").unwrap_or(base).to_string()
 }
 
+/// Only the Kata shim is exempt: it holds the stopped task but no guest and
+/// no share of `/data`. Any other shim kind naming the sandbox blocks.
 fn is_containerd_shim(program: &str) -> bool {
-    program.starts_with("containerd-shim-")
+    program == "containerd-shim-kata-v2"
 }
 
 #[cfg(test)]
@@ -284,5 +286,29 @@ mod tests {
     fn an_unreadable_process_table_fails_closed() {
         let root = tempfile::tempdir().unwrap();
         assert!(sandbox_host_state(root.path(), ID).is_err());
+    }
+
+    #[test]
+    fn a_process_that_cannot_be_read_is_never_treated_as_vanished() {
+        let root = host();
+        // A read error other than "no such process" (here EISDIR, which root
+        // cannot bypass) leaves the process unidentified: fail closed.
+        std::fs::create_dir_all(root.path().join("proc/77/cmdline")).unwrap();
+        assert!(sandbox_host_state(root.path(), ID).is_err());
+    }
+
+    #[test]
+    fn only_the_kata_shim_is_exempt() {
+        for program in [
+            "/nix/store/x-containerd-2.3.0/bin/containerd-shim-runc-v2",
+            "/usr/bin/containerd-shim-kata-v2-impostor",
+            "/usr/bin/containerd",
+        ] {
+            let root = host();
+            process(root.path(), 51, &[program, "-id", ID]);
+            let state = sandbox_host_state(root.path(), ID).unwrap();
+            assert!(!state.vm_gone(), "{program} must not be exempt");
+            assert!(state.shims.is_empty(), "{program}");
+        }
     }
 }
