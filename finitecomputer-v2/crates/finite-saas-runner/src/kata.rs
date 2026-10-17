@@ -643,32 +643,91 @@ impl KataLauncher {
         Ok(())
     }
 
+    /// Remove the container now named `container_name`, if there is one, and
+    /// prove it gone. Ok means that exact container record no longer exists,
+    /// so neither the Runner nor containerd's restart monitor can give it a
+    /// task again; callers start another container on its `/data` only after
+    /// Ok. A retained record or an inconclusive lookup is an error.
     fn remove_compute(&self, container_name: &str) -> Result<(), RunnerError> {
-        if self.config.hosted_hermes.is_some()
-            && self
-                .inspect(container_name)?
-                .is_some_and(|container| container.state.status == "running")
-        {
+        match self.inspect(container_name)? {
+            Some(inspected) => self.remove_inspected_compute(container_name, &inspected),
+            None => Ok(()),
+        }
+    }
+
+    /// `remove_compute` for exactly container `id`, which the caller pinned
+    /// before renames or a failed stop: a different container under the name
+    /// is refused, and with nothing under the name the ID must still be
+    /// proven absent.
+    fn remove_pinned_compute(&self, container_name: &str, id: &str) -> Result<(), RunnerError> {
+        match self.inspect(container_name)? {
+            Some(inspected) if inspected.id == id => {
+                self.remove_inspected_compute(container_name, &inspected)
+            }
+            Some(_) => Err(RunnerError::RuntimeLaunch(format!(
+                "refusing to remove {container_name}: it is no longer container {id}"
+            ))),
+            None => self.confirm_removed(container_name, id).map_err(|error| {
+                RunnerError::RuntimeLaunch(format!(
+                    "refusing to treat {container_name} as removed: container {id} is not proven gone ({error})"
+                ))
+            }),
+        }
+    }
+
+    fn remove_inspected_compute(
+        &self,
+        container_name: &str,
+        inspected: &KataInspect,
+    ) -> Result<(), RunnerError> {
+        let id = inspected.id.as_str();
+        if self.config.hosted_hermes.is_some() && inspected.state.status == "running" {
             // Guest shutdown can take minutes. Retain its saved reservation
             // and keep ingress available until the short remove/reuse boundary.
-            match self.stop_compute(container_name)? {
+            match self.stop_compute_checked(container_name, Some(id))? {
                 // After a failed-but-gone stop containerd could still restart
-                // this container, but the `rm --force` below must succeed
-                // first: it deletes any task and the container record, after
-                // which neither the Runner nor the restart monitor can give
-                // it a task. Callers start another writer only after that.
+                // this container. The removal below, proven by its full ID,
+                // must succeed before any caller starts another writer.
                 KataStop::Clean | KataStop::FailedButGone { .. } => {}
             }
         }
+        // Remove the pinned full ID, never whatever the name means by then.
         self.run_checked(
             self.command(vec![
                 OsString::from("rm"),
                 OsString::from("--force"),
-                OsString::from(container_name),
+                OsString::from(id),
             ]),
             self.config.command_timeout,
         )?;
-        Ok(())
+        self.confirm_removed(container_name, id)
+    }
+
+    /// `nerdctl rm --force` exits 0 even when it only logged a failure to
+    /// delete the container (nerdctl 2.3.4 `pkg/cmd/container/remove.go`
+    /// returns nil for any error under `--force`). Only nerdctl answering an
+    /// inspect of the exact full ID with "no such object" proves the record,
+    /// and so any task containerd could restart, is gone.
+    fn confirm_removed(&self, container_name: &str, id: &str) -> Result<(), RunnerError> {
+        let command = self.command(vec![OsString::from("inspect"), OsString::from(id)]);
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if output.status.success() {
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "Kata compute {container_name} ({id}) still exists after its removal; `nerdctl rm --force` exits 0 even when it did not remove the container"
+            )));
+        }
+        let combined = format!(
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if combined.contains(&format!("no such object {id}")) {
+            return Ok(());
+        }
+        Err(RunnerError::RuntimeLaunch(format!(
+            "cannot confirm that Kata compute {container_name} ({id}) was removed: {}",
+            combined.trim()
+        )))
     }
 
     fn remove_compute_if_present(
@@ -1126,7 +1185,7 @@ impl KataLauncher {
     /// Stop `container_name`, pinning its identity first so a failed stop is
     /// judged against exactly that container. Every caller must handle
     /// `KataStop::FailedButGone`: after it, only that same container may
-    /// start again on its `/data` (or it is removed first).
+    /// start again on its `/data` (or it is proven removed first).
     fn stop_compute(&self, container_name: &str) -> Result<KataStop, RunnerError> {
         let expected_id = self
             .inspect(container_name)
@@ -1137,7 +1196,7 @@ impl KataLauncher {
     }
 
     /// For callers that only stop: nothing starts on this `/data` after them
-    /// in the same operation (or `rm --force` of this container comes first),
+    /// in the same operation (or this container is proven removed first),
     /// so a failed-but-gone stop is a completed stop. Callers that start any
     /// other container afterwards must use `stop_compute` and match.
     fn stop_compute_only(&self, container_name: &str) -> Result<(), RunnerError> {
@@ -1562,8 +1621,8 @@ impl KataLauncher {
         old_npub: &str,
     ) -> Result<(), RunnerError> {
         if self.inspect(candidate_name)?.is_some() {
-            // `rm --force` must complete before the old Runtime is started;
-            // two live containers must never write the same /data bind.
+            // The candidate must be proven removed before the old Runtime
+            // is started; two containers must never write the same /data.
             self.remove_compute(candidate_name)?;
         }
         self.restore_previous_compute(canonical_plan, old_npub, None)
@@ -1572,14 +1631,16 @@ impl KataLauncher {
     fn restore_rollback_after_adopted_target_failure(
         &self,
         canonical_plan: &KataLaunchPlan,
+        target_id: &str,
         rollback_name: &str,
         rollback_id: &str,
         expected_old_npub: Option<&str>,
     ) -> Result<(), RunnerError> {
-        // The target canonical must be removed before the old handle is made
-        // canonical and started: both bind the same durable /data read-write.
-        // Only the validated rollback container, by its full ID, may start.
-        self.remove_compute(&canonical_plan.container_name)?;
+        // The target canonical, by the full ID that was validated, must be
+        // proven removed before the old handle is made canonical and
+        // started: both bind the same durable /data read-write. Only the
+        // validated rollback container, by its full ID, may start.
+        self.remove_pinned_compute(&canonical_plan.container_name, target_id)?;
         self.rename_compute(rollback_name, &canonical_plan.container_name)?;
         match expected_old_npub {
             Some(expected) => {
@@ -2972,6 +3033,7 @@ impl RuntimeLauncher for KataLauncher {
                     };
                     let restore = self.restore_rollback_after_adopted_target_failure(
                         &canonical_plan,
+                        &inspected.id,
                         &rollback_name,
                         &rollback.id,
                         expected_old_npub
@@ -3207,20 +3269,36 @@ impl RuntimeLauncher for KataLauncher {
             Err(error) => {
                 // The old compute may come back only after the target, now
                 // canonical, stopped cleanly or its failed stop was proven
-                // gone, and only once `rm --force` of the target succeeded
-                // (discard_candidate_and_restore), so the restart monitor
-                // can never give the target a task again. A target stop that
-                // is not proven gone keeps the old compute stopped.
-                match self.stop_compute(&canonical_name) {
+                // gone, and only once the target's record, pinned here by its
+                // full ID before any rename, is proven removed: then the
+                // restart monitor can never give the target a task again. A
+                // target that cannot be pinned, stopped or proven removed
+                // keeps the old compute stopped.
+                let Some(target_id) = self
+                    .inspect(&canonical_name)
+                    .ok()
+                    .flatten()
+                    .map(|target| target.id)
+                else {
+                    return Err(runtime_upgrade_failure(
+                        error,
+                        Some(RunnerError::RuntimeLaunch(format!(
+                            "the upgraded compute {canonical_name} could not be identified for rollback"
+                        ))),
+                    ));
+                };
+                match self.stop_compute_checked(&canonical_name, Some(&target_id)) {
                     Ok(KataStop::Clean | KataStop::FailedButGone { .. }) => {}
                     Err(stop) => return Err(runtime_upgrade_failure(error, Some(stop))),
                 }
                 let move_target = self.rename_compute(&canonical_name, &candidate_name);
                 let move_old =
                     move_target.and_then(|()| self.rename_compute(&rollback_name, &canonical_name));
-                let restore = move_old.and_then(|()| {
-                    self.discard_candidate_and_restore(&candidate_name, &canonical_plan, &old_npub)
-                });
+                let restore = move_old
+                    .and_then(|()| self.remove_pinned_compute(&candidate_name, &target_id))
+                    .and_then(|()| {
+                        self.restore_previous_compute(&canonical_plan, &old_npub, Some(&old_id))
+                    });
                 return Err(runtime_upgrade_failure(error, restore.err()));
             }
         };
@@ -5383,10 +5461,21 @@ case "$cmd" in
         fi
       fi
     fi
+    if [ -f "$root/inspect-id-unavailable" ]; then
+      # containerd cannot answer a lookup by full ID (names contain '-').
+      case "$*" in
+        *-*) ;;
+        *) echo "time=\"2026-10-17T02:56:03Z\" level=fatal msg=\"rpc error: code = Unavailable desc = connection error\"" >&2; exit 1 ;;
+      esac
+    fi
     printf '['
     separator=""
     for ref in "$@"; do
-      if ! name="$(resolve "$ref")"; then echo "not found" >&2; exit 1; fi
+      if ! name="$(resolve "$ref")"; then
+        # nerdctl 2.3.4 generic inspect, cmd/nerdctl/inspect/inspect.go.
+        echo "time=\"2026-10-17T02:56:03Z\" level=fatal msg=\"1 errors: [no such object $ref]\"" >&2
+        exit 1
+      fi
       printf '%s' "$separator"; separator=","
       record "$name"
     done
@@ -5502,7 +5591,19 @@ case "$cmd" in
     fi
     ;;
   rm)
-    for name in "$@"; do :; done
+    for target in "$@"; do :; done
+    if ! name="$(resolve "$target")"; then
+      # Under --force nerdctl logs a missing container and exits 0.
+      echo "time=\"2026-10-17T02:56:03Z\" level=error msg=\"no such container $target\"" >&2
+      exit 0
+    fi
+    if [ -f "$root/rm-succeeds-but-retains" ]; then
+      # nerdctl 2.3.4 pkg/cmd/container/remove.go: under --force any
+      # removal error is only logged and the command exits 0, while the
+      # container record (and its task) stays.
+      echo "time=\"2026-10-17T02:56:03Z\" level=error msg=\"failed to delete task: rpc error: code = Unavailable desc = ttrpc: closed\"" >&2
+      exit 0
+    fi
     if [ -f "$root/$name.wedged" ]; then
       echo "failed to delete task: rpc error: code = Unavailable desc = ttrpc: closed" >&2
       exit 1
@@ -5551,10 +5652,14 @@ case "$cmd" in
         *) image="$1"; shift ;;
       esac
     done
+    # Each run of a name gets a new full ID that tests can predict:
+    # fake_run_id(name, n) for the n-th run (0-based) of that name.
+    runs="$(cat "$root/runs.$name" 2>/dev/null || echo 0)"
+    printf '%s' "$((runs + 1))" > "$root/runs.$name"
     if [ -f "$root/run-id" ]; then
       write_field "$name" id "$(cat "$root/run-id")"
     else
-      write_field "$name" id "$(python3 -c 'import hashlib,sys,time; print(hashlib.sha256(("%s-%d" % (sys.argv[1], time.time_ns())).encode()).hexdigest())' "$name")"
+      write_field "$name" id "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(("run-%s-%s" % (sys.argv[2], sys.argv[1])).encode()).hexdigest())' "$name" "$runs")"
     fi
     write_field "$name" hermes-port "$hermes"
     write_field "$name" image "$image"; write_field "$name" status running
@@ -5575,6 +5680,8 @@ case "$cmd" in
       write_field "$stale" request "$(cat "$root/also-create.request")"
       write_field "$stale" recovery ""
       write_field "$stale" status created
+      # Its full ID is fake_container_id(stale).
+      write_field "$stale" id "$(python3 -c 'import hashlib,sys; print(hashlib.sha256(sys.argv[1].encode()).hexdigest())' "$stale")"
       rm -f "$root/also-create" "$root/also-create.request"
     fi
     ;;
@@ -5815,6 +5922,15 @@ esac
     /// The full containerd ID a fixture container carries.
     fn fake_container_id(name: &str) -> String {
         format!("{:x}", Sha256::digest(name.as_bytes()))
+    }
+
+    /// The full ID the fake `nerdctl run` gives the `nth` (0-based) run of
+    /// `name`.
+    fn fake_run_id(name: &str, nth: usize) -> String {
+        format!(
+            "{:x}",
+            Sha256::digest(format!("run-{nth}-{name}").as_bytes())
+        )
     }
 
     /// An empty synthetic host for the failed-stop proof: no process and no
@@ -6238,7 +6354,10 @@ esac
             .unwrap();
         let run = commands_before_retry.find("run --detach").unwrap();
         let remove = commands_before_retry
-            .find(&format!("rm --force {}", candidate_plan.container_name))
+            .find(&format!(
+                "rm --force {}",
+                fake_run_id(&candidate_plan.container_name, 0)
+            ))
             .unwrap();
         let start = commands_before_retry
             .rfind(&format!(
@@ -6527,7 +6646,10 @@ esac
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
         assert!(!commands.contains("run --detach"));
         let remove = commands
-            .find(&format!("rm --force {}", candidate.container_name))
+            .find(&format!(
+                "rm --force {}",
+                fake_container_id(&candidate.container_name)
+            ))
             .unwrap();
         let start = commands
             .find(&format!(
@@ -6973,7 +7095,10 @@ esac
 
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
         let remove_old = commands
-            .find(&format!("rm --force {}", old_helper.container_name))
+            .find(&format!(
+                "rm --force {}",
+                fake_container_id(&old_helper.container_name)
+            ))
             .unwrap();
         let stop = commands
             .find(&format!("stop --time 30 {}", plan.container_name))
@@ -8700,31 +8825,74 @@ esac
 
     #[test]
     fn kata_upgrade_post_swap_failure_restores_the_old_compute_only_after_the_target_is_gone() {
+        post_swap_failure_cases(false);
+    }
+
+    #[test]
+    fn kata_upgrade_hosted_post_swap_failure_restores_the_old_compute_only_after_the_target_is_gone()
+     {
+        post_swap_failure_cases(true);
+    }
+
+    fn post_swap_failure_cases(hosted: bool) {
         // The swapped-in target fails its post-swap checks. The old compute
         // may come back only after the target stopped cleanly or its failed
-        // stop was proven gone, and only after `rm --force` of the target. A
-        // target stop that is not proven gone keeps the old compute stopped
-        // and reports the Agent down.
-        for (case, arm, target_alive, restored) in [
-            ("clean-stop", None, false, true),
+        // stop was proven gone, and only after the target's record, pinned
+        // by its full ID, is proven removed. Otherwise the old compute stays
+        // stopped and the Agent is reported down.
+        #[derive(Clone, Copy, Debug, PartialEq)]
+        enum Outcome {
+            Restored,
+            DownBeforeRemoval,
+            DownTargetRetained,
+        }
+        for (case, arm, target_alive, retained, outcome) in [
+            ("clean-stop", None, false, false, Outcome::Restored),
             (
                 "failed-stop-gone",
                 Some("fail-stop-after-exit"),
                 false,
-                true,
+                false,
+                Outcome::Restored,
             ),
             (
                 "failed-stop-vm-alive",
                 Some("fail-stop-after-exit"),
                 true,
                 false,
+                Outcome::DownBeforeRemoval,
             ),
-            ("stop-still-running", Some("stuck-stop"), false, false),
+            (
+                "stop-still-running",
+                Some("stuck-stop"),
+                false,
+                false,
+                Outcome::DownBeforeRemoval,
+            ),
+            (
+                "clean-stop-removal-retained",
+                None,
+                false,
+                true,
+                Outcome::DownTargetRetained,
+            ),
+            (
+                "failed-stop-gone-removal-retained",
+                Some("fail-stop-after-exit"),
+                false,
+                true,
+                Outcome::DownTargetRetained,
+            ),
         ] {
+            let label = format!("{case} hosted={hosted}");
             let old_server = TestHttpServer::start("npub1sameagent");
             let candidate_server = TestHttpServer::start("npub1sameagent");
+            let core = EmptyRouteTargets::start();
             let temp = tempfile::tempdir().unwrap();
             let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            if hosted {
+                hosted_fixture(&mut launcher, &temp, &core.url());
+            }
             write_fake_container(
                 &fake_state,
                 &plan.container_name,
@@ -8739,11 +8907,8 @@ esac
                 kata_upgrade_helper_name(&plan.container_name, "rollback", &lease.request.id);
             let candidate_name =
                 kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
-            std::fs::write(
-                fake_state.join("run-id"),
-                fake_container_id(&candidate_name),
-            )
-            .unwrap();
+            let target_id = fake_container_id(&candidate_name);
+            std::fs::write(fake_state.join("run-id"), &target_id).unwrap();
             std::fs::write(
                 fake_state.join("on-swap-image"),
                 format!(
@@ -8758,6 +8923,9 @@ esac
             if target_alive {
                 live_qemu(&launcher, &candidate_name);
             }
+            if retained {
+                arm_retained_removal(&fake_state);
+            }
 
             let error = launcher
                 .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
@@ -8766,63 +8934,561 @@ esac
 
             assert!(
                 error.contains("did not resolve to the requested upgrade artifact"),
-                "{case}: {error}"
+                "{label}: {error}"
             );
             let mutations = provider_mutations(&fake_state);
             let old_start = format!("start {}", fake_container_id(&plan.container_name));
-            if restored {
-                assert!(!reports_agent_down(&error), "{case}: {error}");
-                let target_removed = mutations
-                    .iter()
-                    .position(|line| *line == format!("rm --force {candidate_name}"))
-                    .unwrap_or_else(|| panic!("{case}: {mutations:?}"));
-                let old_started = mutations
-                    .iter()
-                    .position(|line| *line == old_start)
-                    .unwrap_or_else(|| panic!("{case}: {mutations:?}"));
-                assert!(target_removed < old_started, "{case}: {mutations:?}");
-                assert_eq!(
-                    std::fs::read_to_string(
-                        fake_state.join(format!("{}.status", plan.container_name))
-                    )
-                    .unwrap(),
-                    "running",
-                    "{case}"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(
-                        fake_state.join(format!("{}.image", plan.container_name))
-                    )
-                    .unwrap(),
-                    OLD_TEST_IMAGE,
-                    "{case}"
-                );
-            } else {
-                assert!(reports_agent_down(&error), "{case}: {error}");
-                assert!(
-                    !mutations.iter().any(|line| line.starts_with("start ")),
-                    "{case}: the old compute started beside the target: {mutations:?}"
-                );
-                assert!(
-                    !mutations.iter().any(|line| line.starts_with("rm ")),
-                    "{case}: {mutations:?}"
-                );
-                assert_eq!(
-                    mutations
+            let target_removal = format!("rm --force {target_id}");
+            let status = |name: &str| {
+                std::fs::read_to_string(fake_state.join(format!("{name}.status"))).unwrap()
+            };
+            match outcome {
+                Outcome::Restored => {
+                    assert!(!reports_agent_down(&error), "{label}: {error}");
+                    let target_removed = mutations
                         .iter()
-                        .filter(|line| line.starts_with("rename "))
-                        .count(),
-                    2,
-                    "{case}: only the swap itself renamed: {mutations:?}"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(fake_state.join(format!("{rollback_name}.status")))
+                        .position(|line| *line == target_removal)
+                        .unwrap_or_else(|| panic!("{label}: {mutations:?}"));
+                    let old_started = mutations
+                        .iter()
+                        .position(|line| *line == old_start)
+                        .unwrap_or_else(|| panic!("{label}: {mutations:?}"));
+                    assert!(target_removed < old_started, "{label}: {mutations:?}");
+                    assert_eq!(status(&plan.container_name), "running", "{label}");
+                    assert_eq!(
+                        std::fs::read_to_string(
+                            fake_state.join(format!("{}.image", plan.container_name))
+                        )
                         .unwrap(),
-                    "exited",
-                    "{case}"
-                );
+                        OLD_TEST_IMAGE,
+                        "{label}"
+                    );
+                }
+                Outcome::DownBeforeRemoval => {
+                    assert!(reports_agent_down(&error), "{label}: {error}");
+                    assert!(
+                        !mutations.iter().any(|line| line.starts_with("start ")),
+                        "{label}: the old compute started beside the target: {mutations:?}"
+                    );
+                    assert!(
+                        !mutations.iter().any(|line| line.starts_with("rm ")),
+                        "{label}: {mutations:?}"
+                    );
+                    assert_eq!(
+                        mutations
+                            .iter()
+                            .filter(|line| line.starts_with("rename "))
+                            .count(),
+                        2,
+                        "{label}: only the swap itself renamed: {mutations:?}"
+                    );
+                    assert_eq!(status(&rollback_name), "exited", "{label}");
+                }
+                Outcome::DownTargetRetained => {
+                    // Codex round 3: nerdctl exited 0 but kept the
+                    // target, which the restart monitor could still
+                    // start; the old compute must not start beside it.
+                    assert!(
+                        reports_agent_down(&error) && error.contains(RETAINED_REMOVAL),
+                        "{label}: {error}"
+                    );
+                    assert!(
+                        mutations.contains(&target_removal),
+                        "{label}: {mutations:?}"
+                    );
+                    assert_nothing_started_after_removal(&fake_state, &label);
+                    assert!(
+                        fake_state.join(format!("{candidate_name}.image")).exists(),
+                        "{label}: the fake must have retained the target"
+                    );
+                    assert_eq!(status(&plan.container_name), "exited", "{label}");
+                }
             }
         }
+    }
+
+    /// The tail of a removal that nerdctl 2.3.4 reports as success while it
+    /// kept the container record (`rm-succeeds-but-retains`).
+    const RETAINED_REMOVAL: &str = "still exists after its removal";
+
+    /// Make every later fake `nerdctl rm --force` log a deletion error, keep
+    /// the container record and exit 0, as nerdctl 2.3.4 does under --force.
+    fn arm_retained_removal(fake_state: &Path) {
+        std::fs::write(fake_state.join("rm-succeeds-but-retains"), "1").unwrap();
+    }
+
+    /// After the first `rm`, no provider command starts or creates compute.
+    fn assert_nothing_started_after_removal(fake_state: &Path, label: &str) {
+        let mutations = provider_mutations(fake_state);
+        let first_removal = mutations
+            .iter()
+            .position(|line| line.starts_with("rm "))
+            .unwrap_or_else(|| panic!("{label}: nothing was removed: {mutations:?}"));
+        assert!(
+            !mutations[first_removal..].iter().any(|line| {
+                line.starts_with("start ")
+                    || line.starts_with("run ")
+                    || line.starts_with("restart ")
+            }),
+            "{label}: compute started after a retained removal: {mutations:?}"
+        );
+    }
+
+    /// A removal nerdctl reported as success while it kept the record was
+    /// refused, and nothing started or was created afterwards.
+    fn assert_retained_removal_refused(error: &str, fake_state: &Path, label: &str) {
+        assert!(error.contains(RETAINED_REMOVAL), "{label}: {error}");
+        assert_nothing_started_after_removal(fake_state, label);
+    }
+
+    fn fake_status(fake_state: &Path, name: &str) -> String {
+        std::fs::read_to_string(fake_state.join(format!("{name}.status"))).unwrap()
+    }
+
+    #[test]
+    fn kata_retained_removal_of_an_upgrade_candidate_never_restarts_the_old_compute() {
+        // discard_candidate_and_restore after the candidate failed its
+        // identity check: the candidate was kept, so the old compute stays
+        // stopped and the Agent is reported down.
+        for hosted in [false, true] {
+            let label = format!("hosted={hosted}");
+            let old_server = TestHttpServer::start("npub1sameagent");
+            let candidate_server = TestHttpServer::start("npub1differentagent");
+            let core = EmptyRouteTargets::start();
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            if hosted {
+                hosted_fixture(&mut launcher, &temp, &core.url());
+            }
+            write_fake_container(
+                &fake_state,
+                &plan.container_name,
+                OLD_TEST_IMAGE,
+                "artifact-v1",
+                "",
+                old_server.port,
+                &plan.state_root,
+            );
+            arm_retained_removal(&fake_state);
+            let lease = upgrade_lease("runtime_ctl_upgrade_rollback");
+
+            let error = launcher
+                .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+                .unwrap_err()
+                .to_string();
+
+            assert!(
+                reports_agent_down(&error) && error.contains("different Agent Principal"),
+                "{label}: {error}"
+            );
+            assert_retained_removal_refused(&error, &fake_state, &label);
+            let candidate_name =
+                kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
+            assert!(
+                fake_state.join(format!("{candidate_name}.image")).exists(),
+                "{label}"
+            );
+            assert_eq!(
+                fake_status(&fake_state, &plan.container_name),
+                "exited",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_unconfirmed_removal_of_an_upgrade_candidate_never_restarts_the_old_compute() {
+        // The candidate really was removed, but the lookup by its full ID
+        // cannot answer: an inconclusive check refuses like a retained one.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1differentagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join("inspect-id-unavailable"), "1").unwrap();
+
+        let error = launcher
+            .upgrade_runtime(
+                &upgrade_lease("runtime_ctl_upgrade_unconfirmed"),
+                &RuntimeRestartOptions::default(),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            reports_agent_down(&error)
+                && error.contains("cannot confirm that Kata compute")
+                && error.contains("Unavailable"),
+            "{error}"
+        );
+        assert_nothing_started_after_removal(&fake_state, "unconfirmed");
+        assert_eq!(fake_status(&fake_state, &plan.container_name), "exited");
+    }
+
+    #[test]
+    fn kata_retained_removal_of_a_recovery_helper_never_restarts_the_canonical() {
+        // The helper finished; it must be gone before the canonical starts.
+        for hosted in [false, true] {
+            let label = format!("hosted={hosted}");
+            let request_id = "runtime_ctl_recover_retained_helper";
+            let (error, _temp, plan, fake_state, _fence) =
+                failed_stop_recovery(request_id, hosted, |_, _, fake_state| {
+                    arm_retained_removal(fake_state)
+                });
+            assert_retained_removal_refused(&error, &fake_state, &label);
+            let helper = kata_recovery_plan(&plan, request_id);
+            assert!(
+                fake_state
+                    .join(format!("{}.image", helper.container_name))
+                    .exists(),
+                "{label}"
+            );
+            assert_eq!(
+                fake_status(&fake_state, &plan.container_name),
+                "exited",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_retained_removal_of_a_stale_recovery_helper_stops_the_recovery() {
+        // reconcile_recovery_helpers runs before the canonical is touched.
+        for hosted in [false, true] {
+            let label = format!("hosted={hosted}");
+            let (error, _temp, plan, fake_state, _fence) = failed_stop_recovery(
+                "runtime_ctl_recover_after_retained_helper",
+                hosted,
+                |launcher, plan, fake_state| {
+                    let abandoned =
+                        recovery_lease("runtime_ctl_recover_abandoned_helper", OLD_TEST_IMAGE, 1);
+                    write_fake_recovery_candidate(launcher, fake_state, plan, &abandoned, 1);
+                    arm_retained_removal(fake_state);
+                },
+            );
+            assert_retained_removal_refused(&error, &fake_state, &label);
+            // A hosted Runner stops the running helper before removing it;
+            // the canonical is never touched.
+            let abandoned = kata_recovery_plan(&plan, "runtime_ctl_recover_abandoned_helper");
+            let mut expected = Vec::new();
+            if hosted {
+                expected.push(format!("stop --time 30 {}", abandoned.container_name));
+            }
+            expected.push(format!(
+                "rm --force {}",
+                fake_container_id(&abandoned.container_name)
+            ));
+            assert_eq!(provider_mutations(&fake_state), expected, "{label}");
+            assert_eq!(
+                fake_status(&fake_state, &plan.container_name),
+                "running",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_retained_removal_of_a_stale_upgrade_candidate_stops_the_upgrade() {
+        // The stale-candidate sweep runs before the old compute stops.
+        for hosted in [false, true] {
+            let label = format!("hosted={hosted}");
+            let old_server = TestHttpServer::start("npub1sameagent");
+            let candidate_server = TestHttpServer::start("npub1sameagent");
+            let core = EmptyRouteTargets::start();
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            if hosted {
+                hosted_fixture(&mut launcher, &temp, &core.url());
+            }
+            write_fake_container(
+                &fake_state,
+                &plan.container_name,
+                OLD_TEST_IMAGE,
+                "artifact-v1",
+                "",
+                old_server.port,
+                &plan.state_root,
+            );
+            let stale = stale_created_candidate(
+                &fake_state,
+                &plan,
+                "runtime_ctl_canary_window",
+                candidate_server.port,
+            );
+            arm_retained_removal(&fake_state);
+
+            let error = launcher
+                .upgrade_runtime(
+                    &upgrade_lease("runtime_ctl_upgrade_after_canary"),
+                    &RuntimeRestartOptions::default(),
+                )
+                .unwrap_err()
+                .to_string();
+
+            assert_retained_removal_refused(&error, &fake_state, &label);
+            assert_eq!(mutation_verbs(&fake_state), vec!["rm"], "{label}");
+            assert!(
+                fake_state.join(format!("{stale}.image")).exists(),
+                "{label}"
+            );
+            assert_eq!(
+                fake_status(&fake_state, &plan.container_name),
+                "running",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn kata_retained_removal_of_an_interrupted_candidate_never_restores_the_rollback() {
+        // A crash left the old compute under its rollback name and the
+        // candidate beside it, with no canonical: the candidate must be gone
+        // before the old compute is renamed back and started.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let lease = upgrade_lease("runtime_ctl_crash_after_old_rename");
+        let rollback_name =
+            kata_upgrade_helper_name(&plan.container_name, "rollback", &lease.request.id);
+        let candidate_name =
+            kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
+        write_fake_container(
+            &fake_state,
+            &rollback_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join(format!("{rollback_name}.status")), "exited").unwrap();
+        write_fake_container(
+            &fake_state,
+            &candidate_name,
+            &target_artifact().reference,
+            "artifact-v2",
+            &lease.request.id,
+            candidate_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{candidate_name}.status")),
+            "exited",
+        )
+        .unwrap();
+        write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
+        arm_retained_removal(&fake_state);
+
+        let error = launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap_err()
+            .to_string();
+
+        assert_retained_removal_refused(&error, &fake_state, "interrupted");
+        assert_eq!(mutation_verbs(&fake_state), vec!["rm"]);
+        assert_eq!(fake_status(&fake_state, &rollback_name), "exited");
+        assert!(
+            !fake_state
+                .join(format!("{}.image", plan.container_name))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn kata_retained_removal_of_an_interrupted_pre_swap_candidate_never_restores_the_old_compute() {
+        // The old compute was stopped and a candidate created before a crash;
+        // the retry must see the candidate gone before restarting the old.
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let candidate_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+        let lease = upgrade_lease("runtime_ctl_crash_after_candidate_run");
+        let candidate_name =
+            kata_upgrade_helper_name(&plan.container_name, "candidate", &lease.request.id);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        write_fake_container(
+            &fake_state,
+            &candidate_name,
+            &target_artifact().reference,
+            "artifact-v2",
+            &lease.request.id,
+            candidate_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{candidate_name}.status")),
+            "exited",
+        )
+        .unwrap();
+        write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
+        arm_retained_removal(&fake_state);
+
+        let error = launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap_err()
+            .to_string();
+
+        assert_retained_removal_refused(&error, &fake_state, "pre-swap");
+        assert_eq!(mutation_verbs(&fake_state), vec!["rm"]);
+        assert_eq!(fake_status(&fake_state, &plan.container_name), "exited");
+    }
+
+    #[test]
+    fn kata_retained_removal_of_an_adopted_target_never_restores_the_rollback() {
+        // The candidate became canonical before a crash and then failed its
+        // identity check: the target must be gone before the rollback is
+        // renamed back and started.
+        let target_server = TestHttpServer::start("npub1differentagent");
+        let old_server = TestHttpServer::start("npub1sameagent");
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, fake_state) = test_launcher(&temp, target_server.port);
+        let lease = upgrade_lease("runtime_ctl_crash_identity_mismatch");
+        let rollback_name =
+            kata_upgrade_helper_name(&plan.container_name, "rollback", &lease.request.id);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            &target_artifact().reference,
+            "artifact-v2",
+            &lease.request.id,
+            target_server.port,
+            &plan.state_root,
+        );
+        write_fake_container(
+            &fake_state,
+            &rollback_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            old_server.port,
+            &plan.state_root,
+        );
+        std::fs::write(fake_state.join(format!("{rollback_name}.status")), "exited").unwrap();
+        write_kata_upgrade_expected_npub(&plan, &lease.request.id, "npub1sameagent").unwrap();
+        arm_retained_removal(&fake_state);
+
+        let error = launcher
+            .upgrade_runtime(&lease, &RuntimeRestartOptions::default())
+            .unwrap_err()
+            .to_string();
+
+        assert!(reports_agent_down(&error), "{error}");
+        assert_retained_removal_refused(&error, &fake_state, "adopted");
+        assert_eq!(
+            mutation_verbs(&fake_state),
+            vec!["rm"],
+            "no rename back, no start"
+        );
+        assert_eq!(fake_status(&fake_state, &rollback_name), "exited");
+    }
+
+    #[test]
+    fn kata_retained_removal_never_launches_a_replacement() {
+        // run_fresh replaces an owned container under the same name.
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, fake_state) = test_launcher(&temp, 1);
+        write_fake_container(
+            &fake_state,
+            &plan.container_name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            1,
+            &plan.state_root,
+        );
+        std::fs::write(
+            fake_state.join(format!("{}.status", plan.container_name)),
+            "exited",
+        )
+        .unwrap();
+        arm_retained_removal(&fake_state);
+        let lease = relocation_creation_lease(
+            "agent_request_retained_replacement",
+            "finite-lat-1",
+            "finite-lat-1",
+            &"0".repeat(64),
+            true,
+        );
+        let planned = launcher.plan_launch(&lease).unwrap();
+        assert_eq!(planned.container_name, plan.container_name);
+
+        let error = launcher
+            .run_fresh(
+                &planned,
+                &lease,
+                &RuntimeLaunchOptions::default(),
+                &mut || Ok(()),
+            )
+            .unwrap_err()
+            .to_string();
+
+        assert_retained_removal_refused(&error, &fake_state, "replacement");
+        assert_eq!(mutation_verbs(&fake_state), vec!["rm"]);
+    }
+
+    #[test]
+    fn kata_pinned_removal_refuses_another_container_or_a_hidden_record() {
+        let temp = tempfile::tempdir().unwrap();
+        let (launcher, plan, fake_state) = test_launcher(&temp, 1);
+        let name = plan.container_name.clone();
+        write_fake_container(
+            &fake_state,
+            &name,
+            OLD_TEST_IMAGE,
+            "artifact-v1",
+            "",
+            1,
+            &plan.state_root,
+        );
+        // Another container under the name is never removed in its place.
+        let error = launcher
+            .remove_pinned_compute(&name, &"e".repeat(64))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no longer container"), "{error}");
+        assert!(provider_mutations(&fake_state).is_empty());
+        // The pinned record renamed away is not "removed" just because the
+        // name is free.
+        let id = fake_container_id(&name);
+        launcher.rename_compute(&name, "elsewhere").unwrap();
+        let error = launcher
+            .remove_pinned_compute(&name, &id)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not proven gone"), "{error}");
+        assert!(fake_state.join("elsewhere.image").exists());
+        // Removed for real: the ID lookup answers "no such object".
+        launcher.remove_pinned_compute("elsewhere", &id).unwrap();
+        assert!(!fake_state.join("elsewhere.image").exists());
+        assert_eq!(
+            provider_mutations(&fake_state),
+            vec![
+                format!("rename {name} elsewhere"),
+                format!("rm --force {id}"),
+            ]
+        );
     }
 
     #[test]
@@ -9741,7 +10407,10 @@ esac
         );
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
         let remove = commands
-            .find(&format!("rm --force {candidate_name}"))
+            .find(&format!(
+                "rm --force {}",
+                fake_container_id(&candidate_name)
+            ))
             .unwrap();
         let restore = commands
             .find(&format!("rename {rollback_name} {}", plan.container_name))
@@ -9928,7 +10597,13 @@ esac
         );
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
         assert!(
-            !commands.contains(&format!("rm --force {}\n", plan.container_name)),
+            [
+                plan.container_name.clone(),
+                std::fs::read_to_string(fake_state.join(format!("{}.id", plan.container_name)))
+                    .unwrap()
+            ]
+            .iter()
+            .all(|target| !commands.contains(&format!("rm --force {target}\n"))),
             "the canonical handle is never removed:\n{commands}"
         );
     }
@@ -10470,7 +11145,9 @@ esac
         assert_eq!(facts.runtime_artifact_id, "artifact-v2");
         assert!(!fake_state.join(format!("{stale}.image")).exists());
         let commands = std::fs::read_to_string(fake_state.join("commands.log")).unwrap();
-        let remove_stale = commands.find(&format!("rm --force {stale}\n")).unwrap();
+        let remove_stale = commands
+            .find(&format!("rm --force {}\n", fake_container_id(&stale)))
+            .unwrap();
         let stop_old = commands
             .find(&format!("stop --time 30 {}", plan.container_name))
             .unwrap();
@@ -10521,7 +11198,9 @@ esac
         let adopt = commands
             .find(&format!("rename {candidate_name} {}", plan.container_name))
             .unwrap();
-        let remove_stale = commands.find(&format!("rm --force {stale}\n")).unwrap();
+        let remove_stale = commands
+            .find(&format!("rm --force {}\n", fake_container_id(&stale)))
+            .unwrap();
         assert!(
             adopt < remove_stale,
             "completion sweeps after the verified adoption"
