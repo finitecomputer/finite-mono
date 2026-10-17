@@ -111,10 +111,32 @@ if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
 fi
 
 git fetch origin --prune
-git merge-base --is-ancestor "$REV" origin/main || {
-  echo "refusing: $REV is not on origin/main" >&2
-  exit 65
-}
+# Isolated Runner release (opt-in): REV must be the exact head of a reviewed
+# origin release/runner-hosts-* branch instead of a main revision.
+if [[ -n "${FINITE_ISOLATED_RELEASE_BRANCH:-}" ]]; then
+  [[ "$FINITE_ISOLATED_RELEASE_BRANCH" =~ ^release/runner-hosts-[A-Za-z0-9._-]+$ ]] || {
+    echo "refusing: FINITE_ISOLATED_RELEASE_BRANCH must name release/runner-hosts-*" >&2
+    exit 64
+  }
+  # Fetch the named branch into the ref checked below. The clone's configured
+  # fetch refspecs may not cover it, and a stale tracking ref must not pass.
+  git fetch --no-tags origin \
+    "+refs/heads/$FINITE_ISOLATED_RELEASE_BRANCH:refs/remotes/origin/$FINITE_ISOLATED_RELEASE_BRANCH" || {
+    echo "refusing: cannot fetch origin $FINITE_ISOLATED_RELEASE_BRANCH" >&2
+    exit 65
+  }
+  release_head="$(git rev-parse --verify "refs/remotes/origin/$FINITE_ISOLATED_RELEASE_BRANCH^{commit}")" || exit 65
+  [[ "$release_head" == "$REV" ]] || {
+    echo "refusing: $REV is not the head of origin/$FINITE_ISOLATED_RELEASE_BRANCH ($release_head)" >&2
+    exit 65
+  }
+  echo "    isolated-release=$FINITE_ISOLATED_RELEASE_BRANCH"
+else
+  git merge-base --is-ancestor "$REV" origin/main || {
+    echo "refusing: $REV is not on origin/main" >&2
+    exit 65
+  }
+fi
 
 echo "==> validated finite-lat-3 closure artifact"
 echo "    rev=$REV"
