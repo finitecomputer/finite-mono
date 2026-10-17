@@ -29,13 +29,15 @@ the `wg-finite` overlay hub at `10.254.3.1`.
 ## SSH refused on a Latitude host
 
 `infra/nixos/modules/ssh-flood-limits.nix` throttles unauthenticated SSH on
-lat2, lat3, lat4, lat5 and lat7. sshd penalties last at most 10 minutes.
-fail2ban bans port 22 for one source, from 1 h up to 24 h on repeats. From
-any working session: `fail2ban-client status sshd`, then
-`fail2ban-client set sshd unbanip <ip>`. The exempt sources live in the
-module; add a changed operator address there. With no working session, assume
-the provider IPMI console offers no login: the path is a power cycle into the
-previous GRUB generation, a full host outage that needs its own go.
+lat2, lat3, lat4, lat5 and lat7 with sshd settings only; there is no ban
+daemon and no firewall rule. A penalised source is refused for at most 10
+minutes, so waiting it out works. Sources in the module's exempt list (the
+WireGuard overlay and the listed operator address) are never penalised; add a
+changed operator address there. From any working session,
+`systemctl reload sshd` re-executes the listener and clears every penalty;
+open sessions survive. With no working session, assume the provider IPMI
+console offers no login: the path is a power cycle into the previous GRUB
+generation, a full host outage that needs its own go.
 
 ## Legacy hosts
 

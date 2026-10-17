@@ -3,18 +3,19 @@
 # External scanners hold sshd's unauthenticated-connection slots. Under the
 # OpenSSH default MaxStartups of 10:30:100, sshd drops new connections at
 # random once more than 10 are unauthenticated, including operator key logins.
-# These limits keep a few flooding sources from filling the table and ban
-# repeat abusers. There is deliberately no firewall allowlist: an operator on
-# an unlisted address is still served, only throttled like any other source.
+# These sshd settings keep a few flooding sources from filling the table and
+# refuse repeat offenders for at most 10 minutes. There is deliberately no
+# firewall allowlist and no ban daemon: an operator on an unlisted address is
+# still served, only throttled like any other source.
 #
-# Applying this restarts sshd.service (KillMode=process keeps open sessions)
-# and starts fail2ban.service; nothing else is restarted on its account.
+# Applying this restarts sshd.service (KillMode=process keeps open sessions);
+# nothing else is restarted on its account.
 { lib, ... }:
 let
-  # Sources fail2ban never bans and sshd never penalises; key authentication
-  # still applies. The private WireGuard overlay, and the operator's current
-  # egress address. That address changes every few days and nothing depends
-  # on it being current: a stale entry only loses the exemption.
+  # Sources sshd never penalises; key authentication still applies. The
+  # private WireGuard overlay, and the operator's current egress address.
+  # That address changes every few days and nothing depends on it being
+  # current: a stale entry only loses the exemption.
   exemptSources = [
     "10.254.3.0/29"
     "136.49.172.158"
@@ -36,25 +37,8 @@ in
     # 10 minutes still bounds every penalty.
     PerSourcePenalties = "noauth:5";
     PerSourcePenaltyExemptList = lib.concatStringsSep "," exemptSources;
-    # The fail2ban module defaults this to VERBOSE; keep the current level.
+    # Pinned so a module that raises it (fail2ban defaults it to VERBOSE)
+    # cannot change log volume unnoticed.
     LogLevel = "INFO";
-  };
-
-  services.fail2ban = {
-    enable = true;
-    ignoreIP = exemptSources;
-    maxretry = 5;
-    bantime = "1h";
-    bantime-increment = {
-      enable = true;
-      maxtime = "24h";
-    };
-    # Aggressive mode also counts pre-auth disconnects for valid users and
-    # bare scanner connections, which make up most of the flood; normal mode
-    # only counts invalid users. The ban covers port 22 only.
-    jails.sshd.settings = {
-      mode = "aggressive";
-      findtime = "10m";
-    };
   };
 }
