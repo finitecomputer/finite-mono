@@ -1,5 +1,6 @@
 mod config;
 mod connections;
+mod control;
 mod daemon;
 mod hosted_hermes;
 mod hosted_hermes_pull;
