@@ -23,3 +23,7 @@ ab-serve:
 # Runs the skill A/B harness for one custom build prompt
 ab-test-prompt prompt:
     cd ab-testing && pnpm run ab:prompt -- {{ quote(prompt) }}
+
+# Saves an isolated fixture plan; optional --candidate PATH changes skill B
+ab-fixture *args:
+    cd ab-testing && node scripts/fixture.mjs {{ args }}

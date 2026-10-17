@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "id": "coffee-shop-homepage",
+  "title": "Coffee-shop homepage",
+  "brief": "Build a single-file homepage for Juniper Coffee, a neighborhood coffee shop. Use forest green (#23483C), cream (#FFF7E6), and warm orange (#C76535). Include the shop name, a short introduction, a menu with Espresso ($3), Latte ($5), and Filter coffee ($4), and a visit section with the address 42 Cedar Lane and opening hours Daily 7am–4pm. Make it usable on desktop and mobile. Deliver a self-contained HTML file. This is a local homepage preview; do not deploy or add a contact form.",
+  "requiredVisibleText": ["Juniper Coffee", "Espresso", "Latte", "Filter coffee", "42 Cedar Lane"],
+  "reviewCriteria": [
+    "Does the page feel like a distinct neighborhood coffee shop?",
+    "Are the requested colors, prices, and opening hours correct?",
+    "Can a visitor find the menu and visit details quickly on desktop and mobile?",
+    "Which result would you give to the user, and why?"
+  ],
+  "scope": "First local fixture only. Text checks do not prove visual quality, factual completeness, a working contact form, three pages, or deployment."
+}
