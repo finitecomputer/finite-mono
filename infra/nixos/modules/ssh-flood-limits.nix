@@ -11,10 +11,14 @@
 # and starts fail2ban.service; nothing else is restarted on its account.
 { lib, ... }:
 let
-  # Operator egress addresses: fail2ban never bans them and sshd never
-  # penalises them. Key authentication still applies. Update this list when
-  # an operator's address changes.
-  operatorSources = [ "136.49.172.158" ];
+  # Sources fail2ban never bans and sshd never penalises; key authentication
+  # still applies. The private WireGuard overlay, and the operator's current
+  # egress address. That address changes every few days and nothing depends
+  # on it being current: a stale entry only loses the exemption.
+  exemptSources = [
+    "10.254.3.0/29"
+    "136.49.172.158"
+  ];
 in
 {
   services.openssh.settings = {
@@ -31,14 +35,14 @@ in
     # and close without authenticating are refused sooner. The default max of
     # 10 minutes still bounds every penalty.
     PerSourcePenalties = "noauth:5";
-    PerSourcePenaltyExemptList = lib.concatStringsSep "," operatorSources;
+    PerSourcePenaltyExemptList = lib.concatStringsSep "," exemptSources;
     # The fail2ban module defaults this to VERBOSE; keep the current level.
     LogLevel = "INFO";
   };
 
   services.fail2ban = {
     enable = true;
-    ignoreIP = operatorSources;
+    ignoreIP = exemptSources;
     maxretry = 5;
     bantime = "1h";
     bantime-increment = {
