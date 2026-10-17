@@ -84,7 +84,7 @@ fn systemd_lifecycle() {
                 .unwrap();
             hosted.reconcile().unwrap();
         }
-        "stop" => launcher.stop_compute(&job.name).unwrap(),
+        "stop" => launcher.stop_compute_only(&job.name).unwrap(),
         "start" => launcher.start_compute(&job.name).unwrap(),
         "remove" => launcher.remove_compute(&job.name).unwrap(),
         "rename" => launcher.rename_compute(&job.name, &job.runtime).unwrap(),
