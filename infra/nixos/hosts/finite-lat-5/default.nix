@@ -35,6 +35,7 @@ in
     ../../modules/finite-saas-runner.nix
     ../../modules/kata-runner-host.nix
     ../../modules/metrics.nix
+    ../../modules/ssh-flood-limits.nix
   ];
 
   networking.hostName = "finite-lat-5";
