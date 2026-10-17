@@ -1,8 +1,9 @@
 # Finite Private requests and usage
 
-[Issue #946](https://github.com/finitecomputer/finite-mono/issues/946) defines
-this Internal Operator dashboard. It supplements GPU health with request
-traffic, tokens, timings, and seven-day diagnostic metadata.
+This Internal Operator dashboard supplements GPU health with request traffic,
+tokens, timings, and seven-day diagnostic metadata. The closed
+[GitHub issue #946](https://github.com/finitecomputer/finite-mono/issues/946)
+is a historical specification and rollout record, not an active ticket.
 
 ## Measurement contract
 
