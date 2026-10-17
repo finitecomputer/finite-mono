@@ -490,6 +490,20 @@ mod tests {
         assert!(marker.exists());
         std::fs::write(&marker, "test-invocation").unwrap();
 
+        // A command left behind by the proof itself refuses after the proof.
+        let procs = root.path().join("cgroup/cgroup.procs");
+        assert!(
+            guard
+                .resolve_own_failed_mutation(|| {
+                    std::fs::write(&procs, format!("{}\n4243\n", std::process::id())).unwrap();
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(marker.exists());
+        assert_eq!(proxy_log(root.path()), "");
+        std::fs::write(&procs, std::process::id().to_string()).unwrap();
+
         // Proven: the proxy stops while the marker still fences, then it clears.
         guard.resolve_own_failed_mutation(|| Ok(())).unwrap();
         assert!(!marker.exists());
