@@ -86,6 +86,7 @@ in
     ../../modules/backups.nix
     ../../modules/monitoring.nix
     ../../modules/finite-litestream.nix
+    ../../modules/ssh-flood-limits.nix
   ];
 
   networking.hostName = "finite-lat-2";
