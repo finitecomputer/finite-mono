@@ -1,0 +1,130 @@
+# Maintenance test candidate for 2026-09-16 03:00 America/Chicago.
+# Derived from Tinfoil V4.1 v0.0.3 and the exact live GLM flash-5 release.
+# Preparation only: this config has not been measured or run on our H200s.
+# See infra/runbooks/finite-private-deepseek-v41-test.md before release/use.
+cvm-version: 0.14.6
+cpus: 32
+memory: 524288
+gpus: 8
+
+models:
+  - name: "deepseek-v4-1-flash"
+    repo: "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a40aa45a94ad051997016db3960a90277"
+    mpk: "159977c3efb94d1eba09025f71af1d1d55d6a58c58e4165b4587ec83166fa385_510313381888_27d8d4f7-446a-5f31-ae99-2339b36c2dde"
+    schema: 2
+
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+      - finite.computer
+
+containers:
+  - name: "deepseek-v4-1-flash"
+    image: "ghcr.io/tinfoilsh/confidential-deepseek-v4-1-flash@sha256:fd77a686a50cc854424a55d6222530e6d5197d9b2f999ede32019b5dfd0ea9c0" # v0.0.3
+    runtime: nvidia
+    gpus: all
+    restart: always
+    networks: [model-net]
+    secrets: [VLLM_API_KEY]
+    env:
+      - PYTORCH_CUDA_ALLOC_CONF: "expandable_segments:True"
+      - VLLM_ALLREDUCE_USE_SYMM_MEM: "0"
+      - VLLM_ALLREDUCE_USE_FLASHINFER: "0"
+      - FLASHINFER_NO_DOWNLOAD: "1"
+      - NUMBA_CACHE_DIR: "/root/numba-cache"
+      - VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+    command:
+      [
+        "--model",
+        "/tinfoil/mpk/mpk-159977c3efb94d1eba09025f71af1d1d55d6a58c58e4165b4587ec83166fa385",
+        "--tokenizer-mode",
+        "deepseek_v41",
+        "--tensor-parallel-size",
+        "8",
+        "--language-model-only",
+        "--host",
+        "0.0.0.0",
+        "--engram-config",
+        '{"cpu_offload":false}',
+        "--tool-call-parser",
+        "deepseek_v41",
+        "--enable-auto-tool-choice",
+        "--reasoning-parser",
+        "deepseek_v41",
+        "--enable-force-include-usage",
+        "--enable-prompt-tokens-details",
+        "--served-model-name",
+        "deepseek-v4-1-flash",
+        "--scheduling-policy",
+        "priority",
+        "--port",
+        "8001",
+        "--disable-custom-all-reduce",
+        "--compilation-config",
+        '{"mode":0,"cudagraph_mode":"FULL_DECODE_ONLY","pass_config":{"fuse_allreduce_rms":false}}',
+        "--max-model-len",
+        "393216",
+        "--max-num-batched-tokens",
+        "8192",
+        "--max-cudagraph-capture-size",
+        "512",
+        "--gpu-memory-utilization",
+        "0.85",
+        "--max-num-seqs",
+        "64",
+        "--speculative-config",
+        '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}',
+        "--override-generation-config",
+        '{"temperature":1.0,"top_p":0.95}',
+      ]
+    tmpfs:
+      /tmp: size=16g,mode=1777,exec
+      /root: size=20g,mode=0700,exec
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120m
+
+  - name: "finite-private-limiter"
+    image: "ghcr.io/finitecomputer/private-limiter:2026-08-28.6@sha256:4746398277eeb7eb96994c40affff34cd070721dd7753596bf7571604c823461"
+    restart: always
+    env:
+      - LISTEN_ADDR: "0.0.0.0:8002"
+      - FINITE_USAGE_API_URL: "https://finite.computer"
+      - UPSTREAM_BASE_URL: "http://deepseek-v4-1-flash:8001"
+      - FINITE_PRIVATE_MODEL: "deepseek-v4-1-flash"
+      - FINITE_PRIVATE_UPSTREAM_MODEL: "deepseek-v4-1-flash"
+      # Existing issued Runtimes may send either historical label. The dotted
+      # Z.ai spelling is accepted as an alias; the served name stays hyphenated.
+      # The limiter canonicalizes only these names; any other model fails
+      # before reserve.
+      - FINITE_PRIVATE_MODEL_ALIASES: "glm-5-3-flash,deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash"
+      - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
+      - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
+      - DASHBOARD_URL: "https://finite.computer/dashboard"
+      - READINESS_TIMEOUT_SECS: "5"
+      - FINITE_USAGE_API_TIMEOUT_SECS: "15"
+      - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
+      - UPSTREAM_BODY_TIMEOUT_SECS: "600"
+      - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+    secrets:
+      - FINITE_USAGE_API_SERVICE_KEY
+      - VLLM_INTERNAL_API_KEY
+    networks: [model-net, core-api]
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45m
+
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  # Tinfoil requires a path declaration. Proxy every path so the limiter's
+  # Axum router remains the only public route authority.
+  paths:
+    - "/*"
