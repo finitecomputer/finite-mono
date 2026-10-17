@@ -8,10 +8,11 @@ use finite_saas_runner::{
     AgentCreationRunner, AgentIdentityAuthorityConfig, AppleContainerConfig,
     AppleContainerLauncher, CoreHttpAgentCreationQueue, DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
     DEFAULT_FINITE_AGENT_PICTURE_URL, DEFAULT_FINITE_PRIVATE_BASE_URL,
-    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL, DockerConfig, DockerLauncher,
-    EnclaviaConfig, EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher,
-    KataRetirementConfig, PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome,
-    RuntimeLauncher, durable_state_manifest_sha256,
+    DEFAULT_FINITE_PRIVATE_MODEL, DEFAULT_FINITECHAT_SERVER_URL,
+    DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT, DockerConfig, DockerLauncher, EnclaviaConfig,
+    EnclaviaLauncher, FinitePrivateRuntimeDefaults, KataConfig, KataLauncher, KataRetirementConfig,
+    PhalaConfig, PhalaLauncher, RandomLeaseTokenSource, RunOnceOutcome, RuntimeLauncher,
+    durable_state_manifest_sha256,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -414,6 +415,8 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 durable_tree_quiescence_window: DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW,
                 retirement: optional_kata_retirement_config()?,
                 hosted_hermes: hosted_hermes.clone(),
+                host_root: PathBuf::from("/"),
+                failed_stop_settle_timeout: DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT,
             });
             let outcome = run_once_with_launcher(
                 queue,

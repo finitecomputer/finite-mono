@@ -43,9 +43,10 @@ pub mod retirement;
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use health_reports::{HealthReportConfig, HealthReportState};
 pub use kata::{
-    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
-    KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
-    durable_tree_is_quiescent, durable_tree_is_quiescent_within,
+    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT,
+    DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig,
+    Quiescence, durable_state_manifest_sha256, durable_tree_is_quiescent,
+    durable_tree_is_quiescent_within,
 };
 pub use lifecycle_probe::{
     LIFECYCLE_PROBE_SCHEMA, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
