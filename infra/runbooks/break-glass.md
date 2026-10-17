@@ -26,6 +26,17 @@ the `wg-finite` overlay hub at `10.254.3.1`.
 - **lat1 is the frozen point-in-time record.** Do not boot it back into
   service; a second writer on Postgres/chat/sites is split-brain.
 
+## SSH refused on a Latitude host
+
+`infra/nixos/modules/ssh-flood-limits.nix` throttles unauthenticated SSH on
+lat2, lat3, lat4, lat5 and lat7. sshd penalties last at most 10 minutes.
+fail2ban bans port 22 for one source, from 1 h up to 24 h on repeats. From
+any working session: `fail2ban-client status sshd`, then
+`fail2ban-client set sshd unbanip <ip>`. The exempt sources live in the
+module; add a changed operator address there. With no working session, assume
+the provider IPMI console offers no login: the path is a power cycle into the
+previous GRUB generation, a full host outage that needs its own go.
+
 ## Legacy hosts
 
 smoke is `15.204.56.61`; clawland is `15.204.108.57`. Consult their host README
