@@ -120,7 +120,7 @@ lat1-rollout-contract:
 # contract for finite-lat-3 closure rollouts.
 lat3-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat3-nixos-closure-artifact scripts/deploy-lat3-closure-cache
-    cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact
+    cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact scripts.tests.test_isolated_runner_release.Lat3IsolatedReleaseGateTests
 
 # Static manifest, install-input, build-host, dry-activation, app-plane
 # fence, and rollback contract for finite-lat-2 closure rollouts.
@@ -132,7 +132,7 @@ lat2-runner-rollout-contract:
 # and rollback contract for finite-lat-4 closure rollouts.
 lat4-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat4-nixos-closure-artifact scripts/deploy-lat4-closure-cache scripts/install-lat4-from-artifact
-    cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact
+    cd ../.. && python3 -m unittest scripts.tests.test_lat4_closure_artifact scripts.tests.test_isolated_runner_release.Lat4IsolatedReleaseGateTests
 
 # Evaluated systemd ordering plus synthetic transient/persistent endpoint
 # behavior for the aggregate production healthcheck.
@@ -189,4 +189,4 @@ install-lat5-from-artifact artifact_dir target_host *args:
 
 lat5-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat5-nixos-closure-artifact scripts/deploy-lat5-closure-cache scripts/install-lat5-from-artifact infra/nixos/scripts/capture-lat5-host-evidence
-    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap
+    cd ../.. && python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap scripts.tests.test_isolated_runner_release.Lat5IsolatedReleaseGateTests
