@@ -471,6 +471,13 @@ def is_connected(config: PlatformConfig) -> bool:
     return validate_config(config) and check_requirements()
 
 
+def _direct_streaming_enabled() -> bool:
+    return (
+        os.getenv("FINITECHAT_CHAT_TRANSPORT", "").strip().lower() == "direct"
+        and os.getenv("FINITECHAT_DIRECT_STREAMING", "").strip() == "1"
+    )
+
+
 class FiniteChatAdapter(BasePlatformAdapter):
     """Bridge Finite Chat messages to Hermes through the resident service."""
 
@@ -479,6 +486,9 @@ class FiniteChatAdapter(BasePlatformAdapter):
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config, _finite_platform())
+        # Edits are only cheap on the direct transport, where the sidecar keeps
+        # running edits as ephemeral drafts; MLS Finite Chat stays append-only.
+        self.SUPPORTS_MESSAGE_EDITING = _direct_streaming_enabled()
         extra = getattr(config, "extra", {}) or {}
         self.home = str(extra.get("home") or os.getenv("FINITECHAT_HOME") or "").strip()
         # Shared with the module-level post_tool_call hook so fbrain's

@@ -36,6 +36,27 @@ export function directHostedImageUrl(
   return null;
 }
 
+/**
+ * Response headers for an authenticated attachment download. The sandbox CSP
+ * and nosniff are always the dashboard's own, matching the Hosted Web Device,
+ * because a direct-mode agent controls the upstream response headers.
+ */
+export function attachmentResponseHeaders(upstream: Headers) {
+  const headers = new Headers({
+    "cache-control": "private, no-store",
+    "content-security-policy": "sandbox",
+    "x-content-type-options": "nosniff",
+    "content-disposition": "attachment",
+  });
+  for (const name of ["content-type", "content-disposition", "content-length"]) {
+    const value = upstream.get(name);
+    if (value) {
+      headers.set(name, value);
+    }
+  }
+  return headers;
+}
+
 function isLoopbackHostname(hostname: string) {
   return (
     hostname === "localhost" ||

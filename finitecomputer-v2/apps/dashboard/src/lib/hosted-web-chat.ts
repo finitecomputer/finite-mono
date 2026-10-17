@@ -11,10 +11,24 @@ import {
   coreProjectPrimaryUrl,
   loadCoreMe,
   loadCoreBillingOverview,
-  loadCoreRequesterEmail,
   type CoreAgentCreationRequestSummary,
   type CoreVisibleProject,
 } from "@/lib/core-client";
+import { directChatBridge, type DirectChatBridge } from "@/lib/direct-chat-bridge";
+import {
+  directChatAction,
+  directChatAttachment,
+  directChatBootstrapState,
+  directChatSessionFor,
+  directChatRoomId,
+  directChatRuntimeCommand,
+  directChatUpdates,
+  directChatUploadAttachments,
+  directChatViewState,
+  type DirectChatSession,
+} from "@/lib/direct-web-chat";
+import { hostedRequesterAssertion } from "@/lib/hosted-requester-assertion";
+import { HostedWebChatError } from "@/lib/hosted-web-chat-error";
 import {
   hostedDeviceAction,
   hostedDeviceAuthorizeAgentBinding,
@@ -31,9 +45,11 @@ import {
   type HostedChatAction,
   type HostedRequesterContext,
   type HostedChatState,
+  type HostedRuntimeCommand,
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
-import { sitesUpstreamOrigin } from "@/lib/site-preview";
+
+export { HostedWebChatError } from "@/lib/hosted-web-chat-error";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -41,17 +57,6 @@ const AGENT_BINDING_AUTHORIZATION_REQUIRED =
   "first-time binding bootstrap was not authorized by Project creation";
 const AGENT_BINDING_RECOVERY_REQUIRED =
   `canonical Agent conversation requires recovery: ${AGENT_BINDING_AUTHORIZATION_REQUIRED}`;
-const HOSTED_REQUESTER_ASSERTION_TIMEOUT_MS = 5_000;
-
-export class HostedWebChatError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code?: "binding_authorization_required"
-  ) {
-    super(message);
-  }
-}
 
 export function hostedWebChatErrorMessage(error: unknown) {
   return error instanceof HostedWebChatError ? error.message : CHAT_UNAVAILABLE_MESSAGE;
@@ -102,16 +107,157 @@ export function isAgentBindingAuthorizationRequired(error: unknown) {
   );
 }
 
-export async function bootstrapHostedWebChat(machineId: string, viewQuery = "") {
-  const context = await hostedWebChatContext(machineId);
-  // Once bootstrapped, a transcript read must not reopen the shared Device cursor.
-  if (viewQuery) return hostedDeviceState(context.config, context.account, viewQuery);
-  return bootstrapHostedWebChatWithContext(context);
+export type HostedWebChatContext = {
+  account: Awaited<ReturnType<typeof getAccountAuthContext>>;
+  config: NonNullable<ReturnType<typeof hostedDeviceConfig>>;
+  trialAccount: boolean;
+  primaryUrl: string | null;
+  agentName: string;
+  projectId: string;
+  runtimeId: string;
+};
+
+/**
+ * Every chat operation for one Core-authorized context. The chat target
+ * resolver picks the agent's direct Finite Chat bridge or the legacy Hosted
+ * Web Device; an agent runs exactly one of them.
+ */
+export function hostedWebChatOperations(bridge: DirectChatBridge = directChatBridge) {
+  const direct = async (context: HostedWebChatContext): Promise<DirectChatSession | null> => {
+    const access = {
+      account: context.account,
+      hosted: context.config,
+      runtimeId: context.runtimeId,
+      projectId: context.projectId,
+    };
+    const target = await bridge.resolve(access);
+    return target.kind === "direct" ? directChatSessionFor(bridge, access, target) : null;
+  };
+
+  return {
+    async bootstrap(context: HostedWebChatContext, viewQuery = "") {
+      const session = await direct(context);
+      if (session) {
+        return viewQuery
+          ? directChatViewState(session, viewQuery)
+          : directChatBootstrapState(session);
+      }
+      // Once bootstrapped, a transcript read must not reopen the shared Device cursor.
+      if (viewQuery) return hostedDeviceState(context.config, context.account, viewQuery);
+      return bootstrapHostedWebChatWithContext(context);
+    },
+
+    async recoverBinding(
+      context: HostedWebChatContext,
+      requests: CoreAgentCreationRequestSummary[]
+    ) {
+      // A direct agent has no hosted-device binding to authorize or recover.
+      const session = await direct(context);
+      if (session) return directChatBootstrapState(session);
+      const creation = selectOriginalAgentCreationRequest(requests, context.projectId);
+      if (!creation) {
+        throw new HostedWebChatError(
+          "Finite could not verify the original agent creation request.",
+          409
+        );
+      }
+      await hostedDeviceAuthorizeAgentBinding(context.config, context.account, {
+        project_id: context.projectId,
+        creation_request_id: creation.id,
+      });
+      // Keep the Project, Runtime contact, and Agent Principal lookup on the same
+      // fresh Core snapshot that authorized this exact recovery. Falling back to
+      // the ordinary SWR context here could bind a stale Runtime endpoint.
+      return bootstrapHostedWebChatWithContext(context);
+    },
+
+    async claimOwner(context: HostedWebChatContext) {
+      const session = await direct(context);
+      if (session) {
+        assertCommandSucceeded(await directChatRuntimeCommand(
+          session,
+          ownerClaimCommand(directChatRoomId(session), session.target.info.agentAccountId)
+        ));
+        return { claimed: true as const };
+      }
+      const state = await bootstrapHostedWebChatWithContext(context);
+      const binding = state.hosted_agent_binding;
+      if (!binding) {
+        throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
+      }
+      await claimAgentOwner(context, state, binding.agent_account_id, binding.canonical_room_id);
+      return { claimed: true as const };
+    },
+
+    async dispatch(context: HostedWebChatContext, payload: unknown) {
+      const action = parseHostedChatAction(payload);
+      const session = await direct(context);
+      if (session) {
+        return directChatAction(session, action, { textSend: isTextSendAction(action) });
+      }
+      if ("StartTopicChatIntent" in action) {
+        const bound = await hostedDeviceOpenAgentBinding(
+          context.config,
+          context.account,
+          context.projectId
+        );
+        const target = action.StartTopicChatIntent;
+        if (!isCanonicalNewChatTarget(bound, target)) {
+          throw new HostedWebChatError("New chats must stay in the Agent conversation.", 409);
+        }
+        return hostedDeviceNewChat(context.config, context.account, {
+          project_id: context.projectId,
+          ...target,
+        });
+      }
+      const requester = isTextSendAction(action)
+        ? await createHostedRequesterContext(context)
+        : undefined;
+      return hostedDeviceAction(context.config, context.account, action, requester);
+    },
+
+    async stream(context: HostedWebChatContext, signal: AbortSignal, viewQuery = "") {
+      // Bound trial streams so reconnect rechecks billing after a payment change.
+      const accessSignal = context.trialAccount
+        ? AbortSignal.any([signal, AbortSignal.timeout(30_000)])
+        : signal;
+      const session = await direct(context);
+      if (session) return directChatUpdates(session, accessSignal, viewQuery);
+      return hostedDeviceUpdates(context.config, context.account, accessSignal, viewQuery);
+    },
+
+    async uploadAttachments(context: HostedWebChatContext, formData: FormData) {
+      const session = await direct(context);
+      if (session) return directChatUploadAttachments(session, formData);
+      return hostedDeviceAttachments(context.config, context.account, formData);
+    },
+
+    async attachment(
+      context: HostedWebChatContext,
+      roomId: string,
+      messageId: string,
+      attachmentId: string,
+      signal: AbortSignal
+    ) {
+      const session = await direct(context);
+      if (session) return directChatAttachment(session, roomId, messageId, attachmentId, signal);
+      return hostedDeviceAttachment(
+        context.config,
+        context.account,
+        roomId,
+        messageId,
+        attachmentId,
+        signal
+      );
+    },
+  };
 }
 
-async function bootstrapHostedWebChatWithContext(
-  context: Awaited<ReturnType<typeof hostedWebChatContext>>
-) {
+export async function bootstrapHostedWebChat(machineId: string, viewQuery = "") {
+  return hostedWebChatOperations().bootstrap(await hostedWebChatContext(machineId), viewQuery);
+}
+
+async function bootstrapHostedWebChatWithContext(context: HostedWebChatContext) {
   try {
     return await hostedDeviceOpenAgentBinding(context.config, context.account, context.projectId);
   } catch (error) {
@@ -198,60 +344,18 @@ export async function recoverHostedWebChatBinding(machineId: string) {
       409
     );
   }
-  const context = hostedWebChatContextForProject(account, project);
-  const creation = selectOriginalAgentCreationRequest(
-    core.me?.agent_creation_requests ?? [],
-    context.projectId
+  return hostedWebChatOperations().recoverBinding(
+    hostedWebChatContextForProject(account, project),
+    core.me?.agent_creation_requests ?? []
   );
-  if (!project || !creation) {
-    throw new HostedWebChatError(
-      "Finite could not verify the original agent creation request.",
-      409
-    );
-  }
-  await hostedDeviceAuthorizeAgentBinding(context.config, context.account, {
-    project_id: context.projectId,
-    creation_request_id: creation.id,
-  });
-  // Keep the Project, Runtime contact, and Agent Principal lookup on the same
-  // fresh Core snapshot that authorized this exact recovery. Falling back to
-  // the ordinary SWR context here could bind a stale Runtime endpoint.
-  return bootstrapHostedWebChatWithContext(context);
 }
 
 export async function claimHostedWebChatOwner(machineId: string) {
-  const context = await hostedWebChatContext(machineId);
-  const state = await bootstrapHostedWebChatWithContext(context);
-  const binding = state.hosted_agent_binding;
-  if (!binding) {
-    throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
-  }
-  await claimAgentOwner(context, state, binding.agent_account_id, binding.canonical_room_id);
-  return { claimed: true as const };
+  return hostedWebChatOperations().claimOwner(await hostedWebChatContext(machineId));
 }
 
 export async function dispatchHostedWebChatAction(machineId: string, payload: unknown) {
-  const context = await hostedWebChatContext(machineId);
-  const action = parseHostedChatAction(payload);
-  if ("StartTopicChatIntent" in action) {
-    const bound = await hostedDeviceOpenAgentBinding(
-      context.config,
-      context.account,
-      context.projectId
-    );
-    const target = action.StartTopicChatIntent;
-    if (!isCanonicalNewChatTarget(bound, target)) {
-      throw new HostedWebChatError("New chats must stay in the Agent conversation.", 409);
-    }
-    return hostedDeviceNewChat(context.config, context.account, {
-      project_id: context.projectId,
-      ...target,
-    });
-  }
-  const requester = isTextSendAction(action)
-    ? await createHostedRequesterContext(context)
-    : undefined;
-  return hostedDeviceAction(context.config, context.account, action, requester);
+  return hostedWebChatOperations().dispatch(await hostedWebChatContext(machineId), payload);
 }
 
 function isTextSendAction(action: HostedChatAction) {
@@ -263,19 +367,9 @@ function isTextSendAction(action: HostedChatAction) {
 }
 
 export async function createHostedRequesterContext(
-  context: Pick<
-    Awaited<ReturnType<typeof hostedWebChatContext>>,
-    "config" | "account" | "projectId"
-  >
+  context: Pick<HostedWebChatContext, "config" | "account" | "projectId">
 ): Promise<HostedRequesterContext | undefined> {
-  // Requester assertions and publishing grants belong to the same Sites registry.
-  const upstream = sitesUpstreamOrigin();
-  const serviceToken = process.env.FINITE_SITES_VIEWER_SESSION_TOKEN?.trim();
-  if (!context.account.workosUserId || !context.account.emailVerified || !upstream || !serviceToken) {
-    return undefined;
-  }
-  try {
-    const email = await loadCoreRequesterEmail(context.account);
+  return hostedRequesterAssertion(context.account, async () => {
     // The general /state response contains only AppState. The verified binding
     // is returned by /agent-bindings/open for this exact Core-authorized Project.
     const state = await hostedDeviceOpenAgentBinding(
@@ -289,42 +383,8 @@ export async function createHostedRequesterContext(
       binding.project_id !== context.projectId ||
       binding.human_account_id !== state.identity.account_id
     ) return undefined;
-    const response = await fetch(
-      `${upstream}/internal/v1/hosted-requester-assertions`,
-      {
-        method: "POST",
-        redirect: "error",
-        headers: {
-          authorization: `Bearer ${serviceToken}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          email,
-          requester_npub: state.identity.account_id,
-          agent_npub: binding.agent_npub,
-        }),
-        cache: "no-store",
-        signal: AbortSignal.timeout(HOSTED_REQUESTER_ASSERTION_TIMEOUT_MS),
-      }
-    );
-    if (!response.ok) return undefined;
-    const payload = (await response.json()) as {
-      email?: unknown;
-      assertion?: unknown;
-    };
-    if (
-      payload.email !== email ||
-      typeof payload.assertion !== "string" ||
-      !payload.assertion
-    ) {
-      return undefined;
-    }
-    return { email, sitesAssertion: payload.assertion };
-  } catch {
-    // Chat stays available if Sites is down. Project Init will return the
-    // structured requester_email_required response and the skill can ask.
-    return undefined;
-  }
+    return { requesterNpub: state.identity.account_id, agentNpub: binding.agent_npub };
+  });
 }
 
 export function isCanonicalNewChatTarget(
@@ -344,15 +404,11 @@ export function isCanonicalNewChatTarget(
 }
 
 export async function streamHostedWebChat(machineId: string, signal: AbortSignal, viewQuery = "") {
-  const context = await hostedWebChatContext(machineId);
-  // Bound trial streams so reconnect rechecks billing after a payment change.
-  const accessSignal = context.trialAccount ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : signal;
-  return hostedDeviceUpdates(context.config, context.account, accessSignal, viewQuery);
+  return hostedWebChatOperations().stream(await hostedWebChatContext(machineId), signal, viewQuery);
 }
 
 export async function uploadHostedWebChatAttachments(machineId: string, formData: FormData) {
-  const context = await hostedWebChatContext(machineId);
-  return hostedDeviceAttachments(context.config, context.account, formData);
+  return hostedWebChatOperations().uploadAttachments(await hostedWebChatContext(machineId), formData);
 }
 
 export async function streamHostedWebChatAttachment(
@@ -362,10 +418,8 @@ export async function streamHostedWebChatAttachment(
   attachmentId: string,
   signal: AbortSignal
 ) {
-  const context = await hostedWebChatContext(machineId);
-  return hostedDeviceAttachment(
-    context.config,
-    context.account,
+  return hostedWebChatOperations().attachment(
+    await hostedWebChatContext(machineId),
     roomId,
     messageId,
     attachmentId,
@@ -376,7 +430,7 @@ export async function streamHostedWebChatAttachment(
 async function hostedWebChatContext(
   machineId: string,
   coreCacheMode: "fresh" | "swr" = "swr"
-) {
+): Promise<HostedWebChatContext> {
   const account = await getAccountAuthContext();
   if (!account.workosUserId || !account.emailVerified) {
     throw new HostedWebChatError("Sign in again to use chat.", 401);
@@ -391,7 +445,7 @@ async function hostedWebChatContext(
 function hostedWebChatContextForProject(
   account: Awaited<ReturnType<typeof getAccountAuthContext>>,
   project: CoreVisibleProject
-) {
+): HostedWebChatContext {
   const config = hostedDeviceConfig();
   if (!config) {
     throw new HostedWebChatError(CHAT_UNAVAILABLE_MESSAGE, 503);
@@ -411,17 +465,9 @@ function hostedWebChatContextForProject(
   };
 }
 
-async function claimAgentOwner(
-  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
-  state: HostedChatState,
-  agentAccountId: string,
-  canonicalRoomId: string
-) {
-  if (!state.rooms.some((room) => room.room_id === canonicalRoomId)) {
-    throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
-  }
-  const response = await hostedDeviceRuntimeCommand(context.config, context.account, {
-    room_id: canonicalRoomId,
+function ownerClaimCommand(roomId: string, agentAccountId: string): HostedRuntimeCommand {
+  return {
+    room_id: roomId,
     target_account_id: agentAccountId,
     command: OWNER_CLAIM,
     resource_key: "agent.connections",
@@ -429,7 +475,23 @@ async function claimAgentOwner(
     body: {},
     reuse_succeeded_owner_claim: true,
     wait_millis: 45_000,
-  });
+  };
+}
+
+async function claimAgentOwner(
+  context: HostedWebChatContext,
+  state: HostedChatState,
+  agentAccountId: string,
+  canonicalRoomId: string
+) {
+  if (!state.rooms.some((room) => room.room_id === canonicalRoomId)) {
+    throw new HostedWebChatError("Your chat is still getting ready. Try again shortly.", 503);
+  }
+  const response = await hostedDeviceRuntimeCommand(
+    context.config,
+    context.account,
+    ownerClaimCommand(canonicalRoomId, agentAccountId)
+  );
   assertCommandSucceeded(response);
 }
 
@@ -444,7 +506,7 @@ function assertCommandSucceeded(response: HostedRuntimeCommandResponse) {
 }
 
 async function ensureRuntimeStarted(
-  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
+  context: HostedWebChatContext,
   state: HostedChatState
 ) {
   if (state.status.toLowerCase().includes("running")) {

@@ -1,6 +1,8 @@
 use std::io::Write;
 
-use finitechat_core::{AppAction, AppProfileSummary, AppState, FiniteChatRuntime, OpenOptions};
+use finitechat_core::{
+    AppAction, AppProfileSummary, AppState, AppView, FiniteChatRuntime, OpenOptions, room_digest,
+};
 use finitechat_proto::npub_encode;
 
 use crate::CliError;
@@ -27,6 +29,43 @@ pub(crate) fn run<W: Write>(args: AppArgs, output: &mut W) -> Result<(), CliErro
 
     match args.command {
         AppCommand::Identity => write_pretty_json(output, &runtime.state()?.identity),
+        AppCommand::Digest { room_id } => {
+            let state = runtime.state()?;
+            let mut rooms = Vec::new();
+            for room in state.rooms.iter().filter(|room| {
+                room_id
+                    .as_ref()
+                    .is_none_or(|wanted| &room.room_id == wanted)
+            }) {
+                let mut failure = None;
+                let digest = room_digest(&room.room_id, &state.topics, |topic, chat| match runtime
+                    .state_for_view(AppView {
+                        room_id: Some(room.room_id.clone()),
+                        topic_id: Some(topic.to_owned()),
+                        chat_id: Some(chat.to_owned()),
+                        limit: Some(u32::MAX),
+                        oldest_message_id: None,
+                    }) {
+                    Ok(view) => view.messages,
+                    Err(error) => {
+                        failure.get_or_insert(error);
+                        Vec::new()
+                    }
+                });
+                if let Some(error) = failure {
+                    return Err(error.into());
+                }
+                rooms.push(digest);
+            }
+            write_pretty_json(
+                output,
+                &serde_json::json!({
+                    "account_id": state.identity.account_id,
+                    "device_id": state.identity.device_id,
+                    "rooms": rooms,
+                }),
+            )
+        }
         AppCommand::State {
             start_runtime,
             wait_update_ms,

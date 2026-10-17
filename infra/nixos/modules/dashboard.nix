@@ -34,6 +34,10 @@
       # One Sites registry owns viewing and publishing authorization.
       FC_SITES_UPSTREAM_URL = "https://finite.site";
       FC_CHAT_RELAY_TIMEOUT_MS = "30000";
+      # Runtime ids (comma-separated) or "*" whose web chat may use the agent's
+      # direct Finite Chat bridge; the agent's own report still decides. Empty
+      # keeps every agent on the hosted device. Set per rollout (FIN-182).
+      FC_DIRECT_CHAT_RUNTIME_IDS = "";
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";

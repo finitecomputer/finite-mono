@@ -32,6 +32,9 @@ let
       "finitechat/integrations/hermes/finitechat/adapter.py"
       "finitechat/integrations/hermes/finitechat/plugin.yaml"
       "finitechat/integrations/hermes/finitechat/simplex_topics.py"
+      "finitechat/integrations/hermes/finitechat/dashboard/manifest.json"
+      "finitechat/integrations/hermes/finitechat/dashboard/plugin_api.py"
+      "finitechat/integrations/hermes/finitechat/dashboard/dist/index.js"
     ];
   };
 

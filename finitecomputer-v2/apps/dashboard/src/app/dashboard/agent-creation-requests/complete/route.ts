@@ -59,8 +59,8 @@ export async function GET(request: Request) {
       idempotencyKey: draft.idempotencyKey,
       hostingTier: draft.hostingTier,
       profilePictureUrl: draft.profilePictureUrl,
-      // Same fail-open pre-mint as the direct launch path: chat identity
-      // availability must never block a paid agent creation.
+      // Same required pre-mint as the direct launch path. It throws before
+      // Core creates anything, and the saved draft retries with this key.
       ownerChatAccountId: await hostedDeviceOwnerChatAccountId(
         hostedDeviceConfig(),
         account

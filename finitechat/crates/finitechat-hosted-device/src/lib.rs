@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -47,6 +47,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+mod direct_authorization;
 
 pub const WORKOS_USER_HEADER: &str = "x-finite-workos-user-id";
 pub const REQUESTER_EMAIL_HEADER: &str = "x-finite-requester-email";
@@ -230,6 +232,10 @@ pub enum HostedDeviceError {
     SitesIdentitySetupRequired,
     #[error("invalid Sites Identity Provider request: {0}")]
     InvalidSitesIdentityProvider(String),
+    #[error("invalid direct chat authorization request: {0}")]
+    InvalidDirectAuthorization(String),
+    #[error("Finite Chat identity is not set up for this user")]
+    ChatIdentityMissing,
     #[error("new chat must stay in the canonical Agent conversation: {0}")]
     CanonicalChatConflict(String),
     #[error("hosted chat state could not be inspected: {0}")]
@@ -260,6 +266,12 @@ impl IntoResponse for HostedDeviceError {
             let classification = error.classification();
             body["error_kind"] = json!(classification.kind);
             body["retryable"] = json!(classification.retryable);
+        } else if matches!(
+            self,
+            Self::InvalidDirectAuthorization(_) | Self::ChatIdentityMissing
+        ) {
+            body["error_kind"] = json!(self.diagnostic_class());
+            body["retryable"] = json!(false);
         }
         (status, Json(body)).into_response()
     }
@@ -273,13 +285,14 @@ impl HostedDeviceError {
             | Self::InvalidUser
             | Self::InvalidMultipart(_)
             | Self::InvalidBrainIdentityProvider(_)
-            | Self::InvalidSitesIdentityProvider(_) => StatusCode::BAD_REQUEST,
+            | Self::InvalidSitesIdentityProvider(_)
+            | Self::InvalidDirectAuthorization(_) => StatusCode::BAD_REQUEST,
             Self::BrainIdentitySetupRequired | Self::SitesIdentitySetupRequired => {
                 StatusCode::PRECONDITION_REQUIRED
             }
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::AttachmentNotFound | Self::AgentBindingNotFound => StatusCode::NOT_FOUND,
-            Self::CanonicalChatConflict(_) => StatusCode::CONFLICT,
+            Self::CanonicalChatConflict(_) | Self::ChatIdentityMissing => StatusCode::CONFLICT,
             Self::AttachmentUnavailable => StatusCode::BAD_GATEWAY,
             Self::IncompleteUserState | Self::AgentBindingInvalid(_) => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -313,6 +326,8 @@ impl HostedDeviceError {
             Self::InvalidBrainIdentityProvider(_) => "invalid_brain_identity_provider",
             Self::SitesIdentitySetupRequired => "sites_identity_setup_required",
             Self::InvalidSitesIdentityProvider(_) => "invalid_sites_identity_provider",
+            Self::InvalidDirectAuthorization(_) => "invalid_direct_authorization",
+            Self::ChatIdentityMissing => "chat_identity_missing",
             Self::CanonicalChatConflict(_) => "canonical_chat_conflict",
             Self::Io(_) => "io",
             Self::Task(_) => "task",
@@ -327,6 +342,77 @@ impl HostedDeviceError {
 struct HealthResponse {
     status: &'static str,
     cached_devices: usize,
+}
+
+/// Hash what every hosted user sees in each room, read-only, for comparing
+/// with agents' direct room logs (see `finitechat hermes direct-digest`).
+/// One JSON object per user that has a chat store; no message text.
+pub fn digest_all_users(
+    data_root: &Path,
+    server_url: &str,
+) -> Result<Vec<Value>, HostedDeviceError> {
+    let users = data_root.join("users");
+    let mut entries = match fs::read_dir(&users) {
+        Ok(entries) => entries
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| HostedDeviceError::Task(error.to_string()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(HostedDeviceError::Task(error.to_string())),
+    };
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut digests = Vec::new();
+    for entry in entries {
+        let user_root = entry.path();
+        let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
+        let chat_data = user_root.join("chat");
+        if !path_exists(&identity_paths.identity_file())?
+            || !path_exists(&chat_data.join("client.sqlite3"))?
+        {
+            continue;
+        }
+        let identity = FiniteIdentity::load(&identity_paths)?;
+        let runtime = FiniteChatRuntime::open_for_class(
+            OpenOptions {
+                data_dir: chat_data.to_string_lossy().into_owned(),
+                server_url: server_url.to_owned(),
+                device_id: "hosted-web".to_owned(),
+                account_secret_hex: Some(hex::encode(identity.expose_secret_bytes())),
+                now_unix_seconds: None,
+            },
+            finitechat_core::CommandClass::ReadOnly,
+        )?;
+        let state = runtime.state()?;
+        let mut rooms = Vec::new();
+        for room in &state.rooms {
+            let mut failure = None;
+            let digest =
+                finitechat_core::room_digest(&room.room_id, &state.topics, |topic, chat| {
+                    match runtime.state_for_view(AppView {
+                        room_id: Some(room.room_id.clone()),
+                        topic_id: Some(topic.to_owned()),
+                        chat_id: Some(chat.to_owned()),
+                        limit: Some(u32::MAX),
+                        oldest_message_id: None,
+                    }) {
+                        Ok(view) => view.messages,
+                        Err(error) => {
+                            failure.get_or_insert(error);
+                            Vec::new()
+                        }
+                    }
+                });
+            if let Some(error) = failure {
+                return Err(error.into());
+            }
+            rooms.push(digest);
+        }
+        digests.push(json!({
+            "user_storage_id": entry.file_name().to_string_lossy(),
+            "account_id": state.identity.account_id,
+            "rooms": rooms,
+        }));
+    }
+    Ok(digests)
 }
 
 pub fn app(config: HostedDeviceConfig) -> Router {
@@ -412,6 +498,12 @@ fn app_with_test_options(
             "/v1/sites/identity-provider",
             post(execute_sites_identity_provider_operation).layer(DefaultBodyLimit::max(
                 MAX_SITES_IDENTITY_PROVIDER_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            "/v1/chat/direct-authorization",
+            post(direct_authorization::authorize_direct_request).layer(DefaultBodyLimit::max(
+                direct_authorization::MAX_DIRECT_AUTHORIZATION_REQUEST_BYTES,
             )),
         )
         .route(
@@ -1099,21 +1191,33 @@ async fn execute_sites_identity_provider_operation(
     Ok(Json(response))
 }
 
-fn sites_user_secret_if_setup(
+/// Loads the user's existing Finite Chat account identity: the key
+/// `runtime_for` hands the chat runtime as its account secret. `None` means
+/// the user has no chat setup yet. This never mints an identity, and a
+/// half-present pair fails closed exactly as `runtime_for` does.
+fn existing_chat_identity(
     state: &HostedDeviceState,
     user_id: &str,
-) -> Result<String, HostedDeviceError> {
+) -> Result<Option<FiniteIdentity>, HostedDeviceError> {
     let user_root = state.user_root(user_id);
     let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
     let identity_exists = path_exists(&identity_paths.identity_file())?;
-    let store_exists = path_exists(&user_root.join("chat/client.sqlite3"))?;
+    let store_exists = path_exists(&state.chat_data_dir(user_id).join("client.sqlite3"))?;
     if !identity_exists && !store_exists {
-        return Err(HostedDeviceError::SitesIdentitySetupRequired);
+        return Ok(None);
     }
     if identity_exists != store_exists {
         return Err(HostedDeviceError::IncompleteUserState);
     }
-    let identity = FiniteIdentity::load(&identity_paths)?;
+    Ok(Some(FiniteIdentity::load(&identity_paths)?))
+}
+
+fn sites_user_secret_if_setup(
+    state: &HostedDeviceState,
+    user_id: &str,
+) -> Result<String, HostedDeviceError> {
+    let identity = existing_chat_identity(state, user_id)?
+        .ok_or(HostedDeviceError::SitesIdentitySetupRequired)?;
     Ok(hex::encode(identity.expose_secret_bytes()))
 }
 
@@ -1121,17 +1225,8 @@ fn brain_user_keys_if_setup(
     state: &HostedDeviceState,
     user_id: &str,
 ) -> Result<Keys, HostedDeviceError> {
-    let user_root = state.user_root(user_id);
-    let identity_paths = IdentityPaths::with_finite_home(user_root.join("finite-home"));
-    let identity_exists = path_exists(&identity_paths.identity_file())?;
-    let store_exists = path_exists(&user_root.join("chat/client.sqlite3"))?;
-    if !identity_exists && !store_exists {
-        return Err(HostedDeviceError::BrainIdentitySetupRequired);
-    }
-    if identity_exists != store_exists {
-        return Err(HostedDeviceError::IncompleteUserState);
-    }
-    let identity = FiniteIdentity::load(&identity_paths)?;
+    let identity = existing_chat_identity(state, user_id)?
+        .ok_or(HostedDeviceError::BrainIdentitySetupRequired)?;
     let secret = SecretKey::from_slice(&identity.expose_secret_bytes()).map_err(|_| {
         HostedDeviceError::InvalidBrainIdentityProvider(
             "Hosted Device User Key is invalid".to_owned(),

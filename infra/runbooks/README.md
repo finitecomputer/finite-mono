@@ -16,6 +16,7 @@ fresh read-only evidence establish observed state.
 | Identity Directory | [Identity](identity-authority.md) |
 | CLI releases and aliases | [CLI release](release-cli.md) |
 | Runtime image build, promotion and existing-Agent upgrade | [Runtime image](runtime-image.md) |
+| Web chat to agents' direct room logs | [Direct chat cutover](direct-chat-cutover.md) |
 | Stopped Runtime relocation | [Cold relocation](runtime-cold-relocation.md) |
 | Legacy Hermes import tool | [Legacy import](legacy-hermes-box1-to-lat3.md) |
 | Phala operations | [Phala](phala-confidential-runner.md) |
