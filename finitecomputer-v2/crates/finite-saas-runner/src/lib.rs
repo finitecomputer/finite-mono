@@ -43,9 +43,10 @@ pub mod retirement;
 pub use apple_container::{AppleContainerConfig, AppleContainerLaunchPlan, AppleContainerLauncher};
 pub use health_reports::{HealthReportConfig, HealthReportState};
 pub use kata::{
-    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan,
-    KataLauncher, KataRetirementConfig, Quiescence, durable_state_manifest_sha256,
-    durable_tree_is_quiescent, durable_tree_is_quiescent_within,
+    DEFAULT_DURABLE_TREE_QUIESCENCE_WINDOW, DEFAULT_KATA_FAILED_STOP_SETTLE_TIMEOUT,
+    DURABLE_TREE_WRITER_LEASE, KataConfig, KataLaunchPlan, KataLauncher, KataRetirementConfig,
+    Quiescence, durable_state_manifest_sha256, durable_tree_is_quiescent,
+    durable_tree_is_quiescent_within,
 };
 pub use lifecycle_probe::{
     LIFECYCLE_PROBE_SCHEMA, LifecycleProbeConfig, LifecycleProbeReport, LifecycleProbeRequest,
@@ -126,6 +127,25 @@ fn artifact_bounded_upgrade_runtime_capabilities(
     bounded.recover_known_good_chat &=
         target_artifact.is_some_and(|artifact| artifact.recover_known_good_chat);
     capabilities
+}
+
+/// Spawn `command`, retrying briefly while Linux refuses to exec it with
+/// ETXTBSY ("Text file busy"). That happens to a freshly written executable
+/// while another thread's fork still holds its write handle between fork and
+/// exec, as with the fake providers tests write just before running them.
+/// Nothing ran when the spawn failed, so retrying is safe; the lifecycle
+/// probe's reads use the same bounded retry.
+fn spawn_retrying_text_file_busy(command: &mut Command) -> std::io::Result<Child> {
+    let mut attempt = 0u32;
+    loop {
+        match command.spawn() {
+            Err(error) if error.raw_os_error() == Some(26) && attempt < 5 => {
+                attempt += 1;
+                thread::sleep(Duration::from_millis(20 * u64::from(attempt)));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn wait_with_captured_output(
