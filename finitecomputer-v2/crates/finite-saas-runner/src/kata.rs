@@ -535,14 +535,13 @@ impl KataLauncher {
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
-        let child = process
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| RunnerError::CommandExecution {
+        process.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let child = spawn_retrying_text_file_busy(&mut process).map_err(|error| {
+            RunnerError::CommandExecution {
                 program: command.program.display().to_string(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         wait_with_captured_output(child, &command.program, timeout)
     }
 
@@ -2147,12 +2146,12 @@ impl KataLauncher {
         if let Some(cwd) = command.cwd.as_ref() {
             process.current_dir(cwd);
         }
-        let mut child = process
-            .spawn()
-            .map_err(|error| RunnerError::CommandExecution {
+        let mut child = spawn_retrying_text_file_busy(&mut process).map_err(|error| {
+            RunnerError::CommandExecution {
                 program: command.program.display().to_string(),
                 message: error.to_string(),
-            })?;
+            }
+        })?;
         let mut last_renewal = Instant::now() - Duration::from_secs(60);
         loop {
             if let Some(status) =
@@ -5033,7 +5032,8 @@ fn kata_recovery_run_command(
 }
 
 fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
-    let output = Command::new(&config.nerdctl_bin)
+    let mut command = Command::new(&config.nerdctl_bin);
+    command
         .args([
             "--namespace",
             config.namespace.trim(),
@@ -5049,7 +5049,12 @@ fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
             "--format",
             "{{.ID}}",
         ])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = spawn_retrying_text_file_busy(&mut command)
+        .ok()?
+        .wait_with_output()
         .ok()?;
     if !output.status.success() {
         return None;
@@ -9838,6 +9843,23 @@ esac
             (
                 "reply on stdout only",
                 reply(1, &absent(&reference), ""),
+                false,
+            ),
+            (
+                "two missing references",
+                reply(
+                    1,
+                    "",
+                    &format!(
+                        "time=\"2026-10-17T02:56:03Z\" level=fatal msg=\"2 errors: [no such object {} no such object {reference}]\"\n",
+                        "b".repeat(64)
+                    ),
+                ),
+                false,
+            ),
+            (
+                "unwrapped reply",
+                reply(1, "", &format!("no such object {reference}]\n")),
                 false,
             ),
         ];

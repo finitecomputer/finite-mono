@@ -483,12 +483,13 @@ impl HostedHermesLifecycle {
     }
 
     fn provider(&self, namespace: &str, args: &[&str]) -> Result<String> {
-        let child = Command::new(&self.nerdctl)
+        let mut command = Command::new(&self.nerdctl);
+        command
             .args(["--namespace", namespace])
             .args(args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        let child = crate::spawn_retrying_text_file_busy(&mut command)
             .map_err(|_| refused("cannot inspect provider"))?;
         let output = wait_with_captured_output(child, &self.nerdctl, Duration::from_secs(15))?;
         if !output.status.success() || output.stdout.len() > MAX_READ_BYTES {
@@ -552,12 +553,12 @@ mod failed_stop_resolution_tests {
         };
         hosted
             .execute(&command, Duration::from_secs(10), |command, timeout| {
-                let child = Command::new(&command.program)
+                let mut process = Command::new(&command.program);
+                process
                     .args(&command.args)
                     .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .unwrap();
+                    .stderr(Stdio::piped());
+                let child = crate::spawn_retrying_text_file_busy(&mut process).unwrap();
                 wait_with_captured_output(child, &command.program, timeout)
             })
             .unwrap()
