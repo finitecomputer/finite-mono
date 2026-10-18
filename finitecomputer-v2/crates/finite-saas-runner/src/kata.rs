@@ -1241,7 +1241,14 @@ impl KataLauncher {
         // Still running: one bounded retry with a fresh full grace. Anything
         // that cannot be proven stopped afterwards is a genuine failure.
         match self.stop_command(container_name) {
-            Ok(()) => Ok(KataStop::Clean),
+            // The first failure stays sticky. Teardown may have stopped the
+            // task before the retry, and nerdctl 2.3.4 also reports success
+            // for a task that already stopped, while QEMU or virtiofsd may
+            // remain. So a successful retry proves nothing about the VM.
+            Ok(()) => match self.settle_failed_stop(container_name, expected_id) {
+                Ok(host) => self.accept_failed_stop(container_name, expected_id, error, host),
+                Err(unsettled) => Err(unsettled_stop_failure(error, unsettled.reason())),
+            },
             Err(retry_error) => match self.settle_failed_stop(container_name, expected_id) {
                 Ok(host) => self.accept_failed_stop(container_name, expected_id, retry_error, host),
                 Err(_) => Err(retry_error),
@@ -5603,6 +5610,14 @@ case "$cmd" in
       echo "injected stuck stop" >&2
       exit 42
     fi
+    if [ -f "$root/stuck-stop-once" ]; then
+      # The first stop fails with the guest still up. Teardown then stops the
+      # task on its own, and the retry below succeeds as nerdctl 2.3.4 does
+      # for an already stopped task. Host processes are the test's choice.
+      rm -f "$root/stuck-stop-once"
+      echo "injected stuck stop once" >&2
+      exit 42
+    fi
     if [ -f "$root/$name.stop-fails-early" ]; then
       # nerdctl stop fails in its network cleanup, before containerutil.Stop
       # marks the container explicitly stopped; the guest exits on its own.
@@ -8450,6 +8465,98 @@ esac
         }
     }
 
+    /// The first stop fails while the guest still reads running, then the
+    /// retry succeeds because teardown stopped the task meanwhile. With
+    /// `vm_remains` a synthetic QEMU still serves the sandbox.
+    fn stop_fails_then_retry_succeeds(
+        launcher: &KataLauncher,
+        fake_state: &Path,
+        container_name: &str,
+        vm_remains: bool,
+    ) {
+        std::fs::write(fake_state.join("stuck-stop-once"), "1").unwrap();
+        if vm_remains {
+            live_qemu(launcher, container_name);
+        }
+    }
+
+    #[test]
+    fn kata_upgrade_failed_stop_stays_failed_when_its_retry_succeeds() {
+        // A successful retry after a failed stop proves nothing about the
+        // VM, so the upgrade never starts its candidate: it restores the same
+        // container once the VM is proven gone, or reports the Agent down.
+        // Only non-hosted hosts retry a stop.
+        for vm_remains in [true, false] {
+            let label = format!("vm_remains={vm_remains}");
+            let old_server = TestHttpServer::start("npub1sameagent");
+            let candidate_server = TestHttpServer::start("npub1sameagent");
+            let temp = tempfile::tempdir().unwrap();
+            let (mut launcher, plan, fake_state) = test_launcher(&temp, candidate_server.port);
+            let name = &plan.container_name;
+            write_fake_container(
+                &fake_state,
+                name,
+                OLD_TEST_IMAGE,
+                "artifact-v1",
+                "",
+                old_server.port,
+                &plan.state_root,
+            );
+            stop_fails_then_retry_succeeds(&launcher, &fake_state, name, vm_remains);
+
+            let error = launcher
+                .upgrade_runtime(
+                    &upgrade_lease("runtime_ctl_stop_retry_succeeds"),
+                    &RuntimeRestartOptions::default(),
+                )
+                .unwrap_err()
+                .to_string();
+            let log = commands(&fake_state);
+            assert!(
+                !log.lines().any(|line| line.starts_with("run ")),
+                "{label}: no candidate after a failed stop: {log}"
+            );
+            assert!(
+                error.contains("injected stuck stop once"),
+                "{label}: the first failure stays the cause: {error}"
+            );
+            let status =
+                std::fs::read_to_string(fake_state.join(format!("{name}.status"))).unwrap();
+            if vm_remains {
+                assert!(
+                    reports_agent_down(&error)
+                        && error.contains("not proven gone")
+                        && error.contains("refusing to restart previous Kata compute"),
+                    "{label}: {error}"
+                );
+                assert_eq!(mutation_verbs(&fake_state), vec!["stop", "stop"], "{label}");
+                assert_eq!(status, "exited", "{label}");
+            } else {
+                assert!(
+                    reports_upgrade_not_applied(&error)
+                        && error.contains("although its VM was proven gone"),
+                    "{label}: {error}"
+                );
+                assert_eq!(
+                    provider_mutations(&fake_state)[2],
+                    format!("start {}", fake_container_id(name)),
+                    "{label}: only the same container starts again"
+                );
+                assert_eq!(
+                    mutation_verbs(&fake_state),
+                    vec!["stop", "stop", "start"],
+                    "{label}"
+                );
+                assert_eq!(status, "running", "{label}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(fake_state.join(format!("{name}.image"))).unwrap(),
+                OLD_TEST_IMAGE,
+                "{label}"
+            );
+        }
+    }
+
     #[test]
     fn kata_failed_stop_restore_succeeds_survives_a_racing_monitor_start_or_reports_agent_down() {
         // The restore starts the same container. containerd's restart monitor
@@ -8667,6 +8774,77 @@ esac
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn kata_recovery_failed_stop_stays_failed_when_its_retry_succeeds() {
+        // A successful retry after a failed canonical stop proves nothing
+        // about the VM, so no recovery helper starts: the same container
+        // comes back once the VM is proven gone, or the Agent is reported
+        // down. Only non-hosted hosts retry a stop.
+        for (index, vm_remains) in [true, false].into_iter().enumerate() {
+            let label = format!("vm_remains={vm_remains}");
+            let request_id = format!("runtime_ctl_recover_stop_retry_succeeds_{index}");
+            let (error, _temp, plan, fake_state, _) =
+                failed_stop_recovery(&request_id, false, |launcher, plan, fake_state| {
+                    stop_fails_then_retry_succeeds(
+                        launcher,
+                        fake_state,
+                        &plan.container_name,
+                        vm_remains,
+                    );
+                });
+            let log = commands(&fake_state);
+            assert!(
+                !log.lines().any(|line| line.starts_with("run ")),
+                "{label}: a recovery helper was launched: {log}"
+            );
+            assert!(
+                error.contains("injected stuck stop once")
+                    && error.contains("no recovery helper was started"),
+                "{label}: the first failure stays the cause: {error}"
+            );
+            let status =
+                std::fs::read_to_string(fake_state.join(format!("{}.status", plan.container_name)))
+                    .unwrap();
+            if vm_remains {
+                assert!(
+                    reports_agent_down(&error)
+                        && error.contains("not proven gone")
+                        && error.contains("refusing to restart previous Kata compute"),
+                    "{label}: {error}"
+                );
+                assert_eq!(mutation_verbs(&fake_state), vec!["stop", "stop"], "{label}");
+                assert_eq!(status, "exited", "{label}");
+            } else {
+                assert!(
+                    reports_recovery_not_applied(&error)
+                        && error.contains("although its VM was proven gone"),
+                    "{label}: {error}"
+                );
+                assert_eq!(
+                    provider_mutations(&fake_state)[2],
+                    format!("start {}", fake_container_id(&plan.container_name)),
+                    "{label}: only the same container starts again"
+                );
+                assert_eq!(
+                    mutation_verbs(&fake_state),
+                    vec!["stop", "stop", "start"],
+                    "{label}"
+                );
+                assert_eq!(status, "running", "{label}");
+            }
+            let helper = kata_recovery_plan(&plan, &request_id);
+            assert!(
+                !fake_state
+                    .join(format!("{}.image", helper.container_name))
+                    .exists(),
+                "{label}"
+            );
+            assert!(!helper.env_file.exists(), "{label}");
+            let fence = read_kata_recovery_fence(&plan).unwrap().unwrap();
+            assert!(fence.operation_ids.contains(&request_id), "{label}");
         }
     }
 
