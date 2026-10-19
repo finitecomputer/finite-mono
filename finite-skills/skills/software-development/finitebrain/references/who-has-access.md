@@ -101,9 +101,17 @@ From the Brain's Working Tree, `fbrain admin member remove --target <npub>`
 removes Membership and rotates the Folder Keys the key was entitled to,
 preparing the new grants and re-encrypted Folder objects itself. If
 preparation fails, stop on the reported blocker and never create or edit a raw
-rotation body. `fbrain admin role revoke admin --target <npub>` removes only
-the Admin role; in this release it rotates no keys, so Folders the key no
-longer qualifies for show `revocationIncomplete` afterwards.
+rotation body. `fbrain admin role revoke admin --target <npub>` removes the
+Admin role and, in the same change, rotates every Folder Key the key held only
+as an admin (`admin_only` Folders, and `restricted` Folders without its
+explicit access). Folders it still reaches through explicit Folder access or
+All-Members membership keep their key. The acting admin must be able to open
+each of those Folders; otherwise the command names the Folder and nothing
+changes, so run it from an admin who can. Report `state: complete` and each
+`rotations` entry (Folder, new key version, `cutOffNpubs`). An older Brain
+server answers `unsupported: ... does not support admin demotion with Folder
+Key rotation yet` and nothing changes; do not work around it. Afterwards
+`access list` shows the key as a Member with nothing removal pending.
 
 ## Clearing Removal Pending
 
@@ -173,7 +181,8 @@ delay rotations for as long as they sustain that load. Report repeated 503s
 of either kind to the server operator instead of retrying in a loop.
 
 Member removal does not yet clear Folders where the removed key holds a
-current key without entitlement, for example from an earlier demotion. Run
+current key without entitlement, for example from a demotion by an older Brain
+server. Run
 `access list` before removing a Member; afterwards rotate every Folder still
 listed for that key.
 

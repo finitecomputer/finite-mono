@@ -322,6 +322,11 @@ through public NIP-05. Brain does not consult account authorities; a name
 without a matching NIP-05 record fails with the resolver's error rather than
 falling back to a guess.
 
+`admin role revoke admin` rotates, in the same server change, every Folder Key
+the demoted key held only as an admin, and prints a receipt with `state:
+complete` and one `rotations` entry per rotated Folder. It refuses before
+changing anything when this key cannot open one of those Folders.
+
 `collaborator ensure-admin` is the normal Organization Brain sharing
 operation, and its typed receipt is `complete`, `partial` or `indeterminate`.
 The member, role and `folder-access` commands are advanced primitives that
