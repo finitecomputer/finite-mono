@@ -609,3 +609,49 @@ async fn demotion_accepts_bodies_over_the_default_limit_up_to_its_own() {
         vec![npub(&admin)]
     );
 }
+
+#[tokio::test]
+async fn a_non_admin_demotion_is_refused_before_its_body_is_read() {
+    let admin = Keys::generate();
+    let member = Keys::generate();
+    let target = npub(&member);
+    let router = org_with_promoted_target(&admin, &target).await;
+    let bystander = Keys::generate();
+    let bystander_npub = npub(&bystander);
+    let added = authed_request(
+        router.clone(),
+        &admin,
+        "PUT",
+        &format!("/v1/admin/brains/acme/members/{bystander_npub}"),
+        Some(
+            serde_json::json!({
+                "accessChangeEvent": admin_event(&admin, "acme", "add-bystander",
+                    AdminAccessAction::AddMember, None, Some(&bystander_npub), None),
+            })
+            .to_string(),
+        ),
+        TEST_NOW,
+    )
+    .await;
+    assert_eq!(added.status(), StatusCode::OK);
+
+    // A signed demotion from a Member whose body never finishes: admission
+    // authorizes the signer for the Brain before reading any body.
+    let refused = super::folder_key_rotation_tests::answered_without_body(
+        &router,
+        super::folder_key_rotation_tests::stalled_request(
+            "POST",
+            &format!("/v1/admin/brains/acme/roles/admin/{target}/demotion"),
+            Some(&bystander),
+            TEST_NOW + 1,
+        ),
+    )
+    .await;
+    assert_error(
+        refused,
+        StatusCode::FORBIDDEN,
+        "brain admin access required",
+    )
+    .await;
+    assert!(metadata(&router, &admin, 2).await.admins.contains(&target));
+}

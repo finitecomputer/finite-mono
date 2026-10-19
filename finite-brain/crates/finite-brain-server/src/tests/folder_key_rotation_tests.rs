@@ -1140,7 +1140,12 @@ async fn a_rotation_that_skips_versions_is_a_bad_request() {
 
 /// A request whose body sends one byte and then never finishes. With
 /// `signer`, it carries a valid signed header for `method` and `path`.
-fn stalled_request(method: &str, path: &str, signer: Option<&Keys>, at: u64) -> Request<Body> {
+pub(super) fn stalled_request(
+    method: &str,
+    path: &str,
+    signer: Option<&Keys>,
+    at: u64,
+) -> Request<Body> {
     let body = async_stream::stream! {
         yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{"));
         std::future::pending::<()>().await;
@@ -1159,7 +1164,7 @@ fn stalled_request(method: &str, path: &str, signer: Option<&Keys>, at: u64) -> 
 }
 
 /// Send a request that must be answered without waiting for its body.
-async fn answered_without_body(
+pub(super) async fn answered_without_body(
     router: &Router,
     request: Request<Body>,
 ) -> axum::response::Response {
