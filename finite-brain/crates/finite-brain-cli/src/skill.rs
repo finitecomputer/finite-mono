@@ -148,7 +148,8 @@ Folder Key is missing; verify entitlement before diagnosing delayed keys.
 Confirm successful sync and expected revisions alongside `readable` before
 reporting that current content is usable. Lower-level primitives:
 `admin member add`,
-`admin role grant admin`, `admin folder-access grant --folder <id>`.
+`admin role grant admin`, `admin folder-access grant --folder <id>`,
+`admin folder-access rotate --folder <id>`.
 
 Unsupported: inviting by Finite account, login email, or Core account lookup;
 one invitation reaching every agent or device of one person; guest email
@@ -187,6 +188,14 @@ Folders have access modes: `owner`, `admin_only`, `all_members`,
 tree; Folders you cannot read appear locked or not at all. Access changes
 are signed admin events, and Folder Keys rotate on revocation; the CLI
 prepares rotation material automatically; never hand-build rotation bodies.
+
+A key that holds a Folder's current key without entitlement shows as
+`revocationIncomplete` in `fbrain access list` (for example after
+`admin role revoke admin`, which rotates no keys). An admin who can open that
+Folder clears it with `fbrain admin folder-access revoke --folder <folder-id>
+--target <npub>` for one key, or `fbrain admin folder-access rotate --folder
+<folder-id>` to cut off every such key. `revoke` refuses a key entitled by its
+Brain role; change the role instead.
 
 ## Who has access?
 
