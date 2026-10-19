@@ -192,11 +192,20 @@ async fn report_revocation_incomplete(
     admin: &Keys,
     at: u64,
 ) -> BTreeMap<String, BTreeSet<String>> {
+    report_revocation_incomplete_for(router, admin, "acme", at).await
+}
+
+async fn report_revocation_incomplete_for(
+    router: &Router,
+    admin: &Keys,
+    brain: &str,
+    at: u64,
+) -> BTreeMap<String, BTreeSet<String>> {
     let response = authed_request(
         router.clone(),
         admin,
         "GET",
-        "/v1/brains/acme/access-report",
+        &format!("/v1/brains/{brain}/access-report"),
         None,
         at,
     )
@@ -217,8 +226,12 @@ async fn report_revocation_incomplete(
 
 /// The store predicate behind revoke and rotation, per Folder.
 fn store_stale_holders(state: &ServerState) -> BTreeMap<String, BTreeSet<String>> {
+    store_stale_holders_for(state, "acme")
+}
+
+fn store_stale_holders_for(state: &ServerState, brain: &str) -> BTreeMap<String, BTreeSet<String>> {
     let store = state.store.lock().unwrap();
-    let stored = store.load_brain(&BrainId::new("acme").unwrap()).unwrap();
+    let stored = store.load_brain(&BrainId::new(brain).unwrap()).unwrap();
     stored
         .brain
         .folders
@@ -557,4 +570,160 @@ async fn revoke_refuses_an_explicit_row_whose_key_was_later_promoted() {
         stored.folder_access[&FolderId::new("restricted").unwrap()]
             .contains(&UserId::new(member).unwrap())
     );
+}
+
+fn stored_grant(
+    folder: &str,
+    issuer: &Keys,
+    recipient: &Keys,
+) -> finite_brain_store::FolderKeyGrantMetadata {
+    finite_brain_store::FolderKeyGrantMetadata {
+        id: format!("{folder}-{}", &npub(recipient)[60..]),
+        folder_id: FolderId::new(folder).unwrap(),
+        key_version: 1,
+        issuer_npub: UserId::new(npub(issuer)).unwrap(),
+        recipient_npub: UserId::new(npub(recipient)).unwrap(),
+        format: "NIP-59".to_owned(),
+        wrapped_event_json: gift_wrap_event_json(&npub(recipient)),
+        access_change_event_json: None,
+        created_at: test_rfc3339(),
+    }
+}
+
+/// The report and the store predicate share one stale-holder rule only under
+/// current invariants, so pin them on a Personal Brain too: the owner and
+/// Personal Agent are entitled everywhere, while a key whose Guest row was
+/// dropped and a key holding a stray wrap on an owner Folder are stale.
+#[tokio::test]
+async fn personal_brain_report_and_store_agree_on_stale_holders() {
+    let owner = Keys::generate();
+    let agent = Keys::generate();
+    let guest = Keys::generate();
+    let stray = Keys::generate();
+    let scratch = tempfile::TempDir::new().unwrap();
+    let database = scratch.path().join("personal-equivalence.sqlite3");
+    let mut store = BrainStore::open(&database).unwrap();
+    let output = bootstrap_personal_brain("personal", "Personal Brain", npub(&owner)).unwrap();
+    store
+        .create_personal_brain_bootstrap(
+            &output,
+            &[],
+            &UserId::new(npub(&agent)).unwrap(),
+            &UserId::new(npub(&owner)).unwrap(),
+            &test_rfc3339(),
+        )
+        .unwrap();
+    let brain = BrainId::new("personal").unwrap();
+    for (id, access, guests, recipients) in [
+        (
+            "journal",
+            FolderAccessMode::Owner,
+            vec![],
+            vec![&owner, &agent],
+        ),
+        (
+            "shared",
+            FolderAccessMode::Restricted,
+            vec![&guest],
+            vec![&owner, &agent, &guest],
+        ),
+    ] {
+        let folder = Folder {
+            id: FolderId::new(id).unwrap(),
+            name: DisplayName::new("folder_name", id).unwrap(),
+            role: FolderRole::Folder,
+            access,
+            parent_folder_id: None,
+            path: SafeRelativePath::new("folder_path", id).unwrap(),
+            current_key_version: 1,
+        };
+        let access_user_ids = guests
+            .iter()
+            .map(|keys| UserId::new(npub(keys)).unwrap())
+            .collect::<BTreeSet<_>>();
+        let grants = recipients
+            .iter()
+            .map(|recipient| stored_grant(id, &owner, recipient))
+            .collect::<Vec<_>>();
+        store
+            .create_folder(&brain, &folder, &access_user_ids, &grants)
+            .unwrap();
+    }
+    drop(store);
+    {
+        // Synthetic drift no current API produces: drop the Guest row and
+        // copy the owner's journal wrap to an unrelated key.
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
+        connection
+            .execute(
+                "DELETE FROM folder_access WHERE brain_id = 'personal' AND user_id = ?1",
+                rusqlite::params![npub(&guest)],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folder_key_grants (id, brain_id, folder_id, key_version, issuer_npub, recipient_npub, format, wrapped_event_json, access_change_event_json, created_at, delegated_by_npub, origin_kind, origin_ref, roster_revision) SELECT 'journal-stray', brain_id, folder_id, key_version, issuer_npub, ?1, format, wrapped_event_json, access_change_event_json, created_at, delegated_by_npub, origin_kind, origin_ref, roster_revision FROM folder_key_grants WHERE brain_id = 'personal' AND folder_id = 'journal' AND recipient_npub = ?2",
+                rusqlite::params![npub(&stray), npub(&owner)],
+            )
+            .unwrap();
+    }
+    let state = ServerState::new(BrainStore::open(&database).unwrap(), TEST_BASE_URL)
+        .with_auth_clock(TEST_NOW, 60);
+    let router = router_with_state(state.clone());
+
+    let expected = BTreeMap::from([
+        ("journal".to_owned(), BTreeSet::from([npub(&stray)])),
+        ("shared".to_owned(), BTreeSet::from([npub(&guest)])),
+    ]);
+    assert_eq!(store_stale_holders_for(&state, "personal"), expected);
+    assert_eq!(
+        report_revocation_incomplete_for(&router, &owner, "personal", TEST_NOW).await,
+        expected
+    );
+}
+
+#[tokio::test]
+async fn oversized_revoke_is_refused_before_resolving_the_target() {
+    let admin = Keys::generate();
+    let lookups = Arc::new(Mutex::new(0usize));
+    let counted = lookups.clone();
+    let mut state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+        .with_auth_clock(TEST_NOW, 60);
+    state.nip05_fetcher = Arc::new(move |_| {
+        *counted.lock().unwrap() += 1;
+        Err("synthetic NIP-05 lookup".to_owned())
+    });
+    let router = router_with_state(state);
+    let grants = (0..=finite_brain_core::MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("oversized-{index}"),
+                "keyVersion": 2,
+                "recipientNpub": "unchecked",
+                "wrappedEventJson": "{}"
+            })
+        })
+        .collect::<Vec<_>>();
+    let response = authed_request(
+        router,
+        &admin,
+        "DELETE",
+        "/v1/admin/brains/acme/folders/restricted/access/someone@example.test",
+        Some(
+            serde_json::json!({
+                "newKeyVersion": 2,
+                "grants": grants,
+                "reencryptedRecords": [],
+                "accessChangeEvent": {}
+            })
+            .to_string(),
+        ),
+        TEST_NOW,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(*lookups.lock().unwrap(), 0);
 }

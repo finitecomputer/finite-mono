@@ -869,3 +869,26 @@ fn member_removal_validates_against_access_committed_by_another_connection() {
     );
     assert!(stored.folder_access[&FolderId::new("strategy").unwrap()].contains(&member));
 }
+
+#[test]
+fn stale_version_messages_tell_a_lost_race_from_a_skipped_version() {
+    let raced = StoreError::StaleFolderKeyVersion {
+        folder_id: "strategy".to_owned(),
+        current_key_version: 2,
+        requested_key_version: 2,
+    }
+    .to_string();
+    assert!(
+        raced.contains("Another admin changed this Folder first"),
+        "{raced}"
+    );
+    let skipped = StoreError::StaleFolderKeyVersion {
+        folder_id: "strategy".to_owned(),
+        current_key_version: 2,
+        requested_key_version: 4,
+    }
+    .to_string();
+    assert!(skipped.contains("skips versions"), "{skipped}");
+    assert!(skipped.contains("the next version is 3"), "{skipped}");
+    assert!(!skipped.contains("Another admin"), "{skipped}");
+}

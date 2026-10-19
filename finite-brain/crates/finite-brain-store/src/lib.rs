@@ -93,8 +93,9 @@ pub enum StoreError {
         max: usize,
         current: usize,
     },
-    /// A Folder Key rotation was prepared against a key version that is no
-    /// longer current: another admin rotated or changed the Folder first.
+    /// A Folder Key rotation does not target the next key version: another
+    /// admin rotated the Folder first (requested at or below current), or the
+    /// request skips versions (requested above current plus one).
     StaleFolderKeyVersion {
         folder_id: String,
         current_key_version: u32,
@@ -144,9 +145,18 @@ impl fmt::Display for StoreError {
                 folder_id,
                 current_key_version,
                 requested_key_version,
+            } if u64::from(*requested_key_version) > u64::from(*current_key_version) + 1 => write!(
+                f,
+                "Folder {folder_id} Key rotation skips versions: the request rotates to version {requested_key_version} but the Folder is at version {current_key_version}, so the next version is {}. The request was prepared incorrectly; prepare it again from the current version",
+                u64::from(*current_key_version) + 1
+            ),
+            Self::StaleFolderKeyVersion {
+                folder_id,
+                current_key_version,
+                requested_key_version,
             } => write!(
                 f,
-                "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
+                "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
             ),
         }
     }

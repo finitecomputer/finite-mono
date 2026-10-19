@@ -16,8 +16,9 @@ struct PreparedRotation {
     updated_at: String,
 }
 
-/// Bound fan-out, authorize the admin, then verify the signed event for
-/// `action` before any grant or record is parsed into store input.
+/// Authorize the admin, then verify the signed event for `action` before any
+/// grant or record is parsed into store input. Fan-out is already bounded by
+/// [`parse_rotation_body`].
 fn prepare_rotation(
     state: &ServerState,
     actor: &str,
@@ -27,17 +28,6 @@ fn prepare_rotation(
     action: AdminAccessAction,
     request: FolderKeyRotationMaterialRequest,
 ) -> Result<PreparedRotation, ApiError> {
-    validate_folder_rotation_fanout(
-        if target.is_some() {
-            FolderRotationOperation::FolderAccessRemoval
-        } else {
-            FolderRotationOperation::FolderKeyRotation
-        },
-        [FolderRotationFanout {
-            grants: request.grants.len(),
-            reencrypted_records: request.reencrypted_records.len(),
-        }],
-    )?;
     {
         let store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(brain_id)?;
@@ -90,9 +80,22 @@ impl PreparedRotation {
     }
 }
 
-fn parse_rotation_body(body: &Bytes) -> Result<FolderKeyRotationMaterialRequest, ApiError> {
-    serde_json::from_slice(body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))
+/// Parse rotation material and bound its fan-out before any identity lookup,
+/// alias write, cryptography or store read.
+fn parse_rotation_body(
+    body: &Bytes,
+    operation: FolderRotationOperation,
+) -> Result<FolderKeyRotationMaterialRequest, ApiError> {
+    let request: FolderKeyRotationMaterialRequest = serde_json::from_slice(body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_folder_rotation_fanout(
+        operation,
+        [FolderRotationFanout {
+            grants: request.grants.len(),
+            reencrypted_records: request.reencrypted_records.len(),
+        }],
+    )?;
+    Ok(request)
 }
 
 /// Remove one key's Folder access: its explicit access row, or a current
@@ -106,7 +109,7 @@ pub(crate) async fn remove_folder_access_handler(
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request = parse_rotation_body(&body)?;
+    let request = parse_rotation_body(&body, FolderRotationOperation::FolderAccessRemoval)?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
@@ -148,7 +151,7 @@ pub(crate) async fn rotate_folder_key_handler(
     body: Bytes,
 ) -> Result<Json<RotateFolderKeyResponse>, ApiError> {
     let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request = parse_rotation_body(&body)?;
+    let request = parse_rotation_body(&body, FolderRotationOperation::FolderKeyRotation)?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
     let prepared = prepare_rotation(
