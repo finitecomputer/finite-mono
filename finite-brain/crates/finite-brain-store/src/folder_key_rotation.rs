@@ -99,6 +99,7 @@ fn current_folder_key_holders(stored: &StoredBrain, folder: &Folder) -> BTreeSet
 /// `post_change_brain` and `remaining_access` describe that roster (for
 /// example with a removed member or demoted admin already taken out). Returns
 /// the required recipient set the grants were checked against.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_folder_key_rotation_material(
     post_change_brain: &Brain,
     folder: &Folder,
@@ -156,6 +157,7 @@ pub(crate) fn require_next_key_version(
 /// server's store lock. Every pending wrap marker below the new version is
 /// dropped: the new grants satisfy entitled recipients, and any marker left
 /// for a cut-off key would otherwise block later wrap completion forever.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_folder_key_rotation(
     tx: &Transaction<'_>,
     brain_id: &BrainId,
