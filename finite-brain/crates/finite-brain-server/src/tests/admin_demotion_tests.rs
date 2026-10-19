@@ -9,7 +9,25 @@ const EVENT_MISMATCH: &str =
 /// `acme` with `getting-started` (All-Members) and `restricted`; `target` is
 /// a Member promoted to admin who then received the restricted v1 key by role.
 async fn org_with_promoted_target(admin: &Keys, target: &str) -> Router {
-    let router = router_with_test_org_folders(admin).await;
+    org_with_promoted_target_in(test_state(), admin, target).await
+}
+
+/// [`org_with_promoted_target`] on a caller-owned state, for tests that hold
+/// rotation permits or move the auth clock.
+async fn org_with_promoted_target_in(state: ServerState, admin: &Keys, target: &str) -> Router {
+    let router = router_with_state(state);
+    let created = post_brain(
+        router.clone(),
+        admin,
+        &create_brain_body("acme", "organization"),
+        TEST_NOW,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    add_test_org_folders(&router, admin).await;
     for (action, route, id) in [
         (
             AdminAccessAction::AddMember,
@@ -654,4 +672,63 @@ async fn a_non_admin_demotion_is_refused_before_its_body_is_read() {
     )
     .await;
     assert!(metadata(&router, &admin, 2).await.admins.contains(&target));
+}
+
+/// A demotion fresh when admission checked its header must still be accepted
+/// after it waited in the rotation queue past the clock skew: the handler
+/// validates the signed request at its admission instant.
+#[tokio::test]
+async fn a_demotion_fresh_at_admission_survives_a_queue_wait_past_the_clock_skew() {
+    let admin = Keys::generate();
+    let member = Keys::generate();
+    let target = npub(&member);
+    let state = test_state();
+    let router = org_with_promoted_target_in(state.clone(), &admin, &target).await;
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let route = format!("/v1/admin/brains/acme/roles/admin/{target}/demotion");
+    let body = demotion_body(
+        &admin,
+        &target,
+        vec![restricted_rotation(
+            &admin,
+            &npub(&admin),
+            "rotate-restricted",
+            "restricted",
+            2,
+        )],
+    );
+    // 59 seconds old against the 60-second skew when admission sees it.
+    let request = Request::builder()
+        .method("POST")
+        .uri(&route)
+        .header("content-type", "application/json")
+        .header(
+            AUTHORIZATION,
+            auth_header(&admin, "POST", &route, Some(body.as_bytes()), TEST_NOW - 59),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let pending = tokio::spawn(router.clone().oneshot(request));
+    super::folder_key_rotation_tests::eventually("the demotion to queue for a permit", || {
+        state
+            .rotation_waiting_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 1
+    })
+    .await;
+    // While it waits, the header ages past the skew (69 seconds old).
+    state.advance_auth_clock(10);
+    drop(held);
+    let response = pending.await.unwrap().unwrap();
+    let status = response.status();
+    let text = read_text(response).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let demoted: DemoteAdminResponse = serde_json::from_str(&text).unwrap();
+    assert_eq!(demoted.metadata.admins, vec![npub(&admin)]);
+    assert_eq!(demoted.rotations.len(), 1);
+    assert_eq!(demoted.rotations[0].new_key_version, 2);
 }

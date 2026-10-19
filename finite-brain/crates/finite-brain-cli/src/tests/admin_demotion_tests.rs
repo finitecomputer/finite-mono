@@ -14,6 +14,9 @@ enum DemotionReply {
     KeptAdmin,
     /// An older server: its unknown-route 404.
     UnknownRoute,
+    /// Commit, but answer only after 11 seconds, like a server that queued
+    /// the demotion behind busy rotation admission permits.
+    SlowCommitted,
 }
 
 fn folder(id: &str, access: &str, access_user_ids: &[&str], key_version: u32) -> Value {
@@ -99,10 +102,15 @@ fn start_demotion_server(
                         })
                         .to_string(),
                     ),
-                    DemotionReply::Committed | DemotionReply::KeptAdmin => {
+                    DemotionReply::Committed
+                    | DemotionReply::KeptAdmin
+                    | DemotionReply::SlowCommitted => {
+                        if matches!(reply, DemotionReply::SlowCommitted) {
+                            thread::sleep(Duration::from_secs(11));
+                        }
                         let admins: Vec<&str> = match reply {
-                            DemotionReply::Committed => vec![&admin],
-                            _ => vec![&admin, &demoted],
+                            DemotionReply::KeptAdmin => vec![&admin, &demoted],
+                            _ => vec![&admin],
                         };
                         let mut response = metadata(&admin, &demoted, &admins, 2);
                         response["pendingApprovals"] =
@@ -433,4 +441,17 @@ fn only_a_folder_key_this_key_cannot_open_gets_the_ask_another_admin_hint() {
         unopened.contains("Ask an admin who can open Folder restricted"),
         "{unopened}"
     );
+}
+
+/// The demotion travels on the rotation transport: a server that queues it
+/// for longer than the ordinary 10-second request timeout still answers.
+#[test]
+fn demotion_outlasts_the_ordinary_request_timeout() {
+    let started = Instant::now();
+    let run = run_demotion(DemotionReply::SlowCommitted, true, true);
+    run.result.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(11));
+    let receipt: Value = serde_json::from_str(&run.output).unwrap();
+    assert_eq!(receipt["state"], "complete");
+    assert_eq!(receipt["admins"], serde_json::json!([run.admin]));
 }

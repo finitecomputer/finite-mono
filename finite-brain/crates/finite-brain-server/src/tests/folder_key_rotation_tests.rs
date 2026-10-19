@@ -1302,7 +1302,7 @@ async fn a_stalled_admin_upload_times_out_and_releases_its_permit() {
 }
 
 /// Wait until `condition` holds, failing after five seconds.
-async fn eventually(what: &str, condition: impl Fn() -> bool) {
+pub(super) async fn eventually(what: &str, condition: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !condition() {
         assert!(
