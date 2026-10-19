@@ -11,13 +11,13 @@ use tempfile::TempDir;
 /// role row deleted in SQLite and every wrap kept. The Member now holds that
 /// wrap without entitlement (`revocationIncomplete`), whatever the demotion
 /// route does today. The returned directory owns the database file.
-async fn router_with_demoted_member(admin: &Keys, member: &Keys) -> (Router, TempDir) {
+async fn state_with_demoted_member(admin: &Keys, member: &Keys) -> (ServerState, Router, TempDir) {
     let target = npub(member);
     let database = TempDir::new().unwrap();
     let database_path = database.path().join("brain.sqlite3");
     let state = ServerState::new(BrainStore::open(&database_path).unwrap(), TEST_BASE_URL)
         .with_auth_clock(TEST_NOW, 60);
-    let router = router_with_state(state);
+    let router = router_with_state(state.clone());
     let created = post_brain(
         router.clone(),
         admin,
@@ -82,6 +82,11 @@ async fn router_with_demoted_member(admin: &Keys, member: &Keys) -> (Router, Tem
         )
         .unwrap();
     assert_eq!(demoted, 1);
+    (state, router, database)
+}
+
+async fn router_with_demoted_member(admin: &Keys, member: &Keys) -> (Router, TempDir) {
+    let (_, router, database) = state_with_demoted_member(admin, member).await;
     (router, database)
 }
 
@@ -282,4 +287,74 @@ async fn removal_without_the_stale_grant_rotation_is_refused_then_full_removal_r
         };
         assert_eq!(folder.current_key_version, expected, "{}", folder.id);
     }
+}
+
+/// A removal fresh when admission checked its header must not turn stale
+/// while it waits for a rotation permit: the handler validates it at the
+/// admission instant, not at the moment the body is finally read.
+#[tokio::test]
+async fn removal_queued_past_the_clock_skew_is_validated_at_admission() {
+    let admin = Keys::generate();
+    let member = Keys::generate();
+    let target = npub(&member);
+    let (state, router, _database) = state_with_demoted_member(&admin, &member).await;
+    let plan: MemberRemovalPlanResponse =
+        read_json(removal_plan(&router, &admin, &target, TEST_NOW).await).await;
+    let planned = plan
+        .folder_rotations
+        .iter()
+        .map(|rotation| rotation.folder_id.as_str())
+        .collect::<Vec<_>>();
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let path = format!("/v1/admin/brains/acme/members/{target}");
+    let body = remove_member_body(&admin, &target, &planned);
+    // 59 seconds old against the 60-second skew when admission sees it.
+    let request = Request::builder()
+        .method("DELETE")
+        .uri(&path)
+        .header("content-type", "application/json")
+        .header(
+            AUTHORIZATION,
+            auth_header(
+                &admin,
+                "DELETE",
+                &path,
+                Some(body.as_bytes()),
+                TEST_NOW - 59,
+            ),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let pending = tokio::spawn(router.clone().oneshot(request));
+    let queued_by = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state
+        .rotation_waiting_requests
+        .load(std::sync::atomic::Ordering::Acquire)
+        != 1
+    {
+        assert!(
+            std::time::Instant::now() < queued_by,
+            "the removal never queued for a permit"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    // While it waits, the header ages past the skew (69 seconds old).
+    state.advance_auth_clock(10);
+    drop(held);
+    let response = pending.await.unwrap().unwrap();
+    let status = response.status();
+    let text = read_text(response).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let metadata: BrainMetadataResponse = serde_json::from_str(&text).unwrap();
+    assert!(!metadata.members.contains(&target));
+    let restricted = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == "restricted")
+        .unwrap();
+    assert_eq!(restricted.current_key_version, 2);
 }

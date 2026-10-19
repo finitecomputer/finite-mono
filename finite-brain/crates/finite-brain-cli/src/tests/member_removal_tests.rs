@@ -19,6 +19,9 @@ enum Script {
     FolderNotAdvanced,
     /// An older server without the plan route.
     OldServer,
+    /// Commit the removal, but answer the DELETE only after 11 seconds, past
+    /// the ordinary request timeout, like a server queueing it for a permit.
+    SlowDelete,
 }
 
 impl Script {
@@ -26,7 +29,7 @@ impl Script {
     /// DELETE, mounts; each refusal stops earlier.
     fn expected_requests(self) -> usize {
         match self {
-            Self::Committed => 6,
+            Self::Committed | Self::SlowDelete => 6,
             Self::FolderNotAdvanced => 5,
             Self::PlanVersionMoved => 3,
             Self::OldServer => 2,
@@ -93,6 +96,9 @@ fn reply(
         return ("200 OK", plan.to_string());
     }
     if request_line.starts_with("DELETE") {
+        if script == Script::SlowDelete {
+            thread::sleep(Duration::from_secs(11));
+        }
         let version = if script == Script::FolderNotAdvanced {
             1
         } else {
@@ -166,7 +172,7 @@ fn run_remove(script: Script) -> RemovalRun {
         let started = Instant::now();
         let mut requests = Vec::new();
         while requests.len() < script.expected_requests()
-            && started.elapsed() < Duration::from_secs(5)
+            && started.elapsed() < Duration::from_secs(30)
         {
             let Ok((mut stream, _)) = listener.accept() else {
                 thread::sleep(Duration::from_millis(10));
@@ -306,4 +312,21 @@ fn removal_against_an_older_server_stops_before_the_delete() {
     assert!(message.contains("Upgrade the Brain server"), "{message}");
     assert!(!sent_delete, "{:?}", run.requests);
     assert!(run.output.is_empty());
+}
+
+/// The DELETE carries rotation material, so it uses the rotation timeout and
+/// outlasts a server that holds it longer than an ordinary request.
+#[test]
+fn removal_delete_is_answered_when_the_server_holds_it_past_ten_seconds() {
+    let run = run_remove(Script::SlowDelete);
+    run.result.unwrap();
+    let receipt: Value = serde_json::from_str(&run.output).unwrap();
+    assert_eq!(receipt["rotatedFolders"][0]["newKeyVersion"], 2);
+    assert!(
+        run.requests
+            .iter()
+            .any(|(request, _)| request.starts_with("DELETE")),
+        "{:?}",
+        run.requests
+    );
 }
