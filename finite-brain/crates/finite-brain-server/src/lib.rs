@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -60,9 +60,9 @@ pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
 use protected_routes::{
-    authenticate_request_header, charge_rotation_admission_exit,
+    authenticate_request_header_at, charge_rotation_admission_exit,
     cors_allowed_origins_from_public_base_url, cors_allowlist_middleware,
-    refuse_rate_limited_signer, validate_request_auth,
+    refuse_rate_limited_signer, validate_admitted_rotation_auth, validate_request_auth,
 };
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
@@ -111,7 +111,8 @@ pub struct BrainUpdateNotification {
 pub struct ServerState {
     store: Arc<Mutex<BrainStore>>,
     public_base_url: Arc<str>,
-    auth_now_unix_seconds: Option<u64>,
+    /// Fixed auth clock for tests; shared so a test can advance it.
+    auth_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
     max_auth_skew_seconds: u64,
     auth_replay_cache: Arc<Mutex<BTreeMap<String, u64>>>,
     rate_limit_hits: Arc<Mutex<BTreeMap<String, Vec<u64>>>>,
@@ -166,7 +167,7 @@ impl ServerState {
         Self {
             store: Arc::new(Mutex::new(store)),
             public_base_url: Arc::<str>::from(public_base_url),
-            auth_now_unix_seconds: None,
+            auth_clock: None,
             max_auth_skew_seconds: DEFAULT_MAX_AUTH_SKEW_SECONDS,
             auth_replay_cache: Arc::new(Mutex::new(BTreeMap::new())),
             rate_limit_hits: Arc::new(Mutex::new(BTreeMap::new())),
@@ -296,7 +297,9 @@ impl ServerState {
 
     /// Override the auth validation clock for deterministic tests.
     pub fn with_auth_clock(mut self, now_unix_seconds: u64, max_skew_seconds: u64) -> Self {
-        self.auth_now_unix_seconds = Some(now_unix_seconds);
+        self.auth_clock = Some(Arc::new(std::sync::atomic::AtomicU64::new(
+            now_unix_seconds,
+        )));
         self.max_auth_skew_seconds = max_skew_seconds;
         self
     }
@@ -369,8 +372,20 @@ impl ServerState {
     }
 
     fn auth_now_unix_seconds(&self) -> u64 {
-        self.auth_now_unix_seconds
-            .unwrap_or_else(current_unix_seconds)
+        self.auth_clock
+            .as_ref()
+            .map_or_else(current_unix_seconds, |clock| {
+                clock.load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+
+    /// Move a fixed test auth clock forward, for every clone of this state.
+    #[cfg(test)]
+    fn advance_auth_clock(&self, seconds: u64) {
+        self.auth_clock
+            .as_ref()
+            .expect("advance_auth_clock needs with_auth_clock")
+            .fetch_add(seconds, std::sync::atomic::Ordering::AcqRel);
     }
 
     fn cors_origin_allowed(&self, origin: &str) -> bool {
@@ -1926,7 +1941,7 @@ mod tests {
     fn server_state_defaults_to_portable_v1_auth_skew() {
         let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL);
         assert_eq!(state.max_auth_skew_seconds, 60);
-        assert_eq!(state.auth_now_unix_seconds, None);
+        assert!(state.auth_clock.is_none());
         assert_eq!(state.rate_limit.max_requests, 120);
         assert_eq!(state.rate_limit.window_seconds, 60);
         assert!(state.cors_origin_allowed(TEST_BASE_URL));

@@ -15,14 +15,14 @@ pub(crate) const MAX_CONCURRENT_ROTATION_REQUESTS: usize = 4;
 /// How long an admitted rotation request may take to deliver its body before
 /// it is answered 408 and its permit is released.
 pub(crate) const ROTATION_BODY_READ_DEADLINE: std::time::Duration =
-    std::time::Duration::from_secs(60);
+    std::time::Duration::from_secs(finite_brain_core::ROTATION_BODY_READ_DEADLINE_SECONDS);
 
 /// How long an authorized rotation request may wait, in arrival order, for a
 /// permit before it is answered 503. Two body-read deadlines: a request
 /// queued behind four stalled uploads gets the next released permit within
 /// one deadline, ahead of any upload that arrives after it.
 pub(crate) const ROTATION_ADMISSION_WAIT: std::time::Duration =
-    std::time::Duration::from_secs(ROTATION_BODY_READ_DEADLINE.as_secs() * 2);
+    std::time::Duration::from_secs(finite_brain_core::ROTATION_ADMISSION_WAIT_SECONDS);
 
 /// Authorized rotation requests that may wait for a permit at once. Waiters
 /// hold only their parsed header, never a body; beyond this they get 503.
@@ -51,6 +51,13 @@ impl Drop for WaitingForRotationPermit {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     }
 }
+
+/// The auth clock instant at which admission validated a rotation request's
+/// signed header. Handlers validate the full request (with its body) against
+/// this instant, so a request that was fresh when admitted stays valid while
+/// it waits in the admission queue. Set only by admission, never by clients.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) struct RotationAdmittedAt(pub(crate) u64);
 
 /// Who may occupy a rotation permit on a route. Keys are free, roles are not:
 /// only a caller with this authority can hold one of the permits.
@@ -127,7 +134,14 @@ async fn admit(
         .extensions()
         .get::<OriginalUri>()
         .map_or_else(|| request.uri().clone(), |original| original.0.clone());
-    let actor = authenticate_request_header(state, request.headers(), request.method(), &uri)?;
+    let admitted_at = state.auth_now_unix_seconds();
+    let actor = authenticate_request_header_at(
+        state,
+        request.headers(),
+        request.method(),
+        &uri,
+        admitted_at,
+    )?;
     authorize_rotation_actor(state, admission.authority, params, &actor)?;
     refuse_rate_limited_signer(state, request.method(), &uri, &actor)?;
     let method = request.method().clone();
@@ -157,7 +171,8 @@ async fn admit(
             }
         }
     };
-    let (parts, body) = request.into_parts();
+    let (mut parts, body) = request.into_parts();
+    parts.extensions.insert(RotationAdmittedAt(admitted_at));
     let body = match tokio::time::timeout(
         state.rotation_body_read_deadline,
         axum::body::to_bytes(
@@ -323,9 +338,11 @@ pub(crate) async fn remove_folder_access_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((brain_id, folder_id, target_npub)): AxumPath<(String, String, String)>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor =
+        validate_admitted_rotation_auth(&state, &headers, &method, &uri, &body, admitted_at)?;
     let request = parse_rotation_body(&body, FolderRotationOperation::FolderAccessRemoval)?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;
@@ -365,9 +382,11 @@ pub(crate) async fn rotate_folder_key_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<RotateFolderKeyResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor =
+        validate_admitted_rotation_auth(&state, &headers, &method, &uri, &body, admitted_at)?;
     let request = parse_rotation_body(&body, FolderRotationOperation::FolderKeyRotation)?;
     let brain_id = BrainId::new(brain_id)?;
     let folder_id = FolderId::new(folder_id)?;

@@ -101,6 +101,13 @@ pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_ob
 /// below the 128 MiB export a client downloads to prepare the rotation;
 /// larger rotations are refused, never truncated.
 pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Seconds an admitted rotation request may take to deliver its body before
+/// the server answers 408 and releases its admission permit.
+pub const ROTATION_BODY_READ_DEADLINE_SECONDS: u64 = 60;
+/// Seconds an authorized rotation request may wait, in arrival order, for an
+/// admission permit before the server answers 503: two body deadlines, so a
+/// queued request reaches the front within one deadline of any stall ahead.
+pub const ROTATION_ADMISSION_WAIT_SECONDS: u64 = 2 * ROTATION_BODY_READ_DEADLINE_SECONDS;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";

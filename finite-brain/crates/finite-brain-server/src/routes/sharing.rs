@@ -582,9 +582,11 @@ pub(crate) async fn revoke_shared_folder_connection_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath(connection_id): AxumPath<String>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<MountResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor =
+        validate_admitted_rotation_auth(&state, &headers, &method, &uri, &body, admitted_at)?;
     let actor = UserId::new(actor)?;
     let request: RevokeMountRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
@@ -721,14 +723,16 @@ pub(crate) async fn remove_mount_participant_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((connection_id, target_npub)): AxumPath<(String, String)>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<MountResponse>, ApiError> {
-    let actor = UserId::new(validate_request_auth(
+    let actor = UserId::new(validate_admitted_rotation_auth(
         &state,
         &headers,
         &method,
         &uri,
-        Some(&body),
+        &body,
+        admitted_at,
     )?)?;
     let request: RemoveMountParticipantRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;

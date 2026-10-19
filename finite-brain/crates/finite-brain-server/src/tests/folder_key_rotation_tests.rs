@@ -1507,3 +1507,72 @@ async fn reconnecting_after_admission_exits_is_rate_limited() {
         MAX_CONCURRENT_ROTATION_REQUESTS
     );
 }
+
+/// Sol's and Astra's round-5 finding: the full post-body check used to
+/// recompute "now", so a request that was fresh when admitted but waited in
+/// the queue past the clock skew was refused as stale. It is now validated
+/// against the instant admission checked its header.
+#[tokio::test]
+async fn a_request_fresh_at_admission_survives_a_queue_wait_past_the_clock_skew() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let body = admin_rotation_body(&cast, "rotate-after-a-long-wait");
+    // 59 seconds old against the 60-second skew when admission sees it.
+    let signed_at = TEST_NOW - 59;
+    let request = Request::builder()
+        .method("POST")
+        .uri(ROTATE_PATH)
+        .header("content-type", "application/json")
+        .header(
+            AUTHORIZATION,
+            auth_header(
+                &cast.admin,
+                "POST",
+                ROTATE_PATH,
+                Some(body.as_bytes()),
+                signed_at,
+            ),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let pending = tokio::spawn(router.clone().oneshot(request));
+    eventually("the request to queue for a permit", || {
+        state
+            .rotation_waiting_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 1
+    })
+    .await;
+    // While it waits, the header ages past the skew (69 seconds old).
+    state.advance_auth_clock(10);
+    drop(held);
+    let response = pending.await.unwrap().unwrap();
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+    assert_eq!(restricted_key_version(&state), 2);
+}
+
+#[tokio::test]
+async fn a_header_already_stale_at_admission_is_refused_there() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let refused = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, Some(&cast.admin), TEST_NOW - 61),
+    )
+    .await;
+    assert_error(
+        refused,
+        StatusCode::FORBIDDEN,
+        "stale Nostr event timestamp",
+    )
+    .await;
+    assert_eq!(
+        state.rotation_request_permits.available_permits(),
+        MAX_CONCURRENT_ROTATION_REQUESTS
+    );
+    assert_eq!(restricted_key_version(&state), 1);
+}

@@ -71,7 +71,41 @@ pub(crate) fn validate_request_auth(
     uri: &Uri,
     body: Option<&Bytes>,
 ) -> Result<String, ApiError> {
-    let (event, mut expected) = signed_request_header(state, headers, method, uri)?;
+    validate_request_auth_at(
+        state,
+        headers,
+        method,
+        uri,
+        body,
+        state.auth_now_unix_seconds(),
+    )
+}
+
+/// Full authentication of a rotation request that admission already let in:
+/// the body hash, replay cache and rate limit as usual, but the event's time
+/// is checked against the instant admission validated its header, so a
+/// request that waited in the admission queue past the clock skew is not
+/// refused as stale. The replay cache expiry still uses the current clock.
+pub(crate) fn validate_admitted_rotation_auth(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    body: &Bytes,
+    admitted_at: crate::routes::RotationAdmittedAt,
+) -> Result<String, ApiError> {
+    validate_request_auth_at(state, headers, method, uri, Some(body), admitted_at.0)
+}
+
+fn validate_request_auth_at(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    body: Option<&Bytes>,
+    auth_now: u64,
+) -> Result<String, ApiError> {
+    let (event, mut expected) = signed_request_header(state, headers, method, uri, auth_now)?;
     if let Some(body) = body {
         expected = expected.with_body(body.to_vec());
     }
@@ -83,22 +117,48 @@ pub(crate) fn validate_request_auth(
 }
 
 /// Authenticate a request from its signed header alone, before its body is
-/// read: signature, method, URL and time, and that the replay cache does not
-/// already hold the event. It neither records the event in the replay cache
-/// nor counts it against the rate limit, so the handler's full
-/// [`validate_request_auth`] with the body still runs exactly once and stays
-/// the authority for acting on the request.
-pub(crate) fn authenticate_request_header(
+/// read, at the auth clock instant `auth_now`: signature, method, URL and
+/// time, and that the replay cache does not already hold the event. It
+/// neither records the event in the replay cache nor counts it against the
+/// rate limit, so the handler's full validation with the body still runs
+/// exactly once and stays the authority for acting on the request.
+pub(crate) fn authenticate_request_header_at(
     state: &ServerState,
     headers: &HeaderMap,
     method: &Method,
     uri: &Uri,
+    auth_now: u64,
 ) -> Result<String, ApiError> {
-    let (event, expected) = signed_request_header(state, headers, method, uri)?;
+    let (event, expected) = signed_request_header(state, headers, method, uri, auth_now)?;
     let signer = finite_nostr::validate_http_auth_event_before_body(&event, &expected)
         .map_err(auth_error)?;
     refuse_already_used_auth_event(state, &event)?;
     signer.to_npub().map_err(auth_error)
+}
+
+fn signed_request_header(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    auth_now: u64,
+) -> Result<(Event, HttpAuthValidation), ApiError> {
+    let authorization = headers
+        .get(AUTHORIZATION)
+        .or_else(|| headers.get(NOSTR_AUTHORIZATION_HEADER))
+        .or_else(|| headers.get(FINITEBRAIN_NOSTR_HEADER))
+        .ok_or_else(|| auth_error_message("valid Nostr authorization is required"))?
+        .to_str()
+        .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
+    let event = decode_http_auth_header(authorization)
+        .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
+    let expected = HttpAuthValidation::new(
+        method.as_str(),
+        absolute_url(&state.public_base_url, uri),
+        auth_now,
+        state.max_auth_skew_seconds,
+    );
+    Ok((event, expected))
 }
 
 /// Read-only replay check: refuse an authorization event the replay cache
@@ -116,30 +176,6 @@ fn refuse_already_used_auth_event(state: &ServerState, event: &Event) -> Result<
         ));
     }
     Ok(())
-}
-
-fn signed_request_header(
-    state: &ServerState,
-    headers: &HeaderMap,
-    method: &Method,
-    uri: &Uri,
-) -> Result<(Event, HttpAuthValidation), ApiError> {
-    let authorization = headers
-        .get(AUTHORIZATION)
-        .or_else(|| headers.get(NOSTR_AUTHORIZATION_HEADER))
-        .or_else(|| headers.get(FINITEBRAIN_NOSTR_HEADER))
-        .ok_or_else(|| auth_error_message("valid Nostr authorization is required"))?
-        .to_str()
-        .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
-    let event = decode_http_auth_header(authorization)
-        .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
-    let expected = HttpAuthValidation::new(
-        method.as_str(),
-        absolute_url(&state.public_base_url, uri),
-        state.auth_now_unix_seconds(),
-        state.max_auth_skew_seconds,
-    );
-    Ok((event, expected))
 }
 
 fn add_cors_headers(headers: &mut HeaderMap, origin: &str) {
