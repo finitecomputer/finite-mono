@@ -157,12 +157,20 @@ splits the request: report the removal as blocked by the 64 MiB limit.
 Rotation requests take one of a few server slots, in arrival order, after
 the server checks the signed request comes from an admin of that Brain or
 Mount. A slot is held while the request body arrives (at most 60 seconds) and
-while the server applies it. A 408 means your own upload did not arrive within
+while the server applies it; the CLI waits up to four minutes for its turn,
+its upload and the result. A 408 means your own upload did not arrive within
 60 seconds: nothing changed and the slot was released, so rerun it. A 503
-saying the server stayed busy for the whole admission wait means slots stayed
-taken for two minutes: rerun later. Any key that can create a Brain on this
-server can delay other Brains' rotations this way, by about one 60-second
-deadline per request, not block them for good; report repeated 503s.
+means the server stayed busy and nothing changed. It comes either after the
+whole two-minute admission wait (slots stayed taken), or at once when the
+admission queue was already full (no waiting place at all). Both count
+towards the report below.
+
+Arrival order serves a waiting admin ahead of anyone who arrives later, and
+while the slots are merely busy it is admitted within about one 60-second
+upload. It does not stop a flood: anyone who can create a Brain on this
+server (any key can) and keep many requests open can keep the queue full and
+delay rotations for as long as they sustain that load. Report repeated 503s
+of either kind to the server operator instead of retrying in a loop.
 
 Member removal does not yet clear Folders where the removed key holds a
 current key without entitlement, for example from an earlier demotion. Run
