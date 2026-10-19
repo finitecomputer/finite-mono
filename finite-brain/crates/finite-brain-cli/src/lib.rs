@@ -4769,6 +4769,7 @@ mod tests {
     use tempfile::TempDir;
 
     mod access_report_tests;
+    mod folder_key_rotation_tests;
 
     #[test]
     fn invite_accept_input_parses_url_fragment_and_bare_token() {

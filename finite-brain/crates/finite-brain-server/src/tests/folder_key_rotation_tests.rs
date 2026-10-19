@@ -1,0 +1,518 @@
+//! Folder Key rotation and stale-holder revocation through the signed router.
+//! Every identity here is synthetic.
+
+use super::*;
+
+const REPORT_BODY_LIMIT: usize = 1024 * 1024;
+const ROTATE_PATH: &str = "/v1/admin/brains/acme/folders/restricted/key-rotations";
+
+struct Cast {
+    admin: Keys,
+    demoted: Keys,
+    member: Keys,
+    guest: Keys,
+    outsider: Keys,
+}
+
+/// `acme` with a restricted Folder holding one page. `demoted` received the
+/// current wrap as an admin and was then demoted, `guest` holds explicit
+/// Folder access, and `member` is an ordinary Member with no Folder access.
+async fn demoted_admin_brain() -> (ServerState, Router, Cast) {
+    let cast = Cast {
+        admin: Keys::generate(),
+        demoted: Keys::generate(),
+        member: Keys::generate(),
+        guest: Keys::generate(),
+        outsider: Keys::generate(),
+    };
+    let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+        .with_auth_clock(TEST_NOW, 60);
+    let router = router_with_state(state.clone());
+    let created = post_brain(
+        router.clone(),
+        &cast.admin,
+        &create_brain_body("acme", "organization"),
+        TEST_NOW,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    add_test_org_folders(&router, &cast.admin).await;
+    let brain = BrainId::new("acme").unwrap();
+    {
+        let mut store = state.store.lock().unwrap();
+        for keys in [&cast.member, &cast.demoted] {
+            store
+                .add_member(&brain, &UserId::new(npub(keys)).unwrap())
+                .unwrap();
+        }
+        store
+            .add_admin(&brain, &UserId::new(npub(&cast.demoted)).unwrap())
+            .unwrap();
+    }
+    grant_restricted(&router, &cast.admin, &cast.demoted, TEST_NOW + 1).await;
+    grant_restricted(&router, &cast.admin, &cast.guest, TEST_NOW + 2).await;
+    let page = authed_request(
+        router.clone(),
+        &cast.admin,
+        "PUT",
+        "/v1/brains/acme/folders/restricted/objects/obj_000000000001",
+        Some(object_write_body(
+            &cast.admin,
+            RevisionFixture {
+                brain_id: "acme",
+                folder_id: "restricted",
+                object_id: "obj_000000000001",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "restricted page",
+                nonce: 21,
+                record_type: false,
+            },
+        )),
+        TEST_NOW + 3,
+    )
+    .await;
+    assert_eq!(page.status(), StatusCode::OK);
+    {
+        let mut store = state.store.lock().unwrap();
+        store
+            .remove_admin(&brain, &UserId::new(npub(&cast.demoted)).unwrap())
+            .unwrap();
+    }
+    (state, router, cast)
+}
+
+async fn grant_restricted(router: &Router, admin: &Keys, target: &Keys, at: u64) {
+    let target = npub(target);
+    let change_id = format!("grant-restricted-{}", &target[target.len() - 8..]);
+    let response = authed_request(
+        router.clone(),
+        admin,
+        "PUT",
+        &format!("/v1/admin/brains/acme/folders/restricted/access/{target}"),
+        Some(
+            serde_json::json!({
+                "grant": folder_key_grant_value(&change_id, 1, &target),
+                "accessChangeEvent": admin_event(admin, "acme", &change_id,
+                    AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1)),
+            })
+            .to_string(),
+        ),
+        at,
+    )
+    .await;
+    let status = response.status();
+    let text = read_text(response).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+}
+
+/// Rotation material for `restricted` at `new_key_version`, wrapped for
+/// `recipients` and signed by `signer` with the given event binding.
+#[allow(clippy::too_many_arguments)]
+fn rotation_body(
+    signer: &Keys,
+    change_id: &str,
+    action: AdminAccessAction,
+    event_folder: &str,
+    event_target: Option<&str>,
+    event_key_version: u32,
+    new_key_version: u32,
+    recipients: &[String],
+) -> String {
+    let grants = recipients
+        .iter()
+        .map(|recipient| {
+            folder_key_grant_value(
+                &format!("{change_id}-{}", &recipient[recipient.len() - 8..]),
+                new_key_version,
+                recipient,
+            )
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "newKeyVersion": new_key_version,
+        "grants": grants,
+        "reencryptedRecords": [rotation_object_value(
+            signer,
+            "acme",
+            "restricted",
+            "obj_000000000001",
+            u64::from(new_key_version),
+            Some(u64::from(new_key_version) - 1),
+            new_key_version,
+            "reencrypted restricted page",
+            22,
+        )],
+        "accessChangeEvent": admin_event(
+            signer,
+            "acme",
+            change_id,
+            action,
+            Some(event_folder),
+            event_target,
+            Some(event_key_version),
+        ),
+    })
+    .to_string()
+}
+
+fn admin_rotation_body(cast: &Cast, change_id: &str) -> String {
+    rotation_body(
+        &cast.admin,
+        change_id,
+        AdminAccessAction::RotateFolderKey,
+        "restricted",
+        None,
+        2,
+        2,
+        &[npub(&cast.admin), npub(&cast.guest)],
+    )
+}
+
+fn restricted_key_version(state: &ServerState) -> u32 {
+    let store = state.store.lock().unwrap();
+    let stored = store.load_brain(&BrainId::new("acme").unwrap()).unwrap();
+    stored
+        .brain
+        .folders
+        .iter()
+        .find(|folder| folder.id.as_str() == "restricted")
+        .unwrap()
+        .current_key_version
+}
+
+/// Per Folder, the keys the access report lists as `revocationIncomplete`.
+async fn report_revocation_incomplete(
+    router: &Router,
+    admin: &Keys,
+    at: u64,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let response = authed_request(
+        router.clone(),
+        admin,
+        "GET",
+        "/v1/brains/acme/access-report",
+        None,
+        at,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let report = read_json_with_limit::<serde_json::Value>(response, REPORT_BODY_LIMIT).await;
+    let mut by_folder = BTreeMap::<String, BTreeSet<String>>::new();
+    for row in report["identities"].as_array().unwrap() {
+        for folder in row["revocationIncomplete"].as_array().unwrap() {
+            by_folder
+                .entry(folder.as_str().unwrap().to_owned())
+                .or_default()
+                .insert(row["npub"].as_str().unwrap().to_owned());
+        }
+    }
+    by_folder
+}
+
+/// The store predicate behind revoke and rotation, per Folder.
+fn store_stale_holders(state: &ServerState) -> BTreeMap<String, BTreeSet<String>> {
+    let store = state.store.lock().unwrap();
+    let stored = store.load_brain(&BrainId::new("acme").unwrap()).unwrap();
+    stored
+        .brain
+        .folders
+        .iter()
+        .filter_map(|folder| {
+            let holders = finite_brain_store::stale_folder_key_holders(&stored, folder)
+                .unwrap()
+                .into_iter()
+                .map(|holder| holder.to_string())
+                .collect::<BTreeSet<_>>();
+            (!holders.is_empty()).then(|| (folder.id.to_string(), holders))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn rotation_cuts_off_a_demoted_admin_and_the_report_agrees() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let before = report_revocation_incomplete(&router, &cast.admin, TEST_NOW + 4).await;
+    assert_eq!(
+        before,
+        BTreeMap::from([(
+            "restricted".to_owned(),
+            BTreeSet::from([npub(&cast.demoted)])
+        )])
+    );
+    assert_eq!(store_stale_holders(&state), before);
+
+    let mut updates = state.brain_updates.subscribe();
+    let body = admin_rotation_body(&cast, "rotate-restricted");
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(body.clone()),
+        TEST_NOW + 5,
+    )
+    .await;
+    let status = response.status();
+    let text = read_text(response).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let rotated: RotateFolderKeyResponse = serde_json::from_str(&text).unwrap();
+    let mut recipients = vec![npub(&cast.admin), npub(&cast.guest)];
+    recipients.sort();
+    assert_eq!(
+        rotated.rotation,
+        FolderKeyRotationReceipt {
+            folder_id: "restricted".to_owned(),
+            previous_key_version: 1,
+            new_key_version: 2,
+            recipient_npubs: recipients,
+            cut_off_npubs: vec![npub(&cast.demoted)],
+        }
+    );
+    let restricted = rotated
+        .metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == "restricted")
+        .unwrap();
+    assert_eq!(restricted.current_key_version, 2);
+    assert_eq!(restricted.access_user_ids, vec![npub(&cast.guest)]);
+    // The response still reads as plain Brain metadata for older clients.
+    let plain: BrainMetadataResponse = serde_json::from_str(&text).unwrap();
+    assert_eq!(plain.brain_id, "acme");
+    let update = updates.try_recv().unwrap();
+    assert_eq!(update.reason, BrainUpdateReason::AccessUpdated);
+    assert!(update.notify_npubs.is_empty());
+
+    assert!(
+        report_revocation_incomplete(&router, &cast.admin, TEST_NOW + 6)
+            .await
+            .is_empty()
+    );
+    assert!(store_stale_holders(&state).is_empty());
+
+    // Replaying the same signed rotation finds the version already moved.
+    let replay = authed_request(
+        router.clone(),
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(body),
+        TEST_NOW + 7,
+    )
+    .await;
+    assert_error(replay, StatusCode::CONFLICT, "Key version changed").await;
+    assert_eq!(restricted_key_version(&state), 2);
+}
+
+#[tokio::test]
+async fn rotation_requires_brain_admin_standing() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let recipients = [npub(&cast.admin), npub(&cast.guest)];
+    for (index, keys) in [&cast.member, &cast.guest, &cast.demoted, &cast.outsider]
+        .into_iter()
+        .enumerate()
+    {
+        let body = rotation_body(
+            keys,
+            &format!("not-admin-{index}"),
+            AdminAccessAction::RotateFolderKey,
+            "restricted",
+            None,
+            2,
+            2,
+            &recipients,
+        );
+        let response = authed_request(
+            router.clone(),
+            keys,
+            "POST",
+            ROTATE_PATH,
+            Some(body),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::FORBIDDEN,
+            "brain admin access required",
+        )
+        .await;
+    }
+    assert_eq!(restricted_key_version(&state), 1);
+}
+
+#[tokio::test]
+async fn rotation_rejects_events_bound_to_another_change() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let recipients = [npub(&cast.admin), npub(&cast.guest)];
+    let demoted = npub(&cast.demoted);
+    let cases = [
+        (
+            "wrong-folder",
+            AdminAccessAction::RotateFolderKey,
+            "getting-started",
+            None,
+            2,
+        ),
+        (
+            "wrong-version",
+            AdminAccessAction::RotateFolderKey,
+            "restricted",
+            None,
+            3,
+        ),
+        (
+            "wrong-action",
+            AdminAccessAction::RemoveFolderAccess,
+            "restricted",
+            Some(demoted.as_str()),
+            2,
+        ),
+        (
+            "unexpected-target",
+            AdminAccessAction::RotateFolderKey,
+            "restricted",
+            Some(demoted.as_str()),
+            2,
+        ),
+    ];
+    for (change_id, action, folder, target, event_version) in cases {
+        let body = rotation_body(
+            &cast.admin,
+            change_id,
+            action,
+            folder,
+            target,
+            event_version,
+            2,
+            &recipients,
+        );
+        let response = authed_request(
+            router.clone(),
+            &cast.admin,
+            "POST",
+            ROTATE_PATH,
+            Some(body),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "access-change payload fields differ",
+        )
+        .await;
+    }
+    // Wrapping for the cut-off key, or skipping a required one, is refused.
+    for (change_id, wrapped) in [
+        (
+            "rewrap-demoted",
+            vec![npub(&cast.admin), npub(&cast.guest), demoted.clone()],
+        ),
+        ("skip-guest", vec![npub(&cast.admin)]),
+    ] {
+        let response = authed_request(
+            router.clone(),
+            &cast.admin,
+            "POST",
+            ROTATE_PATH,
+            Some(rotation_body(
+                &cast.admin,
+                change_id,
+                AdminAccessAction::RotateFolderKey,
+                "restricted",
+                None,
+                2,
+                2,
+                &wrapped,
+            )),
+            TEST_NOW + 5,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(restricted_key_version(&state), 1);
+}
+
+#[tokio::test]
+async fn revoke_accepts_a_stale_holder_and_refuses_role_or_unknown_keys() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let revoke = |target: &Keys, change_id: &str| {
+        let target = npub(target);
+        (
+            format!("/v1/admin/brains/acme/folders/restricted/access/{target}"),
+            rotation_body(
+                &cast.admin,
+                change_id,
+                AdminAccessAction::RemoveFolderAccess,
+                "restricted",
+                Some(&target),
+                2,
+                2,
+                &[npub(&cast.admin), npub(&cast.guest)],
+            ),
+        )
+    };
+
+    let (path, body) = revoke(&cast.admin, "revoke-admin");
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &path,
+        Some(body),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_error(response, StatusCode::BAD_REQUEST, "through its Brain role").await;
+    let (path, body) = revoke(&cast.member, "revoke-member");
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &path,
+        Some(body),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_error(
+        response,
+        StatusCode::BAD_REQUEST,
+        "does not currently have access",
+    )
+    .await;
+    assert_eq!(restricted_key_version(&state), 1);
+
+    let (path, body) = revoke(&cast.demoted, "revoke-demoted");
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &path,
+        Some(body),
+        TEST_NOW + 6,
+    )
+    .await;
+    let status = response.status();
+    let text = read_text(response).await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let metadata: BrainMetadataResponse = serde_json::from_str(&text).unwrap();
+    let restricted = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == "restricted")
+        .unwrap();
+    assert_eq!(restricted.current_key_version, 2);
+    assert_eq!(restricted.access_user_ids, vec![npub(&cast.guest)]);
+    assert!(
+        report_revocation_incomplete(&router, &cast.admin, TEST_NOW + 7)
+            .await
+            .is_empty()
+    );
+}

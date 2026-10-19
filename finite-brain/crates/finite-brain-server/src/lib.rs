@@ -10225,4 +10225,5 @@ mod tests {
     }
 
     mod access_report_tests;
+    mod folder_key_rotation_tests;
 }

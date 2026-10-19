@@ -1781,6 +1781,323 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     server_thread.join().unwrap();
 }
 
+/// Production shape from 2026-10-19: a demoted admin keeps current Folder Key
+/// wraps on restricted and admin_only Folders (`revocationIncomplete`). The
+/// built binary revokes that stale holder on one Folder and rotates two others
+/// against a real Brain server; the demoted key can no longer open any of them
+/// while the remaining admin still decrypts every page at the new version.
+#[test]
+fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
+    let scratch = TempDir::new().unwrap();
+    let admin_home = scratch.path().join("admin");
+    let demoted_home = scratch.path().join("demoted");
+    let mut npubs = Vec::new();
+    for home in [&admin_home, &demoted_home] {
+        fs::create_dir_all(home).unwrap();
+        let keys = Keys::generate();
+        let secret = home.join("import-key");
+        fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        fs::remove_file(secret).unwrap();
+        npubs.push(
+            NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+        );
+    }
+    let admin = &npubs[0];
+    let demoted = &npubs[1];
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(demoted, demoted, admin, admin);
+    let run_raw = |home: &Path, cwd: &Path, args: &[&str]| -> Output {
+        command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = run_raw(home, cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let revocation_incomplete = |key: &str| -> Vec<String> {
+        let report = run_json(
+            &admin_home,
+            &admin_home,
+            &["access", "list", "--brain", "rotation"],
+        );
+        let row = report["identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["npub"] == key)
+            .unwrap_or_else(|| panic!("no access row for {key}: {report}"));
+        row["revocationIncomplete"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|folder| folder.as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["brain", "create", "organization", "Rotation"],
+    );
+    let admin_tree = admin_home.join("tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "rotation", admin_tree.to_str().unwrap()],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["admin", "member", "add", "--target", demoted],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["admin", "role", "grant", "admin", "--target", demoted],
+    );
+    // Created while the demoted key is an admin, so it holds every wrap by
+    // role and never gets an explicit Folder access row.
+    run_json(&admin_home, &admin_tree, &["folder", "create", "Revoked"]);
+    run_json(&admin_home, &admin_tree, &["folder", "create", "Rotated"]);
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["folder", "create", "Admins", "--access", "admin_only"],
+    );
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let folders = run_json(&admin_home, &admin_tree, &["folder", "list"]);
+    let folder_id = |path: &str| -> String {
+        folders["folders"]
+            .as_array()
+            .or_else(|| folders.as_array())
+            .unwrap()
+            .iter()
+            .find(|folder| folder["path"] == path)
+            .unwrap_or_else(|| panic!("no folder {path}: {folders}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let pages = [
+        ("Revoked", folder_id("Revoked")),
+        ("Rotated", folder_id("Rotated")),
+        ("Admins", folder_id("Admins")),
+    ];
+    for (path, _) in &pages {
+        fs::write(
+            admin_tree.join(path).join("page.md"),
+            format!("# {path} before rotation\n"),
+        )
+        .unwrap();
+    }
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let demoted_tree = demoted_home.join("tree");
+    run_json(
+        &demoted_home,
+        &demoted_home,
+        &["open", "rotation", demoted_tree.to_str().unwrap()],
+    );
+    run_json(&demoted_home, &demoted_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert_eq!(
+            fs::read_to_string(demoted_tree.join(path).join("page.md")).unwrap(),
+            format!("# {path} before rotation\n")
+        );
+    }
+
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["admin", "role", "revoke", "admin", "--target", demoted],
+    );
+    let mut stale = revocation_incomplete(demoted);
+    stale.sort();
+    let mut expected = pages.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(stale, expected, "demotion leaves every wrap in place");
+
+    // (a) Revoke the stale holder, which has no explicit access row.
+    let revoked_id = &pages[0].1;
+    let revoked = run_json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            revoked_id,
+            "--target",
+            demoted,
+        ],
+    );
+    assert_eq!(revoked["state"], "complete");
+    assert_eq!(revoked["newKeyVersion"], 2);
+    assert!(!revocation_incomplete(demoted).contains(revoked_id));
+    let again = run_raw(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            revoked_id,
+            "--target",
+            demoted,
+        ],
+    );
+    assert!(!again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("does not currently have access"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    // The remaining admin holds its key by role: revoke points at the role.
+    let entitled = run_raw(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            &pages[1].1,
+            "--target",
+            admin,
+        ],
+    );
+    assert!(!entitled.status.success());
+    assert!(
+        String::from_utf8_lossy(&entitled.stderr).contains("through its Brain role"),
+        "{}",
+        String::from_utf8_lossy(&entitled.stderr)
+    );
+
+    // (b) Rotate a restricted Folder and (c) an admin_only Folder.
+    for (_, rotated_id) in &pages[1..] {
+        let rotated = run_json(
+            &admin_home,
+            &admin_tree,
+            &["admin", "folder-access", "rotate", "--folder", rotated_id],
+        );
+        assert_eq!(rotated["state"], "complete");
+        assert_eq!(rotated["previousKeyVersion"], 1);
+        assert_eq!(rotated["newKeyVersion"], 2);
+        assert_eq!(rotated["recipientNpubs"], json!([admin]));
+        assert_eq!(rotated["cutOffNpubs"], json!([demoted]));
+    }
+    assert!(revocation_incomplete(demoted).is_empty());
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "rotation"],
+    );
+    assert_eq!(report["totals"]["revocationIncomplete"], 0, "{report}");
+    let activity = run_json(&admin_home, &admin_tree, &["activity"]);
+    assert!(
+        activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "admin.folder_key.rotated"),
+        "{activity}"
+    );
+
+    // The remaining admin decrypts every re-encrypted page at version 2 from
+    // a fresh tree, then publishes a new revision under the new key.
+    let fresh_admin_tree = admin_home.join("fresh-tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "rotation", fresh_admin_tree.to_str().unwrap()],
+    );
+    run_json(&admin_home, &fresh_admin_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert_eq!(
+            fs::read_to_string(fresh_admin_tree.join(path).join("page.md")).unwrap(),
+            format!("# {path} before rotation\n")
+        );
+        fs::write(
+            fresh_admin_tree.join(path).join("page.md"),
+            format!("# {path} after rotation\n"),
+        )
+        .unwrap();
+    }
+    run_json(&admin_home, &fresh_admin_tree, &["sync", "now"]);
+    let export = run_json(&admin_home, &fresh_admin_tree, &["brain", "export"]);
+    for (_, id) in &pages {
+        let folder = export["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["id"] == id.as_str())
+            .unwrap();
+        assert_eq!(folder["currentKeyVersion"], 2);
+        assert_eq!(folder["accessible"], true);
+    }
+
+    // The demoted key cannot open the new version of any of the three.
+    let denied = run_json(&demoted_home, &demoted_tree, &["brain", "export"]);
+    for (_, id) in &pages {
+        let folder = denied["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["id"] == id.as_str())
+            .unwrap();
+        assert_eq!(folder["currentKeyVersion"], 2);
+        assert_eq!(folder["accessible"], false, "{folder}");
+    }
+    let fresh_demoted_tree = demoted_home.join("fresh-tree");
+    run_json(
+        &demoted_home,
+        &demoted_home,
+        &["open", "rotation", fresh_demoted_tree.to_str().unwrap()],
+    );
+    run_json(&demoted_home, &fresh_demoted_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert!(
+            !fresh_demoted_tree.join(path).join("page.md").exists(),
+            "{path} must stay unreadable to the demoted key"
+        );
+    }
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
 #[test]
 fn built_fbrain_process_two_independent_homes_open_restricted_collaboration() {
     let mut smoke = CollaborationSmokeReport::from_environment();

@@ -670,7 +670,9 @@ pub(crate) fn prepare_folder_key_rotation(
             brain_id: brain_id.to_owned(),
             folder_id: folder_id.to_owned(),
             key_version: folder.current_key_version,
-            reason: format!("the current Folder Key is required before {operation} can be prepared"),
+            reason: format!(
+                "the current Folder Key is required before {operation} can be prepared"
+            ),
         })?;
     let new_key_version = folder
         .current_key_version
@@ -796,7 +798,6 @@ pub(crate) fn prepare_folder_key_rotation(
         }),
     })
 }
-
 
 fn newly_readable_session_key_count(
     prior_tree_state: &finite_brain_core::portability::BrainWorkingTreeStateManifest,

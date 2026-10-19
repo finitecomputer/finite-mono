@@ -10,8 +10,7 @@ use serde::Deserialize;
 use crate::{
     BrainMetadataView, CliEnvironment, CliError, FolderKeyRotationIntent,
     PreparedFolderKeyRotation, command_brain_id, current_folder_id, fetch_brain_metadata,
-    mutate_agent_state, option_value, prepare_folder_key_rotation, signed_json_request,
-    write_json,
+    mutate_agent_state, option_value, prepare_folder_key_rotation, signed_json_request, write_json,
 };
 
 /// Server receipt for one committed Folder Key rotation.
