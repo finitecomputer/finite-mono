@@ -143,11 +143,22 @@ key without explicit access.
 One rotation request carries every re-encrypted page of the Folder and is
 capped at 64 MiB. If the CLI refuses with `needs a <size>-byte rotation
 request, over the ... limit` (nothing was sent), the Folder's pages are too
-large to re-encrypt at once: report the Folder and size and stop. Member
-removal rotates every Folder the Member reads in one request, so for a Member
-of several large Folders, first `revoke` or `rotate` the largest of those
-Folders one at a time, then retry the removal. A 503 saying too many Folder
-Key rotation requests are in progress is a busy server: wait and rerun.
+large to re-encrypt at once: report the Folder and size and stop.
+
+Member removal rotates, in one request, every Folder the Member can read. A
+`rotate` does not shrink that request: the Member stays entitled and the
+removal still re-encrypts the Folder. Only where the Member reads a large
+Folder through an explicit Folder grant can you first run
+`admin folder-access revoke --folder <folder-id> --target <npub>` for that
+Folder (it ends that access), then retry the removal. When the Member reads
+the large Folders through its role, such as `all_members` Folders, nothing
+splits the request: report the removal as blocked by the 64 MiB limit.
+
+A 503 saying too many Folder Key rotation requests from Brain admins are in
+progress means other admins of a Brain on this server hold every rotation
+slot (only signed requests from an admin of the target Brain or Mount can
+hold one, each for at most 60 seconds while its body arrives): wait a minute
+and rerun.
 
 Member removal does not yet clear Folders where the removed key holds a
 current key without entitlement, for example from an earlier demotion. Run
