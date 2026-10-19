@@ -183,21 +183,46 @@ pub fn validate_http_auth_event(
     event: &Event,
     expected: &HttpAuthValidation,
 ) -> Result<NostrPublicKey, NostrPrimitiveError> {
+    let http_data = validate_signed_request_header(event, expected)?;
+    validate_payload(&http_data, expected.body.as_deref())?;
+    validate_expected_signer(event, expected)
+}
+
+/// Validate an HTTP auth event without its body: kind, signature, time,
+/// URL, method and expected signer. The body hash (`payload` tag) is not
+/// checked, so a server can admit or refuse a request from its signed header
+/// alone before reading a large body; it must still run
+/// [`validate_http_auth_event`] with the body before acting on the request.
+pub fn validate_http_auth_event_before_body(
+    event: &Event,
+    expected: &HttpAuthValidation,
+) -> Result<NostrPublicKey, NostrPrimitiveError> {
+    validate_signed_request_header(event, expected)?;
+    validate_expected_signer(event, expected)
+}
+
+fn validate_signed_request_header(
+    event: &Event,
+    expected: &HttpAuthValidation,
+) -> Result<ParsedHttpAuth, NostrPrimitiveError> {
     if event.kind != Kind::HttpAuth {
         return Err(NostrPrimitiveError::WrongEventKind {
             expected: HTTP_AUTH_KIND,
             actual: event.kind.as_u16(),
         });
     }
-
     verify_event_integrity(event)?;
     validate_timestamp(event.created_at, expected.now, expected.max_skew_seconds)?;
-
     let http_data = parse_http_data(event)?;
     validate_url(&http_data, &expected.url)?;
     validate_method(&http_data, &expected.method)?;
-    validate_payload(&http_data, expected.body.as_deref())?;
+    Ok(http_data)
+}
 
+fn validate_expected_signer(
+    event: &Event,
+    expected: &HttpAuthValidation,
+) -> Result<NostrPublicKey, NostrPrimitiveError> {
     let signer = NostrPublicKey::from_protocol(event.pubkey);
     if let Some(expected_signer) = expected.expected_signer
         && signer != expected_signer

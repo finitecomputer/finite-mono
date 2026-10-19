@@ -71,6 +71,41 @@ pub(crate) fn validate_request_auth(
     uri: &Uri,
     body: Option<&Bytes>,
 ) -> Result<String, ApiError> {
+    let (event, mut expected) = signed_request_header(state, headers, method, uri)?;
+    if let Some(body) = body {
+        expected = expected.with_body(body.to_vec());
+    }
+
+    let signer = finite_nostr::validate_http_auth_event(&event, &expected).map_err(auth_error)?;
+    enforce_auth_replay_cache(state, &event)?;
+    enforce_rate_limit(state, method, uri, &signer)?;
+    signer.to_npub().map_err(auth_error)
+}
+
+/// Authenticate a request from its signed header alone, before its body is
+/// read: signature, method, URL and time. It neither records the event in the
+/// replay cache nor counts it against the rate limit, so the handler's full
+/// [`validate_request_auth`] with the body still runs exactly once and stays
+/// the authority for acting on the request.
+pub(crate) fn authenticate_request_header(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Result<String, ApiError> {
+    let (event, expected) = signed_request_header(state, headers, method, uri)?;
+    finite_nostr::validate_http_auth_event_before_body(&event, &expected)
+        .map_err(auth_error)?
+        .to_npub()
+        .map_err(auth_error)
+}
+
+fn signed_request_header(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Result<(Event, HttpAuthValidation), ApiError> {
     let authorization = headers
         .get(AUTHORIZATION)
         .or_else(|| headers.get(NOSTR_AUTHORIZATION_HEADER))
@@ -80,22 +115,13 @@ pub(crate) fn validate_request_auth(
         .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
     let event = decode_http_auth_header(authorization)
         .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
-
-    let expected_url = absolute_url(&state.public_base_url, uri);
-    let mut expected = HttpAuthValidation::new(
+    let expected = HttpAuthValidation::new(
         method.as_str(),
-        expected_url,
+        absolute_url(&state.public_base_url, uri),
         state.auth_now_unix_seconds(),
         state.max_auth_skew_seconds,
     );
-    if let Some(body) = body {
-        expected = expected.with_body(body.to_vec());
-    }
-
-    let signer = finite_nostr::validate_http_auth_event(&event, &expected).map_err(auth_error)?;
-    enforce_auth_replay_cache(state, &event)?;
-    enforce_rate_limit(state, method, uri, &signer)?;
-    signer.to_npub().map_err(auth_error)
+    Ok((event, expected))
 }
 
 fn add_cors_headers(headers: &mut HeaderMap, origin: &str) {

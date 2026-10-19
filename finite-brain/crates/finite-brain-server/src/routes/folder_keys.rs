@@ -8,16 +8,44 @@ use crate::*;
 use finite_brain_store::{FolderKeyRotationRequest, FolderKeyRotationTarget};
 
 /// Rotation requests that may hold a large body at once. With the 64 MiB
-/// rotation body limit this bounds rotation request buffering at 256 MiB.
+/// rotation body limit this bounds buffered rotation request bodies at
+/// 256 MiB (parsing and cryptography allocate on top of that).
 pub(crate) const MAX_CONCURRENT_ROTATION_REQUESTS: usize = 4;
 
+/// How long an admitted rotation request may take to deliver its body before
+/// it is answered 408 and its permit is released.
+pub(crate) const ROTATION_BODY_READ_DEADLINE: std::time::Duration =
+    std::time::Duration::from_secs(60);
+
+/// Who may occupy a rotation permit on a route. Keys are free, roles are not:
+/// only a caller with this authority can hold one of the permits.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(crate) enum RotationAuthority {
+    /// An admin of the `{brain_id}` path Brain (owner or Personal Agent of a
+    /// Personal Brain), exactly as `ensure_brain_admin` decides.
+    BrainAdmin,
+    /// Source or destination control of the `{connection_id}` Mount.
+    MountRevocation,
+    /// Destination control of the active `{connection_id}` Mount.
+    MountParticipantRemoval,
+}
+
+#[derive(Clone)]
+struct RotationAdmission {
+    state: ServerState,
+    authority: RotationAuthority,
+}
+
 /// Wrap the rotating method of a route (and only that method, so siblings on
-/// the same path keep the ordinary 1 MiB cap): admit at most
-/// [`MAX_CONCURRENT_ROTATION_REQUESTS`] at once, answering 503 before the body
-/// is read when none is free, and raise its body limit to
-/// `MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES`.
+/// the same path keep the ordinary 1 MiB cap). Before any body byte is read
+/// the request must carry a valid signed header from a key with `authority`
+/// over the path (403 otherwise); then it takes one of
+/// [`MAX_CONCURRENT_ROTATION_REQUESTS`] permits (503 when none is free) and
+/// must deliver its body within [`ROTATION_BODY_READ_DEADLINE`] (408) and
+/// `MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES` (413).
 pub(crate) fn rotation_method(
     state: &ServerState,
+    authority: RotationAuthority,
     method: axum::routing::MethodRouter<ServerState>,
 ) -> axum::routing::MethodRouter<ServerState> {
     method
@@ -25,26 +53,119 @@ pub(crate) fn rotation_method(
             finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
         ))
         .layer(middleware::from_fn_with_state(
-            state.clone(),
-            limit_concurrent_rotation_requests,
+            RotationAdmission {
+                state: state.clone(),
+                authority,
+            },
+            admit_rotation_request,
         ))
 }
 
-/// The body is read only after this returns, so the permit bounds how many
-/// large rotation bodies are buffered at once, signed or not.
-async fn limit_concurrent_rotation_requests(
-    State(state): State<ServerState>,
+async fn admit_rotation_request(
+    State(admission): State<RotationAdmission>,
+    AxumPath(params): AxumPath<BTreeMap<String, String>>,
     request: axum::extract::Request,
     next: middleware::Next,
 ) -> Response {
-    let Ok(_permit) = state.rotation_request_permits.clone().try_acquire_owned() else {
-        return ApiError::new(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "too many Folder Key rotation requests are in progress; retry shortly",
-        )
-        .into_response();
+    match admit(admission, &params, request, next).await {
+        Ok(response) => response,
+        Err(error) => error.into_response(),
+    }
+}
+
+async fn admit(
+    admission: RotationAdmission,
+    params: &BTreeMap<String, String>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Result<Response, ApiError> {
+    let state = &admission.state;
+    // The handler repeats full authentication with the body hash (and the
+    // replay cache) and the store repeats authority inside its transaction;
+    // this pass only decides who may hold a permit while the body arrives.
+    // Nested routers strip their prefix from `uri()`; the signed URL is the
+    // original one, exactly as the handlers' `OriginalUri` sees it.
+    let uri = request
+        .extensions()
+        .get::<OriginalUri>()
+        .map_or_else(|| request.uri().clone(), |original| original.0.clone());
+    let actor = authenticate_request_header(state, request.headers(), request.method(), &uri)?;
+    authorize_rotation_actor(state, admission.authority, params, &actor)?;
+    let _permit = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many Folder Key rotation requests from Brain admins are in progress; retry shortly",
+            )
+        })?;
+    let (parts, body) = request.into_parts();
+    let body = match tokio::time::timeout(
+        state.rotation_body_read_deadline,
+        axum::body::to_bytes(
+            body,
+            finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(body)) => body,
+        Ok(Err(_)) => {
+            return Err(ApiError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "rotation request body exceeds the rotation request limit or was not fully received",
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError::new(
+                StatusCode::REQUEST_TIMEOUT,
+                "rotation request body was not received before the deadline",
+            ));
+        }
     };
-    next.run(request).await
+    Ok(next
+        .run(axum::extract::Request::from_parts(
+            parts,
+            axum::body::Body::from(body),
+        ))
+        .await)
+}
+
+fn authorize_rotation_actor(
+    state: &ServerState,
+    authority: RotationAuthority,
+    params: &BTreeMap<String, String>,
+    actor: &str,
+) -> Result<(), ApiError> {
+    let param = |name: &str| {
+        params.get(name).cloned().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "rotation route parameter is missing",
+            )
+        })
+    };
+    let refuse = |error: StoreError| match error {
+        StoreError::BrokenInvariant { reason } => ApiError::new(StatusCode::FORBIDDEN, reason),
+        other => ApiError::from(other),
+    };
+    let store = state.store.lock().map_err(lock_error)?;
+    match authority {
+        RotationAuthority::BrainAdmin => {
+            let stored = store.load_brain(&BrainId::new(param("brain_id")?)?)?;
+            ensure_brain_admin(&stored, actor)
+        }
+        RotationAuthority::MountRevocation => store
+            .authorize_mount_revocation(&param("connection_id")?, &UserId::new(actor)?)
+            .map(|_| ())
+            .map_err(refuse),
+        RotationAuthority::MountParticipantRemoval => store
+            .authorize_mount_participant_removal(&param("connection_id")?, &UserId::new(actor)?)
+            .map(|_| ())
+            .map_err(refuse),
+    }
 }
 
 /// Validated, server-shaped rotation material for one Folder.

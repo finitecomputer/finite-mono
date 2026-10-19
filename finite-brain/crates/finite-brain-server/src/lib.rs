@@ -60,7 +60,8 @@ pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
 use protected_routes::{
-    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware, validate_request_auth,
+    authenticate_request_header, cors_allowed_origins_from_public_base_url,
+    cors_allowlist_middleware, validate_request_auth,
 };
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
@@ -121,6 +122,8 @@ pub struct ServerState {
     core_descriptions: Option<CoreDescriptionClient>,
     /// Bounds how many rotation requests may hold large bodies at once.
     rotation_request_permits: Arc<tokio::sync::Semaphore>,
+    /// How long an admitted rotation request may take to deliver its body.
+    rotation_body_read_deadline: Duration,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -174,7 +177,15 @@ impl ServerState {
             rotation_request_permits: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_ROTATION_REQUESTS,
             )),
+            rotation_body_read_deadline: ROTATION_BODY_READ_DEADLINE,
         }
+    }
+
+    /// Override how long an admitted rotation request may take to deliver its
+    /// body (default `ROTATION_BODY_READ_DEADLINE`).
+    pub fn with_rotation_body_read_deadline(mut self, deadline: Duration) -> Self {
+        self.rotation_body_read_deadline = deadline;
+        self
     }
 
     /// Let the access report ask Core's private identity listener to describe
@@ -629,6 +640,7 @@ fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
             "/mounts/{connection_id}",
             get(get_shared_folder_connection_handler).merge(rotation_method(
                 state,
+                RotationAuthority::MountRevocation,
                 axum::routing::delete(revoke_shared_folder_connection_handler),
             )),
         )
@@ -636,6 +648,7 @@ fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
             "/mounts/{connection_id}/participants/{target_npub}",
             axum::routing::put(add_mount_participant_handler).merge(rotation_method(
                 state,
+                RotationAuthority::MountParticipantRemoval,
                 axum::routing::delete(remove_mount_participant_handler),
             )),
         )
@@ -669,6 +682,7 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
             "/brains/{brain_id}/members/{target_npub}",
             axum::routing::put(add_member_handler).merge(rotation_method(
                 state,
+                RotationAuthority::BrainAdmin,
                 axum::routing::delete(remove_member_handler),
             )),
         )
@@ -680,6 +694,7 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
             axum::routing::put(grant_folder_access_handler).merge(rotation_method(
                 state,
+                RotationAuthority::BrainAdmin,
                 axum::routing::delete(remove_folder_access_handler),
             )),
         )
@@ -689,7 +704,11 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/key-rotations",
-            rotation_method(state, axum::routing::post(rotate_folder_key_handler)),
+            rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::post(rotate_folder_key_handler),
+            ),
         )
 }
 

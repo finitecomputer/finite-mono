@@ -18,6 +18,14 @@ struct Cast {
 /// current wrap as an admin and was then demoted, `guest` holds explicit
 /// Folder access, and `member` is an ordinary Member with no Folder access.
 async fn demoted_admin_brain() -> (ServerState, Router, Cast) {
+    demoted_admin_brain_with(|state| state).await
+}
+
+/// `demoted_admin_brain` with the server state adjusted before the router is
+/// built (a NIP-05 fetcher, a short body-read deadline).
+async fn demoted_admin_brain_with(
+    configure: impl FnOnce(ServerState) -> ServerState,
+) -> (ServerState, Router, Cast) {
     let cast = Cast {
         admin: Keys::generate(),
         demoted: Keys::generate(),
@@ -25,8 +33,10 @@ async fn demoted_admin_brain() -> (ServerState, Router, Cast) {
         guest: Keys::generate(),
         outsider: Keys::generate(),
     };
-    let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
-        .with_auth_clock(TEST_NOW, 60);
+    let state = configure(
+        ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+            .with_auth_clock(TEST_NOW, 60),
+    );
     let router = router_with_state(state.clone());
     let created = post_brain(
         router.clone(),
@@ -685,18 +695,22 @@ async fn personal_brain_report_and_store_agree_on_stale_holders() {
     );
 }
 
-#[tokio::test]
-async fn oversized_revoke_is_refused_before_resolving_the_target() {
-    let admin = Keys::generate();
-    let lookups = Arc::new(Mutex::new(0usize));
-    let counted = lookups.clone();
-    let mut state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
-        .with_auth_clock(TEST_NOW, 60);
+/// A NIP-05 fetcher that only counts lookups, so tests can prove none ran.
+fn counting_nip05(state: ServerState, lookups: Arc<Mutex<usize>>) -> ServerState {
+    let mut state = state;
     state.nip05_fetcher = Arc::new(move |_| {
-        *counted.lock().unwrap() += 1;
+        *lookups.lock().unwrap() += 1;
         Err("synthetic NIP-05 lookup".to_owned())
     });
-    let router = router_with_state(state);
+    state
+}
+
+#[tokio::test]
+async fn oversized_revoke_is_refused_before_resolving_the_target() {
+    let lookups = Arc::new(Mutex::new(0usize));
+    let counted = lookups.clone();
+    let (_, router, cast) =
+        demoted_admin_brain_with(move |state| counting_nip05(state, counted)).await;
     let grants = (0..=finite_brain_core::MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
         .map(|index| {
             serde_json::json!({
@@ -709,7 +723,7 @@ async fn oversized_revoke_is_refused_before_resolving_the_target() {
         .collect::<Vec<_>>();
     let response = authed_request(
         router,
-        &admin,
+        &cast.admin,
         "DELETE",
         "/v1/admin/brains/acme/folders/restricted/access/someone@example.test",
         Some(
@@ -721,7 +735,7 @@ async fn oversized_revoke_is_refused_before_resolving_the_target() {
             })
             .to_string(),
         ),
-        TEST_NOW,
+        TEST_NOW + 5,
     )
     .await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
@@ -845,7 +859,13 @@ async fn rotation_routes_refuse_bodies_over_their_limit() {
 
 /// `demoted_admin_brain` plus a destination Brain that mounts `restricted`.
 async fn mounted_brain() -> (ServerState, Router, Cast, Keys, String) {
-    let (state, router, cast) = demoted_admin_brain().await;
+    mounted_brain_with(|state| state).await
+}
+
+async fn mounted_brain_with(
+    configure: impl FnOnce(ServerState) -> ServerState,
+) -> (ServerState, Router, Cast, Keys, String) {
+    let (state, router, cast) = demoted_admin_brain_with(configure).await;
     let destination_admin = Keys::generate();
     let created = post_brain(
         router.clone(),
@@ -936,31 +956,25 @@ fn oversized_mount_bodies() -> [(&'static str, String); 2] {
 }
 
 #[tokio::test]
-async fn mount_rotation_routes_bound_fan_out_before_lookup_or_store_reads() {
-    let outsider = Keys::generate();
+async fn mount_rotation_routes_bound_fan_out_before_lookup_or_material_processing() {
     let lookups = Arc::new(Mutex::new(0usize));
     let counted = lookups.clone();
-    let mut state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
-        .with_auth_clock(TEST_NOW, 60);
-    state.nip05_fetcher = Arc::new(move |_| {
-        *counted.lock().unwrap() += 1;
-        Err("synthetic NIP-05 lookup".to_owned())
-    });
-    let router = router_with_state(state);
-    // The Mount does not exist, so a 413 proves fan-out ran before any store
-    // read, and the NIP-05 participant proves it ran before identity lookup.
+    let (_, router, _, destination_admin, mount_id) =
+        mounted_brain_with(move |state| counting_nip05(state, counted)).await;
+    // The destination controller may use both routes; the NIP-05 participant
+    // proves the fan-out refusal comes before any identity lookup.
     for path in [
-        "/v1/mounts/mount-missing",
-        "/v1/mounts/mount-missing/participants/someone@example.test",
+        format!("/v1/mounts/{mount_id}"),
+        format!("/v1/mounts/{mount_id}/participants/someone@example.test"),
     ] {
         for (kind, body) in oversized_mount_bodies() {
             let response = authed_request(
                 router.clone(),
-                &outsider,
+                &destination_admin,
                 "DELETE",
-                path,
+                &path,
                 Some(body),
-                TEST_NOW,
+                TEST_NOW + 6,
             )
             .await;
             assert_eq!(
@@ -1000,7 +1014,7 @@ async fn mount_rotation_routes_refuse_an_unauthorized_caller_before_reading_mate
     .await;
     assert_error(
         revoke,
-        StatusCode::BAD_REQUEST,
+        StatusCode::FORBIDDEN,
         "mount revocation requires source or destination brain control",
     )
     .await;
@@ -1016,7 +1030,7 @@ async fn mount_rotation_routes_refuse_an_unauthorized_caller_before_reading_mate
     .await;
     assert_error(
         remove,
-        StatusCode::BAD_REQUEST,
+        StatusCode::FORBIDDEN,
         "mount participant management requires destination brain control",
     )
     .await;
@@ -1046,7 +1060,7 @@ async fn rotation_routes_admit_a_bounded_number_of_requests_at_once() {
     assert_error(
         busy,
         StatusCode::SERVICE_UNAVAILABLE,
-        "too many Folder Key rotation requests are in progress",
+        "too many Folder Key rotation requests",
     )
     .await;
     assert_eq!(restricted_key_version(&state), 1);
@@ -1108,4 +1122,159 @@ async fn a_rotation_that_skips_versions_is_a_bad_request() {
     .await;
     assert_error(response, StatusCode::BAD_REQUEST, "skips versions").await;
     assert_eq!(restricted_key_version(&state), 1);
+}
+
+/// A request whose body sends one byte and then never finishes. With
+/// `signer`, it carries a valid signed header for `method` and `path`.
+fn stalled_request(method: &str, path: &str, signer: Option<&Keys>, at: u64) -> Request<Body> {
+    let body = async_stream::stream! {
+        yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{"));
+        std::future::pending::<()>().await;
+    };
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(keys) = signer {
+        request = request.header(
+            AUTHORIZATION,
+            auth_header(keys, method, path, Some(b"{}"), at),
+        );
+    }
+    request.body(Body::from_stream(body)).unwrap()
+}
+
+/// Send a request that must be answered without waiting for its body.
+async fn answered_without_body(
+    router: &Router,
+    request: Request<Body>,
+) -> axum::response::Response {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        router.clone().oneshot(request),
+    )
+    .await
+    .expect("refused without reading the stalled body")
+    .unwrap()
+}
+
+#[tokio::test]
+async fn stalled_unsigned_uploads_cannot_hold_rotation_permits() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    for _ in 0..MAX_CONCURRENT_ROTATION_REQUESTS {
+        let response = answered_without_body(
+            &router,
+            stalled_request("DELETE", "/v1/mounts/does-not-exist", None, TEST_NOW + 5),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    assert_eq!(
+        state.rotation_request_permits.available_permits(),
+        MAX_CONCURRENT_ROTATION_REQUESTS
+    );
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(admin_rotation_body(&cast, "rotate-after-stalled-unsigned")),
+        TEST_NOW + 6,
+    )
+    .await;
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+}
+
+#[tokio::test]
+async fn a_signed_non_admin_is_refused_before_its_body_is_read() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    for keys in [&cast.member, &cast.demoted, &cast.outsider] {
+        let response = answered_without_body(
+            &router,
+            stalled_request("POST", ROTATE_PATH, Some(keys), TEST_NOW + 5),
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::FORBIDDEN,
+            "brain admin access required",
+        )
+        .await;
+    }
+    assert_eq!(
+        state.rotation_request_permits.available_permits(),
+        MAX_CONCURRENT_ROTATION_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn only_brain_admins_can_see_the_busy_answer() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let unsigned = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, None, TEST_NOW + 5),
+    )
+    .await;
+    assert_eq!(unsigned.status(), StatusCode::FORBIDDEN);
+    let member = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, Some(&cast.member), TEST_NOW + 5),
+    )
+    .await;
+    assert_eq!(member.status(), StatusCode::FORBIDDEN);
+    let admin = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, Some(&cast.admin), TEST_NOW + 5),
+    )
+    .await;
+    assert_eq!(admin.status(), StatusCode::SERVICE_UNAVAILABLE);
+    drop(held);
+}
+
+#[tokio::test]
+async fn a_stalled_admin_upload_times_out_and_releases_its_permit() {
+    let (state, router, cast) = demoted_admin_brain_with(|state| {
+        state.with_rotation_body_read_deadline(std::time::Duration::from_millis(200))
+    })
+    .await;
+    let stalled = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        router.clone().oneshot(stalled_request(
+            "POST",
+            ROTATE_PATH,
+            Some(&cast.admin),
+            TEST_NOW + 5,
+        )),
+    )
+    .await
+    .expect("the body-read deadline must answer")
+    .unwrap();
+    assert_error(
+        stalled,
+        StatusCode::REQUEST_TIMEOUT,
+        "rotation request body was not received before the deadline",
+    )
+    .await;
+    assert_eq!(
+        state.rotation_request_permits.available_permits(),
+        MAX_CONCURRENT_ROTATION_REQUESTS
+    );
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(admin_rotation_body(&cast, "rotate-after-timeout")),
+        TEST_NOW + 6,
+    )
+    .await;
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+    assert_eq!(restricted_key_version(&state), 2);
 }
