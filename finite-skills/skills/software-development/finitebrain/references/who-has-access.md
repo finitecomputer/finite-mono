@@ -154,11 +154,15 @@ Folder (it ends that access), then retry the removal. When the Member reads
 the large Folders through its role, such as `all_members` Folders, nothing
 splits the request: report the removal as blocked by the 64 MiB limit.
 
-A 503 saying too many Folder Key rotation requests from Brain admins are in
-progress means other admins of a Brain on this server hold every rotation
-slot (only signed requests from an admin of the target Brain or Mount can
-hold one, each for at most 60 seconds while its body arrives): wait a minute
-and rerun.
+Rotation requests take one of a few server slots, in arrival order, after
+the server checks the signed request comes from an admin of that Brain or
+Mount. A slot is held while the request body arrives (at most 60 seconds) and
+while the server applies it. A 408 means your own upload did not arrive within
+60 seconds: nothing changed and the slot was released, so rerun it. A 503
+saying the server stayed busy for the whole admission wait means slots stayed
+taken for two minutes: rerun later. Any key that can create a Brain on this
+server can delay other Brains' rotations this way, by about one 60-second
+deadline per request, not block them for good; report repeated 503s.
 
 Member removal does not yet clear Folders where the removed key holds a
 current key without entitlement, for example from an earlier demotion. Run

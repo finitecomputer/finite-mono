@@ -337,7 +337,8 @@ entitlement (`revocationIncomplete`); its receipt does not list cut-off keys.
 Either rotation leaves pending Mount Offers and Folder share links for that
 Folder unacceptable; recreate them. Rotation requests are capped at 64 MiB;
 the CLI refuses a larger one before sending and names the Folder and size (see
-Clearing Removal Pending for what to do next). Clearing Removal Pending in
+Clearing Removal Pending for what to do next, and for the 408 and 503
+answers). Clearing Removal Pending in
 [who-has-access.md](who-has-access.md) says when to use each.
 
 `admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder
