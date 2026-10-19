@@ -665,14 +665,38 @@ pub struct RotationObjectRequest {
     pub revision_event: serde_json::Value,
 }
 
-/// Remove Folder access with required Folder Key rotation material.
+/// Client-prepared Folder Key rotation material. Body of both Folder access
+/// removal (`DELETE .../access/{target}`) and standalone Folder Key rotation
+/// (`POST .../key-rotations`); the signed access-change event names which.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoveFolderAccessRequest {
+pub struct FolderKeyRotationMaterialRequest {
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
     pub access_change_event: serde_json::Value,
+}
+
+/// Authoritative result of one committed Folder Key rotation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderKeyRotationReceipt {
+    pub folder_id: String,
+    pub previous_key_version: u32,
+    pub new_key_version: u32,
+    /// Keys wrapped for the new version: exactly the required recipients.
+    pub recipient_npubs: Vec<String>,
+    /// Keys that held the previous current wrap and received no new one.
+    pub cut_off_npubs: Vec<String>,
+}
+
+/// Standalone Folder Key rotation response: Brain metadata plus the receipt.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotateFolderKeyResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub rotation: FolderKeyRotationReceipt,
 }
 
 /// Create Brain Invitation request.

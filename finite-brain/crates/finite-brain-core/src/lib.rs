@@ -787,6 +787,9 @@ pub struct FolderRotationFanout {
 pub enum FolderRotationOperation {
     PersonalAgent,
     FolderAccessRemoval,
+    /// Standalone rotation of one Folder Key with no removed target. Bounded
+    /// exactly like Folder access removal: one Folder per request.
+    FolderKeyRotation,
     MemberRemoval,
 }
 
@@ -798,21 +801,25 @@ pub fn validate_folder_rotation_fanout(
     let operation_name = match operation {
         FolderRotationOperation::PersonalAgent => "Personal Agent rotation",
         FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
+        FolderRotationOperation::FolderKeyRotation => "Folder Key rotation",
         FolderRotationOperation::MemberRemoval => "Member removal",
     };
     let max_rotations = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
-        FolderRotationOperation::FolderAccessRemoval => 1,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => 1,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_ROTATIONS,
     };
     let max_total_grants = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_GRANTS,
     };
     let max_total_records = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_RECORDS,
     };
 
@@ -3327,6 +3334,57 @@ mod tests {
                 }],
             ),
             Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_standalone_folder_key_rotation_like_access_removal() {
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                ],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: MAX_FOLDER_ACCESS_REMOVAL_GRANTS + 1,
+                    reencrypted_records: 0,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ACCESS_REMOVAL_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
                 resource: "re-encrypted records per Folder rotation",
                 ..
             })

@@ -390,7 +390,8 @@ impl From<StoreError> for ApiError {
             }
             StoreError::DuplicateId { .. }
             | StoreError::Conflict { .. }
-            | StoreError::PersonalBrainConflict { .. } => {
+            | StoreError::PersonalBrainConflict { .. }
+            | StoreError::StaleFolderKeyVersion { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
             }
             StoreError::MissingRequiredGrant { .. }
@@ -661,6 +662,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
             axum::routing::post(complete_pending_wraps_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/key-rotations",
+            axum::routing::post(rotate_folder_key_handler),
         )
 }
 

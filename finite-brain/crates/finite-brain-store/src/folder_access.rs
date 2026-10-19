@@ -1,3 +1,6 @@
+use crate::folder_key_rotation::{
+    apply_folder_key_rotation, require_next_key_version, validate_folder_key_rotation_material,
+};
 use crate::*;
 
 impl BrainStore {
@@ -410,146 +413,6 @@ impl BrainStore {
         Ok(GrantFolderAccessOutcome::Granted)
     }
 
-    /// Remove explicit Folder access by rotating the Folder Key and re-encrypting live objects.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rotate_folder_key_for_access_removal(
-        &mut self,
-        brain_id: &BrainId,
-        folder_id: &FolderId,
-        removed_user_id: &UserId,
-        new_key_version: u32,
-        grants: &[FolderKeyGrantMetadata],
-        reencrypted_records: &[FolderObjectRevisionSyncRecord],
-        updated_at: &str,
-    ) -> Result<(), StoreError> {
-        self.rotate_folder_key_for_access_removal_with_control_records(
-            brain_id,
-            folder_id,
-            removed_user_id,
-            new_key_version,
-            grants,
-            reencrypted_records,
-            updated_at,
-            &[],
-        )
-    }
-
-    /// Remove explicit Folder access and append signed grant/admin records atomically.
-    #[allow(clippy::too_many_arguments)]
-    pub fn rotate_folder_key_for_access_removal_with_control_records(
-        &mut self,
-        brain_id: &BrainId,
-        folder_id: &FolderId,
-        removed_user_id: &UserId,
-        new_key_version: u32,
-        grants: &[FolderKeyGrantMetadata],
-        reencrypted_records: &[FolderObjectRevisionSyncRecord],
-        updated_at: &str,
-        control_records: &[SyncRecordInput],
-    ) -> Result<(), StoreError> {
-        validate_folder_rotation_fanout(
-            FolderRotationOperation::FolderAccessRemoval,
-            [FolderRotationFanout {
-                grants: grants.len(),
-                reencrypted_records: reencrypted_records.len(),
-            }],
-        )?;
-        let stored = self.load_brain(brain_id)?;
-        let folder = stored
-            .brain
-            .folders
-            .iter()
-            .find(|folder| folder.id == *folder_id)
-            .ok_or_else(|| StoreError::MissingFolder {
-                folder_id: folder_id.to_string(),
-            })?;
-        if new_key_version != folder.current_key_version + 1 {
-            return Err(StoreError::BrokenInvariant {
-                reason: "folder access removal must rotate to the next key version".to_owned(),
-            });
-        }
-        let mut remaining_access = stored
-            .folder_access
-            .get(folder_id)
-            .cloned()
-            .unwrap_or_default();
-        if !remaining_access.remove(removed_user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "folder access target does not currently have access".to_owned(),
-            });
-        }
-        if folder_access_has_mount_source(&self.conn, brain_id, folder_id, removed_user_id)? {
-            return Err(StoreError::BrokenInvariant {
-                reason: "Folder access target still receives this Folder through an active Mount; remove the target from that Mount before rotating explicit Folder access"
-                    .to_owned(),
-            });
-        }
-
-        let mut rotated_folder = folder.clone();
-        rotated_folder.current_key_version = new_key_version;
-        let personal_agent = stored
-            .personal_agent
-            .as_ref()
-            .map(|relationship| &relationship.agent_npub);
-        let required = required_recipients(
-            &stored.brain,
-            &rotated_folder,
-            &remaining_access,
-            personal_agent,
-        )?;
-        validate_folder_grants(
-            &stored.brain,
-            &rotated_folder,
-            &required,
-            grants,
-            personal_agent,
-        )?;
-
-        let live_objects = self
-            .load_current_objects(brain_id)?
-            .into_iter()
-            .filter(|object| object.folder_id == *folder_id && !object.deleted)
-            .collect::<Vec<_>>();
-        validate_rotation_records(&live_objects, reencrypted_records)?;
-
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
-            params![
-                brain_id.as_str(),
-                folder_id.as_str(),
-                removed_user_id.as_str()
-            ],
-        )?;
-        pending_wraps::clear_pending_grant_wraps_for_folder_recipient(
-            &tx,
-            brain_id,
-            folder_id,
-            removed_user_id,
-        )?;
-        tx.execute(
-            "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
-            params![brain_id.as_str(), folder_id.as_str(), new_key_version],
-        )?;
-        invalidate_pending_email_bootstraps_for_rotated_folder(
-            &tx, brain_id, folder_id, updated_at,
-        )?;
-        for grant in grants {
-            insert_grant(&tx, brain_id, grant)?;
-        }
-        for record in reencrypted_records {
-            let input = SyncRecordInput::FolderObjectRevision(record.clone());
-            sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, brain_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, brain_id)?;
-            sync_records::insert_sync_record(&tx, brain_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, brain_id, &input)?;
-        }
-        sync_records::append_sync_records(&tx, brain_id, control_records)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Remove a Member and every readable Folder relationship in one transaction.
     pub fn remove_member_with_rotations(
         &mut self,
@@ -660,6 +523,7 @@ impl BrainStore {
             });
         }
         let current_objects = self.load_current_objects(brain_id)?;
+        let mut previous_key_versions = Vec::with_capacity(rotations.len());
         for rotation in rotations {
             let folder = stored
                 .brain
@@ -669,39 +533,23 @@ impl BrainStore {
                 .ok_or_else(|| StoreError::MissingFolder {
                     folder_id: rotation.folder_id.to_string(),
                 })?;
-            if rotation.new_key_version != folder.current_key_version + 1 {
-                return Err(StoreError::BrokenInvariant {
-                    reason: "member removal must rotate to each Folder's next key version"
-                        .to_owned(),
-                });
-            }
             let mut remaining_access = stored
                 .folder_access
                 .get(&rotation.folder_id)
                 .cloned()
                 .unwrap_or_default();
             remaining_access.remove(removed_user_id);
-            let mut rotated_folder = folder.clone();
-            rotated_folder.current_key_version = rotation.new_key_version;
-            let required = required_recipients(
+            validate_folder_key_rotation_material(
                 &post_removal_brain,
-                &rotated_folder,
+                folder,
                 &remaining_access,
                 personal_agent,
-            )?;
-            validate_folder_grants(
-                &post_removal_brain,
-                &rotated_folder,
-                &required,
+                rotation.new_key_version,
                 &rotation.grants,
-                personal_agent,
+                &rotation.reencrypted_records,
+                &current_objects,
             )?;
-            let live_objects = current_objects
-                .iter()
-                .filter(|object| object.folder_id == rotation.folder_id && !object.deleted)
-                .cloned()
-                .collect::<Vec<_>>();
-            validate_rotation_records(&live_objects, &rotation.reencrypted_records)?;
+            previous_key_versions.push(folder.current_key_version);
         }
         let mut mounted_removals = Vec::with_capacity(mount_rotations.len());
         let mut rotated_sources = BTreeSet::new();
@@ -753,7 +601,7 @@ impl BrainStore {
                 BTreeSet::new()
             };
             if removed.is_empty() {
-                mounted_removals.push((connection, removed));
+                mounted_removals.push((connection, removed, 0));
                 continue;
             }
             let source = self.load_brain(&connection.source_brain_id)?;
@@ -765,12 +613,7 @@ impl BrainStore {
                 .ok_or_else(|| StoreError::MissingFolder {
                     folder_id: connection.source_folder_id.to_string(),
                 })?;
-            if rotation.new_key_version != folder.current_key_version + 1 {
-                return Err(StoreError::BrokenInvariant {
-                    reason: "member removal Mount rotation must use the next key version"
-                        .to_owned(),
-                });
-            }
+            require_next_key_version(folder, rotation.new_key_version)?;
             let mut remaining_access = source
                 .folder_access
                 .get(&connection.source_folder_id)
@@ -807,11 +650,11 @@ impl BrainStore {
                 .filter(|object| object.folder_id == connection.source_folder_id && !object.deleted)
                 .collect::<Vec<_>>();
             validate_rotation_records(&live_objects, &rotation.reencrypted_records)?;
-            mounted_removals.push((connection, removed));
+            mounted_removals.push((connection, removed, folder.current_key_version));
         }
 
         let tx = self.conn.transaction()?;
-        for rotation in rotations {
+        for (rotation, previous_key_version) in rotations.iter().zip(previous_key_versions) {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
                 params![
@@ -820,33 +663,19 @@ impl BrainStore {
                     removed_user_id.as_str()
                 ],
             )?;
-            tx.execute(
-                "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
-                params![
-                    brain_id.as_str(),
-                    rotation.folder_id.as_str(),
-                    rotation.new_key_version
-                ],
-            )?;
-            invalidate_pending_email_bootstraps_for_rotated_folder(
+            apply_folder_key_rotation(
                 &tx,
                 brain_id,
                 &rotation.folder_id,
+                previous_key_version,
+                rotation.new_key_version,
+                &rotation.grants,
+                &rotation.reencrypted_records,
                 updated_at,
             )?;
-            for grant in &rotation.grants {
-                insert_grant(&tx, brain_id, grant)?;
-            }
-            for record in &rotation.reencrypted_records {
-                let input = SyncRecordInput::FolderObjectRevision(record.clone());
-                sync_records::validate_sync_input(&input)?;
-                sync_records::validate_sync_conflict(&tx, brain_id, &input)?;
-                let sequence = sync_records::next_sequence(&tx, brain_id)?;
-                sync_records::insert_sync_record(&tx, brain_id, sequence, &input)?;
-                sync_records::project_sync_record(&tx, brain_id, &input)?;
-            }
         }
-        for (rotation, (connection, removed)) in mount_rotations.iter().zip(mounted_removals.iter())
+        for (rotation, (connection, removed, previous_key_version)) in
+            mount_rotations.iter().zip(mounted_removals.iter())
         {
             if removed.is_empty() {
                 if rotation.revoke_mount {
@@ -878,36 +707,16 @@ impl BrainStore {
                     target,
                 )?;
             }
-            tx.execute(
-                "UPDATE folders SET current_key_version = ?3 WHERE brain_id = ?1 AND id = ?2",
-                params![
-                    connection.source_brain_id.as_str(),
-                    connection.source_folder_id.as_str(),
-                    rotation.new_key_version
-                ],
-            )?;
-            invalidate_pending_email_bootstraps_for_rotated_folder(
+            apply_folder_key_rotation(
                 &tx,
                 &connection.source_brain_id,
                 &connection.source_folder_id,
+                *previous_key_version,
+                rotation.new_key_version,
+                &rotation.grants,
+                &rotation.reencrypted_records,
                 updated_at,
             )?;
-            for grant in &rotation.grants {
-                insert_grant(&tx, &connection.source_brain_id, grant)?;
-            }
-            for record in &rotation.reencrypted_records {
-                let input = SyncRecordInput::FolderObjectRevision(record.clone());
-                sync_records::validate_sync_input(&input)?;
-                sync_records::validate_sync_conflict(&tx, &connection.source_brain_id, &input)?;
-                let sequence = sync_records::next_sequence(&tx, &connection.source_brain_id)?;
-                sync_records::insert_sync_record(
-                    &tx,
-                    &connection.source_brain_id,
-                    sequence,
-                    &input,
-                )?;
-                sync_records::project_sync_record(&tx, &connection.source_brain_id, &input)?;
-            }
             if rotation.revoke_mount {
                 tx.execute(
                     "UPDATE shared_folder_connections SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
