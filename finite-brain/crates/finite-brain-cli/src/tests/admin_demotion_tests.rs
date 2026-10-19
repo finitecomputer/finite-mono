@@ -141,6 +141,17 @@ struct DemotionRun {
 /// Run `admin role revoke admin` as the admin. `grant_for_admin` decides
 /// whether the export carries a restricted wrap this key can open.
 fn run_demotion(reply: DemotionReply, grant_for_admin: bool, json: bool) -> DemotionRun {
+    run_demotion_with_limit(reply, grant_for_admin, json, None)
+}
+
+/// As [`run_demotion`]; `request_body_limit` replaces the production request
+/// size limit by calling the command's limit-taking entry point directly.
+fn run_demotion_with_limit(
+    reply: DemotionReply,
+    grant_for_admin: bool,
+    json: bool,
+    request_body_limit: Option<usize>,
+) -> DemotionRun {
     let tmp = TempDir::new().unwrap();
     import_identity_secret(&tmp, ADMIN_SECRET);
     let env = env_for(&tmp);
@@ -155,7 +166,12 @@ fn run_demotion(reply: DemotionReply, grant_for_admin: bool, json: bool) -> Demo
         &FolderKey::from_bytes([9; 32]),
         grant_recipient,
     );
-    let expected_requests = if grant_for_admin { 3 } else { 2 };
+    // An unopenable key or an oversized request stops after the export.
+    let expected_requests = if grant_for_admin && request_body_limit.is_none() {
+        3
+    } else {
+        2
+    };
     let (server_url, server) = start_demotion_server(
         admin.clone(),
         demoted.clone(),
@@ -179,7 +195,18 @@ fn run_demotion(reply: DemotionReply, grant_for_admin: bool, json: bool) -> Demo
         args.push("--json".to_owned());
     }
     let mut output = Vec::new();
-    let result = run_with_env(args, env, &mut output);
+    let result = match request_body_limit {
+        None => run_with_env(args, env, &mut output),
+        Some(limit) => {
+            // The dispatcher hands the command everything after `role revoke`.
+            let role_args = args[3..]
+                .iter()
+                .filter(|arg| *arg != "--json")
+                .cloned()
+                .collect::<Vec<_>>();
+            revoke_admin_role(&role_args, &env, json, &mut output, limit)
+        }
+    };
     DemotionRun {
         result,
         output: String::from_utf8(output).unwrap(),
@@ -356,4 +383,54 @@ fn demotion_refuses_a_request_over_the_server_body_limit_naming_the_folders() {
     assert!(error.contains("large ("), "{error}");
     assert!(error.contains(&format!("needs a {size}-byte")), "{error}");
     assert!(error.contains("nothing was sent"), "{error}");
+}
+
+#[test]
+fn demotion_checks_the_combined_request_size_before_sending() {
+    // Each Folder fits on its own; the combined request does not.
+    let run = run_demotion_with_limit(DemotionReply::Committed, true, true, Some(64));
+    let error = run.result.unwrap_err().to_string();
+    assert!(
+        error.contains(&format!(
+            "Admin demotion of {}, rotating [restricted (",
+            run.demoted
+        )),
+        "{error}"
+    );
+    assert!(error.contains("over the 64-byte limit"), "{error}");
+    assert!(error.contains("nothing was sent"), "{error}");
+    assert_eq!(run.requests.len(), 2, "metadata and export only");
+    assert!(
+        run.requests
+            .iter()
+            .all(|(request, _)| !request.starts_with("POST")),
+        "an oversized demotion must not be submitted"
+    );
+}
+
+#[test]
+fn only_a_folder_key_this_key_cannot_open_gets_the_ask_another_admin_hint() {
+    let too_large = CliError::InvalidInput(
+        "Folder Key rotation of restricted needs a 99-byte rotation request, over the 10-byte limit".to_owned(),
+    );
+    let passed_through = cannot_prepare_rotation(too_large, "npub-demoted", "restricted");
+    assert!(
+        matches!(&passed_through, CliError::InvalidInput(message) if message.starts_with("Folder Key rotation of restricted needs")),
+        "{passed_through}"
+    );
+    let unopened = cannot_prepare_rotation(
+        CliError::GrantOpening {
+            brain_id: "acme".to_owned(),
+            folder_id: "restricted".to_owned(),
+            key_version: 1,
+            reason: "no grant".to_owned(),
+        },
+        "npub-demoted",
+        "restricted",
+    )
+    .to_string();
+    assert!(
+        unopened.contains("Ask an admin who can open Folder restricted"),
+        "{unopened}"
+    );
 }

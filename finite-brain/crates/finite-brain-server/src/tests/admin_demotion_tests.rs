@@ -463,8 +463,9 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
     let committed = sequence(&router, &admin, 2).await;
-    // The same signed demotion and rotation under a fresh HTTP auth event.
-    let replay = authed_request(
+    // Resubmitting the committed demotion under a fresh HTTP auth event is
+    // refused by the business rule, not by replay protection.
+    let resubmitted = authed_request(
         router.clone(),
         &admin,
         "POST",
@@ -474,7 +475,7 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
     )
     .await;
     assert_error(
-        replay,
+        resubmitted,
         StatusCode::BAD_REQUEST,
         "brain admin does not exist",
     )

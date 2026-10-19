@@ -114,11 +114,15 @@ run it from an admin who can. An admin may demote itself, but then the
 stepping-down key generates the new Folder Keys, so the receipt's cut-off
 holds only if that client is honest; when that matters, have another admin
 run the demotion. Report `state: complete` and each `rotations` entry
-(Folder, new key version, `cutOffNpubs`). A request too large for the server
-(the rotated Folders' live pages together) is refused before anything is sent,
-naming the Folders. An older Brain
-server answers `unsupported: ... does not support admin demotion with Folder
-Key rotation yet` and nothing changes; do not work around it. Afterwards
+(Folder, new key version, `cutOffNpubs`). The demotion sends every rotated
+Folder's pages in one request under the 64 MiB rotation limit; if the CLI
+refuses it as too large (nothing was sent), it names each Folder and its size.
+Rotating those Folders first does not help, because the demotion must rotate
+them again: report the Folders and sizes and stop. A 503 about too many Folder
+Key rotation requests is a busy server (see Clearing Removal Pending): wait a
+minute and rerun. An older Brain server answers
+`unsupported: ... does not support admin demotion with Folder Key rotation
+yet` and nothing changes; do not work around it. Afterwards
 `access list` shows the key as a Member with nothing removal pending.
 
 ## Clearing Removal Pending

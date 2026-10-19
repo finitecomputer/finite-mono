@@ -66,6 +66,24 @@ pub(crate) fn admin_role_revoke<W: Write>(
     json: bool,
     output: &mut W,
 ) -> Result<(), CliError> {
+    revoke_admin_role(
+        args,
+        env,
+        json,
+        output,
+        MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+    )
+}
+
+/// `admin role revoke admin` with the request size limit as a parameter, so
+/// tests can prove the combined-body check runs before anything is sent.
+pub(crate) fn revoke_admin_role<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+    request_body_limit: usize,
+) -> Result<(), CliError> {
     let brain_id = command_brain_id(args, env)?;
     let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
     let target = resolve_identity_npub(env, args, &raw_target)?;
@@ -113,11 +131,15 @@ pub(crate) fn admin_role_revoke<W: Write>(
         "accessChangeEvent": event,
         "rotations": rotations,
     });
-    ensure_rotation_request_fits(
-        &demotion_request_subject(&target, &body),
-        &body,
-        MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
-    )?;
+    // Each Folder fit on its own when prepared; the combined body may not.
+    // The subject is built only when the request is refused.
+    if serde_json::to_vec(&body)?.len() > request_body_limit {
+        ensure_rotation_request_fits(
+            &demotion_request_subject(&target, &body),
+            &body,
+            request_body_limit,
+        )?;
+    }
     // Rotation transport: the server may queue the request behind its
     // admission permits for longer than the ordinary 10 s timeout.
     let response = signed_rotation_request(env, args, "POST", &route, body)
@@ -226,14 +248,14 @@ fn verified_demotion(
     Ok(response)
 }
 
-/// Name the Folder the acting key could not rotate; nothing was sent.
-fn cannot_prepare_rotation(error: CliError, target: &str, folder_id: &str) -> CliError {
+/// Name the Folder the acting key could not open; nothing was sent. Other
+/// preparation errors, such as a Folder too large to rotate on its own or an
+/// opaque page, pass through unchanged: another admin would hit them too.
+pub(crate) fn cannot_prepare_rotation(error: CliError, target: &str, folder_id: &str) -> CliError {
     match error {
-        CliError::GrantOpening { .. } | CliError::InvalidInput(_) | CliError::NotFound(_) => {
-            CliError::InvalidInput(format!(
-                "cannot revoke admin from {target}: Folder {folder_id} must be rotated so the demoted key cannot read it, and this key cannot prepare that rotation ({error}); nothing was changed. Ask an admin who can open Folder {folder_id} to run the demotion"
-            ))
-        }
+        CliError::GrantOpening { .. } | CliError::NotFound(_) => CliError::InvalidInput(format!(
+            "cannot revoke admin from {target}: Folder {folder_id} must be rotated so the demoted key cannot read it, and this key cannot prepare that rotation ({error}); nothing was changed. Ask an admin who can open Folder {folder_id} to run the demotion"
+        )),
         other => other,
     }
 }
