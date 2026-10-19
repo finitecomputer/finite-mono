@@ -878,7 +878,7 @@ fn member_removal_validates_against_access_committed_by_another_connection() {
     assert_eq!(
         result.unwrap_err(),
         StoreError::BrokenInvariant {
-            reason: "member removal requires exactly one rotation for every readable Folder"
+            reason: "member removal requires exactly one rotation for every Folder the member reads or holds the current key for; if the Member's Folder access changed since the removal was prepared, rerun the removal"
                 .to_owned()
         }
     );

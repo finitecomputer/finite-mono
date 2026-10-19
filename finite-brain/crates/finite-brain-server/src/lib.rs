@@ -453,6 +453,12 @@ impl From<StoreError> for ApiError {
             | StoreError::InvalidRecord { .. } => {
                 Self::new(StatusCode::BAD_REQUEST, value.to_string())
             }
+            StoreError::MemberRemovalMissingStaleGrantRotations { .. } => Self::new(
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "{value}. Nothing was changed. Upgrade fbrain if using an older version; otherwise retry the removal to refresh its plan"
+                ),
+            ),
             StoreError::RebootstrapRequired { .. } => {
                 Self::new(StatusCode::GONE, value.to_string())
             }
@@ -714,6 +720,10 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
                 RotationAuthority::BrainAdmin,
                 axum::routing::delete(remove_member_handler),
             )),
+        )
+        .route(
+            "/brains/{brain_id}/members/{target_npub}/removal-plan",
+            get(member_removal_plan_handler),
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
@@ -10320,4 +10330,5 @@ mod tests {
 
     mod access_report_tests;
     mod folder_key_rotation_tests;
+    mod member_removal_tests;
 }

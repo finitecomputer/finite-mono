@@ -2,6 +2,7 @@ use crate::folder_key_rotation::{
     apply_folder_key_rotation, begin_authoritative_write, require_next_key_version,
     validate_folder_key_rotation_material,
 };
+use crate::member_removal::require_member_removal_rotation_set;
 use crate::*;
 
 impl BrainStore {
@@ -414,7 +415,11 @@ impl BrainStore {
         Ok(GrantFolderAccessOutcome::Granted)
     }
 
-    /// Remove a Member and every readable Folder relationship in one transaction.
+    /// Remove a Member and every Folder Key relationship in one transaction.
+    ///
+    /// `rotations` must cover exactly [`member_removal_folder_rotations`]: the
+    /// Folders the Member reads and the Folders where it still holds the
+    /// current key without entitlement.
     pub fn remove_member_with_rotations(
         &mut self,
         brain_id: &BrainId,
@@ -464,21 +469,12 @@ impl BrainStore {
         // transaction, so validation and the write see one snapshot.
         let tx = begin_authoritative_write(&self.conn)?;
         let stored = self.load_brain(brain_id)?;
-        if stored.brain.admins.contains(removed_user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "remove admin role before removing member".to_owned(),
-            });
-        }
-        if !stored
-            .brain
-            .members
+        let planned_rotations = member_removal_folder_rotations(&stored, removed_user_id)?;
+        require_member_removal_rotation_set(&planned_rotations, rotations)?;
+        let supplied_folders = rotations
             .iter()
-            .any(|member| member.user_id == *removed_user_id)
-        {
-            return Err(StoreError::BrokenInvariant {
-                reason: "brain member does not exist".to_owned(),
-            });
-        }
+            .map(|rotation| rotation.folder_id.clone())
+            .collect::<BTreeSet<_>>();
         let mut post_removal_brain = stored.brain.clone();
         post_removal_brain
             .members
@@ -487,29 +483,6 @@ impl BrainStore {
             .personal_agent
             .as_ref()
             .map(|relationship| &relationship.agent_npub);
-        let mut expected_folders = BTreeSet::new();
-        for folder in &stored.brain.folders {
-            let access = stored
-                .folder_access
-                .get(&folder.id)
-                .cloned()
-                .unwrap_or_default();
-            if required_recipients(&stored.brain, folder, &access, personal_agent)?
-                .contains(removed_user_id)
-            {
-                expected_folders.insert(folder.id.clone());
-            }
-        }
-        let supplied_folders = rotations
-            .iter()
-            .map(|rotation| rotation.folder_id.clone())
-            .collect::<BTreeSet<_>>();
-        if expected_folders != supplied_folders || supplied_folders.len() != rotations.len() {
-            return Err(StoreError::BrokenInvariant {
-                reason: "member removal requires exactly one rotation for every readable Folder"
-                    .to_owned(),
-            });
-        }
         let expected_mounts = self
             .list_active_destination_mounts_for_participant(brain_id, removed_user_id)?
             .into_iter()

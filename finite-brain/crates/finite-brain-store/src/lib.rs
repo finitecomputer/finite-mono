@@ -26,6 +26,7 @@ mod folder_key_rotation;
 mod invite_tokens;
 mod links;
 mod loading;
+mod member_removal;
 mod pending_wraps;
 mod schema;
 mod shared_folders;
@@ -40,6 +41,9 @@ pub use access_report::{
 pub use folder_key_rotation::{
     FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
     folder_key_required_recipients, stale_folder_key_holders,
+};
+pub use member_removal::{
+    MemberRemovalFolderRotation, MemberRemovalRotationReason, member_removal_folder_rotations,
 };
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
@@ -101,6 +105,10 @@ pub enum StoreError {
         current_key_version: u32,
         requested_key_version: u32,
     },
+    /// A Member removal covered every Folder the Member reads but omitted
+    /// Folders where the Member still holds the current key without
+    /// entitlement. Clients from before that rule send exactly this shape.
+    MemberRemovalMissingStaleGrantRotations { folder_ids: Vec<String> },
 }
 
 impl fmt::Display for StoreError {
@@ -157,6 +165,11 @@ impl fmt::Display for StoreError {
             } => write!(
                 f,
                 "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
+            ),
+            Self::MemberRemovalMissingStaleGrantRotations { folder_ids } => write!(
+                f,
+                "member removal omitted rotations for Folders where this Member still holds the current Folder Key without being entitled to it: {}",
+                folder_ids.join(", ")
             ),
         }
     }
@@ -3428,6 +3441,7 @@ mod tests {
     use tempfile::TempDir;
 
     mod folder_key_rotation_tests;
+    mod member_removal_tests;
 
     #[test]
     fn exposes_store_crate_name() {

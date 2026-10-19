@@ -450,7 +450,8 @@ pub struct MemberMountRotationRequest {
     pub reencrypted_records: Vec<RotationObjectRequest>,
 }
 
-/// Remove a Member and rotate every Folder the Member could read.
+/// Remove a Member and rotate every Folder the Member could read or still
+/// holds the current key for (`GET .../members/{target}/removal-plan`).
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveMemberRequest {
@@ -458,6 +459,34 @@ pub struct RemoveMemberRequest {
     pub rotations: Vec<MemberFolderRotationRequest>,
     #[serde(default)]
     pub mount_rotations: Vec<MemberMountRotationRequest>,
+}
+
+/// The native Folder rotations a Member removal must carry, computed by the
+/// same store rule the removal enforces. Admin only; metadata, no key material.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemovalPlanResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub folder_rotations: Vec<MemberRemovalFolderRotationResponse>,
+}
+
+/// One native Folder whose key a Member removal must rotate.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemovalFolderRotationResponse {
+    pub folder_id: String,
+    pub current_key_version: u32,
+    pub reason: MemberRemovalRotationReasonResponse,
+}
+
+/// Why the Folder is in the plan: the Member reads it, or holds its current
+/// key without entitlement (the access report's `revocationIncomplete`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemberRemovalRotationReasonResponse {
+    Readable,
+    StaleCurrentGrant,
 }
 
 /// Create Folder request.
