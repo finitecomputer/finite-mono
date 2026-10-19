@@ -4,15 +4,15 @@
 
 use std::io::Write;
 
-use finite_brain_core::AdminAccessAction;
+use finite_brain_core::{AdminAccessAction, MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES};
 use serde::Deserialize;
 
 use crate::{
     BrainMetadataView, CliEnvironment, CliError, FolderKeyRotationIntent, FolderKeyRotationReceipt,
-    PreparedFolderKeyRotation, admin_access_change_event, command_brain_id, fetch_brain_metadata,
-    folder_required_recipients, mutate_agent_state, prepare_folder_key_rotation,
-    receipt_proves_prepared, required_option_or_positional, resolve_identity_npub,
-    signed_json_request, write_json,
+    PreparedFolderKeyRotation, admin_access_change_event, command_brain_id,
+    ensure_rotation_request_fits, fetch_brain_metadata, folder_required_recipients,
+    mutate_agent_state, prepare_folder_key_rotation, receipt_proves_prepared,
+    required_option_or_positional, resolve_identity_npub, signed_rotation_request, write_json,
 };
 
 #[derive(Debug, Deserialize)]
@@ -109,17 +109,20 @@ pub(crate) fn admin_role_revoke<W: Write>(
         })
         .collect::<Vec<_>>();
     let route = demotion_route(&brain_id, &target);
-    let response = signed_json_request(
-        env,
-        args,
-        "POST",
-        &route,
-        Some(serde_json::json!({
-            "accessChangeEvent": event,
-            "rotations": rotations,
-        })),
-    )
-    .map_err(|error| unsupported_demotion_server(error, &route, &folder_ids))?;
+    let body = serde_json::json!({
+        "accessChangeEvent": event,
+        "rotations": rotations,
+    });
+    ensure_rotation_request_fits(
+        &demotion_request_subject(&target, &body),
+        &body,
+        MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+    )?;
+    // Rotation transport: the server may queue the request behind its
+    // admission permits for longer than the ordinary 10 s timeout.
+    let response = signed_rotation_request(env, args, "POST", &route, body)
+        .map_err(|error| unsupported_demotion_server(error, &route, &folder_ids))?;
+    let raw_response = response.clone();
     let response = verified_demotion(response, &target, &prepared)?;
 
     let summary = format!(
@@ -144,23 +147,12 @@ pub(crate) fn admin_role_revoke<W: Write>(
         Ok(())
     });
     if json {
-        let mut receipt = serde_json::to_value(&response.metadata)?;
+        // The server's full response (metadata, identities, pending
+        // approvals and wraps, rotation receipts) plus the receipt markers.
+        let mut receipt = raw_response;
         receipt["state"] = "complete".into();
         receipt["operation"] = "admin-role-revoke".into();
         receipt["targetNpub"] = target.clone().into();
-        receipt["rotations"] = response
-            .rotations
-            .iter()
-            .map(|rotation| {
-                serde_json::json!({
-                    "folderId": rotation.folder_id,
-                    "previousKeyVersion": rotation.previous_key_version,
-                    "newKeyVersion": rotation.new_key_version,
-                    "recipientNpubs": rotation.recipient_npubs,
-                    "cutOffNpubs": rotation.cut_off_npubs,
-                })
-            })
-            .collect();
         return write_json(output, &receipt);
     }
     writeln!(
@@ -180,6 +172,27 @@ pub(crate) fn admin_role_revoke<W: Write>(
         )?;
     }
     Ok(())
+}
+
+/// What a demotion request rotates, with each Folder's share of the request,
+/// so an oversized request names the Folders whose live pages are too large.
+pub(crate) fn demotion_request_subject(target: &str, body: &serde_json::Value) -> String {
+    let folders = body["rotations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|rotation| {
+            format!(
+                "{} ({} bytes)",
+                rotation["folderId"].as_str().unwrap_or("?"),
+                rotation.to_string().len()
+            )
+        })
+        .collect::<Vec<_>>();
+    format!(
+        "Admin demotion of {target}, rotating [{}],",
+        folders.join(", ")
+    )
 }
 
 /// Accept the demotion only when the server proves it: the key is no longer

@@ -9484,8 +9484,6 @@ mod tests {
         }
     }
 
-    /// Explicit access removal through the one rotation boundary, keeping the
-    /// older positional shape these fixtures were written against.
     /// Demote an admin the way Brain servers did before demotion rotated
     /// Folder Keys: drop the role row and keep every wrap. Production Brains
     /// still hold state written this way, so stale-wrap fixtures start here.
@@ -9509,6 +9507,8 @@ mod tests {
         }
     }
 
+    /// Explicit access removal through the one rotation boundary, keeping the
+    /// older positional shape these fixtures were written against.
     trait BrainStoreAccessRemovalTestExt {
         #[allow(clippy::too_many_arguments)]
         fn rotate_folder_key_for_access_removal(

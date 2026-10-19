@@ -105,6 +105,8 @@ fn start_demotion_server(
                             _ => vec![&admin, &demoted],
                         };
                         let mut response = metadata(&admin, &demoted, &admins, 2);
+                        response["pendingApprovals"] =
+                            serde_json::json!([{ "id": "approval-kept" }]);
                         response["rotations"] = serde_json::json!([{
                             "folderId": "restricted",
                             "previousKeyVersion": 1,
@@ -225,6 +227,11 @@ fn demotion_submits_signed_rotations_and_prints_a_verified_receipt() {
     assert_eq!(receipt["operation"], "admin-role-revoke");
     assert_eq!(receipt["targetNpub"], run.demoted);
     assert_eq!(receipt["admins"], serde_json::json!([run.admin]));
+    // The server's full response passes through, not only the typed view.
+    assert_eq!(
+        receipt["pendingApprovals"],
+        serde_json::json!([{ "id": "approval-kept" }])
+    );
     assert_eq!(
         receipt["rotations"],
         serde_json::json!([{
@@ -325,4 +332,28 @@ fn demotion_against_an_older_server_fails_closed() {
             .count(),
         1
     );
+}
+
+#[test]
+fn demotion_refuses_a_request_over_the_server_body_limit_naming_the_folders() {
+    let body = serde_json::json!({
+        "accessChangeEvent": {},
+        "rotations": [
+            { "folderId": "small", "reencryptedRecords": [] },
+            { "folderId": "large", "reencryptedRecords": ["x".repeat(400)] },
+        ],
+    });
+    let size = serde_json::to_vec(&body).unwrap().len();
+    let subject = demotion_request_subject("npub-demoted", &body);
+    ensure_rotation_request_fits(&subject, &body, size).unwrap();
+    let error = ensure_rotation_request_fits(&subject, &body, size - 1)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Admin demotion of npub-demoted, rotating [small ("),
+        "{error}"
+    );
+    assert!(error.contains("large ("), "{error}");
+    assert!(error.contains(&format!("needs a {size}-byte")), "{error}");
+    assert!(error.contains("nothing was sent"), "{error}");
 }

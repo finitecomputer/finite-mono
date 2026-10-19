@@ -70,7 +70,7 @@ fn record_write_lock_wait(attempt: i32) -> bool {
 /// lock and applies `change`; `work` runs on the store in another thread;
 /// the change commits only once that thread is provably blocked on the
 /// write lock (its busy handler fired), never on a timer.
-fn interleave<T: Send + 'static>(
+pub(super) fn interleave<T: Send + 'static>(
     database: &std::path::Path,
     mut store: BrainStore,
     change: &str,

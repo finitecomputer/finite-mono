@@ -78,6 +78,11 @@ fn admin_store() -> BrainStore {
 }
 
 fn rotation(folder: &str, new_key_version: u32) -> MemberFolderRotation {
+    rotation_issued_by(folder, new_key_version, ADMIN)
+}
+
+/// One rotation re-wrapping `folder` for `npub-admin` only, issued by `issuer`.
+fn rotation_issued_by(folder: &str, new_key_version: u32, issuer: &str) -> MemberFolderRotation {
     MemberFolderRotation {
         folder_id: folder_id(folder),
         new_key_version,
@@ -85,7 +90,7 @@ fn rotation(folder: &str, new_key_version: u32) -> MemberFolderRotation {
             &format!("{folder}-admin-v{new_key_version}"),
             folder,
             new_key_version,
-            ADMIN,
+            issuer,
             ADMIN,
         )],
         reencrypted_records: if folder == "strategy" {
@@ -313,13 +318,16 @@ fn demotion_refuses_a_moved_key_version_or_a_wrap_for_the_demoted_key() {
         ADMIN,
         DEMOTED,
     ));
-    assert!(
+    assert_eq!(
         demote(
             &mut store,
             &[rotation("strategy", 2), still_wraps_demoted],
             &[],
         )
-        .is_err()
+        .unwrap_err(),
+        StoreError::BrokenInvariant {
+            reason: "grant recipients must exactly match required recipients".to_owned()
+        }
     );
     let after = store.load_brain(&acme()).unwrap();
     assert_eq!(after.brain, before.brain);
@@ -453,4 +461,98 @@ fn demotion_keeps_the_last_admin_and_refuses_personal_brains() {
     let after = store.load_brain(&brain_id).unwrap();
     assert_eq!(after.brain, before.brain);
     assert_eq!(after.grants, before.grants);
+}
+
+#[test]
+fn an_admin_may_demote_itself_and_issues_the_rotations_as_an_admin() {
+    let mut store = admin_store();
+    // The demoted key signs every new grant: it is an admin when it acts.
+    let outcomes = demote(
+        &mut store,
+        &[
+            rotation_issued_by("strategy", 2, DEMOTED),
+            rotation_issued_by("admin-only", 2, DEMOTED),
+        ],
+        &[brain_admin_control_record("self-demotion", DEMOTED)],
+    )
+    .unwrap();
+
+    assert_eq!(outcomes.len(), 2);
+    for outcome in &outcomes {
+        assert_eq!(outcome.recipients, BTreeSet::from([user(ADMIN)]));
+        assert_eq!(outcome.cut_off_holders, BTreeSet::from([user(DEMOTED)]));
+    }
+    let stored = store.load_brain(&acme()).unwrap();
+    assert_eq!(stored.brain.admins, vec![user(ADMIN)]);
+    let strategy_v2 = stored
+        .grants
+        .iter()
+        .find(|grant| grant.folder_id.as_str() == "strategy" && grant.key_version == 2)
+        .unwrap();
+    assert_eq!(strategy_v2.issuer_npub, user(DEMOTED));
+}
+
+#[test]
+fn rotation_grants_from_a_key_that_is_not_an_admin_are_refused() {
+    let mut store = admin_store();
+    let member = user("npub-member");
+    store.add_member(&acme(), &member).unwrap();
+    let before = store.load_brain(&acme()).unwrap();
+    let error = demote(
+        &mut store,
+        &[
+            rotation_issued_by("strategy", 2, member.as_str()),
+            rotation("admin-only", 2),
+        ],
+        &[],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        StoreError::BrokenInvariant {
+            reason: "organization folder grants must be issued by a brain admin".to_owned()
+        }
+    );
+    let after = store.load_brain(&acme()).unwrap();
+    assert_eq!(after.brain, before.brain);
+    assert_eq!(after.grants, before.grants);
+}
+
+#[test]
+fn demotion_validates_against_access_committed_by_another_connection() {
+    let scratch = tempfile::TempDir::new().unwrap();
+    let database = scratch.path().join("demotion-race.sqlite3");
+    let mut store = BrainStore::open(&database).unwrap();
+    bootstrap_org_and_strategy_folder(&mut store);
+    let demoted = user(DEMOTED);
+    store.add_member(&acme(), &demoted).unwrap();
+    store.add_admin(&acme(), &demoted).unwrap();
+    let rotations = [rotation("private-project", 2), rotation("strategy", 2)];
+
+    // Prepared while the role alone reaches both restricted Folders. Another
+    // connection grants explicit `strategy` access first, so only
+    // `private-project` may rotate once the demotion reads under the lock.
+    let (result, store) = super::folder_key_rotation_tests::interleave(
+        &database,
+        store,
+        "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES ('acme', 'strategy', 'npub-demoted')",
+        move |store| demote(store, &rotations, &[]),
+    );
+    assert_eq!(
+        result.unwrap_err(),
+        StoreError::FolderRotationSetMismatch {
+            operation: "admin demotion",
+            required_folder_ids: vec!["private-project".to_owned()],
+            supplied_folder_ids: vec!["private-project".to_owned(), "strategy".to_owned()],
+        }
+    );
+    let stored = store.load_brain(&acme()).unwrap();
+    assert!(stored.brain.admins.contains(&demoted));
+    assert!(
+        stored
+            .brain
+            .folders
+            .iter()
+            .all(|folder| folder.current_key_version == 1)
+    );
 }

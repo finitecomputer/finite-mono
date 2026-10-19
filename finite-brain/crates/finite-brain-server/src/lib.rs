@@ -722,7 +722,11 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}/demotion",
-            axum::routing::post(demote_admin_handler),
+            rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::post(demote_admin_handler),
+            ),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",

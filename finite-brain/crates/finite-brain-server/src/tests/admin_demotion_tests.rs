@@ -3,6 +3,9 @@
 
 use super::*;
 
+const EVENT_MISMATCH: &str =
+    "signed event mismatch: access-change payload fields differ from expected request";
+
 /// `acme` with `getting-started` (All-Members) and `restricted`; `target` is
 /// a Member promoted to admin who then received the restricted v1 key by role.
 async fn org_with_promoted_target(admin: &Keys, target: &str) -> Router {
@@ -49,8 +52,11 @@ async fn org_with_promoted_target(admin: &Keys, target: &str) -> Router {
     router
 }
 
+/// One restricted rotation signed by `signer`, re-wrapping the key for
+/// `recipient` only.
 fn restricted_rotation(
-    admin: &Keys,
+    signer: &Keys,
+    recipient: &str,
     change_id: &str,
     folder: &str,
     key_version: u32,
@@ -58,10 +64,10 @@ fn restricted_rotation(
     serde_json::json!({
         "folderId": "restricted",
         "newKeyVersion": 2,
-        "grants": [folder_key_grant_value("restricted-admin-v2", 2, &npub(admin))],
+        "grants": [folder_key_grant_value("restricted-admin-v2", 2, recipient)],
         "reencryptedRecords": [],
         "accessChangeEvent": admin_event(
-            admin,
+            signer,
             "acme",
             change_id,
             AdminAccessAction::RotateFolderKey,
@@ -136,6 +142,7 @@ async fn demotion_rotates_role_only_folders_and_records_each_signed_change() {
             &target,
             vec![restricted_rotation(
                 &admin,
+                &npub(&admin),
                 "rotate-restricted",
                 "restricted",
                 2,
@@ -341,7 +348,8 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
     assert_eq!(add_other.status(), StatusCode::OK);
     let route = format!("/v1/admin/brains/acme/roles/admin/{target}/demotion");
     let before = sequence(&router, &admin, 1).await;
-    let rotation = || restricted_rotation(&admin, "rotate-restricted", "restricted", 2);
+    let rotation =
+        || restricted_rotation(&admin, &npub(&admin), "rotate-restricted", "restricted", 2);
 
     let mut wrong_action: serde_json::Value =
         serde_json::from_str(&demotion_body(&admin, &target, vec![rotation()])).unwrap();
@@ -377,13 +385,13 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
             &admin,
             wrong_action.to_string(),
             StatusCode::BAD_REQUEST,
-            "",
+            EVENT_MISMATCH,
         ),
         (
             &admin,
             demotion_body(&admin, &other_npub, vec![rotation()]),
             StatusCode::BAD_REQUEST,
-            "",
+            EVENT_MISMATCH,
         ),
         (
             &admin,
@@ -392,13 +400,14 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
                 &target,
                 vec![restricted_rotation(
                     &admin,
+                    &npub(&admin),
                     "rotate-restricted",
                     "getting-started",
                     2,
                 )],
             ),
             StatusCode::BAD_REQUEST,
-            "",
+            EVENT_MISMATCH,
         ),
         (
             &admin,
@@ -407,19 +416,20 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
                 &target,
                 vec![restricted_rotation(
                     &admin,
+                    &npub(&admin),
                     "rotate-restricted",
                     "restricted",
                     3,
                 )],
             ),
             StatusCode::BAD_REQUEST,
-            "",
+            EVENT_MISMATCH,
         ),
         (
             &admin,
             demotion_body(&admin, &target, vec![wrong_rotation_action]),
             StatusCode::BAD_REQUEST,
-            "",
+            EVENT_MISMATCH,
         ),
         (
             &admin,
@@ -474,4 +484,127 @@ async fn demotion_requires_an_admin_and_binds_every_signed_event() {
         2
     );
     assert_eq!(sequence(&router, &admin, 4).await, committed);
+}
+
+#[tokio::test]
+async fn an_admin_demotes_itself_and_signs_the_rotations() {
+    let admin = Keys::generate();
+    let member = Keys::generate();
+    let target = npub(&member);
+    let router = org_with_promoted_target(&admin, &target).await;
+
+    // The target signs its own demotion and every rotation; the new key is
+    // wrapped only for the remaining admin.
+    let response = authed_request(
+        router.clone(),
+        &member,
+        "POST",
+        &format!("/v1/admin/brains/acme/roles/admin/{target}/demotion"),
+        Some(demotion_body(
+            &member,
+            &target,
+            vec![restricted_rotation(
+                &member,
+                &npub(&admin),
+                "rotate-restricted",
+                "restricted",
+                2,
+            )],
+        )),
+        TEST_NOW,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let demoted: DemoteAdminResponse = read_json(response).await;
+    assert_eq!(demoted.metadata.admins, vec![npub(&admin)]);
+    assert_eq!(
+        demoted.rotations,
+        vec![FolderKeyRotationReceipt {
+            folder_id: "restricted".to_owned(),
+            previous_key_version: 1,
+            new_key_version: 2,
+            recipient_npubs: vec![npub(&admin)],
+            cut_off_npubs: vec![target.clone()],
+        }]
+    );
+
+    // Now a Member, the same key can no longer demote anyone.
+    let refused = authed_request(
+        router.clone(),
+        &member,
+        "POST",
+        &format!(
+            "/v1/admin/brains/acme/roles/admin/{}/demotion",
+            npub(&admin)
+        ),
+        Some(demotion_body(&member, &npub(&admin), Vec::new())),
+        TEST_NOW + 1,
+    )
+    .await;
+    assert_error(
+        refused,
+        StatusCode::FORBIDDEN,
+        "brain admin access required",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn demotion_accepts_bodies_over_the_default_limit_up_to_its_own() {
+    let admin = Keys::generate();
+    let member = Keys::generate();
+    let target = npub(&member);
+    let router = org_with_promoted_target(&admin, &target).await;
+    let route = format!("/v1/admin/brains/acme/roles/admin/{target}/demotion");
+    // Unknown fields are ignored, so padding sizes the body without changing
+    // the demotion it carries.
+    let padded = |size: usize| -> String {
+        let mut body: serde_json::Value = serde_json::from_str(&demotion_body(
+            &admin,
+            &target,
+            vec![restricted_rotation(
+                &admin,
+                &npub(&admin),
+                "rotate-restricted",
+                "restricted",
+                2,
+            )],
+        ))
+        .unwrap();
+        let unpadded = body.to_string().len() + r#","padding":"""#.len();
+        body["padding"] = "x".repeat(size - unpadded).into();
+        let body = body.to_string();
+        assert_eq!(body.len(), size);
+        body
+    };
+
+    let over = authed_request(
+        router.clone(),
+        &admin,
+        "POST",
+        &route,
+        Some(padded(
+            finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES + 1,
+        )),
+        TEST_NOW,
+    )
+    .await;
+    assert_eq!(over.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(metadata(&router, &admin, 1).await.admins.contains(&target));
+
+    let large = padded(MAX_REQUEST_BODY_BYTES * 4);
+    let accepted = authed_request(
+        router.clone(),
+        &admin,
+        "POST",
+        &route,
+        Some(large),
+        TEST_NOW,
+    )
+    .await;
+    assert_eq!(accepted.status(), StatusCode::OK);
+    assert_eq!(
+        metadata(&router, &admin, 2).await.admins,
+        vec![npub(&admin)]
+    );
 }

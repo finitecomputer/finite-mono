@@ -100,10 +100,14 @@ pub(crate) fn current_folder_key_holders(
 /// will hold after the enclosing mutation commits.
 ///
 /// `post_change_brain` and `remaining_access` describe that roster (for
-/// example with a removed member or demoted admin already taken out). Returns
-/// the required recipient set the grants were checked against.
+/// example with a removed member or demoted admin already taken out); grant
+/// recipients are checked against it. Grant issuers are checked against
+/// `issuer_roster`, the roster before the change: the acting admin's
+/// authority is what it holds when it signs, so an admin may demote itself.
+/// Returns the required recipient set the grants were checked against.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn validate_folder_key_rotation_material(
+    issuer_roster: &Brain,
     post_change_brain: &Brain,
     folder: &Folder,
     remaining_access: &BTreeSet<UserId>,
@@ -123,7 +127,7 @@ pub(crate) fn validate_folder_key_rotation_material(
         personal_agent,
     )?;
     validate_folder_grants(
-        post_change_brain,
+        issuer_roster,
         &rotated_folder,
         &required,
         grants,
@@ -287,6 +291,7 @@ impl BrainStore {
         };
         let live_objects = self.load_current_objects(brain_id)?;
         let recipients = validate_folder_key_rotation_material(
+            &stored.brain,
             &stored.brain,
             folder,
             &remaining_access,

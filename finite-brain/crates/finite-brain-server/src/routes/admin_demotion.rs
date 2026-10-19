@@ -22,9 +22,13 @@ pub(crate) async fn demote_admin_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<DemoteAdminResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    // Validated at the instant admission checked the header, so a demotion
+    // that queued for a rotation permit past the clock skew is still accepted.
+    let actor =
+        validate_admitted_rotation_auth(&state, &headers, &method, &uri, &body, admitted_at)?;
     let request: DemoteAdminRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     validate_folder_rotation_fanout(

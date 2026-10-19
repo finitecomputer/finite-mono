@@ -9,7 +9,8 @@
 //! keep their key.
 
 use crate::folder_key_rotation::{
-    apply_folder_key_rotation, current_folder_key_holders, validate_folder_key_rotation_material,
+    apply_folder_key_rotation, begin_authoritative_write, current_folder_key_holders,
+    validate_folder_key_rotation_material,
 };
 use crate::*;
 
@@ -84,6 +85,9 @@ impl BrainStore {
                 }),
         )?;
         let removed = request.removed_user_id;
+        // Every read below happens under the write lock, so the roster and key
+        // versions validated are the ones the writes apply to.
+        let tx = begin_authoritative_write(&self.conn)?;
         let stored = self.load_brain(brain_id)?;
         if stored.brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
@@ -140,7 +144,10 @@ impl BrainStore {
                 .get(&folder.id)
                 .cloned()
                 .unwrap_or_default();
+            // Issuers are checked against the roster before the demotion, so
+            // an admin may demote itself; recipients against the one after.
             let recipients = validate_folder_key_rotation_material(
+                &stored.brain,
                 &post_demotion_brain,
                 folder,
                 &access,
@@ -164,7 +171,6 @@ impl BrainStore {
             });
         }
 
-        let tx = self.conn.transaction()?;
         tx.execute(
             "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), removed.as_str()],

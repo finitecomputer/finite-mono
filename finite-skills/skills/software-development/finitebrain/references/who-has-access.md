@@ -105,10 +105,18 @@ rotation body. `fbrain admin role revoke admin --target <npub>` removes the
 Admin role and, in the same change, rotates every Folder Key the key held only
 as an admin (`admin_only` Folders, and `restricted` Folders without its
 explicit access). Folders it still reaches through explicit Folder access or
-All-Members membership keep their key. The acting admin must be able to open
-each of those Folders; otherwise the command names the Folder and nothing
-changes, so run it from an admin who can. Report `state: complete` and each
-`rotations` entry (Folder, new key version, `cutOffNpubs`). An older Brain
+All-Members membership keep their key. Each rotation re-encrypts the Folder's
+live pages and has the side effects described under Clearing Removal Pending:
+pending email invitations for the Folder are revoked, and pending Mount Offers
+and Folder share links for it must be recreated. The acting admin must be able to open each of
+those Folders; otherwise the command names the Folder and nothing changes, so
+run it from an admin who can. An admin may demote itself, but then the
+stepping-down key generates the new Folder Keys, so the receipt's cut-off
+holds only if that client is honest; when that matters, have another admin
+run the demotion. Report `state: complete` and each `rotations` entry
+(Folder, new key version, `cutOffNpubs`). A request too large for the server
+(the rotated Folders' live pages together) is refused before anything is sent,
+naming the Folders. An older Brain
 server answers `unsupported: ... does not support admin demotion with Folder
 Key rotation yet` and nothing changes; do not work around it. Afterwards
 `access list` shows the key as a Member with nothing removal pending.
