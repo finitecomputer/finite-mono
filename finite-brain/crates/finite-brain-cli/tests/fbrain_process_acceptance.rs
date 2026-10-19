@@ -12,8 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use finite_brain_core::{
-    BrainId, EncryptedFolderObjectEnvelope, FolderId, FolderKey, FolderKeyGrantPayload,
-    FolderObjectAad, ObjectId, decode_sync_payload, encrypt_folder_object, open_folder_object,
+    BrainId, CryptoRecordError, EncryptedFolderObjectEnvelope, FolderId, FolderKey,
+    FolderKeyGrantPayload, FolderObjectAad, ObjectId, decode_sync_payload, encrypt_folder_object,
+    open_folder_object,
 };
 use finite_nostr::{GiftWrapValidation, NostrPublicKey, build_rumor, open_gift_wrap, wrap_rumor};
 use nostr::{Keys, Kind};
@@ -2214,6 +2215,418 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
     }
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
+}
+
+/// Production on 2026-10-19: keys demoted from admin kept the current wrap of
+/// restricted Folders (`revocationIncomplete`). Removing such a Member must
+/// rotate those Folders too, or the removed key still opens them.
+///
+/// The demotion is reproduced at the store level (the role row deleted, wrap
+/// kept), exactly what `admin role revoke admin` did before it rotated, so
+/// this proof does not depend on how demotion behaves today.
+#[test]
+fn built_fbrain_process_member_removal_rotates_folders_a_demoted_key_still_holds() {
+    let scratch = TempDir::new().unwrap();
+    let admin_home = scratch.path().join("admin");
+    let demoted_home = scratch.path().join("demoted");
+    let mut npubs = Vec::new();
+    let mut identities = Vec::new();
+    for home in [&admin_home, &demoted_home] {
+        fs::create_dir_all(home).unwrap();
+        let keys = Keys::generate();
+        identities.push(keys.clone());
+        let secret = home.join("import-key");
+        fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        fs::remove_file(secret).unwrap();
+        npubs.push(
+            NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+        );
+    }
+    let admin = &npubs[0];
+    let demoted = &npubs[1];
+    let (admin_keys, demoted_keys) = (&identities[0], &identities[1]);
+    let database_path = scratch.path().join("state").join("brain.sqlite3");
+    fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+    let (server_url, shutdown, server_thread) =
+        spawn_file_backed_brain_server(admin, database_path.clone());
+    let fbrain_at = |home: &Path, cwd: &Path, args: &[&str]| -> Output {
+        command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = fbrain_at(home, cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    for args in [
+        vec![
+            "admin",
+            "member",
+            "add",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+        vec![
+            "admin",
+            "role",
+            "grant",
+            "admin",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+    ] {
+        run_json(&admin_home, &admin_home, &args);
+    }
+    // Created while the second key is an admin, so it receives the current
+    // wrap through its role, with no explicit Folder access row.
+    let admin_tree = admin_home.join("tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "roundtrip-org", admin_tree.to_str().unwrap()],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "folder",
+            "create",
+            "research",
+            "--access",
+            "restricted",
+            "--name",
+            "Research",
+            "--path",
+            "Research",
+        ],
+    );
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    fs::write(admin_tree.join("Research/plan.md"), "# Plan v1\n").unwrap();
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let demoted_tree = demoted_home.join("tree");
+    run_json(
+        &demoted_home,
+        &demoted_home,
+        &["open", "roundtrip-org", demoted_tree.to_str().unwrap()],
+    );
+    run_json(&demoted_home, &demoted_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(demoted_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v1\n",
+        "the second admin decrypts the restricted Folder before demotion"
+    );
+    // Keep the version-1 Folder Key the second key opens from its own wrap,
+    // and prove it really decrypts the Folder's current ciphertext.
+    let demoted_v1_key = stored_folder_key(&database_path, demoted_keys, "research", 1);
+    let before = run_json(&admin_home, &admin_tree, &["brain", "export"]);
+    let plaintexts = live_folder_objects(&before, "research")
+        .iter()
+        .map(|(object_id, payload)| {
+            open_stored_object(&demoted_v1_key, "research", object_id, 1, payload)
+                .expect("the version-1 key opens version-1 ciphertext")
+        })
+        .collect::<Vec<_>>();
+    assert!(plaintexts.iter().any(|plain| plain.contains("Plan v1")));
+
+    // Legacy demotion: drop the role row, keep every wrap.
+    let changed = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "DELETE FROM brain_admins WHERE brain_id = 'roundtrip-org' AND user_id = ?1",
+            [demoted.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "roundtrip-org"],
+    );
+    let demoted_row = report["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["npub"] == demoted.as_str())
+        .expect("demoted key in the access report");
+    assert_eq!(demoted_row["brainRole"], "member");
+    assert_eq!(demoted_row["revocationIncomplete"], json!(["research"]));
+    let versions_before = folder_key_versions(&run_json(
+        &admin_home,
+        &admin_home,
+        &["brain", "metadata", "--brain", "roundtrip-org"],
+    ));
+    assert_eq!(versions_before["research"], 1);
+
+    let removed = run_json(
+        &admin_home,
+        &admin_home,
+        &[
+            "admin",
+            "member",
+            "remove",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+    );
+    let rotated = removed["rotatedFolders"].as_array().unwrap();
+    let research = rotated
+        .iter()
+        .find(|folder| folder["folderId"] == "research")
+        .expect("research rotated by member removal");
+    assert_eq!(research["reason"], "staleCurrentGrant");
+    assert_eq!(research["previousKeyVersion"], 1);
+    assert_eq!(research["newKeyVersion"], 2);
+    assert!(
+        rotated
+            .iter()
+            .filter(|folder| folder["folderId"] != "research")
+            .all(|folder| folder["reason"] == "readable"),
+        "{rotated:?}"
+    );
+    assert!(
+        !removed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member == demoted.as_str())
+    );
+    let versions_after = folder_key_versions(&removed);
+    for (folder_id, version) in &versions_before {
+        let expected = if rotated
+            .iter()
+            .any(|folder| folder["folderId"] == *folder_id)
+        {
+            version + 1
+        } else {
+            *version
+        };
+        assert_eq!(versions_after[folder_id], expected, "{folder_id}");
+    }
+
+    // Nobody holds a current wrap without entitlement any more.
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "roundtrip-org"],
+    );
+    assert_eq!(report["totals"]["revocationIncomplete"], 0, "{report}");
+    if let Some(row) = report["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["npub"] == demoted.as_str())
+    {
+        assert_eq!(row["revocationIncomplete"], json!([]), "{row}");
+    }
+    // Authoritative store state: the removed key holds only the version-1
+    // wrap, which opens nothing now that every object moved to version 2.
+    let demoted_research_versions = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .prepare(
+            "SELECT key_version FROM folder_key_grants
+             WHERE brain_id = 'roundtrip-org' AND folder_id = 'research' AND recipient_npub = ?1
+             ORDER BY key_version",
+        )
+        .unwrap()
+        .query_map([demoted.as_str()], |row| row.get::<_, u32>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(demoted_research_versions, vec![1]);
+
+    // The remaining admin's open tree pulls the re-encrypted revision, then
+    // publishes a new one under the new key; a fresh tree decrypts it.
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(admin_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v1\n"
+    );
+    fs::write(admin_tree.join("Research/plan.md"), "# Plan v2\n").unwrap();
+    let pushed = run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let fresh_tree = admin_home.join("fresh-tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "roundtrip-org", fresh_tree.to_str().unwrap()],
+    );
+    run_json(&admin_home, &fresh_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v2\n",
+        "{pushed}"
+    );
+    // Every live object now sits at version 2. The removed key's retained
+    // version-1 Folder Key fails AES-GCM authentication on each of them,
+    // while the remaining admin's version-2 key opens them.
+    let after = run_json(&admin_home, &admin_tree, &["brain", "export"]);
+    let rotated_objects = live_folder_objects(&after, "research");
+    assert!(!rotated_objects.is_empty());
+    // The store's current object rows are exactly these, all at version 2.
+    let stored_rows = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .prepare(
+            "SELECT object_id, payload_json FROM current_encrypted_brain_objects
+             WHERE brain_id = 'roundtrip-org' AND folder_id = 'research' AND deleted = 0
+             ORDER BY object_id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut exported = rotated_objects.clone();
+    exported.sort();
+    assert_eq!(stored_rows, exported);
+    for (object_id, payload) in &stored_rows {
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["keyVersion"], 2, "{object_id}: {payload}");
+    }
+    let admin_v2_key = stored_folder_key(&database_path, admin_keys, "research", 2);
+    let mut admin_plaintexts = Vec::new();
+    for (object_id, payload) in &rotated_objects {
+        assert_eq!(
+            open_stored_object(&demoted_v1_key, "research", object_id, 2, payload),
+            Err(CryptoRecordError::AadMismatch),
+            "{object_id}"
+        );
+        admin_plaintexts
+            .push(open_stored_object(&admin_v2_key, "research", object_id, 2, payload).unwrap());
+    }
+    assert!(
+        admin_plaintexts
+            .iter()
+            .any(|plain| plain.contains("Plan v2"))
+    );
+    // The removed key's client is refused by the server.
+    let refused = fbrain_at(&demoted_home, &demoted_tree, &["sync", "now"]);
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{refusal}");
+    assert!(
+        refusal.contains("403") && refusal.contains("brain access required"),
+        "{refusal}"
+    );
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+/// Open `recipient`'s wrap of the Folder Key at `key_version` straight from
+/// the server's store, the way that key's own client would.
+fn stored_folder_key(
+    database_path: &Path,
+    recipient: &Keys,
+    folder_id: &str,
+    key_version: u32,
+) -> FolderKey {
+    let recipient_key = NostrPublicKey::from_protocol(recipient.public_key());
+    let wrapped: String = rusqlite::Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT wrapped_event_json FROM folder_key_grants
+             WHERE brain_id = 'roundtrip-org' AND folder_id = ?1 AND key_version = ?2
+               AND recipient_npub = ?3
+             LIMIT 1",
+            rusqlite::params![folder_id, key_version, recipient_key.to_npub().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = nostr::Event::from_json(wrapped).unwrap();
+    let opened =
+        open_gift_wrap(recipient, &event, &GiftWrapValidation::new(recipient_key)).unwrap();
+    let grant: Value = serde_json::from_str(&opened.rumor.content).unwrap();
+    assert_eq!(grant["folderId"], folder_id);
+    assert_eq!(grant["keyVersion"], key_version);
+    FolderKey::from_base64(grant["folderKey"].as_str().unwrap()).unwrap()
+}
+
+/// `(objectId, payloadJson)` for every live object of one Folder in an export.
+fn live_folder_objects(export: &Value, folder_id: &str) -> Vec<(String, String)> {
+    export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["folderId"] == folder_id && object["deleted"] != true)
+        .map(|object| {
+            (
+                object["objectId"].as_str().unwrap().to_owned(),
+                object["payloadJson"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Decrypt one exported object under the AAD for `key_version`.
+fn open_stored_object(
+    key: &FolderKey,
+    folder_id: &str,
+    object_id: &str,
+    key_version: u32,
+    payload_json: &str,
+) -> Result<String, CryptoRecordError> {
+    let envelope = EncryptedFolderObjectEnvelope::from_json(
+        &decode_sync_payload(payload_json).ciphertext_or_raw(payload_json),
+    )?;
+    let aad = FolderObjectAad {
+        brain_id: BrainId::new("roundtrip-org").unwrap(),
+        folder_id: FolderId::new(folder_id).unwrap(),
+        object_id: ObjectId::new(object_id).unwrap(),
+        key_version,
+    };
+    open_folder_object(key, &aad, &envelope)
+        .map(|plain| String::from_utf8_lossy(&plain).into_owned())
+}
+
+fn folder_key_versions(metadata: &Value) -> std::collections::BTreeMap<String, u64> {
+    metadata["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| {
+            (
+                folder["id"].as_str().unwrap().to_owned(),
+                folder["currentKeyVersion"].as_u64().unwrap(),
+            )
+        })
+        .collect()
 }
 
 #[test]
