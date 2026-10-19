@@ -341,6 +341,11 @@ Clearing Removal Pending for what to do next, and for the 408 and 503
 answers). Clearing Removal Pending in
 [who-has-access.md](who-has-access.md) says when to use each.
 
+`admin member remove` returns the Brain metadata after removal plus
+`rotatedFolders`: one entry per rotated Folder with `folderId`, `reason`
+(`readable` or `staleCurrentGrant`), `previousKeyVersion` and
+`newKeyVersion`.
+
 `admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder
 whose `repair` is `needsKeyHolder` needs an admin who holds that Folder's
 current key.
