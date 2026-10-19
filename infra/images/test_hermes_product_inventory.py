@@ -242,7 +242,7 @@ print(json.dumps(payload))
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["brains"][0]["folders"])
 
-    def test_brain_identities_project_only_core_resolved_roster_fields(self):
+    def test_brain_identities_project_roster_fields_and_stored_public_name(self):
         agent = {
             "state": "resolved",
             "kind": "agent",
@@ -253,6 +253,14 @@ print(json.dumps(payload))
         }
         unshared = {"state": "notShared", "kind": "human", "accountEmail": "private@example.test"}
         folder = {"folderId": "folder", "path": "private-path", "state": "ready"}
+        stored = {"name": "cara@finite.vip", "storedAt": "2026-09-17T20:39:30Z"}
+        named: dict[str, object] = {
+            "npub": "npub1c",
+            "brainRole": "member",
+            "description": {"state": "unavailable", "reason": "private-reason"},
+            "storedNip05": stored,
+            "folders": [],
+        }
         report = {
             "version": "finite-brain-access-report-v1",
             "brainId": "agent-brain",
@@ -265,11 +273,20 @@ print(json.dumps(payload))
                     "folders": [folder],
                 },
                 {"npub": "npub1b", "brainRole": "admin", "description": unshared, "folders": []},
+                named,
+                {
+                    "npub": "npub1d",
+                    "brainRole": "member",
+                    "description": {"state": "unknown"},
+                    "storedNip05": {"name": "dev@finite.vip"},
+                    "folders": [],
+                },
             ],
         }
         (self.agent / "access.json").write_text(json.dumps(report))
         response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
         self.assertEqual(response.status_code, 200, response.text)
+        unnamed = {"publicName": None, "publicNameStoredAt": None}
         empty = {"kind": None, "name": None, "email": None, "ownerEmail": None}
         self.assertEqual(
             response.json()["identities"],
@@ -281,9 +298,26 @@ print(json.dumps(payload))
                     "name": "Ada",
                     "email": None,
                     "ownerEmail": "sam@example.test",
+                    **unnamed,
                     "folders": [{"id": "folder", "state": "ready"}],
                 },
-                {"npub": "npub1b", "role": "admin", **empty, "folders": []},
+                {"npub": "npub1b", "role": "admin", **empty, **unnamed, "folders": []},
+                {
+                    "npub": "npub1c",
+                    "role": "member",
+                    **empty,
+                    "publicName": "cara@finite.vip",
+                    "publicNameStoredAt": "2026-09-17T20:39:30Z",
+                    "folders": [],
+                },
+                {
+                    "npub": "npub1d",
+                    "role": "member",
+                    **empty,
+                    "publicName": "dev@finite.vip",
+                    "publicNameStoredAt": None,
+                    "folders": [],
+                },
             ],
         )
         self.assertNotIn("private", response.text)
@@ -295,6 +329,18 @@ print(json.dumps(payload))
                 ["access", "list", "--brain", "agent-brain", "--json"],
             ],
         )
+        for malformed in (
+            "cara@finite.vip",
+            {"name": ""},
+            {"name": "cara@finite.vip", "storedAt": "yesterday"},
+            {"name": "cara@finite.vip", "storedAt": "2026-13-01T00:00:00Z"},
+            {"name": "cara@finite.vip", "storedAt": 1790000000},
+        ):
+            named["storedNip05"] = malformed
+            (self.agent / "access.json").write_text(json.dumps(report))
+            response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+            self.assertEqual(response.status_code, 503, malformed)
+        named["storedNip05"] = stored
         report["brainId"] = "other-brain"
         (self.agent / "access.json").write_text(json.dumps(report))
         response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
