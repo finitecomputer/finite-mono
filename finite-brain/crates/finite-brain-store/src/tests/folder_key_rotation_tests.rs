@@ -594,3 +594,89 @@ fn personal_brain_rotation_keeps_the_owner_and_personal_agent() {
     );
     assert!(outcome.cut_off_holders.is_empty());
 }
+
+#[test]
+fn rotation_rewraps_for_an_active_mount_participant_and_revoke_refuses_it() {
+    let mut store = store_with_strategy_folder();
+    bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+    let source_admin = user(ADMIN);
+    let dest_admin = user("npub-dest-admin");
+    store
+        .create_shared_folder_invitation(
+            &acme(),
+            &FolderId::new("strategy").unwrap(),
+            &BrainId::new("dest").unwrap(),
+            "mount-offer",
+            &dest_admin,
+            &source_admin,
+            "/v1/mount-offers/mount-offer/accept",
+            &grant("grant-mount-v1", "strategy", 1, ADMIN, dest_admin.as_str()),
+            "2026-06-30T00:00:00.000Z",
+            NOW,
+        )
+        .unwrap();
+    accept_mount_for_test(
+        &mut store,
+        "mount-offer",
+        &dest_admin,
+        "mount-1",
+        "projection-1",
+        &[],
+        NOW,
+    )
+    .unwrap();
+
+    // The Mount participant is entitled, so leaving it out strands it.
+    assert_eq!(
+        rotate_strategy(
+            &mut store,
+            FolderKeyRotationTarget::RequiredRecipients,
+            2,
+            &[grant("strategy-admin-v2", "strategy", 2, ADMIN, ADMIN)],
+            &[],
+        )
+        .unwrap_err(),
+        StoreError::MissingRequiredGrant {
+            recipient_user_id: dest_admin.to_string()
+        }
+    );
+    assert_eq!(
+        rotate_strategy(
+            &mut store,
+            FolderKeyRotationTarget::RemoveAccess(&dest_admin),
+            2,
+            &[grant("strategy-admin-v2", "strategy", 2, ADMIN, ADMIN)],
+            &[],
+        )
+        .unwrap_err(),
+        StoreError::BrokenInvariant {
+            reason: "Folder access target still receives this Folder through an active Mount; remove the target from that Mount before rotating explicit Folder access".to_owned()
+        }
+    );
+
+    let outcome = rotate_strategy(
+        &mut store,
+        FolderKeyRotationTarget::RequiredRecipients,
+        2,
+        &[
+            grant("strategy-admin-v2", "strategy", 2, ADMIN, ADMIN),
+            grant(
+                "strategy-mount-v2",
+                "strategy",
+                2,
+                ADMIN,
+                dest_admin.as_str(),
+            ),
+        ],
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        outcome.recipients,
+        BTreeSet::from([source_admin, dest_admin.clone()])
+    );
+    assert!(outcome.cut_off_holders.is_empty());
+    let connection = store.load_shared_folder_connection("mount-1").unwrap();
+    assert_eq!(connection.status, SharedFolderConnectionStatus::Active);
+    assert!(current_grant_recipients(&store, "strategy").contains(&dest_admin));
+}
