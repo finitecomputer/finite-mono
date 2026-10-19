@@ -271,11 +271,27 @@ fn removal_that_omits_only_the_stale_grant_folder_is_refused_with_its_ids() {
     let before = key_versions(&store);
     let sequence_before = store.latest_sequence(&acme()).unwrap();
 
+    let error = remove_demoted(&mut store, &readable_only).unwrap_err();
+    let StoreError::FolderRotationSetMismatch {
+        operation,
+        required_folder_ids,
+        supplied_folder_ids,
+    } = &error
+    else {
+        panic!("unexpected error: {error}");
+    };
+    assert_eq!(*operation, "member removal");
+    let mut expected_required = planned
+        .iter()
+        .map(|rotation| rotation.folder_id.to_string())
+        .collect::<Vec<_>>();
+    expected_required.sort();
+    assert_eq!(required_folder_ids, &expected_required);
+    assert!(!supplied_folder_ids.contains(&"strategy".to_owned()));
+    // The server names exactly the skipped stale-grant Folder.
     assert_eq!(
-        remove_demoted(&mut store, &readable_only).unwrap_err(),
-        StoreError::MemberRemovalMissingStaleGrantRotations {
-            folder_ids: vec!["strategy".to_owned()],
-        }
+        member_removal_skipped_stale_grant_folders(&planned, supplied_folder_ids),
+        vec!["strategy".to_owned()]
     );
 
     // Nothing changed: still a Member, still holding the stale wrap.
@@ -297,7 +313,7 @@ fn removal_that_omits_only_the_stale_grant_folder_is_refused_with_its_ids() {
 }
 
 #[test]
-fn removal_with_a_missing_readable_or_duplicate_rotation_keeps_the_generic_refusal() {
+fn removal_with_a_missing_readable_duplicate_or_extra_rotation_is_a_plain_set_mismatch() {
     let mut store = demoted_admin_store();
     let planned = plan(&store, DEMOTED).unwrap();
     let rotations = rotations_for(&store, &planned);
@@ -318,11 +334,20 @@ fn removal_with_a_missing_readable_or_duplicate_rotation_keeps_the_generic_refus
         }],
     ));
     for candidate in [without_team_notes, duplicated, with_extra] {
-        assert!(matches!(
-            remove_demoted(&mut store, &candidate).unwrap_err(),
-            StoreError::BrokenInvariant { reason }
-                if reason.starts_with("member removal requires exactly one rotation")
-        ));
+        let error = remove_demoted(&mut store, &candidate).unwrap_err();
+        let StoreError::FolderRotationSetMismatch {
+            operation,
+            supplied_folder_ids,
+            ..
+        } = &error
+        else {
+            panic!("unexpected error: {error}");
+        };
+        assert_eq!(*operation, "member removal");
+        // Not a stale-grant-only skip, so no Folder is singled out.
+        assert!(
+            member_removal_skipped_stale_grant_folders(&planned, supplied_folder_ids).is_empty()
+        );
     }
 }
 
@@ -395,7 +420,13 @@ fn removal_after_another_admin_rotated_a_planned_folder_says_to_rerun() {
 
     let error = remove_demoted(&mut store, &rotations).unwrap_err();
     assert!(
-        matches!(&error, StoreError::BrokenInvariant { reason } if reason.contains("rerun the removal")),
+        matches!(
+            &error,
+            StoreError::FolderRotationSetMismatch {
+                operation: "member removal",
+                ..
+            }
+        ) && error.to_string().contains("Prepare the change again"),
         "{error}"
     );
     assert_eq!(key_versions(&store), before);

@@ -189,12 +189,12 @@ limit`, rotate the removed key's `revocationIncomplete` Folders first with
 Every refusal below changes nothing. An older Brain server answers with
 `unsupported: ... cannot say which Folders member removal must rotate`:
 report that the Brain server needs an upgrade before this `fbrain` can remove
-Members. HTTP 400 naming Folders where the Member still holds the current key
+Members. HTTP 409 naming Folders where the Member still holds the current key
 means the removal skipped them: upgrade `fbrain` if it is an older version,
-otherwise rerun the removal so it fetches a fresh plan. HTTP 400 saying
-member removal requires exactly one rotation per Folder, or a Folder that
-changed while the removal was prepared, also means another admin changed
-access in between: rerun the removal.
+otherwise rerun the removal so it fetches a fresh plan. HTTP 409 saying
+member removal must rotate exactly a set of Folder Keys, or a Folder that
+changed while the removal was prepared, means another admin changed access
+in between: rerun the removal.
 
 Run `access list` again afterwards. Done when the key holds the intended role
 and no Folder shows `revocationIncomplete` for it. Report any that remain as

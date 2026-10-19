@@ -209,9 +209,14 @@ async fn removal_without_the_stale_grant_rotation_is_refused_then_full_removal_r
         TEST_NOW + 1,
     )
     .await;
-    assert_eq!(old_client.status(), StatusCode::BAD_REQUEST);
+    // Same typed 409 contract as admin demotion's rotation-set mismatch.
+    assert_eq!(old_client.status(), StatusCode::CONFLICT);
     let message = read_text(old_client).await;
-    assert!(message.contains("restricted"), "{message}");
+    assert!(message.contains("[restricted]"), "{message}");
+    assert!(
+        message.contains("without being entitled to it"),
+        "{message}"
+    );
     assert!(
         message.contains("Upgrade fbrain if using an older version"),
         "{message}"
@@ -220,7 +225,27 @@ async fn removal_without_the_stale_grant_rotation_is_refused_then_full_removal_r
         message.contains("otherwise retry the removal to refresh its plan"),
         "{message}"
     );
-    assert!(message.contains("Nothing was changed"), "{message}");
+    assert!(message.contains("nothing was changed"), "{message}");
+    // Any other mismatch, here a duplicated rotation, is the same 409 with
+    // the shared rotation-set wording.
+    let mut duplicated = planned.clone();
+    duplicated.push(planned[0]);
+    let mismatched = authed_request(
+        router.clone(),
+        &admin,
+        "DELETE",
+        &route,
+        Some(remove_member_body(&admin, &target, &duplicated)),
+        TEST_NOW + 1,
+    )
+    .await;
+    assert_eq!(mismatched.status(), StatusCode::CONFLICT);
+    let message = read_text(mismatched).await;
+    assert!(
+        message.contains("member removal must rotate exactly the Folder Keys of"),
+        "{message}"
+    );
+    assert!(message.contains("nothing was changed"), "{message}");
     let unchanged: BrainMetadataResponse =
         read_json(get_metadata(router.clone(), &admin, "acme", TEST_NOW + 2).await).await;
     assert!(unchanged.members.contains(&target));

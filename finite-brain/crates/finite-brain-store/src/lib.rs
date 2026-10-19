@@ -44,6 +44,7 @@ pub use folder_key_rotation::{
 };
 pub use member_removal::{
     MemberRemovalFolderRotation, MemberRemovalRotationReason, member_removal_folder_rotations,
+    member_removal_skipped_stale_grant_folders,
 };
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
@@ -105,10 +106,14 @@ pub enum StoreError {
         current_key_version: u32,
         requested_key_version: u32,
     },
-    /// A Member removal covered every Folder the Member reads but omitted
-    /// Folders where the Member still holds the current key without
-    /// entitlement. Clients from before that rule send exactly this shape.
-    MemberRemovalMissingStaleGrantRotations { folder_ids: Vec<String> },
+    /// A roster change that must rotate Folder Keys was submitted with a
+    /// different set of rotations than the stored roster requires: the client
+    /// is too old to prepare them, or the roster changed after preparation.
+    FolderRotationSetMismatch {
+        operation: &'static str,
+        required_folder_ids: Vec<String>,
+        supplied_folder_ids: Vec<String>,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -166,10 +171,15 @@ impl fmt::Display for StoreError {
                 f,
                 "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
             ),
-            Self::MemberRemovalMissingStaleGrantRotations { folder_ids } => write!(
+            Self::FolderRotationSetMismatch {
+                operation,
+                required_folder_ids,
+                supplied_folder_ids,
+            } => write!(
                 f,
-                "member removal omitted rotations for Folders where this Member still holds the current Folder Key without being entitled to it: {}",
-                folder_ids.join(", ")
+                "{operation} must rotate exactly the Folder Keys of [{}], but the request rotates [{}]; nothing was changed. Prepare the change again with a current fbrain",
+                required_folder_ids.join(", "),
+                supplied_folder_ids.join(", ")
             ),
         }
     }

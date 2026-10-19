@@ -877,9 +877,10 @@ fn member_removal_validates_against_access_committed_by_another_connection() {
     );
     assert_eq!(
         result.unwrap_err(),
-        StoreError::BrokenInvariant {
-            reason: "member removal requires exactly one rotation for every Folder the member reads or holds the current key for; if the Member's Folder access changed since the removal was prepared, rerun the removal"
-                .to_owned()
+        StoreError::FolderRotationSetMismatch {
+            operation: "member removal",
+            required_folder_ids: vec!["strategy".to_owned(), "team-notes".to_owned()],
+            supplied_folder_ids: vec!["team-notes".to_owned()],
         }
     );
     let stored = store.load_brain(&acme()).unwrap();

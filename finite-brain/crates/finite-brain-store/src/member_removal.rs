@@ -71,12 +71,9 @@ pub fn member_removal_folder_rotations(
 
 /// Require exactly one supplied rotation per planned Folder.
 ///
-/// A request that covers every readable Folder but omits stale-grant Folders
-/// is what a client from before this rule sends, or a current client whose
-/// plan went stale; it gets a typed error naming those Folders. Any other
-/// mismatch means the Member's Folder access changed after the client
-/// prepared the removal (for example another admin rotated a planned
-/// Folder), so the refusal says to rerun it.
+/// Any mismatch is the typed [`StoreError::FolderRotationSetMismatch`] that
+/// admin demotion also returns, so clients see one contract for a roster
+/// change prepared against a different rotation set. Nothing is written.
 pub(crate) fn require_member_removal_rotation_set(
     planned: &[MemberRemovalFolderRotation],
     supplied: &[MemberFolderRotation],
@@ -92,26 +89,50 @@ pub(crate) fn require_member_removal_rotation_set(
     if supplied_ids.len() == supplied.len() && supplied_ids == planned_ids {
         return Ok(());
     }
+    Err(StoreError::FolderRotationSetMismatch {
+        operation: "member removal",
+        required_folder_ids: planned_ids.iter().map(ToString::to_string).collect(),
+        supplied_folder_ids: supplied
+            .iter()
+            .map(|rotation| rotation.folder_id.to_string())
+            .collect(),
+    })
+}
+
+/// The planned stale-grant Folders a refused removal skipped, when skipping
+/// them is its only mismatch; empty otherwise.
+///
+/// That is the shape a client from before stale-grant rotation sends, or a
+/// current client whose plan went stale, so the server can name those
+/// Folders and say to upgrade or retry instead of only listing both sets.
+pub fn member_removal_skipped_stale_grant_folders(
+    planned: &[MemberRemovalFolderRotation],
+    supplied_folder_ids: &[String],
+) -> Vec<String> {
+    let supplied = supplied_folder_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let planned_ids = planned
+        .iter()
+        .map(|rotation| rotation.folder_id.as_str())
+        .collect::<BTreeSet<_>>();
+    if supplied.len() != supplied_folder_ids.len() || !supplied.is_subset(&planned_ids) {
+        return Vec::new();
+    }
     let missing = planned
         .iter()
-        .filter(|rotation| !supplied_ids.contains(&rotation.folder_id))
+        .filter(|rotation| !supplied.contains(rotation.folder_id.as_str()))
         .collect::<Vec<_>>();
-    let only_stale_grants_missing = supplied_ids.len() == supplied.len()
-        && supplied_ids.is_subset(&planned_ids)
-        && !missing.is_empty()
-        && missing
+    if missing
+        .iter()
+        .all(|rotation| rotation.reason == MemberRemovalRotationReason::StaleCurrentGrant)
+    {
+        missing
             .iter()
-            .all(|rotation| rotation.reason == MemberRemovalRotationReason::StaleCurrentGrant);
-    if only_stale_grants_missing {
-        return Err(StoreError::MemberRemovalMissingStaleGrantRotations {
-            folder_ids: missing
-                .iter()
-                .map(|rotation| rotation.folder_id.to_string())
-                .collect(),
-        });
+            .map(|rotation| rotation.folder_id.to_string())
+            .collect()
+    } else {
+        Vec::new()
     }
-    Err(StoreError::BrokenInvariant {
-        reason: "member removal requires exactly one rotation for every Folder the member reads or holds the current key for; if the Member's Folder access changed since the removal was prepared, rerun the removal"
-            .to_owned(),
-    })
 }

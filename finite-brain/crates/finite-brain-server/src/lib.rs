@@ -444,6 +444,7 @@ impl From<StoreError> for ApiError {
             }
             StoreError::DuplicateId { .. }
             | StoreError::Conflict { .. }
+            | StoreError::FolderRotationSetMismatch { .. }
             | StoreError::PersonalBrainConflict { .. }
             | StoreError::StaleFolderKeyVersion { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
@@ -453,12 +454,6 @@ impl From<StoreError> for ApiError {
             | StoreError::InvalidRecord { .. } => {
                 Self::new(StatusCode::BAD_REQUEST, value.to_string())
             }
-            StoreError::MemberRemovalMissingStaleGrantRotations { .. } => Self::new(
-                StatusCode::BAD_REQUEST,
-                format!(
-                    "{value}. Nothing was changed. Upgrade fbrain if using an older version; otherwise retry the removal to refresh its plan"
-                ),
-            ),
             StoreError::RebootstrapRequired { .. } => {
                 Self::new(StatusCode::GONE, value.to_string())
             }
