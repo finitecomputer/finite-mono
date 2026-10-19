@@ -17,6 +17,41 @@ pub(crate) const MAX_CONCURRENT_ROTATION_REQUESTS: usize = 4;
 pub(crate) const ROTATION_BODY_READ_DEADLINE: std::time::Duration =
     std::time::Duration::from_secs(60);
 
+/// How long an authorized rotation request may wait, in arrival order, for a
+/// permit before it is answered 503. Two body-read deadlines: a request
+/// queued behind four stalled uploads gets the next released permit within
+/// one deadline, ahead of any upload that arrives after it.
+pub(crate) const ROTATION_ADMISSION_WAIT: std::time::Duration =
+    std::time::Duration::from_secs(ROTATION_BODY_READ_DEADLINE.as_secs() * 2);
+
+/// Authorized rotation requests that may wait for a permit at once. Waiters
+/// hold only their parsed header, never a body; beyond this they get 503.
+pub(crate) const MAX_WAITING_ROTATION_REQUESTS: usize = 64;
+
+/// Membership in the bounded set of requests waiting for a rotation permit;
+/// leaving it (permit taken, wait expired or client gone) frees the slot.
+struct WaitingForRotationPermit(Arc<std::sync::atomic::AtomicUsize>);
+
+impl WaitingForRotationPermit {
+    fn enter(waiting: &Arc<std::sync::atomic::AtomicUsize>) -> Result<Self, ApiError> {
+        use std::sync::atomic::Ordering;
+        if waiting.fetch_add(1, Ordering::AcqRel) >= MAX_WAITING_ROTATION_REQUESTS {
+            waiting.fetch_sub(1, Ordering::AcqRel);
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "too many Folder Key rotation requests are waiting for admission; retry later",
+            ));
+        }
+        Ok(Self(waiting.clone()))
+    }
+}
+
+impl Drop for WaitingForRotationPermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 /// Who may occupy a rotation permit on a route. Keys are free, roles are not:
 /// only a caller with this authority can hold one of the permits.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -39,10 +74,13 @@ struct RotationAdmission {
 /// Wrap the rotating method of a route (and only that method, so siblings on
 /// the same path keep the ordinary 1 MiB cap). Before any body byte is read
 /// the request must carry a valid signed header from a key with `authority`
-/// over the path (403 otherwise); then it takes one of
-/// [`MAX_CONCURRENT_ROTATION_REQUESTS`] permits (503 when none is free) and
-/// must deliver its body within [`ROTATION_BODY_READ_DEADLINE`] (408) and
-/// `MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES` (413).
+/// over the path (403 otherwise); then it waits in arrival order, at most
+/// [`ROTATION_ADMISSION_WAIT`] and among at most
+/// [`MAX_WAITING_ROTATION_REQUESTS`] waiters (503 otherwise), for one of
+/// [`MAX_CONCURRENT_ROTATION_REQUESTS`] permits, and must then deliver its
+/// body within [`ROTATION_BODY_READ_DEADLINE`] (408) and
+/// `MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES` (413). The permit is held until
+/// the handler has answered.
 pub(crate) fn rotation_method(
     state: &ServerState,
     authority: RotationAuthority,
@@ -91,16 +129,34 @@ async fn admit(
         .map_or_else(|| request.uri().clone(), |original| original.0.clone());
     let actor = authenticate_request_header(state, request.headers(), request.method(), &uri)?;
     authorize_rotation_actor(state, admission.authority, params, &actor)?;
-    let _permit = state
-        .rotation_request_permits
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| {
-            ApiError::new(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "too many Folder Key rotation requests from Brain admins are in progress; retry shortly",
-            )
-        })?;
+    refuse_rate_limited_signer(state, request.method(), &uri, &actor)?;
+    let method = request.method().clone();
+    // A request that leaves admission without reaching its handler is
+    // charged to the signer's rate limit, so reconnecting is throttled.
+    let charge_exit = |error: ApiError| {
+        charge_rotation_admission_exit(state, &method, &uri, &actor);
+        error
+    };
+    // Wait in arrival order (the semaphore is fair), so a stream of stalled
+    // uploads that each time out and reconnect queues behind this request
+    // instead of winning every refill.
+    let _permit = {
+        let _waiting = WaitingForRotationPermit::enter(&state.rotation_waiting_requests)?;
+        match tokio::time::timeout(
+            state.rotation_admission_wait,
+            state.rotation_request_permits.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) | Err(_) => {
+                return Err(charge_exit(ApiError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "the server stayed busy with Folder Key rotation requests for the whole admission wait; retry later",
+                )));
+            }
+        }
+    };
     let (parts, body) = request.into_parts();
     let body = match tokio::time::timeout(
         state.rotation_body_read_deadline,
@@ -119,10 +175,10 @@ async fn admit(
             ));
         }
         Err(_) => {
-            return Err(ApiError::new(
+            return Err(charge_exit(ApiError::new(
                 StatusCode::REQUEST_TIMEOUT,
                 "rotation request body was not received before the deadline",
-            ));
+            )));
         }
     };
     Ok(next

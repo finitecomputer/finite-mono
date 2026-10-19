@@ -1041,10 +1041,13 @@ fn mount_revocation_validates_against_access_committed_by_another_connection() {
             )
         },
     );
-    let error = result.unwrap_err();
-    assert!(
-        !matches!(error, StoreError::Database { .. }),
-        "validation must see the committed Guest, not fail on a stale snapshot: {error:?}"
+    // Validation sees the committed Guest (not a stale snapshot, and not a
+    // database lock error), so the grants no longer cover every recipient.
+    assert_eq!(
+        result.unwrap_err(),
+        StoreError::BrokenInvariant {
+            reason: "connection rotation grants must exactly match remaining recipients".to_owned()
+        }
     );
     let connection = store.load_shared_folder_connection("mount-1").unwrap();
     assert_eq!(connection.status, SharedFolderConnectionStatus::Active);

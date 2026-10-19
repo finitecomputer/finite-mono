@@ -60,8 +60,9 @@ pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
 use protected_routes::{
-    authenticate_request_header, cors_allowed_origins_from_public_base_url,
-    cors_allowlist_middleware, validate_request_auth,
+    authenticate_request_header, charge_rotation_admission_exit,
+    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware,
+    refuse_rate_limited_signer, validate_request_auth,
 };
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
@@ -124,6 +125,10 @@ pub struct ServerState {
     rotation_request_permits: Arc<tokio::sync::Semaphore>,
     /// How long an admitted rotation request may take to deliver its body.
     rotation_body_read_deadline: Duration,
+    /// How long an authorized rotation request may wait for a permit.
+    rotation_admission_wait: Duration,
+    /// Authorized rotation requests currently waiting for a permit.
+    rotation_waiting_requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -178,7 +183,16 @@ impl ServerState {
                 MAX_CONCURRENT_ROTATION_REQUESTS,
             )),
             rotation_body_read_deadline: ROTATION_BODY_READ_DEADLINE,
+            rotation_admission_wait: ROTATION_ADMISSION_WAIT,
+            rotation_waiting_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Override how long an authorized rotation request may wait, in arrival
+    /// order, for a permit (default `ROTATION_ADMISSION_WAIT`).
+    pub fn with_rotation_admission_wait(mut self, wait: Duration) -> Self {
+        self.rotation_admission_wait = wait;
+        self
     }
 
     /// Override how long an admitted rotation request may take to deliver its

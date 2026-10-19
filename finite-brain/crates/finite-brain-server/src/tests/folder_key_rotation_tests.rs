@@ -1041,13 +1041,16 @@ async fn mount_rotation_routes_refuse_an_unauthorized_caller_before_reading_mate
 
 #[tokio::test]
 async fn rotation_routes_admit_a_bounded_number_of_requests_at_once() {
-    let (state, router, cast) = demoted_admin_brain().await;
+    let wait = std::time::Duration::from_millis(200);
+    let (state, router, cast) =
+        demoted_admin_brain_with(|state| state.with_rotation_admission_wait(wait)).await;
     let held = state
         .rotation_request_permits
         .clone()
         .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
         .unwrap();
     let body = admin_rotation_body(&cast, "rotate-while-busy");
+    let started = std::time::Instant::now();
     let busy = authed_request(
         router.clone(),
         &cast.admin,
@@ -1057,10 +1060,13 @@ async fn rotation_routes_admit_a_bounded_number_of_requests_at_once() {
         TEST_NOW + 5,
     )
     .await;
+    // An authorized request waits for a permit and is refused only once
+    // the whole admission wait has passed.
+    assert!(started.elapsed() >= wait, "{:?}", started.elapsed());
     assert_error(
         busy,
         StatusCode::SERVICE_UNAVAILABLE,
-        "too many Folder Key rotation requests",
+        "stayed busy with Folder Key rotation requests for the whole admission wait",
     )
     .await;
     assert_eq!(restricted_key_version(&state), 1);
@@ -1210,7 +1216,10 @@ async fn a_signed_non_admin_is_refused_before_its_body_is_read() {
 
 #[tokio::test]
 async fn only_brain_admins_can_see_the_busy_answer() {
-    let (state, router, cast) = demoted_admin_brain().await;
+    let (state, router, cast) = demoted_admin_brain_with(|state| {
+        state.with_rotation_admission_wait(std::time::Duration::from_millis(200))
+    })
+    .await;
     let held = state
         .rotation_request_permits
         .clone()
@@ -1277,4 +1286,224 @@ async fn a_stalled_admin_upload_times_out_and_releases_its_permit() {
     let status = response.status();
     assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
     assert_eq!(restricted_key_version(&state), 2);
+}
+
+/// Wait until `condition` holds, failing after five seconds.
+async fn eventually(what: &str, condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !condition() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Sol's round-4 scenario: a stranger creates its own Brain, which makes it an
+/// admin there, and keeps every permit busy with stalled uploads that
+/// reconnect as soon as each one times out. An admin of another Brain queues
+/// in arrival order and gets the next released permit.
+#[tokio::test]
+async fn a_rotation_waits_its_turn_behind_refilling_stalled_uploads() {
+    let deadline = std::time::Duration::from_millis(300);
+    let (state, router, cast) =
+        demoted_admin_brain_with(|state| state.with_rotation_body_read_deadline(deadline)).await;
+    let stranger = Keys::generate();
+    let created = post_brain(
+        router.clone(),
+        &stranger,
+        &create_brain_body("squat", "organization"),
+        TEST_NOW + 1,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let stalls = (0..MAX_CONCURRENT_ROTATION_REQUESTS)
+        .map(|_| {
+            let router = router.clone();
+            let stranger = stranger.clone();
+            tokio::spawn(async move {
+                loop {
+                    let _ = router
+                        .clone()
+                        .oneshot(stalled_request(
+                            "POST",
+                            "/v1/admin/brains/squat/folders/anything/key-rotations",
+                            Some(&stranger),
+                            TEST_NOW + 5,
+                        ))
+                        .await;
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    eventually("the stalled uploads to hold every permit", || {
+        state.rotation_request_permits.available_permits() == 0
+    })
+    .await;
+
+    let started = std::time::Instant::now();
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(admin_rotation_body(&cast, "rotate-behind-stalls")),
+        TEST_NOW + 6,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    for stall in stalls {
+        stall.abort();
+    }
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+    assert!(
+        elapsed < deadline * 4,
+        "admitted within about one deadline: {elapsed:?}"
+    );
+    assert_eq!(restricted_key_version(&state), 2);
+}
+
+#[tokio::test]
+async fn the_admission_queue_is_bounded() {
+    let (state, router, cast) = demoted_admin_brain_with(|state| {
+        state.with_rotation_admission_wait(std::time::Duration::from_secs(30))
+    })
+    .await;
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let waiters = (0..MAX_WAITING_ROTATION_REQUESTS)
+        .map(|_| {
+            let router = router.clone();
+            let admin = cast.admin.clone();
+            tokio::spawn(async move {
+                let _ = router
+                    .oneshot(stalled_request(
+                        "POST",
+                        ROTATE_PATH,
+                        Some(&admin),
+                        TEST_NOW + 5,
+                    ))
+                    .await;
+            })
+        })
+        .collect::<Vec<_>>();
+    eventually("every waiting slot to fill", || {
+        state
+            .rotation_waiting_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+            == MAX_WAITING_ROTATION_REQUESTS
+    })
+    .await;
+    let refused = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, Some(&cast.admin), TEST_NOW + 5),
+    )
+    .await;
+    assert_error(
+        refused,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "too many Folder Key rotation requests are waiting for admission",
+    )
+    .await;
+    for waiter in waiters {
+        waiter.abort();
+    }
+    drop(held);
+    eventually("aborted waiters to leave the queue", || {
+        state
+            .rotation_waiting_requests
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_permit_is_held_while_the_body_arrives() {
+    let (state, router, cast) = demoted_admin_brain_with(|state| {
+        state.with_rotation_admission_wait(std::time::Duration::from_millis(200))
+    })
+    .await;
+    let others = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32 - 1)
+        .unwrap();
+    let stalled = {
+        let router = router.clone();
+        let admin = cast.admin.clone();
+        tokio::spawn(async move {
+            let _ = router
+                .oneshot(stalled_request(
+                    "POST",
+                    ROTATE_PATH,
+                    Some(&admin),
+                    TEST_NOW + 5,
+                ))
+                .await;
+        })
+    };
+    eventually("the stalled upload to hold the last permit", || {
+        state.rotation_request_permits.available_permits() == 0
+    })
+    .await;
+    let busy = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(admin_rotation_body(&cast, "rotate-while-a-body-arrives")),
+        TEST_NOW + 6,
+    )
+    .await;
+    assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(restricted_key_version(&state), 1);
+    stalled.abort();
+    drop(others);
+}
+
+#[tokio::test]
+async fn reconnecting_after_admission_exits_is_rate_limited() {
+    let (state, router, cast) = demoted_admin_brain_with(|state| {
+        state
+            .with_rotation_body_read_deadline(std::time::Duration::from_millis(50))
+            .with_rate_limit(3, 600)
+    })
+    .await;
+    for _ in 0..3 {
+        let timed_out = router
+            .clone()
+            .oneshot(stalled_request(
+                "POST",
+                ROTATE_PATH,
+                Some(&cast.admin),
+                TEST_NOW + 5,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(timed_out.status(), StatusCode::REQUEST_TIMEOUT);
+    }
+    let throttled = answered_without_body(
+        &router,
+        stalled_request("POST", ROTATE_PATH, Some(&cast.admin), TEST_NOW + 5),
+    )
+    .await;
+    assert_error(
+        throttled,
+        StatusCode::TOO_MANY_REQUESTS,
+        "protected route rate limit exceeded",
+    )
+    .await;
+    assert_eq!(
+        state.rotation_request_permits.available_permits(),
+        MAX_CONCURRENT_ROTATION_REQUESTS
+    );
 }
