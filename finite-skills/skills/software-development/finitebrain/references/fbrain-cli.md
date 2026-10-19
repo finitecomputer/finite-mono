@@ -328,11 +328,14 @@ The member, role and `folder-access` commands are advanced primitives that
 change one relationship each. [sharing.md](sharing.md) is the contract for
 both and for reporting their receipts.
 
-`admin folder-access rotate` moves one Folder to its next key version for
-exactly its entitled keys and returns `state: complete` with
+`admin folder-access rotate` generates a fresh key at the Folder's next key
+version for exactly its entitled keys and returns `state: complete` with
 `previousKeyVersion`, `newKeyVersion`, `recipientNpubs` and `cutOffNpubs`.
-`admin folder-access revoke` also accepts a key that holds the current Folder
-Key without entitlement (`revocationIncomplete`). Clearing Removal Pending in
+`admin folder-access revoke` rotates the same way after removing the named
+key's access, and also accepts a key that holds the current Folder Key without
+entitlement (`revocationIncomplete`); its receipt does not list cut-off keys.
+Either rotation leaves pending Mount Offers and Folder share links for that
+Folder unacceptable; recreate them. Clearing Removal Pending in
 [who-has-access.md](who-has-access.md) says when to use each.
 
 `admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder

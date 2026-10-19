@@ -192,10 +192,14 @@ prepares rotation material automatically; never hand-build rotation bodies.
 A key that holds a Folder's current key without entitlement shows as
 `revocationIncomplete` in `fbrain access list` (for example after
 `admin role revoke admin`, which rotates no keys). An admin who can open that
-Folder clears it with `fbrain admin folder-access revoke --folder <folder-id>
---target <npub>` for one key, or `fbrain admin folder-access rotate --folder
-<folder-id>` to cut off every such key. `revoke` refuses a key entitled by its
-Brain role; change the role instead.
+Folder clears it with `fbrain admin folder-access rotate --folder <folder-id>`,
+which generates a fresh key for exactly the entitled keys and lists every key
+it cut off in `cutOffNpubs`. `fbrain admin folder-access revoke --folder
+<folder-id> --target <npub>` removes one key's access and rotates the same way,
+so it also cuts off every other stale key, but its receipt does not list them:
+check `access list` afterwards. `revoke` refuses a key that stays entitled by
+its Brain role; change the role instead. Pending Mount Offers and Folder share
+links for a rotated Folder must be recreated.
 
 ## Who has access?
 

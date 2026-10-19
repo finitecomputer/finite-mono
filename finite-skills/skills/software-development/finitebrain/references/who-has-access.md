@@ -115,22 +115,30 @@ fbrain admin folder-access revoke --folder <folder-id> --target <npub> --json
 fbrain admin folder-access rotate --folder <folder-id> --json
 ```
 
-`revoke` cuts off one key: its explicit Folder access, or a current key it
-holds without entitlement. It refuses a key entitled by its Brain role
-(`through its Brain role`: change the role instead) and a key with no access
-(`does not currently have access`). `rotate` re-wraps the current key for
-exactly the Folder's entitled keys and cuts off every `revocationIncomplete`
-key at once. Both re-encrypt the Folder's live pages and revoke pending email
-invitations that would have delivered that Folder. Report `state: complete`,
-the new key version and `cutOffNpubs` from the receipt.
+Both generate a fresh Folder Key at the next version, wrap it for exactly the
+Folder's entitled keys and re-encrypt its live pages, so every key outside that
+set is cut off, not only a named one. `revoke` also removes the named key's
+explicit Folder access, and accepts a key that holds the current key without
+entitlement. It refuses a key that stays entitled without that access, such as
+an admin with an old explicit grant (`through its Brain role`: change the role
+instead), and a key with nothing to remove (`does not currently have access`).
+Use `rotate` to clear every `revocationIncomplete` key at once; only its
+receipt lists the keys it cut off (`cutOffNpubs`). After a `revoke`, run
+`access list` to see which keys lost the Folder. Report `state: complete` and
+the new key version from either receipt.
+
+A rotation revokes pending email invitations that would have delivered the
+Folder. Pending Mount Offers and Folder share links for it keep a grant for the
+old key version and can no longer be accepted: revoke and recreate them.
 
 Mount participants of a Folder that is the source of an active Mount stay
-entitled, so `rotate` re-wraps the key for them. `revoke` refuses a key that
-still receives the Folder through an active Mount; remove it from that Mount
-first. An HTTP 409 saying the Folder Key version changed while the rotation was
-prepared means another admin changed the Folder first: rerun the command. An older Brain server
-answers `rotate` with `unsupported: ... does not support Folder Key rotation
-yet` (nothing changed) and refuses `revoke` for a key without explicit access.
+entitled, so both commands wrap the new key for them. `revoke` refuses a key
+that still receives the Folder through an active Mount; remove it from that
+Mount first. An HTTP 409 saying the Folder Key version changed while the
+rotation was prepared means another admin changed the Folder first: rerun the
+command. An older Brain server answers `rotate` with `unsupported: ... does not
+support Folder Key rotation yet` (nothing changed) and refuses `revoke` for a
+key without explicit access.
 
 Member removal does not yet clear Folders where the removed key holds a
 current key without entitlement, for example from an earlier demotion. Run
