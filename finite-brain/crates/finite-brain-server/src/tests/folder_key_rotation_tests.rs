@@ -12,11 +12,15 @@ struct Cast {
     member: Keys,
     guest: Keys,
     outsider: Keys,
+    /// File-backed store, so the fixture can write legacy state directly.
+    database: tempfile::TempDir,
 }
 
 /// `acme` with a restricted Folder holding one page. `demoted` received the
-/// current wrap as an admin and was then demoted, `guest` holds explicit
-/// Folder access, and `member` is an ordinary Member with no Folder access.
+/// current wrap as an admin and was then demoted the way servers did before
+/// demotion rotated Folder Keys (the role row deleted, every wrap kept), as
+/// production still holds. `guest` holds explicit Folder access, and `member`
+/// is an ordinary Member with no Folder access.
 async fn demoted_admin_brain() -> (ServerState, Router, Cast) {
     demoted_admin_brain_with(|state| state).await
 }
@@ -32,9 +36,11 @@ async fn demoted_admin_brain_with(
         member: Keys::generate(),
         guest: Keys::generate(),
         outsider: Keys::generate(),
+        database: tempfile::TempDir::new().unwrap(),
     };
+    let database_path = cast.database.path().join("brain.sqlite3");
     let state = configure(
-        ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+        ServerState::new(BrainStore::open(&database_path).unwrap(), TEST_BASE_URL)
             .with_auth_clock(TEST_NOW, 60),
     );
     let router = router_with_state(state.clone());
@@ -88,12 +94,14 @@ async fn demoted_admin_brain_with(
     )
     .await;
     assert_eq!(page.status(), StatusCode::OK);
-    {
-        let mut store = state.store.lock().unwrap();
-        store
-            .remove_admin(&brain, &UserId::new(npub(&cast.demoted)).unwrap())
-            .unwrap();
-    }
+    let legacy = rusqlite::Connection::open(&database_path).unwrap();
+    let demoted_rows = legacy
+        .execute(
+            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+            rusqlite::params![brain.as_str(), npub(&cast.demoted)],
+        )
+        .unwrap();
+    assert_eq!(demoted_rows, 1);
     (state, router, cast)
 }
 

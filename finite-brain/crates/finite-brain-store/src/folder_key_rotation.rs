@@ -82,7 +82,10 @@ pub fn stale_folder_key_holders(
         .collect())
 }
 
-fn current_folder_key_holders(stored: &StoredBrain, folder: &Folder) -> BTreeSet<UserId> {
+pub(crate) fn current_folder_key_holders(
+    stored: &StoredBrain,
+    folder: &Folder,
+) -> BTreeSet<UserId> {
     stored
         .grants
         .iter()

@@ -444,6 +444,7 @@ impl From<StoreError> for ApiError {
             }
             StoreError::DuplicateId { .. }
             | StoreError::Conflict { .. }
+            | StoreError::FolderRotationSetMismatch { .. }
             | StoreError::PersonalBrainConflict { .. }
             | StoreError::StaleFolderKeyVersion { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
@@ -718,6 +719,10 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
             axum::routing::put(add_admin_handler).delete(remove_admin_handler),
+        )
+        .route(
+            "/brains/{brain_id}/roles/admin/{target_npub}/demotion",
+            axum::routing::post(demote_admin_handler),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
@@ -5552,7 +5557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demoted_member_cannot_regrant_retained_folder_access() {
+    async fn demoted_member_cannot_regrant_folder_access() {
         let admin = Keys::generate();
         let member = Keys::generate();
         let target = npub(&member);
@@ -5585,11 +5590,11 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
         let path = format!("/v1/admin/brains/acme/folders/restricted/access/{target}");
-        let body = |signer: &Keys, id: &str| {
+        let body = |signer: &Keys, id: &str, key_version: u32| {
             serde_json::json!({
-            "grant": folder_key_grant_value(id, 1, &target),
+            "grant": folder_key_grant_value(id, key_version, &target),
             "accessChangeEvent": admin_event(signer, "acme", id,
-                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1))
+                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(key_version))
         }).to_string()
         };
         let grant = authed_request(
@@ -5597,19 +5602,30 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "initial-grant")),
+            Some(body(&admin, "initial-grant", 1)),
             TEST_NOW,
         )
         .await;
         assert_eq!(grant.status(), StatusCode::OK);
+        // Demotion rotates the restricted key the member held only by role.
         let demote = authed_request(
             router.clone(),
             &admin,
-            "DELETE",
-            &format!("/v1/admin/brains/acme/roles/admin/{target}"),
+            "POST",
+            &format!("/v1/admin/brains/acme/roles/admin/{target}/demotion"),
             Some(
-                serde_json::json!({"accessChangeEvent": admin_event(&admin, "acme", "demote",
-                AdminAccessAction::RemoveAdmin, None, Some(&target), None)})
+                serde_json::json!({
+                    "accessChangeEvent": admin_event(&admin, "acme", "demote",
+                        AdminAccessAction::RemoveAdmin, None, Some(&target), None),
+                    "rotations": [{
+                        "folderId": "restricted",
+                        "newKeyVersion": 2,
+                        "grants": [folder_key_grant_value("restricted-admin-v2", 2, &npub(&admin))],
+                        "reencryptedRecords": [],
+                        "accessChangeEvent": admin_event(&admin, "acme", "rotate-restricted",
+                            AdminAccessAction::RotateFolderKey, Some("restricted"), None, Some(2)),
+                    }],
+                })
                 .to_string(),
             ),
             TEST_NOW,
@@ -5634,7 +5650,7 @@ mod tests {
             &member,
             "PUT",
             &path,
-            Some(body(&member, "unauthorized-repair")),
+            Some(body(&member, "unauthorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -5661,7 +5677,7 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "authorized-repair")),
+            Some(body(&admin, "authorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -10319,5 +10335,6 @@ mod tests {
     }
 
     mod access_report_tests;
+    mod admin_demotion_tests;
     mod folder_key_rotation_tests;
 }

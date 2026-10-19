@@ -108,6 +108,13 @@ pub const ROTATION_BODY_READ_DEADLINE_SECONDS: u64 = 60;
 /// admission permit before the server answers 503: two body deadlines, so a
 /// queued request reaches the front within one deadline of any stall ahead.
 pub const ROTATION_ADMISSION_WAIT_SECONDS: u64 = 2 * ROTATION_BODY_READ_DEADLINE_SECONDS;
+/// Maximum Folder rotations accepted in one admin demotion: at most every
+/// native Folder of the Brain.
+pub const MAX_ADMIN_DEMOTION_ROTATIONS: usize = BRAIN_CAPACITY_ENVELOPE.folders;
+/// Maximum total Folder Key Grants accepted in one admin demotion.
+pub const MAX_ADMIN_DEMOTION_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
+/// Maximum total re-encrypted records accepted in one admin demotion.
+pub const MAX_ADMIN_DEMOTION_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -807,6 +814,9 @@ pub enum FolderRotationOperation {
     /// exactly like Folder access removal: one Folder per request.
     FolderKeyRotation,
     MemberRemoval,
+    /// Removing the admin role: one rotation per native Folder the demoted
+    /// key reached only through that role.
+    AdminDemotion,
 }
 
 /// Validate key-rotation work before cryptography, record parsing, or durable mutation.
@@ -819,24 +829,28 @@ pub fn validate_folder_rotation_fanout(
         FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
         FolderRotationOperation::FolderKeyRotation => "Folder Key rotation",
         FolderRotationOperation::MemberRemoval => "Member removal",
+        FolderRotationOperation::AdminDemotion => "Admin demotion",
     };
     let max_rotations = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
         FolderRotationOperation::FolderAccessRemoval
         | FolderRotationOperation::FolderKeyRotation => 1,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_ROTATIONS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_ROTATIONS,
     };
     let max_total_grants = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
         FolderRotationOperation::FolderAccessRemoval
         | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_GRANTS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_GRANTS,
     };
     let max_total_records = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
         FolderRotationOperation::FolderAccessRemoval
         | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_RECORDS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_RECORDS,
     };
 
     let mut rotation_count = 0usize;
@@ -3350,6 +3364,46 @@ mod tests {
                 }],
             ),
             Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_admin_demotion_to_one_rotation_per_native_folder() {
+        let one_grant = FolderRotationFanout {
+            grants: 1,
+            reencrypted_records: 0,
+        };
+        assert!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                std::iter::repeat_n(one_grant, MAX_ADMIN_DEMOTION_ROTATIONS),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                std::iter::repeat_n(one_grant, MAX_ADMIN_DEMOTION_ROTATIONS + 1),
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Admin demotion",
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ROTATION_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Admin demotion",
                 resource: "re-encrypted records per Folder rotation",
                 ..
             })
