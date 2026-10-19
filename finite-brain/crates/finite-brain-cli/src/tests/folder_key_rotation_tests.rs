@@ -279,3 +279,161 @@ fn rotate_requires_a_folder_outside_a_working_tree() {
         "{error}"
     );
 }
+
+fn revoke_metadata(admins: &[&str], members: &[&str], access: &[&str], key_version: u32) -> Value {
+    serde_json::json!({
+        "brainId": "acme",
+        "kind": "organization",
+        "name": "Acme",
+        "ownerUserId": null,
+        "members": members,
+        "guests": [],
+        "admins": admins,
+        "folders": [{
+            "id": "restricted",
+            "name": "restricted",
+            "role": "folder",
+            "access": "restricted",
+            "parentFolderId": null,
+            "path": "restricted",
+            "accessUserIds": access,
+            "currentKeyVersion": key_version,
+            "setupIncomplete": false
+        }],
+        "mountedFolders": [],
+        "grantCount": 2
+    })
+}
+
+/// Serves `before` for metadata, a readable export, and `after` for the
+/// DELETE; returns the captured request lines.
+fn start_revoke_server(
+    before: Value,
+    after: Value,
+    export_grant: Value,
+    expected_requests: usize,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let started = Instant::now();
+        let mut requests = Vec::new();
+        while requests.len() < expected_requests && started.elapsed() < Duration::from_secs(5) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            };
+            let (request_line, _) = read_http_request(&mut stream);
+            let body = if request_line.contains("/metadata") {
+                before.to_string()
+            } else if request_line.contains("/export") {
+                serde_json::json!({
+                    "brain": { "id": "acme", "kind": "organization", "name": "Acme", "ownerUserId": null },
+                    "folders": [{ "id": "restricted", "path": "restricted", "access": "restricted", "currentKeyVersion": 1, "accessible": true }],
+                    "keyGrants": [export_grant],
+                    "objects": [],
+                    "accessState": { "members": before["members"], "admins": before["admins"] }
+                })
+                .to_string()
+            } else {
+                after.to_string()
+            };
+            requests.push(request_line);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        }
+        requests
+    });
+    (url, handle)
+}
+
+fn run_revoke(
+    before: Value,
+    after: Value,
+    expected_requests: usize,
+) -> (Result<(), CliError>, Vec<String>) {
+    let tmp = TempDir::new().unwrap();
+    import_identity_secret(&tmp, ADMIN_SECRET);
+    let env = env_for(&tmp);
+    let admin = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+    let export_grant = export_grant_for_test(
+        &env,
+        "acme",
+        "restricted",
+        1,
+        &FolderKey::from_bytes([9; 32]),
+        &admin,
+    );
+    let (server_url, server) = start_revoke_server(before, after, export_grant, expected_requests);
+    let target = npub_for_secret(DEMOTED_SECRET);
+    let result = run_with_env(
+        [
+            "admin",
+            "folder-access",
+            "revoke",
+            "--brain",
+            "acme",
+            "--folder",
+            "restricted",
+            "--target",
+            &target,
+            "--server",
+            &server_url,
+            "--json",
+        ],
+        env,
+        &mut Vec::new(),
+    );
+    (result, server.join().unwrap())
+}
+
+#[test]
+fn revoke_refuses_before_preparing_when_the_target_keeps_the_key_by_role() {
+    let tmp = TempDir::new().unwrap();
+    import_identity_secret(&tmp, ADMIN_SECRET);
+    let admin = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+    let promoted = npub_for_secret(DEMOTED_SECRET);
+    // An explicit grant from before the key was promoted to admin.
+    let before = revoke_metadata(&[&admin, &promoted], &[&admin, &promoted], &[&promoted], 1);
+    let (result, requests) = run_revoke(before.clone(), before, 1);
+    let error = result.unwrap_err();
+    assert!(
+        error.to_string().contains("through its Brain role"),
+        "{error}"
+    );
+    assert!(error.to_string().contains("Nothing was changed"), "{error}");
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.starts_with("DELETE")),
+        "{requests:?}"
+    );
+}
+
+#[test]
+fn revoke_rejects_a_result_that_still_wraps_the_target() {
+    let tmp = TempDir::new().unwrap();
+    import_identity_secret(&tmp, ADMIN_SECRET);
+    let admin = run(&tmp, &["signer", "public-key"]).trim().to_owned();
+    let target = npub_for_secret(DEMOTED_SECRET);
+    let before = revoke_metadata(&[&admin], &[&admin, &target], &[&target], 1);
+    // The row is gone and the version moved, but the target is an admin in
+    // the authoritative result, so the new key was wrapped for it.
+    let after = revoke_metadata(&[&admin, &target], &[&admin, &target], &[], 2);
+    let (result, requests) = run_revoke(before, after, 3);
+    let error = result.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Folder access revocation postcondition was not authoritative"),
+        "{error}"
+    );
+    assert!(
+        requests.last().unwrap().starts_with("DELETE"),
+        "{requests:?}"
+    );
+}

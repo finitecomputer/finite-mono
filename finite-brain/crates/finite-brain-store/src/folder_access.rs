@@ -1,5 +1,6 @@
 use crate::folder_key_rotation::{
-    apply_folder_key_rotation, require_next_key_version, validate_folder_key_rotation_material,
+    apply_folder_key_rotation, begin_authoritative_write, require_next_key_version,
+    validate_folder_key_rotation_material,
 };
 use crate::*;
 
@@ -459,6 +460,9 @@ impl BrainStore {
                     reencrypted_records: rotation.reencrypted_records.len(),
                 })),
         )?;
+        // Every roster, Mount and object read below happens inside the write
+        // transaction, so validation and the write see one snapshot.
+        let tx = begin_authoritative_write(&self.conn)?;
         let stored = self.load_brain(brain_id)?;
         if stored.brain.admins.contains(removed_user_id) {
             return Err(StoreError::BrokenInvariant {
@@ -653,7 +657,6 @@ impl BrainStore {
             mounted_removals.push((connection, removed, folder.current_key_version));
         }
 
-        let tx = self.conn.transaction()?;
         for (rotation, previous_key_version) in rotations.iter().zip(previous_key_versions) {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",

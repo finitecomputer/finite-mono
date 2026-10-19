@@ -516,3 +516,45 @@ async fn revoke_accepts_a_stale_holder_and_refuses_role_or_unknown_keys() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn revoke_refuses_an_explicit_row_whose_key_was_later_promoted() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    grant_restricted(&router, &cast.admin, &cast.member, TEST_NOW + 4).await;
+    let member = npub(&cast.member);
+    {
+        let mut store = state.store.lock().unwrap();
+        store
+            .add_admin(
+                &BrainId::new("acme").unwrap(),
+                &UserId::new(member.clone()).unwrap(),
+            )
+            .unwrap();
+    }
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &format!("/v1/admin/brains/acme/folders/restricted/access/{member}"),
+        Some(rotation_body(
+            &cast.admin,
+            "revoke-promoted",
+            AdminAccessAction::RemoveFolderAccess,
+            "restricted",
+            Some(&member),
+            2,
+            2,
+            &[npub(&cast.admin), npub(&cast.guest), member.clone()],
+        )),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_error(response, StatusCode::BAD_REQUEST, "through its Brain role").await;
+    assert_eq!(restricted_key_version(&state), 1);
+    let store = state.store.lock().unwrap();
+    let stored = store.load_brain(&BrainId::new("acme").unwrap()).unwrap();
+    assert!(
+        stored.folder_access[&FolderId::new("restricted").unwrap()]
+            .contains(&UserId::new(member).unwrap())
+    );
+}

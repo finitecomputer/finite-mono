@@ -212,10 +212,15 @@ impl BrainStore {
     /// Rotate one Folder Key to its next version and append the signed
     /// control records, atomically.
     ///
+    /// The write transaction (`BEGIN IMMEDIATE`) opens before the roster,
+    /// grants, Mount sources and live objects are read, so validation and the
+    /// write see one snapshot even with another writer on the same database.
+    ///
     /// With [`FolderKeyRotationTarget::RemoveAccess`] the target must hold the
-    /// Folder through an explicit access row or a stale current wrap; a key
-    /// entitled by its Brain role is refused because rotation would hand it
-    /// the new key again.
+    /// Folder through an explicit access row or a stale current wrap, and must
+    /// not remain a required recipient once its row is removed: a key still
+    /// entitled by its Brain role (or as owner or Personal Agent) is refused,
+    /// because the rotation would hand it the new key again.
     pub fn rotate_folder_key(
         &mut self,
         brain_id: &BrainId,
@@ -236,6 +241,7 @@ impl BrainStore {
                 reencrypted_records: request.reencrypted_records.len(),
             }],
         )?;
+        let tx = begin_authoritative_write(&self.conn)?;
         let stored = self.load_brain(brain_id)?;
         let folder = stored
             .brain
@@ -246,6 +252,10 @@ impl BrainStore {
                 folder_id: request.folder_id.to_string(),
             })?;
         require_next_key_version(folder, request.new_key_version)?;
+        let personal_agent = stored
+            .personal_agent
+            .as_ref()
+            .map(|relationship| &relationship.agent_npub);
         let mut remaining_access = stored
             .folder_access
             .get(&folder.id)
@@ -255,10 +265,15 @@ impl BrainStore {
             FolderKeyRotationTarget::RequiredRecipients => None,
             FolderKeyRotationTarget::RemoveAccess(removed) => {
                 let had_row = remaining_access.remove(removed);
-                if !had_row {
-                    refuse_removal_without_stale_wrap(&stored, folder, removed)?;
-                }
-                if folder_access_has_mount_source(&self.conn, brain_id, &folder.id, removed)? {
+                refuse_removal_that_keeps_the_key(
+                    &stored,
+                    folder,
+                    &remaining_access,
+                    personal_agent,
+                    removed,
+                    had_row,
+                )?;
+                if folder_access_has_mount_source(&tx, brain_id, &folder.id, removed)? {
                     return Err(StoreError::BrokenInvariant {
                         reason: "Folder access target still receives this Folder through an active Mount; remove the target from that Mount before rotating explicit Folder access"
                             .to_owned(),
@@ -267,10 +282,6 @@ impl BrainStore {
                 had_row.then_some(removed)
             }
         };
-        let personal_agent = stored
-            .personal_agent
-            .as_ref()
-            .map(|relationship| &relationship.agent_npub);
         let live_objects = self.load_current_objects(brain_id)?;
         let recipients = validate_folder_key_rotation_material(
             &stored.brain,
@@ -287,7 +298,6 @@ impl BrainStore {
             .filter(|holder| !recipients.contains(holder))
             .collect::<BTreeSet<_>>();
 
-        let tx = self.conn.transaction()?;
         if let Some(removed) = removed_access_row {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -321,22 +331,43 @@ impl BrainStore {
     }
 }
 
-/// A removal target without an explicit access row must hold a stale current
-/// wrap. Anything else is refused with the reason an admin can act on.
-fn refuse_removal_without_stale_wrap(
+/// Open the write transaction before any authoritative read.
+///
+/// The store's loaders read through `self.conn`; opening the transaction on
+/// that same connection with `BEGIN IMMEDIATE` makes those reads part of it
+/// and takes the database write lock first, so a concurrent writer either
+/// commits before every read or waits until this transaction ends.
+/// `new_unchecked` only skips rusqlite's `&mut Connection` borrow; callers
+/// hold `&mut BrainStore`, so no other transaction can be open on it.
+pub(crate) fn begin_authoritative_write(conn: &Connection) -> Result<Transaction<'_>, StoreError> {
+    Ok(Transaction::new_unchecked(
+        conn,
+        TransactionBehavior::Immediate,
+    )?)
+}
+
+/// Refuse a removal that would leave the target holding the new key, or that
+/// names a key with nothing to remove.
+fn refuse_removal_that_keeps_the_key(
     stored: &StoredBrain,
     folder: &Folder,
+    access_without_target: &BTreeSet<UserId>,
+    personal_agent: Option<&UserId>,
     removed: &UserId,
+    had_row: bool,
 ) -> Result<(), StoreError> {
-    if stale_folder_key_holders(stored, folder)?.contains(removed) {
-        return Ok(());
+    if required_recipients(&stored.brain, folder, access_without_target, personal_agent)?
+        .contains(removed)
+    {
+        return Err(StoreError::BrokenInvariant {
+            reason: "folder access target holds this Folder through its Brain role, not Folder access; change the role (for example revoke admin) instead of revoking Folder access"
+                .to_owned(),
+        });
     }
-    let reason = if folder_key_required_recipients(stored, folder)?.contains(removed) {
-        "folder access target holds this Folder through its Brain role, not Folder access; change the role (for example revoke admin) instead of revoking Folder access"
-    } else {
-        "folder access target does not currently have access"
-    };
-    Err(StoreError::BrokenInvariant {
-        reason: reason.to_owned(),
-    })
+    if !had_row && !stale_folder_key_holders(stored, folder)?.contains(removed) {
+        return Err(StoreError::BrokenInvariant {
+            reason: "folder access target does not currently have access".to_owned(),
+        });
+    }
+    Ok(())
 }

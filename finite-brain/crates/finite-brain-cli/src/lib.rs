@@ -2466,6 +2466,25 @@ fn access_revoke<W: Write>(
     let target_input = required_option_or_positional(args, "--target", 1, "target")?;
     let target = resolve_identity_npub(env, args, &target_input)?;
     let metadata = fetch_brain_metadata(env, args, &brain_id)?;
+    if let Some(folder) = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+    {
+        let access_without_target = folder
+            .access_user_ids
+            .iter()
+            .filter(|user| **user != target)
+            .cloned()
+            .collect::<Vec<_>>();
+        if folder_required_recipients(&metadata, &folder.access, &access_without_target)?
+            .contains(&target)
+        {
+            return Err(CliError::InvalidInput(format!(
+                "{target} holds Folder {folder_id} through its Brain role (admin, all_members Member, owner or Personal Agent), not Folder access; revoking would hand it the new Folder Key. Change the role instead, for example `fbrain admin role revoke admin --target {target}`. Nothing was changed"
+            )));
+        }
+    }
     let body = prepare_folder_access_removal(env, args, &metadata, &brain_id, &folder_id, &target)?;
     let new_key_version = body["newKeyVersion"].as_u64().ok_or_else(|| {
         CliError::InvalidInput("prepared rotation omitted key version".to_owned())
@@ -2478,8 +2497,14 @@ fn access_revoke<W: Write>(
         .iter()
         .find(|folder| folder.id == folder_id)
         .ok_or_else(|| CliError::NotFound(format!("folder {folder_id} after revocation")))?;
+    // The new key is wrapped for exactly the Folder's required recipients, so
+    // the target must not be one of them in the authoritative roster.
+    let still_wrapped =
+        folder_required_recipients(&authoritative, &folder.access, &folder.access_user_ids)?
+            .contains(&target);
     if folder.current_key_version != new_key_version as u32
         || folder.access_user_ids.iter().any(|user| user == &target)
+        || still_wrapped
     {
         return Err(CliError::InvalidInput(
             "Folder access revocation postcondition was not authoritative".to_owned(),
