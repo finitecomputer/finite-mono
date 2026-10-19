@@ -59,8 +59,10 @@ impl Drop for WaitingForRotationPermit {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RotationAdmittedAt(pub(crate) u64);
 
-/// Who may occupy a rotation permit on a route. Keys are free, roles are not:
-/// only a caller with this authority can hold one of the permits.
+/// Who may occupy a rotation permit on a route. Only a caller with this
+/// authority can hold one of the permits; it is a gate on who may wait, not a
+/// bound on how many callers can, since any key can create a Brain and become
+/// its admin.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RotationAuthority {
     /// An admin of the `{brain_id}` path Brain (owner or Personal Agent of a
