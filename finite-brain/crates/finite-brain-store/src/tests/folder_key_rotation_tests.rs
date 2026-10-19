@@ -49,32 +49,63 @@ fn admin_with_current_wrap(store: &mut BrainStore) {
         .unwrap();
 }
 
-/// Hold the database write lock on a second connection, apply `change`,
-/// start `work` on the store in another thread, then commit the change after
-/// the worker has had time to begin. Returns the worker's result, the store
-/// and how long the worker took.
+/// Worker threads that have hit the write lock held by another connection.
+static WAITING_FOR_WRITE_LOCK: std::sync::Mutex<Vec<std::thread::ThreadId>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// SQLite busy handler for interleaving tests: record that this thread is
+/// blocked on the write lock, then retry (bounded at about 10 seconds).
+fn record_write_lock_wait(attempt: i32) -> bool {
+    let mut waiting = WAITING_FOR_WRITE_LOCK.lock().unwrap();
+    let current = std::thread::current().id();
+    if !waiting.contains(&current) {
+        waiting.push(current);
+    }
+    drop(waiting);
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    attempt < 2_000
+}
+
+/// A real two-connection interleaving. A second connection takes the write
+/// lock and applies `change`; `work` runs on the store in another thread;
+/// the change commits only once that thread is provably blocked on the
+/// write lock (its busy handler fired), never on a timer.
 fn interleave<T: Send + 'static>(
     database: &std::path::Path,
-    store: BrainStore,
+    mut store: BrainStore,
     change: &str,
     work: impl FnOnce(&mut BrainStore) -> T + Send + 'static,
-) -> (T, BrainStore, std::time::Duration) {
+) -> (T, BrainStore) {
     let mut other = rusqlite::Connection::open(database).unwrap();
     other.pragma_update(None, "foreign_keys", true).unwrap();
     let tx = other
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .unwrap();
     tx.execute_batch(change).unwrap();
-    let started = std::time::Instant::now();
+    store
+        .conn
+        .busy_handler(Some(record_write_lock_wait))
+        .unwrap();
     let worker = std::thread::spawn(move || {
-        let mut store = store;
         let result = work(&mut store);
         (result, store)
     });
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    let worker_id = worker.thread().id();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !WAITING_FOR_WRITE_LOCK.lock().unwrap().contains(&worker_id) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker never waited for the other connection's write lock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     tx.commit().unwrap();
     let (result, store) = worker.join().unwrap();
-    (result, store, started.elapsed())
+    store
+        .conn
+        .busy_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    (result, store)
 }
 
 fn folder(store: &BrainStore, brain_id: &BrainId, folder_id: &str) -> (StoredBrain, Folder) {
@@ -772,7 +803,7 @@ fn rotation_validates_against_a_roster_committed_by_another_connection() {
 
     // Prepared while npub-demoted is still an admin, so its grant set wraps
     // the new key for it. Another connection demotes it before this commits.
-    let (result, mut store, elapsed) = interleave(
+    let (result, mut store) = interleave(
         &database,
         store,
         "DELETE FROM brain_admins WHERE brain_id = 'acme' AND user_id = 'npub-demoted'",
@@ -788,10 +819,6 @@ fn rotation_validates_against_a_roster_committed_by_another_connection() {
                 &[reencrypted_strategy_object("event-reencrypt-2", 2)],
             )
         },
-    );
-    assert!(
-        elapsed >= std::time::Duration::from_millis(400),
-        "the rotation must wait for the other writer: {elapsed:?}"
     );
     assert_eq!(
         result.unwrap_err(),
@@ -828,7 +855,7 @@ fn member_removal_validates_against_access_committed_by_another_connection() {
     // Prepared when the Member reads only the all_members Folder. Another
     // connection grants it the restricted Folder before this commits, so the
     // removal must now rotate that Folder too.
-    let (result, store, elapsed) = interleave(
+    let (result, store) = interleave(
         &database,
         store,
         "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES ('acme', 'strategy', 'npub-member')",
@@ -847,10 +874,6 @@ fn member_removal_validates_against_access_committed_by_another_connection() {
                 NOW,
             )
         },
-    );
-    assert!(
-        elapsed >= std::time::Duration::from_millis(400),
-        "the removal must wait for the other writer: {elapsed:?}"
     );
     assert_eq!(
         result.unwrap_err(),
@@ -891,4 +914,141 @@ fn stale_version_messages_tell_a_lost_race_from_a_skipped_version() {
     assert!(skipped.contains("skips versions"), "{skipped}");
     assert!(skipped.contains("the next version is 3"), "{skipped}");
     assert!(!skipped.contains("Another admin"), "{skipped}");
+}
+
+#[test]
+fn mount_rotations_enforce_fan_out_at_the_store_boundary() {
+    let mut store = store_with_strategy_folder();
+    let grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+        .map(|index| {
+            grant(
+                &format!("mount-fanout-{index}"),
+                "strategy",
+                2,
+                ADMIN,
+                ADMIN,
+            )
+        })
+        .collect::<Vec<_>>();
+    let records = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+        .map(|index| {
+            revision_record_struct(
+                &format!("mount-fanout-record-{index}"),
+                "strategy",
+                &format!("obj_{index:012}"),
+                2,
+                Some(1),
+                "x",
+            )
+        })
+        .collect::<Vec<_>>();
+    // The Mount does not exist: the fan-out refusal comes before any read.
+    for (grants, records) in [(&grants[..], &[][..]), (&[][..], &records[..])] {
+        for error in [
+            store
+                .revoke_shared_folder_connection(
+                    "mount-missing",
+                    &user(ADMIN),
+                    2,
+                    grants,
+                    &[],
+                    records,
+                    NOW,
+                )
+                .unwrap_err(),
+            store
+                .remove_shared_folder_connection_member(
+                    "mount-missing",
+                    &user(ADMIN),
+                    &user("npub-participant"),
+                    2,
+                    grants,
+                    &[],
+                    records,
+                    NOW,
+                )
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(
+                    error,
+                    StoreError::Core(CoreError::RotationFanoutLimitExceeded { .. })
+                ),
+                "{error:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn mount_revocation_validates_against_access_committed_by_another_connection() {
+    let scratch = TempDir::new().unwrap();
+    let database = scratch.path().join("mount-revocation-race.sqlite3");
+    let mut store = BrainStore::open(&database).unwrap();
+    bootstrap_org_and_strategy_folder(&mut store);
+    bootstrap_org_named(&mut store, "dest", "Destination", "npub-dest-admin");
+    let dest_admin = user("npub-dest-admin");
+    store
+        .create_shared_folder_invitation(
+            &acme(),
+            &FolderId::new("strategy").unwrap(),
+            &BrainId::new("dest").unwrap(),
+            "mount-offer",
+            &dest_admin,
+            &user(ADMIN),
+            "/v1/mount-offers/mount-offer/accept",
+            &grant("grant-mount-v1", "strategy", 1, ADMIN, dest_admin.as_str()),
+            "2026-06-30T00:00:00.000Z",
+            NOW,
+        )
+        .unwrap();
+    accept_mount_for_test(
+        &mut store,
+        "mount-offer",
+        &dest_admin,
+        "mount-1",
+        "projection-1",
+        &[],
+        NOW,
+    )
+    .unwrap();
+    assert!(
+        store
+            .load_shared_folder_connection("mount-1")
+            .unwrap()
+            .managed_access_npubs
+            .contains(&dest_admin)
+    );
+
+    // Prepared when only the source admin stays entitled; another
+    // connection grants a Guest the Folder before this commits, so the
+    // revocation's grants no longer cover every required recipient.
+    let grants = vec![grant("strategy-admin-v2", "strategy", 2, ADMIN, ADMIN)];
+    let (result, store) = interleave(
+        &database,
+        store,
+        "INSERT INTO folder_access (brain_id, folder_id, user_id) VALUES ('acme', 'strategy', 'npub-late-guest')",
+        move |store| {
+            let control_records = mount_control_records(&grants);
+            store.revoke_shared_folder_connection(
+                "mount-1",
+                &user(ADMIN),
+                2,
+                &grants,
+                &control_records,
+                &[],
+                NOW,
+            )
+        },
+    );
+    let error = result.unwrap_err();
+    assert!(
+        !matches!(error, StoreError::Database { .. }),
+        "validation must see the committed Guest, not fail on a stale snapshot: {error:?}"
+    );
+    let connection = store.load_shared_folder_connection("mount-1").unwrap();
+    assert_eq!(connection.status, SharedFolderConnectionStatus::Active);
+    let (stored, strategy) = folder(&store, &acme(), "strategy");
+    assert_eq!(strategy.current_key_version, 1);
+    assert!(stored.folder_access[&strategy.id].contains(&user("npub-late-guest")));
 }

@@ -588,28 +588,34 @@ pub(crate) async fn revoke_shared_folder_connection_handler(
     let actor = UserId::new(actor)?;
     let request: RevokeMountRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_mount_rotation_fanout(request.grants.len(), request.reencrypted_records.len())?;
     let now = server_timestamp(&state);
+    // Authorize under a short lock, then parse and verify the rotation
+    // material without holding the store; the store re-checks authority.
+    let connection = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.authorize_mount_revocation(&connection_id, &actor)?
+    };
+    let grants = grant_requests_to_metadata(
+        &request.grants,
+        &connection.source_folder_id,
+        actor.as_str(),
+        None,
+        &now,
+    )?;
+    let reencrypted_records = rotation_records_from_requests(
+        &connection.source_brain_id,
+        &connection.source_folder_id,
+        actor.as_str(),
+        request.new_key_version,
+        request.reencrypted_records,
+    )?;
+    let control_records = grants
+        .iter()
+        .map(folder_key_grant_sync_record)
+        .collect::<Result<Vec<_>, _>>()?;
     let connection = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let connection = store.load_shared_folder_connection(&connection_id)?;
-        let grants = grant_requests_to_metadata(
-            &request.grants,
-            &connection.source_folder_id,
-            actor.as_str(),
-            None,
-            &now,
-        )?;
-        let reencrypted_records = rotation_records_from_requests(
-            &connection.source_brain_id,
-            &connection.source_folder_id,
-            actor.as_str(),
-            request.new_key_version,
-            request.reencrypted_records,
-        )?;
-        let control_records = grants
-            .iter()
-            .map(folder_key_grant_sync_record)
-            .collect::<Result<Vec<_>, _>>()?;
         store.revoke_shared_folder_connection(
             &connection_id,
             &actor,
@@ -726,30 +732,36 @@ pub(crate) async fn remove_mount_participant_handler(
     )?)?;
     let request: RemoveMountParticipantRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    validate_mount_rotation_fanout(request.grants.len(), request.reencrypted_records.len())?;
     let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
     let target = UserId::new(target_identity.npub)?;
     let now = server_timestamp(&state);
+    // Authorize under a short lock, then parse and verify the rotation
+    // material without holding the store; the store re-checks authority.
+    let current = {
+        let store = state.store.lock().map_err(lock_error)?;
+        store.authorize_mount_participant_removal(&connection_id, &actor)?
+    };
+    let grants = grant_requests_to_metadata(
+        &request.grants,
+        &current.source_folder_id,
+        actor.as_str(),
+        None,
+        &now,
+    )?;
+    let records = rotation_records_from_requests(
+        &current.source_brain_id,
+        &current.source_folder_id,
+        actor.as_str(),
+        request.new_key_version,
+        request.reencrypted_records,
+    )?;
+    let control_records = grants
+        .iter()
+        .map(folder_key_grant_sync_record)
+        .collect::<Result<Vec<_>, _>>()?;
     let connection = {
         let mut store = state.store.lock().map_err(lock_error)?;
-        let current = store.load_shared_folder_connection(&connection_id)?;
-        let grants = grant_requests_to_metadata(
-            &request.grants,
-            &current.source_folder_id,
-            actor.as_str(),
-            None,
-            &now,
-        )?;
-        let records = rotation_records_from_requests(
-            &current.source_brain_id,
-            &current.source_folder_id,
-            actor.as_str(),
-            request.new_key_version,
-            request.reencrypted_records,
-        )?;
-        let control_records = grants
-            .iter()
-            .map(folder_key_grant_sync_record)
-            .collect::<Result<Vec<_>, _>>()?;
         store.remove_shared_folder_connection_member(
             &connection_id,
             &actor,
@@ -857,4 +869,21 @@ pub(crate) async fn list_shared_folder_connections_handler(
         (outgoing, incoming)
     };
     Ok(Json(MountListResponse { outgoing, incoming }))
+}
+
+/// A Mount participant removal or Mount revocation rotates one source Folder:
+/// bound it with the single-Folder access-removal limits before identity
+/// resolution, store locking or any rotation material processing.
+fn validate_mount_rotation_fanout(
+    grants: usize,
+    reencrypted_records: usize,
+) -> Result<(), ApiError> {
+    validate_folder_rotation_fanout(
+        FolderRotationOperation::FolderAccessRemoval,
+        [FolderRotationFanout {
+            grants,
+            reencrypted_records,
+        }],
+    )?;
+    Ok(())
 }

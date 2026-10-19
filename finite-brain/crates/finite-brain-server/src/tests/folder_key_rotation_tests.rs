@@ -842,3 +842,270 @@ async fn rotation_routes_refuse_bodies_over_their_limit() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(restricted_key_version(&state), 1);
 }
+
+/// `demoted_admin_brain` plus a destination Brain that mounts `restricted`.
+async fn mounted_brain() -> (ServerState, Router, Cast, Keys, String) {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let destination_admin = Keys::generate();
+    let created = post_brain(
+        router.clone(),
+        &destination_admin,
+        &create_brain_body("dest", "organization"),
+        TEST_NOW,
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::OK);
+    let controller = npub(&destination_admin);
+    let offer = authed_request(
+        router.clone(),
+        &cast.admin,
+        "POST",
+        "/v1/brains/acme/folders/restricted/mount-offers",
+        Some(
+            serde_json::json!({
+                "destinationBrainId": "dest",
+                "destinationControllerNpub": controller,
+                "grant": folder_key_grant_value("grant-restricted-mount-v1", 1, &controller),
+                "accessChangeEvent": admin_event(&cast.admin, "acme", "mount-offer-restricted",
+                    AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&controller), Some(1)),
+                "expiresAt": "2026-06-04T20:26:40Z",
+            })
+            .to_string(),
+        ),
+        TEST_NOW + 4,
+    )
+    .await;
+    let status = offer.status();
+    let offer: serde_json::Value = serde_json::from_str(&read_text(offer).await).unwrap();
+    assert_eq!(status, StatusCode::OK, "{offer}");
+    let accept = authed_request(
+        router.clone(),
+        &destination_admin,
+        "POST",
+        &format!("/v1/mount-offers/{}/accept", offer["id"].as_str().unwrap()),
+        Some(String::new()),
+        TEST_NOW + 5,
+    )
+    .await;
+    let status = accept.status();
+    let mount: serde_json::Value = serde_json::from_str(&read_text(accept).await).unwrap();
+    assert_eq!(status, StatusCode::OK, "{mount}");
+    let mount_id = mount["mountId"].as_str().unwrap().to_owned();
+    (state, router, cast, destination_admin, mount_id)
+}
+
+fn oversized_mount_bodies() -> [(&'static str, String); 2] {
+    let over = finite_brain_core::MAX_FOLDER_ACCESS_REMOVAL_GRANTS + 1;
+    let grants = (0..over)
+        .map(|index| {
+            serde_json::json!({
+                "id": format!("oversized-{index}"),
+                "keyVersion": 2,
+                "recipientNpub": "unchecked",
+                "wrappedEventJson": "{}"
+            })
+        })
+        .collect::<Vec<_>>();
+    let records = (0..finite_brain_core::MAX_FOLDER_ACCESS_REMOVAL_RECORDS + 1)
+        .map(|index| {
+            serde_json::json!({
+                "objectId": format!("obj_{index:012}"),
+                "baseRevision": 1,
+                "keyVersion": 2,
+                "cipher": "AES-256-GCM",
+                "ciphertext": "{}",
+                "revisionEvent": {}
+            })
+        })
+        .collect::<Vec<_>>();
+    [
+        (
+            "grants",
+            serde_json::json!({ "newKeyVersion": 2, "grants": grants, "reencryptedRecords": [] })
+                .to_string(),
+        ),
+        (
+            "records",
+            serde_json::json!({ "newKeyVersion": 2, "grants": [], "reencryptedRecords": records })
+                .to_string(),
+        ),
+    ]
+}
+
+#[tokio::test]
+async fn mount_rotation_routes_bound_fan_out_before_lookup_or_store_reads() {
+    let outsider = Keys::generate();
+    let lookups = Arc::new(Mutex::new(0usize));
+    let counted = lookups.clone();
+    let mut state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+        .with_auth_clock(TEST_NOW, 60);
+    state.nip05_fetcher = Arc::new(move |_| {
+        *counted.lock().unwrap() += 1;
+        Err("synthetic NIP-05 lookup".to_owned())
+    });
+    let router = router_with_state(state);
+    // The Mount does not exist, so a 413 proves fan-out ran before any store
+    // read, and the NIP-05 participant proves it ran before identity lookup.
+    for path in [
+        "/v1/mounts/mount-missing",
+        "/v1/mounts/mount-missing/participants/someone@example.test",
+    ] {
+        for (kind, body) in oversized_mount_bodies() {
+            let response = authed_request(
+                router.clone(),
+                &outsider,
+                "DELETE",
+                path,
+                Some(body),
+                TEST_NOW,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path} oversized {kind}"
+            );
+        }
+    }
+    assert_eq!(*lookups.lock().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn mount_rotation_routes_refuse_an_unauthorized_caller_before_reading_material() {
+    let (state, router, cast, destination_admin, mount_id) = mounted_brain().await;
+    // A malformed grant would fail conversion; the authority refusal must
+    // come first, so the caller learns nothing from the material.
+    let body = serde_json::json!({
+        "newKeyVersion": 2,
+        "grants": [{
+            "id": "malformed",
+            "keyVersion": 2,
+            "recipientNpub": npub(&cast.admin),
+            "wrappedEventJson": "not a gift wrap"
+        }],
+        "reencryptedRecords": []
+    })
+    .to_string();
+    let revoke = authed_request(
+        router.clone(),
+        &cast.member,
+        "DELETE",
+        &format!("/v1/mounts/{mount_id}"),
+        Some(body.clone()),
+        TEST_NOW + 6,
+    )
+    .await;
+    assert_error(
+        revoke,
+        StatusCode::BAD_REQUEST,
+        "mount revocation requires source or destination brain control",
+    )
+    .await;
+    let participant = npub(&destination_admin);
+    let remove = authed_request(
+        router.clone(),
+        &cast.member,
+        "DELETE",
+        &format!("/v1/mounts/{mount_id}/participants/{participant}"),
+        Some(body),
+        TEST_NOW + 6,
+    )
+    .await;
+    assert_error(
+        remove,
+        StatusCode::BAD_REQUEST,
+        "mount participant management requires destination brain control",
+    )
+    .await;
+    let store = state.store.lock().unwrap();
+    let connection = store.load_shared_folder_connection(&mount_id).unwrap();
+    assert_eq!(connection.status, SharedFolderConnectionStatus::Active);
+}
+
+#[tokio::test]
+async fn rotation_routes_admit_a_bounded_number_of_requests_at_once() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let held = state
+        .rotation_request_permits
+        .clone()
+        .try_acquire_many_owned(MAX_CONCURRENT_ROTATION_REQUESTS as u32)
+        .unwrap();
+    let body = admin_rotation_body(&cast, "rotate-while-busy");
+    let busy = authed_request(
+        router.clone(),
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(body.clone()),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_error(
+        busy,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "too many Folder Key rotation requests are in progress",
+    )
+    .await;
+    assert_eq!(restricted_key_version(&state), 1);
+    // The sibling grant method on a rotation path is not limited.
+    grant_restricted(&router, &cast.admin, &cast.member, TEST_NOW + 5).await;
+
+    drop(held);
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(admin_rotation_body_for(
+            &cast,
+            "rotate-after-busy",
+            &[npub(&cast.admin), npub(&cast.guest), npub(&cast.member)],
+        )),
+        TEST_NOW + 6,
+    )
+    .await;
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+    assert_eq!(restricted_key_version(&state), 2);
+}
+
+fn admin_rotation_body_for(cast: &Cast, change_id: &str, recipients: &[String]) -> String {
+    rotation_body(
+        &cast.admin,
+        change_id,
+        AdminAccessAction::RotateFolderKey,
+        "restricted",
+        None,
+        2,
+        2,
+        recipients,
+    )
+}
+
+#[tokio::test]
+async fn a_rotation_that_skips_versions_is_a_bad_request() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(rotation_body(
+            &cast.admin,
+            "rotate-skip",
+            AdminAccessAction::RotateFolderKey,
+            "restricted",
+            None,
+            3,
+            3,
+            &[npub(&cast.admin), npub(&cast.guest)],
+        )),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_error(response, StatusCode::BAD_REQUEST, "skips versions").await;
+    assert_eq!(restricted_key_version(&state), 1);
+}

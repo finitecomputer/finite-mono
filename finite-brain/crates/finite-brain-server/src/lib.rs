@@ -119,6 +119,8 @@ pub struct ServerState {
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
     core_descriptions: Option<CoreDescriptionClient>,
+    /// Bounds how many rotation requests may hold large bodies at once.
+    rotation_request_permits: Arc<tokio::sync::Semaphore>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -169,6 +171,9 @@ impl ServerState {
             invite_mailer: None,
             brain_updates,
             core_descriptions: None,
+            rotation_request_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_ROTATION_REQUESTS,
+            )),
         }
     }
 
@@ -388,6 +393,15 @@ impl From<StoreError> for ApiError {
             StoreError::MissingBrain { .. } | StoreError::MissingFolder { .. } => {
                 Self::new(StatusCode::NOT_FOUND, value.to_string())
             }
+            // A request that skips key versions was prepared incorrectly; a
+            // request at or below the current version lost a race.
+            StoreError::StaleFolderKeyVersion {
+                current_key_version,
+                requested_key_version,
+                ..
+            } if u64::from(requested_key_version) > u64::from(current_key_version) + 1 => {
+                Self::new(StatusCode::BAD_REQUEST, value.to_string())
+            }
             StoreError::DuplicateId { .. }
             | StoreError::Conflict { .. }
             | StoreError::PersonalBrainConflict { .. }
@@ -476,8 +490,8 @@ pub fn validate_core_identity_url(url: &str) -> Result<String, String> {
 /// Build a router with explicit state.
 pub fn router_with_state(state: ServerState) -> Router {
     let cors_state = state.clone();
-    let normal_routes = normal_signed_api_router();
-    let low_level_routes = low_level_signed_api_router();
+    let normal_routes = normal_signed_api_router(&state);
+    let low_level_routes = low_level_signed_api_router(&state);
     let signed_routes = Router::new().nest("/v1", normal_routes.nest("/admin", low_level_routes));
     Router::new()
         .route("/", get(root_handler))
@@ -499,7 +513,7 @@ async fn api_route_not_found_handler() -> ApiError {
     )
 }
 
-fn normal_signed_api_router() -> Router<ServerState> {
+fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route("/brain-updates", get(brain_updates_handler))
         .route(
@@ -613,17 +627,17 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/mounts/{connection_id}",
-            get(get_shared_folder_connection_handler).merge(
-                axum::routing::delete(revoke_shared_folder_connection_handler)
-                    .layer(rotation_body_limit()),
-            ),
+            get(get_shared_folder_connection_handler).merge(rotation_method(
+                state,
+                axum::routing::delete(revoke_shared_folder_connection_handler),
+            )),
         )
         .route(
             "/mounts/{connection_id}/participants/{target_npub}",
-            axum::routing::put(add_mount_participant_handler).merge(
-                axum::routing::delete(remove_mount_participant_handler)
-                    .layer(rotation_body_limit()),
-            ),
+            axum::routing::put(add_mount_participant_handler).merge(rotation_method(
+                state,
+                axum::routing::delete(remove_mount_participant_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/mounts",
@@ -649,12 +663,14 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
 }
 
-fn low_level_signed_api_router() -> Router<ServerState> {
+fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route(
             "/brains/{brain_id}/members/{target_npub}",
-            axum::routing::put(add_member_handler)
-                .merge(axum::routing::delete(remove_member_handler).layer(rotation_body_limit())),
+            axum::routing::put(add_member_handler).merge(rotation_method(
+                state,
+                axum::routing::delete(remove_member_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
@@ -662,9 +678,10 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
-            axum::routing::put(grant_folder_access_handler).merge(
-                axum::routing::delete(remove_folder_access_handler).layer(rotation_body_limit()),
-            ),
+            axum::routing::put(grant_folder_access_handler).merge(rotation_method(
+                state,
+                axum::routing::delete(remove_folder_access_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
@@ -672,7 +689,7 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/key-rotations",
-            axum::routing::post(rotate_folder_key_handler).layer(rotation_body_limit()),
+            rotation_method(state, axum::routing::post(rotate_folder_key_handler)),
         )
 }
 

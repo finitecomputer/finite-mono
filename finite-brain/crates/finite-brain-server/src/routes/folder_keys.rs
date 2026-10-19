@@ -7,11 +7,44 @@
 use crate::*;
 use finite_brain_store::{FolderKeyRotationRequest, FolderKeyRotationTarget};
 
-/// Request body limit for every route that carries Folder Key rotation
-/// material. Apply it to the rotating method only, so sibling methods on the
-/// same path keep the ordinary request cap.
-pub(crate) fn rotation_body_limit() -> DefaultBodyLimit {
-    DefaultBodyLimit::max(finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES)
+/// Rotation requests that may hold a large body at once. With the 64 MiB
+/// rotation body limit this bounds rotation request buffering at 256 MiB.
+pub(crate) const MAX_CONCURRENT_ROTATION_REQUESTS: usize = 4;
+
+/// Wrap the rotating method of a route (and only that method, so siblings on
+/// the same path keep the ordinary 1 MiB cap): admit at most
+/// [`MAX_CONCURRENT_ROTATION_REQUESTS`] at once, answering 503 before the body
+/// is read when none is free, and raise its body limit to
+/// `MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES`.
+pub(crate) fn rotation_method(
+    state: &ServerState,
+    method: axum::routing::MethodRouter<ServerState>,
+) -> axum::routing::MethodRouter<ServerState> {
+    method
+        .layer(DefaultBodyLimit::max(
+            finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            limit_concurrent_rotation_requests,
+        ))
+}
+
+/// The body is read only after this returns, so the permit bounds how many
+/// large rotation bodies are buffered at once, signed or not.
+async fn limit_concurrent_rotation_requests(
+    State(state): State<ServerState>,
+    request: axum::extract::Request,
+    next: middleware::Next,
+) -> Response {
+    let Ok(_permit) = state.rotation_request_permits.clone().try_acquire_owned() else {
+        return ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many Folder Key rotation requests are in progress; retry shortly",
+        )
+        .into_response();
+    };
+    next.run(request).await
 }
 
 /// Validated, server-shaped rotation material for one Folder.

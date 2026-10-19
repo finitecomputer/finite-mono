@@ -1720,16 +1720,16 @@ impl BrainStore {
         }
     }
 
-    fn rotate_shared_folder_access_removal<F>(
-        &mut self,
+    /// Validate and write one mounted source Folder rotation inside the
+    /// caller's write transaction; the caller finishes its own Mount writes
+    /// and commits.
+    fn rotate_shared_folder_access_removal(
+        &self,
+        tx: &Transaction<'_>,
         connection: &StoredSharedFolderConnection,
         actor_npub: &UserId,
         rotation: SharedFolderAccessRemoval<'_>,
-        after_rotation: F,
-    ) -> Result<(), StoreError>
-    where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StoreError>,
-    {
+    ) -> Result<(), StoreError> {
         if rotation.removed_user_ids.is_empty() {
             return Err(StoreError::BrokenInvariant {
                 reason: "shared folder access removal requires at least one target".to_owned(),
@@ -1788,7 +1788,6 @@ impl BrainStore {
             .collect::<Vec<_>>();
         validate_rotation_records(&live_objects, rotation.reencrypted_records)?;
 
-        let tx = self.conn.transaction()?;
         for removed in rotation.removed_user_ids {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -1808,29 +1807,27 @@ impl BrainStore {
             ],
         )?;
         invalidate_pending_email_bootstraps_for_rotated_folder(
-            &tx,
+            tx,
             &connection.source_brain_id,
             &connection.source_folder_id,
             rotation.updated_at,
         )?;
         for grant in rotation.grants {
-            insert_grant(&tx, &connection.source_brain_id, grant)?;
+            insert_grant(tx, &connection.source_brain_id, grant)?;
         }
         sync_records::append_sync_records(
-            &tx,
+            tx,
             &connection.source_brain_id,
             rotation.control_records,
         )?;
         for record in rotation.reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, &connection.source_brain_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, &connection.source_brain_id)?;
-            sync_records::insert_sync_record(&tx, &connection.source_brain_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, &connection.source_brain_id, &input)?;
+            sync_records::validate_sync_conflict(tx, &connection.source_brain_id, &input)?;
+            let sequence = sync_records::next_sequence(tx, &connection.source_brain_id)?;
+            sync_records::insert_sync_record(tx, &connection.source_brain_id, sequence, &input)?;
+            sync_records::project_sync_record(tx, &connection.source_brain_id, &input)?;
         }
-        after_rotation(&tx)?;
-        tx.commit()?;
         Ok(())
     }
 }
