@@ -7,6 +7,13 @@
 use crate::*;
 use finite_brain_store::{FolderKeyRotationRequest, FolderKeyRotationTarget};
 
+/// Request body limit for every route that carries Folder Key rotation
+/// material. Apply it to the rotating method only, so sibling methods on the
+/// same path keep the ordinary request cap.
+pub(crate) fn rotation_body_limit() -> DefaultBodyLimit {
+    DefaultBodyLimit::max(finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES)
+}
+
 /// Validated, server-shaped rotation material for one Folder.
 struct PreparedRotation {
     new_key_version: u32,

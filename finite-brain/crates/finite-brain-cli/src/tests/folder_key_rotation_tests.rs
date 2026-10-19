@@ -437,3 +437,27 @@ fn revoke_rejects_a_result_that_still_wraps_the_target() {
         "{requests:?}"
     );
 }
+
+#[test]
+fn rotation_requests_over_the_limit_are_refused_before_sending() {
+    let body = serde_json::json!({ "reencryptedRecords": ["x".repeat(64)] });
+    let size = serde_json::to_vec(&body).unwrap().len();
+    ensure_rotation_request_fits("Folder restricted Key rotation", &body, size).unwrap();
+    let error = ensure_rotation_request_fits("Folder restricted Key rotation", &body, size - 1)
+        .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("Folder restricted Key rotation"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("{size}-byte rotation request")),
+        "{message}"
+    );
+    assert!(message.contains("nothing was sent"), "{message}");
+    // The CLI enforces the same bound the server applies to rotation routes.
+    assert_eq!(
+        finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+        64 * 1024 * 1024
+    );
+}

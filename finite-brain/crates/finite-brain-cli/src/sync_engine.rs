@@ -786,16 +786,22 @@ pub(crate) fn prepare_folder_key_rotation(
         target,
         Some(new_key_version),
     )?;
+    let body = serde_json::json!({
+        "newKeyVersion": new_key_version,
+        "grants": grants,
+        "reencryptedRecords": reencrypted_records,
+        "accessChangeEvent": access_change_event,
+    });
+    crate::ensure_rotation_request_fits(
+        &format!("Folder {folder_id} Key rotation"),
+        &body,
+        finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+    )?;
     Ok(PreparedFolderKeyRotation {
         previous_key_version: folder.current_key_version,
         new_key_version,
         recipients: remaining_recipients,
-        body: serde_json::json!({
-            "newKeyVersion": new_key_version,
-            "grants": grants,
-            "reencryptedRecords": reencrypted_records,
-            "accessChangeEvent": access_change_event,
-        }),
+        body,
     })
 }
 

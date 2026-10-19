@@ -727,3 +727,118 @@ async fn oversized_revoke_is_refused_before_resolving_the_target() {
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(*lookups.lock().unwrap(), 0);
 }
+
+/// Add a padding field so a valid body crosses the ordinary 1 MiB cap.
+fn padded(body: String, bytes: usize) -> String {
+    let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+    value["padding"] = serde_json::Value::String("x".repeat(bytes));
+    value.to_string()
+}
+
+#[tokio::test]
+async fn rotation_routes_accept_bodies_above_the_ordinary_cap_up_to_their_own_limit() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let over_ordinary = MAX_REQUEST_BODY_BYTES + 1024;
+
+    // DELETE access, with a body over 1 MiB, revokes the stale holder.
+    let demoted = npub(&cast.demoted);
+    let revoke = padded(
+        rotation_body(
+            &cast.admin,
+            "revoke-padded",
+            AdminAccessAction::RemoveFolderAccess,
+            "restricted",
+            Some(&demoted),
+            2,
+            2,
+            &[npub(&cast.admin), npub(&cast.guest)],
+        ),
+        over_ordinary,
+    );
+    assert!(revoke.len() > MAX_REQUEST_BODY_BYTES);
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &format!("/v1/admin/brains/acme/folders/restricted/access/{demoted}"),
+        Some(revoke),
+        TEST_NOW + 5,
+    )
+    .await;
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+
+    // POST key-rotations, with a body over 1 MiB, rotates again.
+    let rotate = padded(
+        rotation_body(
+            &cast.admin,
+            "rotate-padded",
+            AdminAccessAction::RotateFolderKey,
+            "restricted",
+            None,
+            3,
+            3,
+            &[npub(&cast.admin), npub(&cast.guest)],
+        ),
+        over_ordinary,
+    );
+    let response = authed_request(
+        router.clone(),
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(rotate),
+        TEST_NOW + 6,
+    )
+    .await;
+    let status = response.status();
+    assert_eq!(status, StatusCode::OK, "{}", read_text(response).await);
+    assert_eq!(restricted_key_version(&state), 3);
+
+    // Member removal reads its body past the ordinary cap (then rejects the
+    // malformed JSON), while the sibling grant method keeps the 1 MiB cap.
+    let member = npub(&cast.member);
+    let oversized_garbage = "x".repeat(over_ordinary);
+    let removal = authed_request(
+        router.clone(),
+        &cast.admin,
+        "DELETE",
+        &format!("/v1/admin/brains/acme/members/{member}"),
+        Some(oversized_garbage.clone()),
+        TEST_NOW + 7,
+    )
+    .await;
+    assert_error(
+        removal,
+        StatusCode::BAD_REQUEST,
+        "invalid JSON request body",
+    )
+    .await;
+    let grant = authed_request(
+        router,
+        &cast.admin,
+        "PUT",
+        &format!("/v1/admin/brains/acme/folders/restricted/access/{member}"),
+        Some(oversized_garbage),
+        TEST_NOW + 7,
+    )
+    .await;
+    assert_eq!(grant.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn rotation_routes_refuse_bodies_over_their_limit() {
+    let (state, router, cast) = demoted_admin_brain().await;
+    let body = "x".repeat(finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES + 1);
+    let response = authed_request(
+        router,
+        &cast.admin,
+        "POST",
+        ROTATE_PATH,
+        Some(body),
+        TEST_NOW + 5,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(restricted_key_version(&state), 1);
+}

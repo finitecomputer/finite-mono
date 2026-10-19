@@ -613,13 +613,17 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/mounts/{connection_id}",
-            get(get_shared_folder_connection_handler)
-                .delete(revoke_shared_folder_connection_handler),
+            get(get_shared_folder_connection_handler).merge(
+                axum::routing::delete(revoke_shared_folder_connection_handler)
+                    .layer(rotation_body_limit()),
+            ),
         )
         .route(
             "/mounts/{connection_id}/participants/{target_npub}",
-            axum::routing::put(add_mount_participant_handler)
-                .delete(remove_mount_participant_handler),
+            axum::routing::put(add_mount_participant_handler).merge(
+                axum::routing::delete(remove_mount_participant_handler)
+                    .layer(rotation_body_limit()),
+            ),
         )
         .route(
             "/brains/{brain_id}/mounts",
@@ -649,7 +653,8 @@ fn low_level_signed_api_router() -> Router<ServerState> {
     Router::new()
         .route(
             "/brains/{brain_id}/members/{target_npub}",
-            axum::routing::put(add_member_handler).delete(remove_member_handler),
+            axum::routing::put(add_member_handler)
+                .merge(axum::routing::delete(remove_member_handler).layer(rotation_body_limit())),
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
@@ -657,7 +662,9 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
-            axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
+            axum::routing::put(grant_folder_access_handler).merge(
+                axum::routing::delete(remove_folder_access_handler).layer(rotation_body_limit()),
+            ),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
@@ -665,7 +672,7 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/key-rotations",
-            axum::routing::post(rotate_folder_key_handler),
+            axum::routing::post(rotate_folder_key_handler).layer(rotation_body_limit()),
         )
 }
 

@@ -31,6 +31,22 @@ struct RotateFolderKeyResponse {
     rotation: FolderKeyRotationReceipt,
 }
 
+/// Refuse to send rotation material larger than the server accepts, naming
+/// what was being rotated and the size, before any request is made.
+pub(crate) fn ensure_rotation_request_fits(
+    subject: &str,
+    body: &serde_json::Value,
+    limit: usize,
+) -> Result<(), CliError> {
+    let size = serde_json::to_vec(body)?.len();
+    if size > limit {
+        return Err(CliError::InvalidInput(format!(
+            "{subject} needs a {size}-byte rotation request, over the {limit}-byte limit for Folder Key rotation requests; nothing was sent. Its live pages are too large to re-encrypt in one request"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn rotation_route(brain_id: &str, folder_id: &str) -> String {
     format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/key-rotations")
 }

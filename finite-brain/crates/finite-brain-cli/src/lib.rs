@@ -3516,17 +3516,17 @@ fn admin_operation<W: Write>(
                 }));
             }
             let route = format!("/v1/admin/brains/{brain_id}/members/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({
-                    "accessChangeEvent": event,
-                    "rotations": rotations,
-                    "mountRotations": mount_rotations
-                })),
+            let body = serde_json::json!({
+                "accessChangeEvent": event,
+                "rotations": rotations,
+                "mountRotations": mount_rotations
+            });
+            ensure_rotation_request_fits(
+                &format!("Member removal of {target}"),
+                &body,
+                finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
             )?;
+            let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
             let authoritative: BrainMetadataView = serde_json::from_value(response)?;
             if authoritative.members.iter().any(|member| member == &target)
                 || authoritative

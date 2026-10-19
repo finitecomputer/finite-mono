@@ -92,6 +92,15 @@ pub const MAX_MEMBER_REMOVAL_ROTATIONS: usize =
 pub const MAX_MEMBER_REMOVAL_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
 /// Maximum total re-encrypted records accepted in one Member removal.
 pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
+/// Maximum request body for one request that carries Folder Key rotation
+/// material: standalone rotation, Folder access removal, Member removal and
+/// Mount participant or Mount revocation. Each re-encrypted page travels with
+/// its signed revision event, so the ordinary 1 MiB request cap would refuse
+/// a Folder whose live pages total about 1 MiB. This explicit budget averages
+/// about 64 KiB per record at the 1,000-record Folder fan-out limit and stays
+/// below the 128 MiB export a client downloads to prepare the rotation;
+/// larger rotations are refused, never truncated.
+pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
