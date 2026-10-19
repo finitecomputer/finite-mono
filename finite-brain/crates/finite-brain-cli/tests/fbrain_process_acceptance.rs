@@ -12,10 +12,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use finite_brain_core::{
-    BrainId, FolderId, FolderKey, FolderKeyGrantPayload, FolderObjectAad, ObjectId,
-    encrypt_folder_object,
+    BrainId, EncryptedFolderObjectEnvelope, FolderId, FolderKey, FolderKeyGrantPayload,
+    FolderObjectAad, ObjectId, decode_sync_payload, encrypt_folder_object, open_folder_object,
 };
-use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
+use finite_nostr::{GiftWrapValidation, NostrPublicKey, build_rumor, open_gift_wrap, wrap_rumor};
 use nostr::{Keys, Kind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1781,6 +1781,74 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
     server_thread.join().unwrap();
 }
 
+/// Open the grant in `export` addressed to `keys` for one Folder version.
+fn open_grant(keys: &Keys, export: &Value, folder_id: &str, key_version: u32) -> Option<FolderKey> {
+    let npub = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    let grant = export["keyGrants"].as_array()?.iter().find(|grant| {
+        grant["folderId"] == folder_id
+            && grant["keyVersion"] == key_version
+            && grant["recipientNpub"] == npub.as_str()
+    })?;
+    let event = nostr::Event::from_json(grant["wrappedEventJson"].as_str()?).ok()?;
+    let validation = GiftWrapValidation::new(NostrPublicKey::parse(&npub).unwrap());
+    let opened = open_gift_wrap(keys, &event, &validation).ok()?;
+    let payload: Value = serde_json::from_str(&opened.rumor.content).ok()?;
+    FolderKey::from_base64(payload["folderKey"].as_str()?).ok()
+}
+
+/// Whether `keys` can open one exported grant, whoever it names.
+fn grant_opens(keys: &Keys, grant: &Value) -> bool {
+    let recipient = NostrPublicKey::from_protocol(keys.public_key());
+    let Some(event) = grant["wrappedEventJson"]
+        .as_str()
+        .and_then(|json| nostr::Event::from_json(json).ok())
+    else {
+        return false;
+    };
+    open_gift_wrap(keys, &event, &GiftWrapValidation::new(recipient)).is_ok()
+}
+
+/// The single live page of one Folder in an export, as its object id and
+/// encrypted envelope.
+fn live_page(export: &Value, folder_id: &str) -> (String, EncryptedFolderObjectEnvelope) {
+    let pages = export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["folderId"] == folder_id && object["deleted"] == false)
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 1, "{folder_id}: {pages:?}");
+    let payload = pages[0]["payloadJson"].as_str().unwrap();
+    let envelope_json = decode_sync_payload(payload).ciphertext_or_raw(payload);
+    (
+        pages[0]["objectId"].as_str().unwrap().to_owned(),
+        EncryptedFolderObjectEnvelope::from_json(&envelope_json).unwrap(),
+    )
+}
+
+/// Decrypt one page under the AAD of `key_version` and return its Markdown;
+/// `None` when decryption fails.
+fn open_page(
+    key: &FolderKey,
+    brain_id: &str,
+    folder_id: &str,
+    object_id: &str,
+    key_version: u32,
+    envelope: &EncryptedFolderObjectEnvelope,
+) -> Option<String> {
+    let aad = FolderObjectAad {
+        brain_id: BrainId::new(brain_id).unwrap(),
+        folder_id: FolderId::new(folder_id).unwrap(),
+        object_id: ObjectId::new(object_id).unwrap(),
+        key_version,
+    };
+    let plaintext = open_folder_object(key, &aad, envelope).ok()?;
+    let page: Value = serde_json::from_slice(&plaintext).unwrap();
+    Some(page["markdown"].as_str().unwrap().to_owned())
+}
+
 /// Production shape from 2026-10-19: a demoted admin keeps current Folder Key
 /// wraps on restricted and admin_only Folders (`revocationIncomplete`). The
 /// built binary revokes that stale holder on one Folder and rotates two others
@@ -1792,6 +1860,7 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
     let admin_home = scratch.path().join("admin");
     let demoted_home = scratch.path().join("demoted");
     let mut npubs = Vec::new();
+    let mut identities = Vec::new();
     for home in [&admin_home, &demoted_home] {
         fs::create_dir_all(home).unwrap();
         let keys = Keys::generate();
@@ -1819,9 +1888,11 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
                 .to_npub()
                 .unwrap(),
         );
+        identities.push(keys);
     }
     let admin = &npubs[0];
     let demoted = &npubs[1];
+    let (admin_keys, demoted_keys) = (&identities[0], &identities[1]);
     let (server_url, shutdown, server_thread) =
         spawn_real_brain_server(demoted, demoted, admin, admin);
     let run_raw = |home: &Path, cwd: &Path, args: &[&str]| -> Output {
@@ -1936,6 +2007,22 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
             format!("# {path} before rotation\n")
         );
     }
+    // Keep the demoted key's own version 1 Folder Keys, opened from its own
+    // grants, and prove they really decrypt the version 1 pages.
+    let before_demotion = run_json(&demoted_home, &demoted_tree, &["brain", "export"]);
+    let retained_keys = pages
+        .iter()
+        .map(|(path, id)| {
+            let key = open_grant(demoted_keys, &before_demotion, id, 1)
+                .unwrap_or_else(|| panic!("demoted key holds no v1 grant for {path}"));
+            let (object_id, envelope) = live_page(&before_demotion, id);
+            assert_eq!(
+                open_page(&key, "rotation", id, &object_id, 1, &envelope).as_deref(),
+                Some(format!("# {path} before rotation\n").as_str())
+            );
+            key
+        })
+        .collect::<Vec<_>>();
 
     run_json(
         &admin_home,
@@ -2069,6 +2156,36 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
         assert_eq!(folder["accessible"], true);
     }
 
+    // Cryptographic denial, for the revoked Folder and both rotated ones: the
+    // version 2 ciphertext from the remaining admin's export opens with the
+    // admin's new key and not with the demoted key's retained version 1 key,
+    // and no version 2 grant opens for the demoted key.
+    for ((path, id), retained) in pages.iter().zip(&retained_keys) {
+        let (object_id, envelope) = live_page(&export, id);
+        let new_key = open_grant(admin_keys, &export, id, 2)
+            .unwrap_or_else(|| panic!("admin holds no v2 grant for {path}"));
+        assert_eq!(
+            open_page(&new_key, "rotation", id, &object_id, 2, &envelope).as_deref(),
+            Some(format!("# {path} after rotation\n").as_str())
+        );
+        assert_eq!(
+            open_page(retained, "rotation", id, &object_id, 2, &envelope),
+            None,
+            "{path}: the retained v1 key must not open v2 ciphertext"
+        );
+        let v2_grants = export["keyGrants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|grant| grant["folderId"] == id.as_str() && grant["keyVersion"] == 2)
+            .collect::<Vec<_>>();
+        assert!(!v2_grants.is_empty());
+        for grant in v2_grants {
+            assert_ne!(grant["recipientNpub"], demoted.as_str());
+            assert!(!grant_opens(demoted_keys, grant), "{path}: v2 grant opened");
+        }
+    }
+
     // The demoted key cannot open the new version of any of the three.
     let denied = run_json(&demoted_home, &demoted_tree, &["brain", "export"]);
     for (_, id) in &pages {
@@ -2080,6 +2197,7 @@ fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
             .unwrap();
         assert_eq!(folder["currentKeyVersion"], 2);
         assert_eq!(folder["accessible"], false, "{folder}");
+        assert!(open_grant(demoted_keys, &denied, id, 2).is_none());
     }
     let fresh_demoted_tree = demoted_home.join("fresh-tree");
     run_json(
