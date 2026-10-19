@@ -1371,7 +1371,7 @@ async fn a_rotation_waits_its_turn_behind_refilling_stalled_uploads() {
 #[tokio::test]
 async fn the_admission_queue_is_bounded() {
     let (state, router, cast) = demoted_admin_brain_with(|state| {
-        state.with_rotation_admission_wait(std::time::Duration::from_secs(30))
+        state.with_rotation_admission_wait(std::time::Duration::from_secs(5))
     })
     .await;
     let held = state
@@ -1413,6 +1413,17 @@ async fn the_admission_queue_is_bounded() {
         "too many Folder Key rotation requests are waiting for admission",
     )
     .await;
+    // The queue-full refusal is charged to the signer's rate limit.
+    let key = format!("{}:POST:{ROTATE_PATH}", npub(&cast.admin));
+    assert_eq!(
+        state
+            .rate_limit_hits
+            .lock()
+            .unwrap()
+            .get(&key)
+            .map_or(0, Vec::len),
+        1
+    );
     for waiter in waiters {
         waiter.abort();
     }

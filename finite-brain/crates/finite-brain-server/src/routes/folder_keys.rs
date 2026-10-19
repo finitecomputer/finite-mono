@@ -155,7 +155,8 @@ async fn admit(
     // uploads that each time out and reconnect queues behind this request
     // instead of winning every refill.
     let _permit = {
-        let _waiting = WaitingForRotationPermit::enter(&state.rotation_waiting_requests)?;
+        let _waiting = WaitingForRotationPermit::enter(&state.rotation_waiting_requests)
+            .map_err(charge_exit)?;
         match tokio::time::timeout(
             state.rotation_admission_wait,
             state.rotation_request_permits.clone().acquire_owned(),
