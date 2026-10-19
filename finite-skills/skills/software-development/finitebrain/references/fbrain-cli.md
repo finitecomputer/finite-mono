@@ -335,7 +335,9 @@ version for exactly its entitled keys and returns `state: complete` with
 key's access, and also accepts a key that holds the current Folder Key without
 entitlement (`revocationIncomplete`); its receipt does not list cut-off keys.
 Either rotation leaves pending Mount Offers and Folder share links for that
-Folder unacceptable; recreate them. Clearing Removal Pending in
+Folder unacceptable; recreate them. Rotation requests are capped at 64 MiB; the CLI
+refuses a larger one before sending and names the Folder and size (see
+Clearing Removal Pending for what to do next). Clearing Removal Pending in
 [who-has-access.md](who-has-access.md) says when to use each.
 
 `admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder

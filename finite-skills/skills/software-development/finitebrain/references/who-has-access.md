@@ -140,6 +140,15 @@ command. An older Brain server answers `rotate` with `unsupported: ... does not
 support Folder Key rotation yet` (nothing changed) and refuses `revoke` for a
 key without explicit access.
 
+One rotation request carries every re-encrypted page of the Folder and is
+capped at 64 MiB. If the CLI refuses with `needs a <size>-byte rotation
+request, over the ... limit` (nothing was sent), the Folder's pages are too
+large to re-encrypt at once: report the Folder and size and stop. Member
+removal rotates every Folder the Member reads in one request, so for a Member
+of several large Folders, first `revoke` or `rotate` the largest of those
+Folders one at a time, then retry the removal. A 503 saying too many Folder
+Key rotation requests are in progress is a busy server: wait and rerun.
+
 Member removal does not yet clear Folders where the removed key holds a
 current key without entitlement, for example from an earlier demotion. Run
 `access list` before removing a Member; afterwards rotate every Folder still
