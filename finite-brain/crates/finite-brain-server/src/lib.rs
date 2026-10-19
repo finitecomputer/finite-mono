@@ -4453,6 +4453,20 @@ mod tests {
         let actor = UserId::new(npub(&keys)).unwrap();
         let state = test_state();
         let router = router_with_state(state.clone());
+        // Rotation admission first requires an admin of the path Brain.
+        let created = post_brain(
+            router.clone(),
+            &keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
+        let sequence_before = latest_sync_sequence(&router, &keys, "acme").await;
 
         let grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
             .map(|index| {
@@ -4473,11 +4487,11 @@ mod tests {
         })
         .to_string();
         let access = authed_request(
-            router,
+            router.clone(),
             &keys,
             "DELETE",
             &format!(
-                "/v1/admin/brains/personal/folders/notes/access/{}",
+                "/v1/admin/brains/acme/folders/restricted/access/{}",
                 actor.as_str()
             ),
             Some(access_body),
@@ -4491,14 +4505,22 @@ mod tests {
         )
         .await;
 
-        assert!(
-            state
-                .store
-                .lock()
-                .unwrap()
-                .list_visible_brains(&actor)
-                .unwrap()
-                .is_empty()
+        let stored = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let restricted = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id.as_str() == "restricted")
+            .unwrap();
+        assert_eq!(restricted.current_key_version, 1);
+        assert_eq!(
+            latest_sync_sequence_at(&router, &keys, "acme", TEST_NOW + 2).await,
+            sequence_before
         );
     }
 
