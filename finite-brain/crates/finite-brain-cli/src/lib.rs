@@ -2490,7 +2490,7 @@ fn access_revoke<W: Write>(
         CliError::InvalidInput("prepared rotation omitted key version".to_owned())
     })?;
     let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
-    let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+    let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
     let authoritative: BrainMetadataView = serde_json::from_value(response)?;
     let folder = authoritative
         .folders
@@ -3190,7 +3190,7 @@ fn mount<W: Write>(
                         "reencryptedRecords": []
                     })
                 };
-                signed_json_request(env, args, "DELETE", &route, Some(body))?
+                signed_rotation_request(env, args, "DELETE", &route, body)?
             } else {
                 return Err(CliError::InvalidCommand(format!(
                     "mount participant {action}"
@@ -3241,7 +3241,7 @@ fn mount<W: Write>(
                     env, args, &metadata, &brain_id, &folder_id, &targets,
                 )?
             };
-            let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             if response["status"] != "revoked" {
                 return Err(CliError::InvalidInput(
                     "Mount revoke postcondition was not authoritative".to_owned(),
@@ -3526,7 +3526,7 @@ fn admin_operation<W: Write>(
                 &body,
                 finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
             )?;
-            let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             let authoritative: BrainMetadataView = serde_json::from_value(response)?;
             if authoritative.members.iter().any(|member| member == &target)
                 || authoritative

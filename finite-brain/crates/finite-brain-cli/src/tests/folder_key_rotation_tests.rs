@@ -461,3 +461,67 @@ fn rotation_requests_over_the_limit_are_refused_before_sending() {
         64 * 1024 * 1024
     );
 }
+
+/// A server that answers every request with `{"ok":true}` after `delay`,
+/// like a Brain server that queues a rotation behind busy admission permits.
+fn start_slow_server(delay: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            thread::spawn(move || {
+                let _ = read_http_request(&mut stream);
+                thread::sleep(delay);
+                let body = "{\"ok\":true}";
+                let _ = stream.write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                );
+            });
+        }
+    });
+    url
+}
+
+/// Sol's round-5 finding: the shared CLI transport gave up after 10 seconds,
+/// while the server may legitimately queue a rotation for its admission wait.
+#[test]
+fn rotation_requests_outlast_the_ordinary_request_timeout() {
+    assert!(
+        ROTATION_REQUEST_TIMEOUT
+            >= Duration::from_secs(
+                finite_brain_core::ROTATION_ADMISSION_WAIT_SECONDS
+                    + finite_brain_core::ROTATION_BODY_READ_DEADLINE_SECONDS
+            )
+    );
+    let tmp = TempDir::new().unwrap();
+    import_identity_secret(&tmp, ADMIN_SECRET);
+    let server_url = start_slow_server(Duration::from_secs(11));
+    let args = vec!["--server".to_owned(), server_url];
+    let rotation = {
+        let env = env_for(&tmp);
+        let args = args.clone();
+        thread::spawn(move || {
+            signed_rotation_request(
+                &env,
+                &args,
+                "POST",
+                "/v1/admin/brains/acme/folders/restricted/key-rotations",
+                serde_json::json!({}),
+            )
+        })
+    };
+    let ordinary = signed_json_request(
+        &env_for(&tmp),
+        &args,
+        "GET",
+        "/v1/brains/acme/metadata",
+        None,
+    );
+    assert!(matches!(ordinary, Err(CliError::Http(_))), "{ordinary:?}");
+    assert_eq!(rotation.join().unwrap().unwrap()["ok"], true);
+}

@@ -10,7 +10,8 @@ use serde::Deserialize;
 use crate::{
     BrainMetadataView, CliEnvironment, CliError, FolderKeyRotationIntent,
     PreparedFolderKeyRotation, command_brain_id, current_folder_id, fetch_brain_metadata,
-    mutate_agent_state, option_value, prepare_folder_key_rotation, signed_json_request, write_json,
+    mutate_agent_state, option_value, prepare_folder_key_rotation, signed_rotation_request,
+    write_json,
 };
 
 /// Server receipt for one committed Folder Key rotation.
@@ -71,7 +72,7 @@ pub(crate) fn access_rotate<W: Write>(
         FolderKeyRotationIntent::Rotate,
     )?;
     let route = rotation_route(&brain_id, &folder_id);
-    let response = signed_json_request(env, args, "POST", &route, Some(prepared.body.clone()))
+    let response = signed_rotation_request(env, args, "POST", &route, prepared.body.clone())
         .map_err(|error| unsupported_rotation_server(error, &route))?;
     let receipt = verified_rotation(response, &folder_id, &prepared)?;
     let summary = format!(

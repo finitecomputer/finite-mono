@@ -17,6 +17,20 @@ pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
 pub(crate) const FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES_ENV: &str =
     "FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES";
 const DEFAULT_JSON_RESPONSE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+/// Whole-request timeout for ordinary Brain API calls.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Server time allowed after a rotation request's body arrives: identity
+/// resolution, the store lock wait and grant and record verification.
+const ROTATION_HANDLER_ALLOWANCE_SECONDS: u64 = 60;
+/// Whole-request timeout for requests that carry Folder Key rotation
+/// material. The server may queue them for its admission wait, then read the
+/// body under its body deadline, then apply them; giving up sooner would
+/// abandon a request before its fair turn.
+pub(crate) const ROTATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(
+    finite_brain_core::ROTATION_ADMISSION_WAIT_SECONDS
+        + finite_brain_core::ROTATION_BODY_READ_DEADLINE_SECONDS
+        + ROTATION_HANDLER_ALLOWANCE_SECONDS,
+);
 pub(crate) const SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES: usize = SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES;
 
@@ -281,6 +295,7 @@ pub(crate) fn signed_json_read_existing_identity(
         None,
         DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
         crate::signer::load_existing_signer,
+        DEFAULT_REQUEST_TIMEOUT,
     )
 }
 
@@ -336,9 +351,35 @@ pub(crate) fn signed_json_request_to_server_with_response_limit(
         body,
         response_limit_bytes,
         load_signer,
+        DEFAULT_REQUEST_TIMEOUT,
     )
 }
 
+/// Send a request that carries Folder Key rotation material (Folder Key
+/// rotation, Folder access removal, Member removal, Mount revocation or Mount
+/// participant removal) with [`ROTATION_REQUEST_TIMEOUT`], so the CLI waits
+/// out the server's admission queue instead of giving up after 10 seconds.
+pub(crate) fn signed_rotation_request(
+    env: &CliEnvironment,
+    args: &[String],
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    signed_json_request_with_signer(
+        env,
+        &server_url,
+        method,
+        path,
+        Some(body),
+        DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
+        load_signer,
+        ROTATION_REQUEST_TIMEOUT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn signed_json_request_with_signer(
     env: &CliEnvironment,
     server_url: &str,
@@ -347,6 +388,7 @@ fn signed_json_request_with_signer(
     body: Option<serde_json::Value>,
     response_limit_bytes: usize,
     signer_loader: fn(&CliEnvironment) -> Result<crate::signer::LocalSigner, CliError>,
+    timeout: Duration,
 ) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
     let transport_url = absolute_server_url(server_url, path);
@@ -361,6 +403,7 @@ fn signed_json_request_with_signer(
         Some(&authorization),
         body.as_deref(),
         response_limit_bytes,
+        timeout,
     )?;
     if !(200..300).contains(&response.status) {
         return Err(CliError::HttpStatus {
@@ -384,11 +427,12 @@ fn http_request_with_response_limit(
     authorization: Option<&str>,
     body: Option<&[u8]>,
     response_limit_bytes: usize,
+    timeout: Duration,
 ) -> Result<HttpResponse, CliError> {
     validate_http_url(url)?;
     let body = body.unwrap_or_default();
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .redirects(0)
         .build();
     let mut request = agent
