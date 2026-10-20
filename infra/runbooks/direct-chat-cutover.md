@@ -49,8 +49,8 @@ are [runtime-image.md](runtime-image.md); the lat2 deploy is
    SELECT r.source_host_id, count(*) FROM project_runtime_links l
    JOIN agent_runtimes r ON r.id = l.agent_runtime_id WHERE l.active GROUP BY 1;
    ```
-   A host outside lat3/lat4/lat5 also needs the upgrade wrapper and
-   finite-status host lists extended first.
+   A host outside lat3/lat4/lat5 needs the upgrade wrapper extended first. For
+   example, lat7 is not in `scripts/rollout-lat1-runtime-artifact` yet.
 4. **Hosted access applied for every active runtime.** Any row that fails this
    check has no direct path: enable it, or leave that runtime off the list.
    ```sql
@@ -122,7 +122,9 @@ upgraded report no finitechat plugin and stay on the hosted device.
    ```sh
    scripts/direct_chat_fold_audit.py hosted-digests.jsonl fold-status-*.json
    ```
-   Every room must be `intact`. A difference names the topic or chat.
+   Every room must be `intact`. A difference names the topic or chat. If any
+   room is not intact, follow **A failed audit** under Rollback for that
+   agent now; it has not been used directly yet.
 4. **Check the canary owner's web chat:**
    - same topics, chats, order, archived chats and history;
    - a send gets a reply;
@@ -139,9 +141,11 @@ upgraded report no finitechat plugin and stay on the hosted device.
 3. After each host:
    - run `scripts/finite-status`; Direct chat fold must not be amber;
    - copy that host's `fold-status.json` files and run the audit;
-   - for any room that is not intact, keep that agent upgraded but take it off
-     the list by naming the other runtimes explicitly instead of `*`, then
-     investigate.
+   - for any agent with a room that is not intact, follow **A failed audit**
+     under Rollback right away. Never leave it upgraded while taking it off the
+     dashboard list: the dashboard would send its chat to the hosted device,
+     which an upgraded agent no longer reads, and sends would never reach
+     Hermes.
 
 ### 5. After
 
@@ -151,21 +155,34 @@ record transcript content.
 
 ## Rollback
 
-**Before people have chatted directly (canary, or a failed audit):**
-- Upgrade the agent forward to the previous artifact with the same wrapper. Its
-  MLS store is untouched, so the agent serves MLS chat and the dashboard uses
-  the hosted device for it. The direct image's dashboard plugin stays in the
-  Hermes home and reports `not_found` to the dashboard. Within 30 seconds of
-  the agent being healthy, check that the owner's chat loads.
-- Leave `direct/` in place. The next direct start refuses it, because MLS
-  advanced past the fold, and keeps serving MLS chat. Move it aside
-  (`direct.rolled-back-<time>`) before upgrading again; that start folds afresh.
+The dashboard list stays as it is in every case. An agent's own report decides
+its chat path, so backend and dashboard cannot disagree.
+
+**A failed audit, or a canary you abandon (before people have chatted directly):**
+1. Upgrade the agent forward to the previous artifact with the same wrapper.
+   - Its MLS store and MLS delivery state are untouched, so it serves MLS chat,
+     and the dashboard uses the hosted device for it.
+   - The direct image's dashboard plugin stays in the Hermes home and reports
+     `not_found` to the dashboard.
+2. Within 30 seconds of the agent being healthy, check that the owner's chat
+   loads and a send gets a reply.
+3. Move the log aside from the host. The older image does not read it:
+   `mv /data/finite-saas-runner/kata/<agent runtime id>/agent/direct …/agent/direct.rolled-back-<time>`.
+   - Keep it. It is the copy that failed, with its `fold-status.json`.
+   - Do not leave it in place. If nothing moves on MLS before the next upgrade,
+     the next direct start would serve that same log again.
+4. Investigate from the moved-aside copy and the audit output. The next upgrade
+   folds afresh and must pass the audit again.
 
 **After people have chatted directly:**
 - Their direct-period messages exist only in `direct/` and in Hermes' sessions.
   The MLS path cannot show them.
-- Prefer rolling forward. If you must roll back, keep `direct/`, move it aside
-  as above, and record which runtimes did so in FIN-182.
+- Prefer rolling forward. If you must roll back, follow steps 1–3 above and
+  record which runtimes did so in FIN-182.
+- If you upgrade without moving `direct/` aside, the next direct start compares
+  MLS with the log. It refuses the log, and keeps serving MLS chat with the
+  reason in `fold-status.json`, if any MLS room advanced or gained history since
+  the log began. That applies to folded and fresh logs alike.
 
 **Dashboard only:** set the list back to `""` and deploy. This alone is not a
 rollback for an upgraded agent: it no longer reads MLS, so its chat would stop.
