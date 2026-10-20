@@ -16,7 +16,7 @@ export function AdminOpsTabs({ children }: { children: ReactNode }) {
     <ToolbarTarget.Provider value={toolbar}>
       <Tabs value={section} onValueChange={setSection} className="gap-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
-          <TabsList aria-label="Admin sections" className={styles.sectionTabs} style={{ height: 40 }}>
+          <TabsList aria-label="Admin sections" className={styles.sectionTabs}>
             <TabsTrigger value="users">Users</TabsTrigger>
             <TabsTrigger value="invites">Invites</TabsTrigger>
             <TabsTrigger value="trials">Free trials</TabsTrigger>

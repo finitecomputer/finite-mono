@@ -4,7 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
 
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 import {
@@ -106,6 +106,7 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     const scrollRegion = page.getByRole("region", { name: "Users table, scroll for more columns" });
     assert.equal(await scrollRegion.evaluate((element) => element.scrollWidth > element.clientWidth), true);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await assertAdminTabsStayInShell(page);
     await page.setViewportSize({ width: 1440, height: 1000 });
     await page.getByLabel("Filter agents").fill("PRIVATE@FINITE.VIP 84");
     assert.equal(await usersTable.locator("tbody > tr").count(), 1);
@@ -167,6 +168,31 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await stopChildProcess(dashboard);
   }
 });
+
+/**
+ * Keyboard tab navigation must not scroll the dashboard shell sideways: the
+ * document can fit while the inner `.ocean-app-scroll` overflows.
+ */
+async function assertAdminTabsStayInShell(page: Page) {
+  const tabs = ["Users", "Invites", "Free trials", "Finite Private", "Email"];
+  await page.getByRole("tab", { name: "Users", exact: true }).focus();
+  for (const [key, expected] of [["End", "Email"], ...tabs.slice(0, -1).reverse().map((name) => ["ArrowLeft", name])]) {
+    await page.keyboard.press(key);
+    const tab = page.getByRole("tab", { name: expected, exact: true });
+    await waitFor(async () => (await tab.getAttribute("aria-selected")) === "true");
+    const shell = await page.locator(".ocean-app-scroll").evaluate((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      scrollLeft: element.scrollLeft,
+    }));
+    assert.ok(shell.scrollWidth <= shell.clientWidth, `${expected}: shell overflows ${JSON.stringify(shell)}`);
+    assert.equal(shell.scrollLeft, 0, `${expected}: shell scrolled sideways`);
+    const heading = await page.getByRole("heading", { name: "Ministry of Operations" }).boundingBox();
+    assert.ok(heading && heading.x >= 0, `${expected}: heading moved to x=${heading?.x}`);
+    const strip = await page.getByRole("tablist", { name: "Admin sections" }).boundingBox();
+    assert.ok(strip && strip.x >= 0 && strip.x + strip.width <= 390, `${expected}: tab strip clipped ${JSON.stringify(strip)}`);
+  }
+}
 
 async function stopChildProcess(process: ChildProcessWithoutNullStreams) {
   if (process.exitCode !== null || process.signalCode !== null) return;

@@ -20,13 +20,20 @@
   margin-top: 4px;
 }
 
+/* Five tabs exceed a phone's width; wrap inside the page instead of widening the shell. */
 .sectionTabs {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  max-width: 100%;
+  height: auto;
+  min-height: 40px;
   background: transparent;
   padding: 0;
   gap: 4px;
 }
 
 .sectionTabs > [data-slot="tabs-trigger"] {
+  flex: 0 0 auto;
   height: 40px;
   border-radius: 999px;
   padding-inline: 14px;
