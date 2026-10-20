@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod access_report;
+mod admin_demotion;
 mod approvals;
 mod brains;
 mod folder_access;
@@ -37,6 +38,7 @@ pub use access_report::{
     MAX_ACCESS_REPORT_IDENTITIES, MAX_ACCESS_REPORT_OUTGOING_MOUNTS, ParticipationEvidence,
     ParticipationKind,
 };
+pub use admin_demotion::{AdminDemotionRequest, admin_demotion_rotation_folders};
 pub use folder_key_rotation::{
     FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
     folder_key_required_recipients, stale_folder_key_holders,
@@ -101,6 +103,14 @@ pub enum StoreError {
         current_key_version: u32,
         requested_key_version: u32,
     },
+    /// A roster change that must rotate Folder Keys was submitted with a
+    /// different set of rotations than the stored roster requires: the client
+    /// is too old to prepare them, or the roster changed after preparation.
+    FolderRotationSetMismatch {
+        operation: &'static str,
+        required_folder_ids: Vec<String>,
+        supplied_folder_ids: Vec<String>,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -157,6 +167,16 @@ impl fmt::Display for StoreError {
             } => write!(
                 f,
                 "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
+            ),
+            Self::FolderRotationSetMismatch {
+                operation,
+                required_folder_ids,
+                supplied_folder_ids,
+            } => write!(
+                f,
+                "{operation} must rotate exactly the Folder Keys of [{}], but the request rotates [{}]; nothing was changed. Prepare the change again with a current fbrain",
+                required_folder_ids.join(", "),
+                supplied_folder_ids.join(", ")
             ),
         }
     }
@@ -803,7 +823,8 @@ pub struct EncryptedExportFolderAccess {
     pub user_ids: Vec<UserId>,
 }
 
-/// One Folder Key rotation prepared for atomic Member removal.
+/// One Folder Key rotation prepared for an atomic roster change: Member
+/// removal or admin demotion.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MemberFolderRotation {
     pub folder_id: FolderId,
@@ -3435,6 +3456,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
+    mod admin_demotion_tests;
     mod folder_key_rotation_tests;
 
     #[test]
@@ -8466,7 +8488,7 @@ mod tests {
     }
 
     #[test]
-    fn demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
+    fn legacy_demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("brain.sqlite3");
         let mut store = BrainStore::open(&db).unwrap();
@@ -8486,7 +8508,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &old_grant)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         // Reopen persisted pre-repair state, as a server upgrade would.
         drop(store);
         let mut store = BrainStore::open(&db).unwrap();
@@ -8601,7 +8623,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &retained)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         let repair = grant("repair", "strategy", 1, "npub-admin", member.as_str());
         let key_record = folder_key_grant_control_record(&repair, "repair-key-record");
         let access_record = folder_access_control_record(
@@ -8681,15 +8703,29 @@ mod tests {
         store.add_member(&brain_id, &member).unwrap();
         store.add_admin(&brain_id, &member).unwrap();
 
-        store.remove_admin(&brain_id, &member).unwrap();
-        assert_eq!(
-            store
-                .remove_admin(&brain_id, &UserId::new("npub-admin").unwrap())
-                .unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: "organization brain must keep at least one admin".to_owned()
-            }
-        );
+        let rotations = [MemberFolderRotation {
+            folder_id: FolderId::new("private-project").unwrap(),
+            new_key_version: 2,
+            grants: vec![grant(
+                "private-project-admin-v2",
+                "private-project",
+                2,
+                "npub-admin",
+                "npub-admin",
+            )],
+            reencrypted_records: Vec::new(),
+        }];
+        store
+            .remove_admin(
+                &brain_id,
+                AdminDemotionRequest {
+                    removed_user_id: &member,
+                    rotations: &rotations,
+                    updated_at: "2026-06-23T00:00:00.000Z",
+                    control_records: &[],
+                },
+            )
+            .unwrap();
 
         store.remove_member(&brain_id, &member).unwrap();
         let stored = store.load_brain(&brain_id).unwrap();
@@ -9597,6 +9633,29 @@ mod tests {
             self.grant_folder_access_with_control_records(
                 brain_id, folder_id, user_id, grant, &records,
             )
+        }
+    }
+
+    /// Demote an admin the way Brain servers did before demotion rotated
+    /// Folder Keys: drop the role row and keep every wrap. Production Brains
+    /// still hold state written this way, so stale-wrap fixtures start here.
+    trait LegacyAdminDemotionTestExt {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId);
+    }
+
+    impl LegacyAdminDemotionTestExt for BrainStore {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId) {
+            let removed = self
+                .conn
+                .execute(
+                    "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                    params![brain_id.as_str(), user_id.as_str()],
+                )
+                .unwrap();
+            assert_eq!(
+                removed, 1,
+                "legacy demotion fixture target must be an admin"
+            );
         }
     }
 

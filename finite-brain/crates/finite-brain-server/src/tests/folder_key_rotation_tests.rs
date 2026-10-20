@@ -12,11 +12,15 @@ struct Cast {
     member: Keys,
     guest: Keys,
     outsider: Keys,
+    /// File-backed store, so the fixture can write legacy state directly.
+    database: tempfile::TempDir,
 }
 
 /// `acme` with a restricted Folder holding one page. `demoted` received the
-/// current wrap as an admin and was then demoted, `guest` holds explicit
-/// Folder access, and `member` is an ordinary Member with no Folder access.
+/// current wrap as an admin and was then demoted the way servers did before
+/// demotion rotated Folder Keys (the role row deleted, every wrap kept), as
+/// production still holds. `guest` holds explicit Folder access, and `member`
+/// is an ordinary Member with no Folder access.
 async fn demoted_admin_brain() -> (ServerState, Router, Cast) {
     demoted_admin_brain_with(|state| state).await
 }
@@ -32,9 +36,11 @@ async fn demoted_admin_brain_with(
         member: Keys::generate(),
         guest: Keys::generate(),
         outsider: Keys::generate(),
+        database: tempfile::TempDir::new().unwrap(),
     };
+    let database_path = cast.database.path().join("brain.sqlite3");
     let state = configure(
-        ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
+        ServerState::new(BrainStore::open(&database_path).unwrap(), TEST_BASE_URL)
             .with_auth_clock(TEST_NOW, 60),
     );
     let router = router_with_state(state.clone());
@@ -88,12 +94,14 @@ async fn demoted_admin_brain_with(
     )
     .await;
     assert_eq!(page.status(), StatusCode::OK);
-    {
-        let mut store = state.store.lock().unwrap();
-        store
-            .remove_admin(&brain, &UserId::new(npub(&cast.demoted)).unwrap())
-            .unwrap();
-    }
+    let legacy = rusqlite::Connection::open(&database_path).unwrap();
+    let demoted_rows = legacy
+        .execute(
+            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+            rusqlite::params![brain.as_str(), npub(&cast.demoted)],
+        )
+        .unwrap();
+    assert_eq!(demoted_rows, 1);
     (state, router, cast)
 }
 
@@ -1132,7 +1140,12 @@ async fn a_rotation_that_skips_versions_is_a_bad_request() {
 
 /// A request whose body sends one byte and then never finishes. With
 /// `signer`, it carries a valid signed header for `method` and `path`.
-fn stalled_request(method: &str, path: &str, signer: Option<&Keys>, at: u64) -> Request<Body> {
+pub(super) fn stalled_request(
+    method: &str,
+    path: &str,
+    signer: Option<&Keys>,
+    at: u64,
+) -> Request<Body> {
     let body = async_stream::stream! {
         yield Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"{"));
         std::future::pending::<()>().await;
@@ -1151,7 +1164,7 @@ fn stalled_request(method: &str, path: &str, signer: Option<&Keys>, at: u64) -> 
 }
 
 /// Send a request that must be answered without waiting for its body.
-async fn answered_without_body(
+pub(super) async fn answered_without_body(
     router: &Router,
     request: Request<Body>,
 ) -> axum::response::Response {
@@ -1289,7 +1302,7 @@ async fn a_stalled_admin_upload_times_out_and_releases_its_permit() {
 }
 
 /// Wait until `condition` holds, failing after five seconds.
-async fn eventually(what: &str, condition: impl Fn() -> bool) {
+pub(super) async fn eventually(what: &str, condition: impl Fn() -> bool) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while !condition() {
         assert!(
