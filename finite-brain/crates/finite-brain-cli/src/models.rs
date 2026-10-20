@@ -561,6 +561,18 @@ pub(crate) struct PersonalAgentView {
     pub(crate) agent_npub: String,
 }
 
+/// Server-computed scope of a permanent Folder deletion
+/// (`GET /v1/brains/{id}/folders/{folder}/deletion-preview`).
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderDeletionPreviewView {
+    pub(crate) brain_id: String,
+    pub(crate) folder_id: String,
+    pub(crate) folder_ids: Vec<String>,
+    pub(crate) object_count: usize,
+    pub(crate) current_key_version: u32,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FolderMetadataView {
