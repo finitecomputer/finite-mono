@@ -92,6 +92,23 @@ pub const MAX_MEMBER_REMOVAL_ROTATIONS: usize =
 pub const MAX_MEMBER_REMOVAL_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
 /// Maximum total re-encrypted records accepted in one Member removal.
 pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
+/// Maximum request body for one request that carries Folder Key rotation
+/// material: standalone rotation, Folder access removal, Member removal and
+/// Mount participant or Mount revocation. Each re-encrypted page travels with
+/// its signed revision event, so the ordinary 1 MiB request cap would refuse
+/// a Folder whose live pages total about 1 MiB. This explicit budget averages
+/// about 64 KiB per record at the 1,000-record Folder fan-out limit and stays
+/// below the 128 MiB export a client downloads to prepare the rotation;
+/// larger rotations are refused, never truncated.
+pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Seconds an admitted rotation request may take to deliver its body before
+/// the server answers 408 and releases its admission permit.
+pub const ROTATION_BODY_READ_DEADLINE_SECONDS: u64 = 60;
+/// Seconds an authorized rotation request may wait, in arrival order, for an
+/// admission permit before the server answers 503: two body deadlines, so a
+/// request with nobody waiting ahead of it reaches the front within one
+/// deadline of any stall ahead; each earlier waiter can add another deadline.
+pub const ROTATION_ADMISSION_WAIT_SECONDS: u64 = 2 * ROTATION_BODY_READ_DEADLINE_SECONDS;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -787,6 +804,9 @@ pub struct FolderRotationFanout {
 pub enum FolderRotationOperation {
     PersonalAgent,
     FolderAccessRemoval,
+    /// Standalone rotation of one Folder Key with no removed target. Bounded
+    /// exactly like Folder access removal: one Folder per request.
+    FolderKeyRotation,
     MemberRemoval,
 }
 
@@ -798,21 +818,25 @@ pub fn validate_folder_rotation_fanout(
     let operation_name = match operation {
         FolderRotationOperation::PersonalAgent => "Personal Agent rotation",
         FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
+        FolderRotationOperation::FolderKeyRotation => "Folder Key rotation",
         FolderRotationOperation::MemberRemoval => "Member removal",
     };
     let max_rotations = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
-        FolderRotationOperation::FolderAccessRemoval => 1,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => 1,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_ROTATIONS,
     };
     let max_total_grants = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_GRANTS,
     };
     let max_total_records = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_RECORDS,
     };
 
@@ -3327,6 +3351,57 @@ mod tests {
                 }],
             ),
             Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_standalone_folder_key_rotation_like_access_removal() {
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                ],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: MAX_FOLDER_ACCESS_REMOVAL_GRANTS + 1,
+                    reencrypted_records: 0,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ACCESS_REMOVAL_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
                 resource: "re-encrypted records per Folder rotation",
                 ..
             })

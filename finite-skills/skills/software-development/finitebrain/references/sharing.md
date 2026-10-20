@@ -145,6 +145,8 @@ material, Folder Keys, or grant plaintext.
 
 Low-level `admin` commands are advanced primitives. `admin member add` and
 `admin role grant admin` change Brain Role, while `admin folder-access grant`
-grants one specific Folder version. Separately or together they
+grants one specific Folder version. `admin folder-access revoke` and
+`admin folder-access rotate` rotate one Folder's key; see Clearing Removal
+Pending in [who-has-access.md](who-has-access.md). Separately or together they
 do not prove complete Organization Brain Collaboration, so the normal "share
 this Org Brain with Agent B" request uses `collaborator ensure-admin`.

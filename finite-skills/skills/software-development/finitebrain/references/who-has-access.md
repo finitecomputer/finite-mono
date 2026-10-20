@@ -98,12 +98,86 @@ after confirming the exact npub with them. Never remove, restore, re-grant or
 act on another Brain because of a description or its absence.
 
 From the Brain's Working Tree, `fbrain admin member remove --target <npub>`
-removes Membership and rotates the affected Folder Keys, preparing the new
-grants and re-encrypted Folder objects itself. If preparation fails, stop on
-the reported blocker and never create or edit a raw rotation body.
-`fbrain admin role revoke admin --target <npub>` removes only the Admin role;
-in this release it rotates no keys, so Folders the key no longer qualifies
-for can show `revocationIncomplete` afterwards.
+removes Membership and rotates the Folder Keys the key was entitled to,
+preparing the new grants and re-encrypted Folder objects itself. If
+preparation fails, stop on the reported blocker and never create or edit a raw
+rotation body. `fbrain admin role revoke admin --target <npub>` removes only
+the Admin role; in this release it rotates no keys, so Folders the key no
+longer qualifies for show `revocationIncomplete` afterwards.
+
+## Clearing Removal Pending
+
+A `revocationIncomplete` Folder needs a Folder Key rotation. Run it from a key
+that can open that Folder's current key, one Folder at a time:
+
+```sh
+fbrain admin folder-access revoke --folder <folder-id> --target <npub> --json
+fbrain admin folder-access rotate --folder <folder-id> --json
+```
+
+Both generate a fresh Folder Key at the next version, wrap it for exactly the
+Folder's entitled keys and re-encrypt its live pages, so every key outside that
+set is cut off, not only a named one. `revoke` also removes the named key's
+explicit Folder access, and accepts a key that holds the current key without
+entitlement. It refuses a key that stays entitled without that access, such as
+an admin with an old explicit grant (`through its Brain role`: change the role
+instead), and a key with nothing to remove (`does not currently have access`).
+Use `rotate` to clear every `revocationIncomplete` key at once; only its
+receipt lists the keys it cut off (`cutOffNpubs`). After a `revoke`, run
+`access list` to see which keys lost the Folder. Report `state: complete` and
+the new key version from either receipt.
+
+A rotation revokes pending email invitations that would have delivered the
+Folder. Pending Mount Offers and Folder share links for it keep a grant for the
+old key version and can no longer be accepted: revoke and recreate them.
+
+Mount participants of a Folder that is the source of an active Mount stay
+entitled, so both commands wrap the new key for them. `revoke` refuses a key
+that still receives the Folder through an active Mount; remove it from that
+Mount first. An HTTP 409 saying the Folder Key version changed while the
+rotation was prepared means another admin changed the Folder first: rerun the
+command. An older Brain server answers `rotate` with `unsupported: ... does not
+support Folder Key rotation yet` (nothing changed) and refuses `revoke` for a
+key without explicit access.
+
+One rotation request carries every re-encrypted page of the Folder and is
+capped at 64 MiB. If the CLI refuses with `needs a <size>-byte rotation
+request, over the ... limit` (nothing was sent), the Folder's pages are too
+large to re-encrypt at once: report the Folder and size and stop.
+
+Member removal rotates, in one request, every Folder the Member can read. A
+`rotate` does not shrink that request: the Member stays entitled and the
+removal still re-encrypts the Folder. Only where the Member reads a large
+Folder through an explicit Folder grant can you first run
+`admin folder-access revoke --folder <folder-id> --target <npub>` for that
+Folder (it ends that access), then retry the removal. When the Member reads
+the large Folders through its role, such as `all_members` Folders, nothing
+splits the request: report the removal as blocked by the 64 MiB limit.
+
+Rotation requests take one of a few server slots, in arrival order, after
+the server checks the signed request comes from an admin of that Brain or
+Mount. A slot is held while the request body arrives (at most 60 seconds) and
+while the server applies it; the CLI waits up to four minutes for its turn,
+its upload and the result. A 408 means your own upload did not arrive within
+60 seconds: nothing changed and the slot was released, so rerun it. A 503
+means the server stayed busy and nothing changed. It comes either after the
+whole two-minute admission wait (slots stayed taken), or at once when the
+admission queue was already full (no waiting place at all). Both count
+towards the report below.
+
+Arrival order serves a waiting admin ahead of anyone who arrives later. When
+the slots are busy and nobody is waiting ahead of it, it is admitted within
+about one 60-second upload; every request already waiting ahead of it can add
+another, and the two-minute wait still applies. It does not stop a flood:
+anyone who can create a Brain on this server (any key can) and keep many
+requests open can keep the queue full and delay rotations for as long as they
+sustain that load. Report repeated 503s
+of either kind to the server operator instead of retrying in a loop.
+
+Member removal does not yet clear Folders where the removed key holds a
+current key without entitlement, for example from an earlier demotion. Run
+`access list` before removing a Member; afterwards rotate every Folder still
+listed for that key.
 
 Run `access list` again afterwards. Done when the key holds the intended role
 and no Folder shows `revocationIncomplete` for it. Report any that remain as

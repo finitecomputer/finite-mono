@@ -7,6 +7,7 @@ mod clock;
 mod embedding_provider;
 mod environment;
 mod error;
+mod folder_key_rotation;
 mod http;
 mod identity_authority;
 mod models;
@@ -33,6 +34,7 @@ pub use models::{ActivityEntry, ConflictEntry, ConflictState};
 pub(crate) use admin::*;
 pub(crate) use args::*;
 pub(crate) use clock::*;
+pub(crate) use folder_key_rotation::*;
 pub(crate) use http::*;
 pub(crate) use identity_authority::*;
 pub(crate) use models::*;
@@ -158,7 +160,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2464,25 +2466,58 @@ fn access_revoke<W: Write>(
     let target_input = required_option_or_positional(args, "--target", 1, "target")?;
     let target = resolve_identity_npub(env, args, &target_input)?;
     let metadata = fetch_brain_metadata(env, args, &brain_id)?;
+    if let Some(folder) = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+    {
+        let access_without_target = folder
+            .access_user_ids
+            .iter()
+            .filter(|user| **user != target)
+            .cloned()
+            .collect::<Vec<_>>();
+        if folder_required_recipients(&metadata, &folder.access, &access_without_target)?
+            .contains(&target)
+        {
+            return Err(CliError::InvalidInput(format!(
+                "{target} holds Folder {folder_id} through its Brain role (admin, all_members Member, owner or Personal Agent), not Folder access; revoking would hand it the new Folder Key. Change the role instead, for example `fbrain admin role revoke admin --target {target}`. Nothing was changed"
+            )));
+        }
+    }
     let body = prepare_folder_access_removal(env, args, &metadata, &brain_id, &folder_id, &target)?;
     let new_key_version = body["newKeyVersion"].as_u64().ok_or_else(|| {
         CliError::InvalidInput("prepared rotation omitted key version".to_owned())
     })?;
     let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
-    let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+    let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
     let authoritative: BrainMetadataView = serde_json::from_value(response)?;
     let folder = authoritative
         .folders
         .iter()
         .find(|folder| folder.id == folder_id)
         .ok_or_else(|| CliError::NotFound(format!("folder {folder_id} after revocation")))?;
+    // The new key is wrapped for exactly the Folder's required recipients, so
+    // the target must not be one of them in the authoritative roster.
+    let still_wrapped =
+        folder_required_recipients(&authoritative, &folder.access, &folder.access_user_ids)?
+            .contains(&target);
     if folder.current_key_version != new_key_version as u32
         || folder.access_user_ids.iter().any(|user| user == &target)
+        || still_wrapped
     {
         return Err(CliError::InvalidInput(
             "Folder access revocation postcondition was not authoritative".to_owned(),
         ));
     }
+    let summary = format!(
+        "Folder access revoked brain={brain_id} folder={folder_id} target={target} keyVersion={new_key_version}"
+    );
+    // Best effort: the local activity log exists only inside a Working Tree.
+    let _ = mutate_agent_state(env, |state, now| {
+        state.add_activity(now, "admin.folder_access.revoked", summary.clone());
+        Ok(())
+    });
     let receipt = serde_json::json!({
         "state": "complete",
         "operation": "admin-folder-access-revoke",
@@ -3147,7 +3182,7 @@ fn mount<W: Write>(
                         "reencryptedRecords": []
                     })
                 };
-                signed_json_request(env, args, "DELETE", &route, Some(body))?
+                signed_rotation_request(env, args, "DELETE", &route, body)?
             } else {
                 return Err(CliError::InvalidCommand(format!(
                     "mount participant {action}"
@@ -3198,7 +3233,7 @@ fn mount<W: Write>(
                     env, args, &metadata, &brain_id, &folder_id, &targets,
                 )?
             };
-            let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             if response["status"] != "revoked" {
                 return Err(CliError::InvalidInput(
                     "Mount revoke postcondition was not authoritative".to_owned(),
@@ -3473,17 +3508,17 @@ fn admin_operation<W: Write>(
                 }));
             }
             let route = format!("/v1/admin/brains/{brain_id}/members/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({
-                    "accessChangeEvent": event,
-                    "rotations": rotations,
-                    "mountRotations": mount_rotations
-                })),
+            let body = serde_json::json!({
+                "accessChangeEvent": event,
+                "rotations": rotations,
+                "mountRotations": mount_rotations
+            });
+            ensure_rotation_request_fits(
+                &format!("Member removal of {target}"),
+                &body,
+                finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
             )?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             let authoritative: BrainMetadataView = serde_json::from_value(response)?;
             if authoritative.members.iter().any(|member| member == &target)
                 || authoritative
@@ -3633,6 +3668,9 @@ fn admin<W: Write>(
         ("member", "add" | "remove") | ("folder-access", "grant") => &args[1..],
         ("folder-access", "revoke") => {
             return access_revoke(&args[1..], env, json, output);
+        }
+        ("folder-access", "rotate") => {
+            return access_rotate(&args[1..], env, json, output);
         }
         ("role", "grant") | ("role", "revoke") => {
             let positional_role = args.get(2).filter(|value| !value.starts_with('-')).cloned();
@@ -4749,6 +4787,7 @@ mod tests {
 
     mod access_report_tests;
     mod folder_delete_tests;
+    mod folder_key_rotation_tests;
 
     #[test]
     fn invite_accept_input_parses_url_fragment_and_bare_token() {
