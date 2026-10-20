@@ -14,7 +14,8 @@ export function AdminOpsTabs({ children }: { children: ReactNode }) {
   const [toolbar, setToolbar] = useState<HTMLDivElement | null>(null);
   return (
     <ToolbarTarget.Provider value={toolbar}>
-      <Tabs value={section} onValueChange={setSection} className="gap-4">
+      {/* min-w-0: the page stack's grid would otherwise size this to the Users search field. */}
+      <Tabs value={section} onValueChange={setSection} className="min-w-0 gap-4">
         <div className="flex flex-wrap items-center justify-between gap-4">
           <TabsList aria-label="Admin sections" className={styles.sectionTabs}>
             <TabsTrigger value="users">Users</TabsTrigger>
