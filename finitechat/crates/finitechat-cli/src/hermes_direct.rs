@@ -179,10 +179,34 @@ impl DirectStore {
              CREATE TABLE IF NOT EXISTS direct_profiles (
                account_id TEXT PRIMARY KEY,
                profile_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS direct_used_authorizations (
+               signature TEXT PRIMARY KEY,
+               used_at INTEGER NOT NULL
              );",
         )
         .map_err(|error| CliError::Hermes(format!("direct log schema failed: {error}")))?;
         Ok(Self { conn })
+    }
+
+    /// Record a request authorization's first use; false if it was used
+    /// before. Kept past the validity window, then pruned.
+    fn consume_authorization(&self, signature: &str, now: u64) -> Result<bool, CliError> {
+        self.conn
+            .execute(
+                "DELETE FROM direct_used_authorizations WHERE used_at < ?1",
+                params![now.saturating_sub(AUTHORIZATION_REPLAY_SECS) as i64],
+            )
+            .map_err(sql_error)?;
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO direct_used_authorizations(signature, used_at)
+                 VALUES (?1, ?2)",
+                params![signature, now as i64],
+            )
+            .map_err(sql_error)?;
+        Ok(inserted == 1)
     }
 
     fn meta(&self, key: &str) -> Result<Option<String>, CliError> {
@@ -545,7 +569,6 @@ pub(super) struct DirectRuntime {
     origin: DirectOrigin,
     inner: Mutex<DirectInner>,
     updates: (Mutex<u64>, Condvar),
-    seen_authorizations: Mutex<BTreeMap<String, u64>>,
     on_append: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
 }
 
@@ -602,7 +625,6 @@ impl DirectRuntime {
                 polled_row_id,
             }),
             updates: (Mutex::new(0), Condvar::new()),
-            seen_authorizations: Mutex::new(BTreeMap::new()),
             on_append: Mutex::new(None),
         }))
     }
@@ -766,12 +788,15 @@ impl DirectRuntime {
         }
         let signer = event.pubkey.to_hex();
         self.authorize_signer(&signer)?;
-        let mut seen = self
-            .seen_authorizations
+        // Durable, so a restart inside the validity window cannot make a
+        // used authorization valid again.
+        let first_use = self
             .lock()
-            .map_err(|_| AppApiError::Internal("authorization cache poisoned".to_owned()))?;
-        seen.retain(|_, at| now.saturating_sub(*at) <= AUTHORIZATION_REPLAY_SECS);
-        if seen.insert(event.sig.to_string(), now).is_some() {
+            .map_err(|error| AppApiError::Internal(error.to_string()))?
+            .store
+            .consume_authorization(&event.sig.to_string(), now)
+            .map_err(|error| AppApiError::Internal(error.to_string()))?;
+        if !first_use {
             return Err(AppApiError::Unauthorized(
                 "chat authorization was already used",
             ));
@@ -1257,11 +1282,15 @@ fn fold_agent_device(home: &AgentHome) -> Result<(), CliError> {
     let dir = direct_dir(&home.dir);
     fs::create_dir_all(&dir).map_err(|error| CliError::Hermes(error.to_string()))?;
     let has_mls_store = home.dir.join(STORE_FILE).is_file();
-    let export = if has_mls_store {
+    let source = if has_mls_store {
         Some(final_sync_and_export(home)?)
     } else {
         None
     };
+    let mls_cursors = source
+        .as_ref()
+        .map(|source| source.cursors.clone())
+        .unwrap_or_default();
     let staging = dir.join(format!("{DIRECT_LOG_FILE}.fold-{}", std::process::id()));
     let _ = fs::remove_file(&staging);
     let report = {
@@ -1270,10 +1299,18 @@ fn fold_agent_device(home: &AgentHome) -> Result<(), CliError> {
             .conn
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(sql_error)?;
-        let report = match &export {
-            Some(export) if !export.rooms.is_empty() => write_fold(&store, home, export)?,
+        let report = match &source {
+            Some(source) if !source.export.rooms.is_empty() => {
+                write_fold(&store, home, &source.export)?
+            }
             _ => write_fresh_room(&store, home)?,
         };
+        // The MLS boundary this log starts from, for fresh logs too: any MLS
+        // room that later gains history means MLS chat ran past this log.
+        store.set_meta(
+            "fold_cursors",
+            &serde_json::to_string(&mls_cursors).map_err(CliError::Serialize)?,
+        )?;
         store.conn.execute_batch("COMMIT").map_err(sql_error)?;
         report
     };
@@ -1317,11 +1354,10 @@ fn refuse_if_mls_advanced_after_fold(home: &AgentHome) -> Result<(), CliError> {
     if !home.dir.join(STORE_FILE).is_file() {
         return Ok(());
     }
+    // Every MLS room's cursor when the log began, folded or fresh. A room
+    // missing here had no history then.
     let recorded = {
         let store = DirectStore::open(&DirectStore::path(&home.dir))?;
-        if store.meta("origin")?.as_deref() != Some("fold") {
-            return Ok(());
-        }
         store
             .meta("fold_cursors")?
             .and_then(|value| serde_json::from_str::<BTreeMap<String, u64>>(&value).ok())
@@ -1335,9 +1371,7 @@ fn refuse_if_mls_advanced_after_fold(home: &AgentHome) -> Result<(), CliError> {
         .room_sync_cursors()?
         .into_iter()
         .filter(|cursor| {
-            recorded
-                .get(&cursor.room_id)
-                .is_some_and(|folded| cursor.last_applied_seq > *folded)
+            cursor.last_applied_seq > recorded.get(&cursor.room_id).copied().unwrap_or(0)
         })
         .map(|cursor| cursor.room_id)
         .collect::<Vec<_>>();
@@ -1345,36 +1379,82 @@ fn refuse_if_mls_advanced_after_fold(home: &AgentHome) -> Result<(), CliError> {
         Ok(())
     } else {
         Err(CliError::Hermes(format!(
-            "direct log refused: MLS chat advanced after the fold in {}; move {}/{DIRECT_DIR} aside to fold again",
+            "direct log refused: MLS chat advanced after this log began, in {}; move {}/{DIRECT_DIR} aside to fold again",
             advanced.join(", "),
             home.dir.display()
         )))
     }
 }
 
-/// Sync the MLS Device until the server has nothing newer, then export.
-fn final_sync_and_export(home: &AgentHome) -> Result<DirectFoldExport, CliError> {
+/// What a fold installs: the Device's export, and every MLS room's cursor.
+struct FoldSource {
+    export: DirectFoldExport,
+    cursors: BTreeMap<String, u64>,
+}
+
+/// Sync the MLS Device until every room has reached the server head, then
+/// export. Anything short of that keeps MLS chat: a fold installed early
+/// would serve a room with the tail of its history missing.
+fn final_sync_and_export(home: &AgentHome) -> Result<FoldSource, CliError> {
     let runtime = open_agent_runtime(home)?;
     runtime.dispatch_and_wait(AppAction::StartRuntime)?;
+    let mut drained = false;
     for _ in 0..FOLD_SYNC_ROUNDS {
         let sync = runtime.agent_bridge_poll_once()?;
         if sync.events.is_empty() {
+            drained = true;
             break;
         }
     }
-    let behind = runtime
-        .room_sync_cursors()?
-        .into_iter()
-        .filter(|cursor| cursor.behind_server.is_some())
-        .map(|cursor| cursor.room_id)
+    let cursors = runtime.room_sync_cursors()?;
+    let export = runtime.export_direct_fold()?;
+    let served = export
+        .rooms
+        .iter()
+        .filter(|room| room.connected)
+        .map(|room| room.room_id.as_str())
         .collect::<Vec<_>>();
-    if !behind.is_empty() {
-        return Err(CliError::Hermes(format!(
-            "direct fold refused: rooms are behind the chat server: {}",
-            behind.join(", ")
-        )));
+    fold_sync_complete(drained, &served, &cursors)
+        .map_err(|reason| CliError::Hermes(format!("direct fold refused: {reason}")))?;
+    Ok(FoldSource {
+        export,
+        cursors: cursors
+            .into_iter()
+            .map(|cursor| (cursor.room_id, cursor.last_applied_seq))
+            .collect(),
+    })
+}
+
+/// Whether a fold may serve `rooms`. Each must have finished a sync to the
+/// server head in this process (`currency_verified`, which a quarantined room
+/// never gets) and must not be behind the server; the sync must also have
+/// drained rather than run out of rounds.
+fn fold_sync_complete(
+    drained: bool,
+    rooms: &[&str],
+    cursors: &[AppRoomSyncCursor],
+) -> Result<(), String> {
+    if !drained {
+        return Err(format!(
+            "the chat server still had events after {FOLD_SYNC_ROUNDS} sync rounds"
+        ));
     }
-    Ok(runtime.export_direct_fold()?)
+    let mut incomplete = Vec::new();
+    for room_id in rooms {
+        let cursor = cursors.iter().find(|cursor| cursor.room_id == *room_id);
+        match cursor {
+            Some(cursor) if cursor.behind_server.is_some() => {
+                incomplete.push(format!("{room_id} (behind the chat server)"));
+            }
+            Some(cursor) if cursor.currency_verified => {}
+            _ => incomplete.push(format!("{room_id} (did not sync to the server head)")),
+        }
+    }
+    if incomplete.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("rooms are not current: {}", incomplete.join(", ")))
+    }
 }
 
 fn write_fold(
@@ -1448,15 +1528,6 @@ fn write_fold(
     store.set_meta("origin", "fold")?;
     store.set_meta("created_at", &now_unix_seconds().to_string())?;
     store.set_meta("owner_account_id", &owner)?;
-    let cursors = export
-        .rooms
-        .iter()
-        .map(|room| (room.room_id.clone(), room.last_applied_seq))
-        .collect::<BTreeMap<_, _>>();
-    store.set_meta(
-        "fold_cursors",
-        &serde_json::to_string(&cursors).map_err(CliError::Serialize)?,
-    )?;
     for profile in &export.profiles {
         store.upsert_profile(profile)?;
     }
@@ -2247,4 +2318,62 @@ pub(super) fn cmd_direct_digest<W: Write>(home_dir: &Path, output: &mut W) -> Re
             "rooms": digests,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use finitechat_core::AppBehindServerEvidence;
+
+    fn cursor(room_id: &str, currency_verified: bool, behind: bool) -> AppRoomSyncCursor {
+        AppRoomSyncCursor {
+            room_id: room_id.to_owned(),
+            last_applied_seq: 40,
+            own_send_high_water_seq: 0,
+            currency_initialized: true,
+            currency_verified,
+            behind_server: behind.then(|| AppBehindServerEvidence {
+                local_mark: 40,
+                observed_seq: 38,
+                message_id: "message".to_owned(),
+                observed_at: 0,
+                evidence_epoch: 1,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_fold_installs_only_rooms_synced_to_the_server_head() {
+        let healthy = cursor("room-a", true, false);
+        assert_eq!(
+            fold_sync_complete(true, &["room-a"], std::slice::from_ref(&healthy)),
+            Ok(())
+        );
+
+        // A quarantined room returns no events while still behind, so an
+        // empty poll is not proof; it never becomes currency-verified.
+        let quarantined = cursor("room-b", false, false);
+        let error =
+            fold_sync_complete(true, &["room-a", "room-b"], &[healthy.clone(), quarantined])
+                .unwrap_err();
+        assert!(
+            error.contains("room-b (did not sync to the server head)"),
+            "{error}"
+        );
+        assert!(!error.contains("room-a"), "{error}");
+
+        let rewound = cursor("room-c", true, true);
+        let error = fold_sync_complete(true, &["room-c"], &[rewound]).unwrap_err();
+        assert!(error.contains("room-c (behind the chat server)"), "{error}");
+
+        // A room the export serves but the cursors never mention.
+        let error =
+            fold_sync_complete(true, &["room-d"], std::slice::from_ref(&healthy)).unwrap_err();
+        assert!(error.contains("room-d"), "{error}");
+
+        // A backlog that outlasts the sync budget is refused even if every
+        // room it has seen so far is current.
+        let error = fold_sync_complete(false, &["room-a"], &[healthy]).unwrap_err();
+        assert!(error.contains("still had events"), "{error}");
+    }
 }

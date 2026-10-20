@@ -483,6 +483,26 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         &json!({"OpenChat": {"room_id": room_id, "topic_id": topic_id, "chat_id": chat_id}}),
     ));
 
+    // A used authorization stays used across a restart: send once here, and
+    // replay the identical signed request at the restarted sidecar below.
+    let replay_body = serde_json::to_vec(&json!({"SendChatMessage": {
+        "room_id": room_id, "topic_id": topic_id, "chat_id": chat_id,
+        "text": "sent exactly once", "metadata_json": null,
+    }}))
+    .unwrap();
+    let replay_header = person.sign("POST", "/v1/app/actions", Some(&replay_body));
+    let send_signed = |bridge: &Bridge| {
+        bridge
+            .http
+            .post(format!("{}/v1/app/actions", bridge.url))
+            .header("x-finite-chat-authorization", &replay_header)
+            .header("content-type", "application/json")
+            .body(replay_body.clone())
+            .send()
+            .unwrap()
+    };
+    assert_eq!(send_signed(&bridge).status(), 200);
+
     // Digest is hashes only, and a second process sees the same durable log.
     let digest = bridge.json(bridge.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
     assert!(!digest.to_string().contains("hello direct"));
@@ -490,9 +510,21 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         url: spawn_sidecar(&agent_home, dir.path().join("ready-2.json")),
         http: reqwest::blocking::Client::new(),
     };
+    let replayed = send_signed(&restarted);
+    assert_eq!(
+        replayed.status(),
+        401,
+        "a restart does not reopen a used authorization"
+    );
+    assert!(replayed.text().unwrap().contains("already used"));
     let restarted_digest =
         restarted.json(restarted.get(&person, &format!("/v1/app/digest?room_id={room_id}")));
     assert_eq!(restarted_digest, digest);
+    let once: Vec<String> = chat_messages(&restarted.json(restarted.get(&person, &path)))
+        .into_iter()
+        .filter(|text| text == "sent exactly once")
+        .collect();
+    assert_eq!(once.len(), 1, "the replay had no durable effect");
     let landing = restarted.json(restarted.get(&person, "/v1/app/state"));
     assert_eq!(landing["selected_room_id"], room_id.as_str());
     assert_eq!(landing["selected_topic_id"], topic_id.as_str());
@@ -513,17 +545,10 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     let operator: Value = serde_json::from_slice(&sink).unwrap();
     assert_eq!(operator["rooms"][0], digest);
 
-    // Rollback, then forward again: an older image runs MLS chat, so the
-    // room moves on without the folded log. The next direct start refuses
-    // the stale log and keeps serving MLS chat, saying why.
-    user.dispatch_and_wait(AppAction::SendChatMessage {
-        room_id: room_id.clone(),
-        topic_id: topic_id.clone(),
-        chat_id: chat_id.clone(),
-        text: "sent while rolled back".to_owned(),
-        metadata_json: None,
-    })
-    .unwrap();
+    // Rollback, then forward again. An older image runs MLS chat, so MLS
+    // moves on without the folded log. Each next direct start refuses the
+    // stale log and keeps serving MLS chat, saying why.
+    //
     // Direct seqs run past the MLS cursor, so direct chat must not have
     // moved the MLS sidecar's cursors: the rolled-back sidecar would skip
     // every new MLS message.
@@ -532,7 +557,72 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         before_direct,
         "direct chat leaves the MLS delivery state as it was"
     );
-    // SAFETY: the running direct sidecars read the transport only at start.
+    let refused_for = |ready: &str| -> String {
+        let refused = Bridge {
+            url: spawn_sidecar(&agent_home, dir.path().join(ready)),
+            http: reqwest::blocking::Client::new(),
+        };
+        let info = refused
+            .http
+            .get(format!("{}/v1/app/info", refused.url))
+            .send()
+            .unwrap();
+        assert_eq!(info.status(), 404, "a stale direct log is not served");
+        let readyz: Value = reqwest::blocking::get(format!("{}/readyz", refused.url))
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(readyz["transport"], "mls");
+        let error = readyz["direct_fold"]["error"].as_str().unwrap().to_owned();
+        assert!(
+            error.contains("MLS chat advanced after this log began"),
+            "{error}"
+        );
+        error
+    };
+
+    // First, a room created while rolled back, which the fold never saw.
+    // SAFETY: running direct sidecars read the transport only at start.
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "mls") };
+    cli_json(&agent_start);
+    let rollback_room = user
+        .dispatch_and_wait(AppAction::CreateRoom {
+            display_name: "Rolled back".to_owned(),
+        })
+        .unwrap()
+        .selected_room_id
+        .unwrap();
+    user.dispatch_and_wait(AppAction::AddRoomMembers {
+        room_id: rollback_room.clone(),
+        profiles: vec![AppProfileSummary {
+            account_id: agent_account.clone(),
+            npub: npub_encode(&agent_account).unwrap(),
+            display_name: "Agent".to_owned(),
+            about: None,
+            picture: None,
+            stale: true,
+            is_agent: true,
+        }],
+    })
+    .unwrap();
+    cli_json(&agent_start);
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
+    let error = refused_for("ready-3.json");
+    assert!(error.contains(&rollback_room), "{error}");
+    assert!(
+        !error.contains(&room_id),
+        "the folded room did not move: {error}"
+    );
+
+    // Then the folded room itself moves on.
+    user.dispatch_and_wait(AppAction::SendChatMessage {
+        room_id: room_id.clone(),
+        topic_id: topic_id.clone(),
+        chat_id: chat_id.clone(),
+        text: "sent while rolled back".to_owned(),
+        metadata_json: None,
+    })
+    .unwrap();
     unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "mls") };
     let request = json!({"timeout_millis": 5000}).to_string();
     let polled = cli_json(&[
@@ -552,27 +642,8 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
         "the rolled-back sidecar hands new MLS messages to Hermes: {polled}"
     );
     unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
-    let refused = Bridge {
-        url: spawn_sidecar(&agent_home, dir.path().join("ready-3.json")),
-        http: reqwest::blocking::Client::new(),
-    };
-    let info = refused
-        .http
-        .get(format!("{}/v1/app/info", refused.url))
-        .send()
-        .unwrap();
-    assert_eq!(info.status(), 404, "a stale direct log is not served");
-    let readyz: Value = reqwest::blocking::get(format!("{}/readyz", refused.url))
-        .unwrap()
-        .json()
-        .unwrap();
-    assert_eq!(readyz["transport"], "mls");
-    assert!(
-        readyz["direct_fold"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("MLS chat advanced after the fold")
-    );
+    let error = refused_for("ready-3b.json");
+    assert!(error.contains(&room_id), "{error}");
     // Moving the log aside folds again, now with the rolled-back message.
     std::fs::rename(
         PathBuf::from(&agent_home).join("direct"),
@@ -585,4 +656,19 @@ fn direct_transport_folds_mls_history_and_serves_web_hermes_and_agentd() {
     };
     let state = refolded.json(refolded.get(&person, &path));
     assert!(chat_messages(&state).contains(&"sent while rolled back".to_owned()));
+    let rooms: Value = refolded
+        .http
+        .get(format!("{}/v1/app/info", refolded.url))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(
+        rooms["rooms"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|room| room == rollback_room.as_str()),
+        "the rollback-period room is folded too: {rooms}"
+    );
 }

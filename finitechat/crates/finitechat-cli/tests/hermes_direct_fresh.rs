@@ -5,6 +5,8 @@
 
 mod direct_support;
 
+use finitechat_core::{AppAction, AppProfileSummary, FiniteChatRuntime, OpenOptions};
+use finitechat_proto::npub_encode;
 use serde_json::{Value, json};
 
 use direct_support::*;
@@ -95,6 +97,73 @@ fn a_new_agent_starts_direct_with_one_home_topic_for_its_owner() {
         restarted.json(restarted.get(&person, &format!("/v1/app/state?room_id={room_id}")))["topics"]
             [0]["title"],
         "Home"
+    );
+
+    // Rolled back to an MLS image, the agent gets an MLS room from the
+    // hosted device and chats there. Going forward again must refuse this
+    // log, not reopen it without the rollback-period chat.
+    // SAFETY: as above; running sidecars read the transport only at start.
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "mls") };
+    let now_arg = now().to_string();
+    let agent_start = [
+        "app",
+        "--data-dir",
+        &agent_home,
+        "--server",
+        &server_url,
+        "--device-id",
+        "agent",
+        "--now",
+        &now_arg,
+        "start",
+    ];
+    cli_json(&agent_start);
+    let user = FiniteChatRuntime::open(OpenOptions {
+        data_dir: dir.path().join("user").display().to_string(),
+        server_url: server_url.clone(),
+        device_id: "hosted-web".to_owned(),
+        account_secret_hex: Some(hex_lower(&USER_SECRET)),
+        now_unix_seconds: None,
+    })
+    .unwrap();
+    let mls_room = user
+        .dispatch_and_wait(AppAction::CreateRoom {
+            display_name: "Rolled back".to_owned(),
+        })
+        .unwrap()
+        .selected_room_id
+        .unwrap();
+    user.dispatch_and_wait(AppAction::AddRoomMembers {
+        room_id: mls_room.clone(),
+        profiles: vec![AppProfileSummary {
+            account_id: agent_account.clone(),
+            npub: npub_encode(&agent_account).unwrap(),
+            display_name: "Agent".to_owned(),
+            about: None,
+            picture: None,
+            stale: true,
+            is_agent: true,
+        }],
+    })
+    .unwrap();
+    user.dispatch_and_wait(AppAction::SendMessage {
+        room_id: mls_room.clone(),
+        text: "chat while rolled back".to_owned(),
+        metadata_json: None,
+    })
+    .unwrap();
+    cli_json(&agent_start);
+    unsafe { std::env::set_var("FINITECHAT_CHAT_TRANSPORT", "direct") };
+    let forward = spawn_sidecar(&agent_home, dir.path().join("ready-2b.json"));
+    let readyz: Value = reqwest::blocking::get(format!("{forward}/readyz"))
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(readyz["transport"], "mls", "a fresh log is refused too");
+    let error = readyz["direct_fold"]["error"].as_str().unwrap();
+    assert!(
+        error.contains("MLS chat advanced after this log began") && error.contains(&mls_room),
+        "{error}"
     );
 
     // Core named no owner: no signer can claim the chat, because code inside

@@ -23,11 +23,12 @@ them would skip every new MLS message.
 
 | Table | Meaning |
 |---|---|
-| `direct_meta` | `schema_version`, `origin` (`fold` or `fresh`), `created_at`, `owner_account_id` (the person this log renders for), `fold_cursors` (room → MLS cursor at the fold), `last_view` (the room, topic and chat the person last opened) |
+| `direct_meta` | `schema_version`, `origin` (`fold` or `fresh`), `created_at`, `owner_account_id` (the person this log renders for), `fold_cursors` (room → MLS cursor when the log began, folded or fresh), `last_view` (the room, topic and chat the person last opened) |
 | `direct_rooms` | `room_id`, `display_name`, `picture`, `read_seq` (the person's read mark), `next_seq` |
 | `direct_members` | room members' account ids |
 | `direct_events` | `room_id`, `seq`, `message_id`, `sender_account_id`, `sender_device_id`, `timestamp_unix_seconds`, `plaintext`, `origin` (`fold` or `direct`), `idempotency_key` |
 | `direct_profiles` | cached `AppProfileSummary` JSON |
+| `direct_used_authorizations` | request signatures already accepted, kept for 10 minutes, so a restart can't reopen one |
 
 **What an event is.** `plaintext` is a JSON `DecryptedApplicationEventV1`: the
 same bytes an MLS Device stores after decryption. Folded events keep their
@@ -50,7 +51,11 @@ transcript row. No text is included.
 
 The fold runs on the first direct start with no log:
 1. It runs `StartRuntime` and syncs until the server has nothing newer.
-2. It refuses if any room is still behind the server.
+2. It refuses unless the sync drained within its rounds and every room it would
+   serve finished a sync to the server head in that process. A quarantined
+   room (one whose sync fails) never does, and neither does one behind the
+   server. A quarantined room returns no events while still behind, so an
+   empty poll alone proves nothing.
 3. It copies every stored message and event (unioned by room, seq and message
    id), each room's members and read mark, and the profiles.
 
@@ -75,8 +80,10 @@ digests, so operators can compare them with `finitechat-hosted-device digest`
 from the host's `/data` mount.
 - A failed fold records `origin: "pending"` with the error, and that start
   serves MLS chat.
-- A folded log whose MLS cursor later advanced (a rollback ran MLS chat again)
-  is refused the same way. Moving `direct/` aside folds afresh.
+- A log, folded or fresh, that MLS chat has since moved past is refused the
+  same way. That means an MLS room advanced, or a new one gained history, after
+  the log began. Only an MLS-serving run (a rollback) can do that. Moving
+  `direct/` aside folds afresh.
 
 ## App API
 
@@ -103,7 +110,8 @@ event, with empty content, created within ±120 s, and these tags:
 - `payload` = SHA-256 of the body, for POST only
 - `nonce`
 
-The signer must be the log's owner. A signature is accepted once. Text sends
+The signer must be the log's owner. A signature is accepted once, including
+across restarts. Text sends
 also take the verified requester headers (`x-finite-requester-email`,
 `x-finite-sites-requester-assertion`). The hosted device mints these events
 with `POST /v1/chat/direct-authorization`.

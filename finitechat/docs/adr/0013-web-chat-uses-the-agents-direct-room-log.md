@@ -43,9 +43,9 @@ beside Hermes' own state.
   accepts it once. Code inside the agent container therefore still cannot speak
   as its owner, as MLS sender authentication guaranteed before.
 - **History moves without leaving the agent.** On the first direct start the
-  sidecar folds the agent's own MLS store: after a final sync, and only when no
-  room is behind the server. The MLS store is only read, so the previous image
-  still works on it.
+  sidecar folds the agent's own MLS store, after a final sync, and only when
+  every room it serves has synced to the server head (no quarantined room, none
+  behind). The MLS store is only read, so the previous image still works on it.
   - The agent's copy differs from the person's in one invisible way: Home's
     `created_seq`, because Home is created before the agent joins.
   - Digests prove the rest per person.
