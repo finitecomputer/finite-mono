@@ -147,10 +147,8 @@ fn built_cli_reports_core_descriptions_only_for_exact_participating_keys() {
     let added = home(scratch.path(), "added");
     let core = CoreFixture::default();
     let core_server = core_stub(core.clone());
-    let authority = brain(
-        &scratch.path().join("brain.sqlite3"),
-        Some(&core_server.url),
-    );
+    let database = scratch.path().join("brain.sqlite3");
+    let authority = brain(&database, Some(&core_server.url));
     let owner_key = run(
         &binary,
         &owner,
@@ -189,6 +187,26 @@ fn built_cli_reports_core_descriptions_only_for_exact_participating_keys() {
             &added_key,
         ],
     );
+    // A stored Directory name for the admin-added key, as an earlier
+    // finite.vip lookup would have left it. Only a live NIP-05 fetch writes
+    // aliases, so seed this synthetic test database directly.
+    {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO identity_aliases (npub, hex_public_key, preferred_nip05, \
+                 nip05_verified_at, nip05_relays_json, updated_at) \
+                 VALUES (?1, ?2, 'added-name@finite.vip', '2026-05-01T00:00:00Z', '[]', \
+                 '2026-05-01T00:00:00Z') ON CONFLICT(npub) DO UPDATE SET \
+                 preferred_nip05 = excluded.preferred_nip05, \
+                 nip05_verified_at = excluded.nip05_verified_at",
+                rusqlite::params![added_key, hex(&added_key)],
+            )
+            .unwrap();
+    }
     let export_before = run(&binary, &owner, &tree, &authority.url, &["brain", "export"]);
     let before = report(&binary, &owner, &authority.url);
     assert_eq!(before["version"], "finite-brain-access-report-v1");
@@ -208,6 +226,11 @@ fn built_cli_reports_core_descriptions_only_for_exact_participating_keys() {
     assert_eq!(
         row(&before, &added_key)["description"]["reason"],
         "noParticipation"
+    );
+    // Its stored Directory name is public and shown; Core's contact is not.
+    assert_eq!(
+        row(&before, &added_key)["storedNip05"],
+        serde_json::json!({ "name": "added-name@finite.vip", "storedAt": "2026-05-01T00:00:00Z" })
     );
     assert!(
         !before
@@ -230,9 +253,13 @@ fn built_cli_reports_core_descriptions_only_for_exact_participating_keys() {
         "{}",
         String::from_utf8_lossy(&human_before.stderr)
     );
+    let human_before = String::from_utf8_lossy(&human_before.stdout);
+    assert!(!human_before.contains("private-added@other-domain.example"));
     assert!(
-        !String::from_utf8_lossy(&human_before.stdout)
-            .contains("private-added@other-domain.example")
+        human_before.contains(
+            "stored NIP-05: added-name@finite.vip (stored 2026-05-01T00:00:00Z; not rechecked; not a mailbox)"
+        ),
+        "{human_before}"
     );
     assert_eq!(
         export_before,

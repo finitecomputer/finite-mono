@@ -211,7 +211,8 @@ when that is permitted; it is never authority:
   key has not acted in this Brain; never guess who it is.
 - `ambiguous`, `unknown`, `unavailable`: say exactly that, with the key.
 - `storedNip05` is a stored public name with its stored time, not rechecked
-  and not a mailbox.
+  and not a mailbox. A key that never acted carries one only for its
+  `finite.vip` Directory name; it never proves who controls the key.
 
 `revocationIncomplete` lists Folders where a current grant remains without
 entitlement; `missingCurrentGrants` lists entitled Folders without one. A
