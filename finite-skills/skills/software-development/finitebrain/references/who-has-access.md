@@ -105,9 +105,29 @@ From the Brain's Working Tree, `fbrain admin member remove --target <npub>`
 removes Membership and rotates the Folder Keys the key was entitled to,
 preparing the new grants and re-encrypted Folder objects itself. If
 preparation fails, stop on the reported blocker and never create or edit a raw
-rotation body. `fbrain admin role revoke admin --target <npub>` removes only
-the Admin role; in this release it rotates no keys, so Folders the key no
-longer qualifies for show `revocationIncomplete` afterwards.
+rotation body. `fbrain admin role revoke admin --target <npub>` removes the
+Admin role and, in the same change, rotates every Folder Key the key held only
+as an admin (`admin_only` Folders, and `restricted` Folders without its
+explicit access). Folders it still reaches through explicit Folder access or
+All-Members membership keep their key. Each rotation re-encrypts the Folder's
+live pages and has the side effects described under Clearing Removal Pending:
+pending email invitations for the Folder are revoked, and pending Mount Offers
+and Folder share links for it must be recreated. The acting admin must be able to open each of
+those Folders; otherwise the command names the Folder and nothing changes, so
+run it from an admin who can. An admin may demote itself, but then the
+stepping-down key generates the new Folder Keys, so the receipt's cut-off
+holds only if that client is honest; when that matters, have another admin
+run the demotion. Report `state: complete` and each `rotations` entry
+(Folder, new key version, `cutOffNpubs`). The demotion sends every rotated
+Folder's pages in one request under the 64 MiB rotation limit; if the CLI
+refuses it as too large (nothing was sent), it names each Folder and its size.
+Rotating those Folders first does not help, because the demotion must rotate
+them again: report the Folders and sizes and stop. A 503 about too many Folder
+Key rotation requests is a busy server (see Clearing Removal Pending): wait a
+minute and rerun. An older Brain server answers
+`unsupported: ... does not support admin demotion with Folder Key rotation
+yet` and nothing changes; do not work around it. Afterwards
+`access list` shows the key as a Member with nothing removal pending.
 
 ## Clearing Removal Pending
 
@@ -179,7 +199,8 @@ sustain that load. Report repeated 503s
 of either kind to the server operator instead of retrying in a loop.
 
 Member removal does not yet clear Folders where the removed key holds a
-current key without entitlement, for example from an earlier demotion. Run
+current key without entitlement, for example from a demotion by an older Brain
+server. Run
 `access list` before removing a Member; afterwards rotate every Folder still
 listed for that key.
 
