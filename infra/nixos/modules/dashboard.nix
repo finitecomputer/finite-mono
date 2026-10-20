@@ -4,10 +4,11 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Organization launch-code setup on the retained production generation,
-    # built from 404737fe; excludes unrelated trial-archive migrations.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/38924002203
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:c398350ce57141f04ec7d78f77068ec019e703c17651136e0e5d3f9f05fa2df0";
+    # Brain roster stored public names (#1113) on the retained production
+    # generation, built from 39e7d33b (aa22ef38 plus the October 20 Brain
+    # PRs); excludes unrelated trial-archive migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/39458277848
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:7580575330b1124bcce54e0383b53ac641aa147f80628ad3b15aa1bb9f6ac3ed";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
