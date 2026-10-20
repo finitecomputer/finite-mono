@@ -224,6 +224,19 @@ pub struct FolderDeleteRequest {
     pub expected_object_count: usize,
 }
 
+/// Server-computed scope of a permanent Folder deletion, read without object
+/// payloads. The confirming client echoes `folderIds` and `objectCount` back as
+/// `FolderDeleteRequest.expectedFolderIds`/`expectedObjectCount`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeletionPreviewResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub folder_ids: Vec<String>,
+    pub object_count: usize,
+    pub current_key_version: u32,
+}
+
 /// Counts and sync cursor returned after permanent Folder deletion.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
