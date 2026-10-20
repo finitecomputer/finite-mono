@@ -56,7 +56,7 @@ fbrain mount accept|list|inspect|revoke
 fbrain mount participant add|remove
 fbrain admin member add|remove
 fbrain admin role grant|revoke admin
-fbrain admin folder-access grant|revoke
+fbrain admin folder-access grant|revoke|rotate
 fbrain admin ensure-access
 ```
 
@@ -267,8 +267,9 @@ cursor. `access summary` is the older metadata view of Folder recipients.
 
 `access` is read-only. Mutations live under the explicit `admin`, `invite`,
 `collaborator`, and `mount` workflows. The CLI prepares Folder Key rotation
-automatically for Folder and Mount revocation. If preparation fails, stop on
-the reported blocker; never author or pass a raw rotation payload.
+automatically for Folder and Mount revocation and for
+`admin folder-access rotate`. If preparation fails, stop on the reported
+blocker; never author or pass a raw rotation payload.
 
 ```sh
 fbrain brain create organization "Org Brain" --json
@@ -307,6 +308,7 @@ fbrain admin role grant admin --target <npub|hex|NIP-05>
 fbrain admin role revoke admin --target <npub|hex|NIP-05>
 fbrain admin folder-access grant --target <npub|hex|NIP-05>
 fbrain admin folder-access revoke --target <npub|hex|NIP-05>
+fbrain admin folder-access rotate --folder <folder-id> [--brain <brain-id>]
 
 # Normal, convergent Organization Brain collaboration from its Working Tree
 fbrain collaborator ensure-admin \
@@ -325,6 +327,19 @@ operation, and its typed receipt is `complete`, `partial` or `indeterminate`.
 The member, role and `folder-access` commands are advanced primitives that
 change one relationship each. [sharing.md](sharing.md) is the contract for
 both and for reporting their receipts.
+
+`admin folder-access rotate` generates a fresh key at the Folder's next key
+version for exactly its entitled keys and returns `state: complete` with
+`previousKeyVersion`, `newKeyVersion`, `recipientNpubs` and `cutOffNpubs`.
+`admin folder-access revoke` rotates the same way after removing the named
+key's access, and also accepts a key that holds the current Folder Key without
+entitlement (`revocationIncomplete`); its receipt does not list cut-off keys.
+Either rotation leaves pending Mount Offers and Folder share links for that
+Folder unacceptable; recreate them. Rotation requests are capped at 64 MiB;
+the CLI refuses a larger one before sending and names the Folder and size (see
+Clearing Removal Pending for what to do next, and for the 408 and 503
+answers). Clearing Removal Pending in
+[who-has-access.md](who-has-access.md) says when to use each.
 
 `admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder
 whose `repair` is `needsKeyHolder` needs an admin who holds that Folder's

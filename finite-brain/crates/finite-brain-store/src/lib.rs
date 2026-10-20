@@ -22,6 +22,7 @@ mod approvals;
 mod brains;
 mod folder_access;
 mod folder_deletion;
+mod folder_key_rotation;
 mod invite_tokens;
 mod links;
 mod loading;
@@ -35,6 +36,10 @@ pub use access_report::{
     IncomingMount, IncomingMountParticipant, MAX_ACCESS_REPORT_EVIDENCE_KEYS,
     MAX_ACCESS_REPORT_IDENTITIES, MAX_ACCESS_REPORT_OUTGOING_MOUNTS, ParticipationEvidence,
     ParticipationKind,
+};
+pub use folder_key_rotation::{
+    FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
+    folder_key_required_recipients, stale_folder_key_holders,
 };
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
@@ -88,6 +93,14 @@ pub enum StoreError {
         max: usize,
         current: usize,
     },
+    /// A Folder Key rotation does not target the next key version: another
+    /// admin rotated the Folder first (requested at or below current), or the
+    /// request skips versions (requested above current plus one).
+    StaleFolderKeyVersion {
+        folder_id: String,
+        current_key_version: u32,
+        requested_key_version: u32,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -127,6 +140,23 @@ impl fmt::Display for StoreError {
             } => write!(
                 f,
                 "capacity exceeded for {limit}: current {current}, maximum {max}"
+            ),
+            Self::StaleFolderKeyVersion {
+                folder_id,
+                current_key_version,
+                requested_key_version,
+            } if u64::from(*requested_key_version) > u64::from(*current_key_version) + 1 => write!(
+                f,
+                "Folder {folder_id} Key rotation skips versions: the request rotates to version {requested_key_version} but the Folder is at version {current_key_version}, so the next version is {}. The request was prepared incorrectly; prepare it again from the current version",
+                u64::from(*current_key_version) + 1
+            ),
+            Self::StaleFolderKeyVersion {
+                folder_id,
+                current_key_version,
+                requested_key_version,
+            } => write!(
+                f,
+                "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
             ),
         }
     }
@@ -1698,16 +1728,16 @@ impl BrainStore {
         }
     }
 
-    fn rotate_shared_folder_access_removal<F>(
-        &mut self,
+    /// Validate and write one mounted source Folder rotation inside the
+    /// caller's write transaction; the caller finishes its own Mount writes
+    /// and commits.
+    fn rotate_shared_folder_access_removal(
+        &self,
+        tx: &Transaction<'_>,
         connection: &StoredSharedFolderConnection,
         actor_npub: &UserId,
         rotation: SharedFolderAccessRemoval<'_>,
-        after_rotation: F,
-    ) -> Result<(), StoreError>
-    where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StoreError>,
-    {
+    ) -> Result<(), StoreError> {
         if rotation.removed_user_ids.is_empty() {
             return Err(StoreError::BrokenInvariant {
                 reason: "shared folder access removal requires at least one target".to_owned(),
@@ -1766,7 +1796,6 @@ impl BrainStore {
             .collect::<Vec<_>>();
         validate_rotation_records(&live_objects, rotation.reencrypted_records)?;
 
-        let tx = self.conn.transaction()?;
         for removed in rotation.removed_user_ids {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -1786,29 +1815,27 @@ impl BrainStore {
             ],
         )?;
         invalidate_pending_email_bootstraps_for_rotated_folder(
-            &tx,
+            tx,
             &connection.source_brain_id,
             &connection.source_folder_id,
             rotation.updated_at,
         )?;
         for grant in rotation.grants {
-            insert_grant(&tx, &connection.source_brain_id, grant)?;
+            insert_grant(tx, &connection.source_brain_id, grant)?;
         }
         sync_records::append_sync_records(
-            &tx,
+            tx,
             &connection.source_brain_id,
             rotation.control_records,
         )?;
         for record in rotation.reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, &connection.source_brain_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, &connection.source_brain_id)?;
-            sync_records::insert_sync_record(&tx, &connection.source_brain_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, &connection.source_brain_id, &input)?;
+            sync_records::validate_sync_conflict(tx, &connection.source_brain_id, &input)?;
+            let sequence = sync_records::next_sequence(tx, &connection.source_brain_id)?;
+            sync_records::insert_sync_record(tx, &connection.source_brain_id, sequence, &input)?;
+            sync_records::project_sync_record(tx, &connection.source_brain_id, &input)?;
         }
-        after_rotation(&tx)?;
-        tx.commit()?;
         Ok(())
     }
 }
@@ -3407,6 +3434,8 @@ mod tests {
     };
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    mod folder_key_rotation_tests;
 
     #[test]
     fn exposes_store_crate_name() {
@@ -9567,6 +9596,84 @@ mod tests {
             ];
             self.grant_folder_access_with_control_records(
                 brain_id, folder_id, user_id, grant, &records,
+            )
+        }
+    }
+
+    /// Explicit access removal through the one rotation boundary, keeping the
+    /// older positional shape these fixtures were written against.
+    trait BrainStoreAccessRemovalTestExt {
+        #[allow(clippy::too_many_arguments)]
+        fn rotate_folder_key_for_access_removal(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+        ) -> Result<FolderKeyRotationOutcome, StoreError>;
+
+        #[allow(clippy::too_many_arguments)]
+        fn rotate_folder_key_for_access_removal_with_control_records(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+            control_records: &[SyncRecordInput],
+        ) -> Result<FolderKeyRotationOutcome, StoreError>;
+    }
+
+    impl BrainStoreAccessRemovalTestExt for BrainStore {
+        fn rotate_folder_key_for_access_removal(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+        ) -> Result<FolderKeyRotationOutcome, StoreError> {
+            self.rotate_folder_key_for_access_removal_with_control_records(
+                brain_id,
+                folder_id,
+                removed_user_id,
+                new_key_version,
+                grants,
+                reencrypted_records,
+                updated_at,
+                &[],
+            )
+        }
+
+        fn rotate_folder_key_for_access_removal_with_control_records(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+            control_records: &[SyncRecordInput],
+        ) -> Result<FolderKeyRotationOutcome, StoreError> {
+            self.rotate_folder_key(
+                brain_id,
+                FolderKeyRotationTarget::RemoveAccess(removed_user_id),
+                FolderKeyRotationRequest {
+                    folder_id,
+                    new_key_version,
+                    grants,
+                    reencrypted_records,
+                    updated_at,
+                    control_records,
+                },
             )
         }
     }

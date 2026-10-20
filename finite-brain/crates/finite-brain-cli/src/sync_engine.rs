@@ -592,6 +592,58 @@ pub(crate) fn prepare_folder_access_removals(
             "at least one Folder access target is required".to_owned(),
         ));
     }
+    prepare_folder_key_rotation(
+        env,
+        args,
+        metadata,
+        brain_id,
+        folder_id,
+        FolderKeyRotationIntent::RemoveAccess(target_npubs),
+    )
+    .map(|prepared| prepared.body)
+}
+
+/// Which signed access change a prepared Folder Key rotation carries.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum FolderKeyRotationIntent<'a> {
+    /// Standalone rotation (`rotate-folder-key`, no target): re-wrap for
+    /// exactly the required recipients in `metadata`.
+    Rotate,
+    /// Remove these keys' explicit access rows (`remove-folder-access` naming
+    /// the first target). Keys with no row, such as stale current-wrap
+    /// holders, are simply not re-wrapped.
+    RemoveAccess(&'a BTreeSet<String>),
+}
+
+/// One Folder Key rotation prepared locally from the current Folder Key.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedFolderKeyRotation {
+    pub(crate) previous_key_version: u32,
+    pub(crate) new_key_version: u32,
+    /// Keys wrapped for `new_key_version`, sorted: the required recipients
+    /// of `metadata` after the intent's access rows are removed.
+    pub(crate) recipients: Vec<String>,
+    /// JSON body for `DELETE .../access/{target}` or `POST .../key-rotations`.
+    pub(crate) body: serde_json::Value,
+}
+
+/// Prepare one Folder Key rotation: open the current Folder Key from this
+/// signer's grants, wrap a fresh key for every required recipient of
+/// `metadata` (pass a post-change roster, for example with a demoted admin
+/// removed, to rotate for that roster), re-encrypt every live object and sign
+/// the access-change event. Fails closed when the current key cannot be opened.
+pub(crate) fn prepare_folder_key_rotation(
+    env: &CliEnvironment,
+    args: &[String],
+    metadata: &BrainMetadataView,
+    brain_id: &str,
+    folder_id: &str,
+    intent: FolderKeyRotationIntent<'_>,
+) -> Result<PreparedFolderKeyRotation, CliError> {
+    let operation = match intent {
+        FolderKeyRotationIntent::Rotate => "Folder Key rotation",
+        FolderKeyRotationIntent::RemoveAccess(_) => "Folder access revocation",
+    };
     let folder = metadata
         .folders
         .iter()
@@ -606,7 +658,7 @@ pub(crate) fn prepare_folder_access_removals(
         .ok_or_else(|| CliError::NotFound(format!("folder {folder_id} in encrypted export")))?;
     if !export_folder.accessible {
         return Err(CliError::InvalidInput(format!(
-            "cannot prepare Folder access revocation: current Folder {folder_id} is not readable"
+            "cannot prepare {operation}: current Folder {folder_id} is not readable by this key"
         )));
     }
     let auth = load_signer(env)?;
@@ -618,27 +670,31 @@ pub(crate) fn prepare_folder_access_removals(
             brain_id: brain_id.to_owned(),
             folder_id: folder_id.to_owned(),
             key_version: folder.current_key_version,
-            reason: "the current Folder Key is required before revocation can be prepared"
-                .to_owned(),
+            reason: format!(
+                "the current Folder Key is required before {operation} can be prepared"
+            ),
         })?;
     let new_key_version = folder
         .current_key_version
         .checked_add(1)
         .ok_or_else(|| CliError::InvalidInput("Folder Key version overflow".to_owned()))?;
     let new_key = FolderKey::generate();
+    let removed_rows = match intent {
+        FolderKeyRotationIntent::Rotate => None,
+        FolderKeyRotationIntent::RemoveAccess(targets) => Some(targets),
+    };
     let remaining_access_user_ids = folder
         .access_user_ids
         .iter()
-        .filter(|recipient| !target_npubs.contains(*recipient))
+        .filter(|recipient| removed_rows.is_none_or(|targets| !targets.contains(*recipient)))
         .cloned()
         .collect::<Vec<_>>();
     let remaining_recipients =
         folder_required_recipients(metadata, &folder.access, &remaining_access_user_ids)?;
     if remaining_recipients.is_empty() {
-        return Err(CliError::InvalidInput(
-            "cannot revoke Folder access without at least one remaining authorized identity"
-                .to_owned(),
-        ));
+        return Err(CliError::InvalidInput(format!(
+            "cannot complete {operation} without at least one remaining authorized identity"
+        )));
     }
     let grants = remaining_recipients
         .iter()
@@ -667,7 +723,7 @@ pub(crate) fn prepare_folder_access_removals(
     {
         let payload_json = object.payload_json.as_deref().ok_or_else(|| {
             CliError::InvalidInput(format!(
-                "cannot prepare revocation: live object {} is opaque",
+                "cannot prepare {operation}: live object {} is opaque",
                 object.object_id
             ))
         })?;
@@ -715,20 +771,38 @@ pub(crate) fn prepare_folder_access_removals(
             "revisionEvent": revision_event,
         }));
     }
+    let (action, target) = match intent {
+        FolderKeyRotationIntent::Rotate => (AdminAccessAction::RotateFolderKey, None),
+        FolderKeyRotationIntent::RemoveAccess(targets) => (
+            AdminAccessAction::RemoveFolderAccess,
+            targets.iter().next().map(String::as_str),
+        ),
+    };
     let access_change_event = admin_access_change_event(
         env,
         brain_id,
-        AdminAccessAction::RemoveFolderAccess,
+        action,
         Some(folder_id),
-        target_npubs.iter().next().map(String::as_str),
+        target,
         Some(new_key_version),
     )?;
-    Ok(serde_json::json!({
+    let body = serde_json::json!({
         "newKeyVersion": new_key_version,
         "grants": grants,
         "reencryptedRecords": reencrypted_records,
         "accessChangeEvent": access_change_event,
-    }))
+    });
+    crate::ensure_rotation_request_fits(
+        &format!("Folder {folder_id} Key rotation"),
+        &body,
+        finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
+    )?;
+    Ok(PreparedFolderKeyRotation {
+        previous_key_version: folder.current_key_version,
+        new_key_version,
+        recipients: remaining_recipients,
+        body,
+    })
 }
 
 fn newly_readable_session_key_count(

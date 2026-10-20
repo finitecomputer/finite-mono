@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -60,7 +60,9 @@ pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
 use protected_routes::{
-    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware, validate_request_auth,
+    authenticate_request_header_at, charge_rotation_admission_exit,
+    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware,
+    refuse_rate_limited_signer, validate_admitted_rotation_auth, validate_request_auth,
 };
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
@@ -109,7 +111,8 @@ pub struct BrainUpdateNotification {
 pub struct ServerState {
     store: Arc<Mutex<BrainStore>>,
     public_base_url: Arc<str>,
-    auth_now_unix_seconds: Option<u64>,
+    /// Fixed auth clock for tests; shared so a test can advance it.
+    auth_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
     max_auth_skew_seconds: u64,
     auth_replay_cache: Arc<Mutex<BTreeMap<String, u64>>>,
     rate_limit_hits: Arc<Mutex<BTreeMap<String, Vec<u64>>>>,
@@ -119,6 +122,14 @@ pub struct ServerState {
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
     core_descriptions: Option<CoreDescriptionClient>,
+    /// Bounds how many rotation requests may hold large bodies at once.
+    rotation_request_permits: Arc<tokio::sync::Semaphore>,
+    /// How long an admitted rotation request may take to deliver its body.
+    rotation_body_read_deadline: Duration,
+    /// How long an authorized rotation request may wait for a permit.
+    rotation_admission_wait: Duration,
+    /// Authorized rotation requests currently waiting for a permit.
+    rotation_waiting_requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -156,7 +167,7 @@ impl ServerState {
         Self {
             store: Arc::new(Mutex::new(store)),
             public_base_url: Arc::<str>::from(public_base_url),
-            auth_now_unix_seconds: None,
+            auth_clock: None,
             max_auth_skew_seconds: DEFAULT_MAX_AUTH_SKEW_SECONDS,
             auth_replay_cache: Arc::new(Mutex::new(BTreeMap::new())),
             rate_limit_hits: Arc::new(Mutex::new(BTreeMap::new())),
@@ -169,7 +180,27 @@ impl ServerState {
             invite_mailer: None,
             brain_updates,
             core_descriptions: None,
+            rotation_request_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_ROTATION_REQUESTS,
+            )),
+            rotation_body_read_deadline: ROTATION_BODY_READ_DEADLINE,
+            rotation_admission_wait: ROTATION_ADMISSION_WAIT,
+            rotation_waiting_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Override how long an authorized rotation request may wait, in arrival
+    /// order, for a permit (default `ROTATION_ADMISSION_WAIT`).
+    pub fn with_rotation_admission_wait(mut self, wait: Duration) -> Self {
+        self.rotation_admission_wait = wait;
+        self
+    }
+
+    /// Override how long an admitted rotation request may take to deliver its
+    /// body (default `ROTATION_BODY_READ_DEADLINE`).
+    pub fn with_rotation_body_read_deadline(mut self, deadline: Duration) -> Self {
+        self.rotation_body_read_deadline = deadline;
+        self
     }
 
     /// Let the access report ask Core's private identity listener to describe
@@ -266,7 +297,9 @@ impl ServerState {
 
     /// Override the auth validation clock for deterministic tests.
     pub fn with_auth_clock(mut self, now_unix_seconds: u64, max_skew_seconds: u64) -> Self {
-        self.auth_now_unix_seconds = Some(now_unix_seconds);
+        self.auth_clock = Some(Arc::new(std::sync::atomic::AtomicU64::new(
+            now_unix_seconds,
+        )));
         self.max_auth_skew_seconds = max_skew_seconds;
         self
     }
@@ -339,8 +372,20 @@ impl ServerState {
     }
 
     fn auth_now_unix_seconds(&self) -> u64 {
-        self.auth_now_unix_seconds
-            .unwrap_or_else(current_unix_seconds)
+        self.auth_clock
+            .as_ref()
+            .map_or_else(current_unix_seconds, |clock| {
+                clock.load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+
+    /// Move a fixed test auth clock forward, for every clone of this state.
+    #[cfg(test)]
+    fn advance_auth_clock(&self, seconds: u64) {
+        self.auth_clock
+            .as_ref()
+            .expect("advance_auth_clock needs with_auth_clock")
+            .fetch_add(seconds, std::sync::atomic::Ordering::AcqRel);
     }
 
     fn cors_origin_allowed(&self, origin: &str) -> bool {
@@ -388,9 +433,19 @@ impl From<StoreError> for ApiError {
             StoreError::MissingBrain { .. } | StoreError::MissingFolder { .. } => {
                 Self::new(StatusCode::NOT_FOUND, value.to_string())
             }
+            // A request that skips key versions was prepared incorrectly; a
+            // request at or below the current version lost a race.
+            StoreError::StaleFolderKeyVersion {
+                current_key_version,
+                requested_key_version,
+                ..
+            } if u64::from(requested_key_version) > u64::from(current_key_version) + 1 => {
+                Self::new(StatusCode::BAD_REQUEST, value.to_string())
+            }
             StoreError::DuplicateId { .. }
             | StoreError::Conflict { .. }
-            | StoreError::PersonalBrainConflict { .. } => {
+            | StoreError::PersonalBrainConflict { .. }
+            | StoreError::StaleFolderKeyVersion { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
             }
             StoreError::MissingRequiredGrant { .. }
@@ -475,8 +530,8 @@ pub fn validate_core_identity_url(url: &str) -> Result<String, String> {
 /// Build a router with explicit state.
 pub fn router_with_state(state: ServerState) -> Router {
     let cors_state = state.clone();
-    let normal_routes = normal_signed_api_router();
-    let low_level_routes = low_level_signed_api_router();
+    let normal_routes = normal_signed_api_router(&state);
+    let low_level_routes = low_level_signed_api_router(&state);
     let signed_routes = Router::new().nest("/v1", normal_routes.nest("/admin", low_level_routes));
     Router::new()
         .route("/", get(root_handler))
@@ -498,7 +553,7 @@ async fn api_route_not_found_handler() -> ApiError {
     )
 }
 
-fn normal_signed_api_router() -> Router<ServerState> {
+fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route("/brain-updates", get(brain_updates_handler))
         .route(
@@ -616,13 +671,19 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/mounts/{connection_id}",
-            get(get_shared_folder_connection_handler)
-                .delete(revoke_shared_folder_connection_handler),
+            get(get_shared_folder_connection_handler).merge(rotation_method(
+                state,
+                RotationAuthority::MountRevocation,
+                axum::routing::delete(revoke_shared_folder_connection_handler),
+            )),
         )
         .route(
             "/mounts/{connection_id}/participants/{target_npub}",
-            axum::routing::put(add_mount_participant_handler)
-                .delete(remove_mount_participant_handler),
+            axum::routing::put(add_mount_participant_handler).merge(rotation_method(
+                state,
+                RotationAuthority::MountParticipantRemoval,
+                axum::routing::delete(remove_mount_participant_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/mounts",
@@ -648,11 +709,15 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
 }
 
-fn low_level_signed_api_router() -> Router<ServerState> {
+fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route(
             "/brains/{brain_id}/members/{target_npub}",
-            axum::routing::put(add_member_handler).delete(remove_member_handler),
+            axum::routing::put(add_member_handler).merge(rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::delete(remove_member_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
@@ -660,11 +725,23 @@ fn low_level_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
-            axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
+            axum::routing::put(grant_folder_access_handler).merge(rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::delete(remove_folder_access_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
             axum::routing::post(complete_pending_wraps_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/key-rotations",
+            rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::post(rotate_folder_key_handler),
+            ),
         )
 }
 
@@ -1868,7 +1945,7 @@ mod tests {
     fn server_state_defaults_to_portable_v1_auth_skew() {
         let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL);
         assert_eq!(state.max_auth_skew_seconds, 60);
-        assert_eq!(state.auth_now_unix_seconds, None);
+        assert!(state.auth_clock.is_none());
         assert_eq!(state.rate_limit.max_requests, 120);
         assert_eq!(state.rate_limit.window_seconds, 60);
         assert!(state.cors_origin_allowed(TEST_BASE_URL));
@@ -4595,6 +4672,20 @@ mod tests {
         let actor = UserId::new(npub(&keys)).unwrap();
         let state = test_state();
         let router = router_with_state(state.clone());
+        // Rotation admission first requires an admin of the path Brain.
+        let created = post_brain(
+            router.clone(),
+            &keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
+        let sequence_before = latest_sync_sequence(&router, &keys, "acme").await;
 
         let grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
             .map(|index| {
@@ -4615,11 +4706,11 @@ mod tests {
         })
         .to_string();
         let access = authed_request(
-            router,
+            router.clone(),
             &keys,
             "DELETE",
             &format!(
-                "/v1/admin/brains/personal/folders/notes/access/{}",
+                "/v1/admin/brains/acme/folders/restricted/access/{}",
                 actor.as_str()
             ),
             Some(access_body),
@@ -4633,14 +4724,22 @@ mod tests {
         )
         .await;
 
-        assert!(
-            state
-                .store
-                .lock()
-                .unwrap()
-                .list_visible_brains(&actor)
-                .unwrap()
-                .is_empty()
+        let stored = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let restricted = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id.as_str() == "restricted")
+            .unwrap();
+        assert_eq!(restricted.current_key_version, 1);
+        assert_eq!(
+            latest_sync_sequence_at(&router, &keys, "acme", TEST_NOW + 2).await,
+            sequence_before
         );
     }
 
@@ -10410,4 +10509,5 @@ mod tests {
     }
 
     mod access_report_tests;
+    mod folder_key_rotation_tests;
 }

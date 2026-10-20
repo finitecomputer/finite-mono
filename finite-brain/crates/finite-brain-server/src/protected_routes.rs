@@ -71,6 +71,78 @@ pub(crate) fn validate_request_auth(
     uri: &Uri,
     body: Option<&Bytes>,
 ) -> Result<String, ApiError> {
+    validate_request_auth_at(
+        state,
+        headers,
+        method,
+        uri,
+        body,
+        state.auth_now_unix_seconds(),
+    )
+}
+
+/// Full authentication of a rotation request that admission already let in:
+/// the body hash, replay cache and rate limit as usual, but the event's time
+/// is checked against the instant admission validated its header, so a
+/// request that waited in the admission queue past the clock skew is not
+/// refused as stale. The replay cache expiry still uses the current clock.
+pub(crate) fn validate_admitted_rotation_auth(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    body: &Bytes,
+    admitted_at: crate::routes::RotationAdmittedAt,
+) -> Result<String, ApiError> {
+    validate_request_auth_at(state, headers, method, uri, Some(body), admitted_at.0)
+}
+
+fn validate_request_auth_at(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    body: Option<&Bytes>,
+    auth_now: u64,
+) -> Result<String, ApiError> {
+    let (event, mut expected) = signed_request_header(state, headers, method, uri, auth_now)?;
+    if let Some(body) = body {
+        expected = expected.with_body(body.to_vec());
+    }
+
+    let signer = finite_nostr::validate_http_auth_event(&event, &expected).map_err(auth_error)?;
+    enforce_auth_replay_cache(state, &event)?;
+    enforce_rate_limit(state, method, uri, &signer)?;
+    signer.to_npub().map_err(auth_error)
+}
+
+/// Authenticate a request from its signed header alone, before its body is
+/// read, at the auth clock instant `auth_now`: signature, method, URL and
+/// time, and that the replay cache does not already hold the event. It
+/// neither records the event in the replay cache nor counts it against the
+/// rate limit, so the handler's full validation with the body still runs
+/// exactly once and stays the authority for acting on the request.
+pub(crate) fn authenticate_request_header_at(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    auth_now: u64,
+) -> Result<String, ApiError> {
+    let (event, expected) = signed_request_header(state, headers, method, uri, auth_now)?;
+    let signer = finite_nostr::validate_http_auth_event_before_body(&event, &expected)
+        .map_err(auth_error)?;
+    refuse_already_used_auth_event(state, &event)?;
+    signer.to_npub().map_err(auth_error)
+}
+
+fn signed_request_header(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+    auth_now: u64,
+) -> Result<(Event, HttpAuthValidation), ApiError> {
     let authorization = headers
         .get(AUTHORIZATION)
         .or_else(|| headers.get(NOSTR_AUTHORIZATION_HEADER))
@@ -80,22 +152,30 @@ pub(crate) fn validate_request_auth(
         .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
     let event = decode_http_auth_header(authorization)
         .map_err(|_| auth_error_message("valid Nostr authorization is required"))?;
-
-    let expected_url = absolute_url(&state.public_base_url, uri);
-    let mut expected = HttpAuthValidation::new(
+    let expected = HttpAuthValidation::new(
         method.as_str(),
-        expected_url,
-        state.auth_now_unix_seconds(),
+        absolute_url(&state.public_base_url, uri),
+        auth_now,
         state.max_auth_skew_seconds,
     );
-    if let Some(body) = body {
-        expected = expected.with_body(body.to_vec());
-    }
+    Ok((event, expected))
+}
 
-    let signer = finite_nostr::validate_http_auth_event(&event, &expected).map_err(auth_error)?;
-    enforce_auth_replay_cache(state, &event)?;
-    enforce_rate_limit(state, method, uri, &signer)?;
-    signer.to_npub().map_err(auth_error)
+/// Read-only replay check: refuse an authorization event the replay cache
+/// already holds, without recording this one.
+fn refuse_already_used_auth_event(state: &ServerState, event: &Event) -> Result<(), ApiError> {
+    let now = state.auth_now_unix_seconds();
+    let cache = state.auth_replay_cache.lock().map_err(lock_error)?;
+    if cache
+        .get(&event.id.to_string())
+        .is_some_and(|expiry| *expiry >= now)
+    {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "replayed Nostr authorization event",
+        ));
+    }
+    Ok(())
 }
 
 fn add_cors_headers(headers: &mut HeaderMap, origin: &str) {
@@ -144,7 +224,7 @@ fn enforce_rate_limit(
     let actor = signer
         .to_npub()
         .unwrap_or_else(|_| "unknown-nostr-public-key".to_owned());
-    let key = format!("{actor}:{}:{}", method.as_str(), uri.path());
+    let key = rate_limit_key(&actor, method, uri);
     let mut hits = state.rate_limit_hits.lock().map_err(lock_error)?;
     let entries = hits.entry(key).or_default();
     entries.retain(|timestamp| *timestamp > floor);
@@ -156,6 +236,57 @@ fn enforce_rate_limit(
     }
     entries.push(now);
     Ok(())
+}
+
+fn rate_limit_key(actor_npub: &str, method: &Method, uri: &Uri) -> String {
+    format!("{actor_npub}:{}:{}", method.as_str(), uri.path())
+}
+
+/// Read-only rate-limit check for rotation admission: refuse a signer whose
+/// protected-route budget for this method and path is spent, without
+/// recording a hit (the handler's full validation records the one hit).
+pub(crate) fn refuse_rate_limited_signer(
+    state: &ServerState,
+    method: &Method,
+    uri: &Uri,
+    actor_npub: &str,
+) -> Result<(), ApiError> {
+    let floor = state
+        .auth_now_unix_seconds()
+        .saturating_sub(state.rate_limit.window_seconds.max(1));
+    let hits = state.rate_limit_hits.lock().map_err(lock_error)?;
+    let recent = hits
+        .get(&rate_limit_key(actor_npub, method, uri))
+        .map_or(0, |entries| {
+            entries.iter().filter(|at| **at > floor).count()
+        });
+    if recent as u32 >= state.rate_limit.max_requests {
+        return Err(ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "protected route rate limit exceeded",
+        ));
+    }
+    Ok(())
+}
+
+/// Record a rate-limit hit for a rotation request that left admission
+/// without reaching its handler (its body timed out or it waited out the
+/// admission window), so a signer that keeps reconnecting is throttled.
+pub(crate) fn charge_rotation_admission_exit(
+    state: &ServerState,
+    method: &Method,
+    uri: &Uri,
+    actor_npub: &str,
+) {
+    let now = state.auth_now_unix_seconds();
+    let floor = now.saturating_sub(state.rate_limit.window_seconds.max(1));
+    if let Ok(mut hits) = state.rate_limit_hits.lock() {
+        let entries = hits
+            .entry(rate_limit_key(actor_npub, method, uri))
+            .or_default();
+        entries.retain(|at| *at > floor);
+        entries.push(now);
+    }
 }
 
 fn auth_error(error: NostrPrimitiveError) -> ApiError {

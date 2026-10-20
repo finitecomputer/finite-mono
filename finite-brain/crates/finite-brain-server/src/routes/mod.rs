@@ -1,6 +1,7 @@
 pub(crate) mod approvals;
 pub(crate) mod brains;
 pub(crate) mod collaboration;
+pub(crate) mod folder_keys;
 pub(crate) mod folders;
 pub(crate) mod identities;
 pub(crate) mod invite_tokens;
@@ -11,6 +12,7 @@ pub(crate) mod sharing;
 pub(crate) use approvals::*;
 pub(crate) use brains::*;
 pub(crate) use collaboration::*;
+pub(crate) use folder_keys::*;
 pub(crate) use folders::*;
 pub(crate) use identities::*;
 pub(crate) use invite_tokens::*;
