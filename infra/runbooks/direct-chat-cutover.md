@@ -39,11 +39,14 @@ are [runtime-image.md](runtime-image.md); the lat2 deploy is
 1. **Code.** Merge the reviewed PR and build the runtime image from `main` per
    [runtime-image.md](runtime-image.md). Record the
    `ghcr.io/finitecomputer/agent-runtime@sha256:…` digest.
-2. **lat2 closure.** Prepare a reviewed one-line change that sets
-   `FC_DIRECT_CHAT_RUNTIME_IDS = "*"` in `infra/nixos/modules/dashboard.nix`.
-   Build the window's lat2 closure from that commit. It carries the dashboard
-   image with the direct bridge, and the hosted device with
-   `/v1/chat/direct-authorization` and `digest`.
+2. **lat2 closure.** lat2 runs its applications and dashboard module from the
+   pinned `lat2-app-source` ([deploy-core.md](deploy-core.md)).
+   - Merge a reviewed one-line change that sets `FC_DIRECT_CHAT_RUNTIME_IDS =
+     "*"` in `infra/nixos/modules/dashboard.nix`.
+   - In the rollout PR, advance `lat2-app-source` to that commit. It must
+     include this change, so the pinned dashboard has the direct bridge and
+     the hosted device has `/v1/chat/direct-authorization` and `digest`.
+   - Build the window's lat2 closure from that rollout revision.
 3. **Host list.** Get devops sign-off on the current agent host list:
    ```sql
    SELECT r.source_host_id, count(*) FROM project_runtime_links l
