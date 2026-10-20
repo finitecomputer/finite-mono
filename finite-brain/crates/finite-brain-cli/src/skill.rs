@@ -201,6 +201,8 @@ so it also cuts off every other stale key, but its receipt does not list them:
 check `access list` afterwards. `revoke` refuses a key that stays entitled by
 its Brain role; change the role instead. Pending Mount Offers and Folder share
 links for a rotated Folder must be recreated.
+`admin member remove` rotates every Folder the removed key reads or still
+holds this way, and lists them in `rotatedFolders`.
 
 ## Who has access?
 

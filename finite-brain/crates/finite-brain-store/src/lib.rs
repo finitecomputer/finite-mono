@@ -27,6 +27,7 @@ mod folder_key_rotation;
 mod invite_tokens;
 mod links;
 mod loading;
+mod member_removal;
 mod pending_wraps;
 mod schema;
 mod shared_folders;
@@ -42,6 +43,10 @@ pub use admin_demotion::{AdminDemotionRequest, admin_demotion_rotation_folders};
 pub use folder_key_rotation::{
     FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
     folder_key_required_recipients, stale_folder_key_holders,
+};
+pub use member_removal::{
+    MemberRemovalFolderRotation, MemberRemovalRotationReason, member_removal_folder_rotations,
+    member_removal_skipped_stale_grant_folders,
 };
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
@@ -3458,6 +3463,7 @@ mod tests {
 
     mod admin_demotion_tests;
     mod folder_key_rotation_tests;
+    mod member_removal_tests;
 
     #[test]
     fn exposes_store_crate_name() {
