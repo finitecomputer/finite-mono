@@ -35,6 +35,8 @@ on:
         default: true
 
 env:
+  # Skip nix-installer-action's check-in, which fails on a 1s timeout; see ci.yml.
+  IDS_LOOKUP: _detsys_ids._tcp.invalid.
   CACHIX_CACHE_NAME: finite
   NIX_CONFIG: |
     access-tokens = github.com=${{ github.token }}

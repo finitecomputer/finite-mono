@@ -19,6 +19,13 @@ permissions:
   contents: read
 
 env:
+  # nix-installer-action@v16 checks in with install.determinate.systems with a
+  # 1s timeout in both its main and post steps. A slow response fails the main
+  # step outright, and in the post step the HTTP client's retry crashes the
+  # action, failing jobs whose work already passed. A discovery name that
+  # cannot resolve skips the check-in; installers still download from
+  # install.determinate.systems.
+  IDS_LOOKUP: _detsys_ids._tcp.invalid.
   CACHIX_CACHE_NAME: finite
   # Authenticate Nix `github:` flake fetches so shared runner egress does not
   # burn the unauthenticated GitHub API quota. Hermes itself is pinned to a
