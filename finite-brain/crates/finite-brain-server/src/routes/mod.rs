@@ -1,3 +1,4 @@
+pub(crate) mod admin_demotion;
 pub(crate) mod approvals;
 pub(crate) mod brains;
 pub(crate) mod collaboration;
@@ -10,6 +11,7 @@ pub(crate) mod objects_sync;
 pub(crate) mod public;
 pub(crate) mod sharing;
 
+pub(crate) use admin_demotion::*;
 pub(crate) use approvals::*;
 pub(crate) use brains::*;
 pub(crate) use collaboration::*;

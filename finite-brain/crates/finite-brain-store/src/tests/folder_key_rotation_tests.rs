@@ -21,7 +21,7 @@ fn user(npub: &str) -> UserId {
 fn demoted_admin_store() -> BrainStore {
     let mut store = store_with_strategy_folder();
     admin_with_current_wrap(&mut store);
-    store.remove_admin(&acme(), &user(DEMOTED)).unwrap();
+    store.remove_admin_keeping_wraps(&acme(), &user(DEMOTED));
     store
 }
 
@@ -70,7 +70,7 @@ fn record_write_lock_wait(attempt: i32) -> bool {
 /// lock and applies `change`; `work` runs on the store in another thread;
 /// the change commits only once that thread is provably blocked on the
 /// write lock (its busy handler fired), never on a timer.
-fn interleave<T: Send + 'static>(
+pub(super) fn interleave<T: Send + 'static>(
     database: &std::path::Path,
     mut store: BrainStore,
     change: &str,
@@ -558,7 +558,7 @@ fn admin_only_folder_rotation_cuts_off_a_demoted_admin() {
             ],
         )
         .unwrap();
-    store.remove_admin(&brain_id, &demoted).unwrap();
+    store.remove_admin_keeping_wraps(&brain_id, &demoted);
     let (stored, admin_only) = folder(&store, &brain_id, "admin-only");
     assert_eq!(
         stale_folder_key_holders(&stored, &admin_only).unwrap(),

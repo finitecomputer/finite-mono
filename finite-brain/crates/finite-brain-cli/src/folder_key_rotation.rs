@@ -17,12 +17,12 @@ use crate::{
 /// Server receipt for one committed Folder Key rotation.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FolderKeyRotationReceipt {
-    folder_id: String,
-    previous_key_version: u32,
-    new_key_version: u32,
-    recipient_npubs: Vec<String>,
-    cut_off_npubs: Vec<String>,
+pub(crate) struct FolderKeyRotationReceipt {
+    pub(crate) folder_id: String,
+    pub(crate) previous_key_version: u32,
+    pub(crate) new_key_version: u32,
+    pub(crate) recipient_npubs: Vec<String>,
+    pub(crate) cut_off_npubs: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,26 +123,36 @@ fn verified_rotation(
     let response: RotateFolderKeyResponse = serde_json::from_value(response)
         .map_err(|error| CliError::HttpResponseDecode(error.to_string()))?;
     let receipt = response.rotation;
-    let metadata_version = response
-        .metadata
+    if !receipt_proves_prepared(&receipt, &response.metadata, folder_id, prepared) {
+        return Err(CliError::InvalidInput(
+            "Folder Key rotation postcondition was not authoritative".to_owned(),
+        ));
+    }
+    Ok(receipt)
+}
+
+/// A rotation receipt proves what was prepared when the Folder advanced from
+/// the prepared version to the next one, the returned metadata agrees, and the
+/// new key is wrapped for exactly the prepared recipients.
+pub(crate) fn receipt_proves_prepared(
+    receipt: &FolderKeyRotationReceipt,
+    metadata: &BrainMetadataView,
+    folder_id: &str,
+    prepared: &PreparedFolderKeyRotation,
+) -> bool {
+    let metadata_version = metadata
         .folders
         .iter()
         .find(|folder| folder.id == folder_id)
         .map(|folder| folder.current_key_version);
     let recipients = receipt.recipient_npubs.iter().collect::<BTreeSet<_>>();
     let expected = prepared.recipients.iter().collect::<BTreeSet<_>>();
-    if receipt.folder_id != folder_id
-        || receipt.previous_key_version != prepared.previous_key_version
-        || receipt.new_key_version != prepared.new_key_version
-        || metadata_version != Some(prepared.new_key_version)
-        || recipients != expected
-        || receipt.recipient_npubs.len() != expected.len()
-    {
-        return Err(CliError::InvalidInput(
-            "Folder Key rotation postcondition was not authoritative".to_owned(),
-        ));
-    }
-    Ok(receipt)
+    receipt.folder_id == folder_id
+        && receipt.previous_key_version == prepared.previous_key_version
+        && receipt.new_key_version == prepared.new_key_version
+        && metadata_version == Some(prepared.new_key_version)
+        && recipients == expected
+        && receipt.recipient_npubs.len() == expected.len()
 }
 
 /// An older Brain server answers the new route with its unknown-route 404 (or

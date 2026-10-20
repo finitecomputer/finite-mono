@@ -1,11 +1,14 @@
 //! Folder Key rotation routes: explicit access removal and standalone rotation.
+//! Admin demotion (`admin_demotion.rs`) reuses [`rotation_material`] per Folder.
 //!
 //! Both routes accept the same client-prepared material and commit through
 //! `BrainStore::rotate_folder_key`; the signed admin access-change event binds
 //! the action, Folder, optional target and new key version.
 
 use crate::*;
-use finite_brain_store::{FolderKeyRotationRequest, FolderKeyRotationTarget};
+use finite_brain_store::{
+    FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
+};
 
 /// Rotation requests that may hold a large body at once. With the 64 MiB
 /// rotation body limit this bounds buffered rotation request bodies at
@@ -59,8 +62,10 @@ impl Drop for WaitingForRotationPermit {
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) struct RotationAdmittedAt(pub(crate) u64);
 
-/// Who may occupy a rotation permit on a route. Keys are free, roles are not:
-/// only a caller with this authority can hold one of the permits.
+/// Who may occupy a rotation permit on a route. Only a caller with this
+/// authority can hold one of the permits; it is a gate on who may wait, not a
+/// bound on how many callers can, since any key can create a Brain and become
+/// its admin.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum RotationAuthority {
     /// An admin of the `{brain_id}` path Brain (owner or Personal Agent of a
@@ -241,12 +246,13 @@ fn authorize_rotation_actor(
 }
 
 /// Validated, server-shaped rotation material for one Folder.
-struct PreparedRotation {
-    new_key_version: u32,
-    grants: Vec<FolderKeyGrantMetadata>,
-    reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
-    control_records: Vec<SyncRecordInput>,
-    updated_at: String,
+pub(crate) struct PreparedRotation {
+    pub(crate) new_key_version: u32,
+    pub(crate) grants: Vec<FolderKeyGrantMetadata>,
+    pub(crate) reencrypted_records: Vec<FolderObjectRevisionSyncRecord>,
+    /// The new grants' records followed by the signed access-change record.
+    pub(crate) control_records: Vec<SyncRecordInput>,
+    pub(crate) updated_at: String,
 }
 
 /// Authorize the admin, then verify the signed event for `action` before any
@@ -266,6 +272,24 @@ fn prepare_rotation(
         let stored = store.load_brain(brain_id)?;
         ensure_brain_admin(&stored, actor)?;
     }
+    let updated_at = server_timestamp(state);
+    rotation_material(
+        actor, brain_id, folder_id, target, action, request, updated_at,
+    )
+}
+
+/// Verify one Folder's signed access-change event for `action`, then shape
+/// its grants, re-encrypted records and control records. The caller has
+/// already bounded fan-out and authorized the admin.
+pub(crate) fn rotation_material(
+    actor: &str,
+    brain_id: &BrainId,
+    folder_id: &FolderId,
+    target: Option<&UserId>,
+    action: AdminAccessAction,
+    request: FolderKeyRotationMaterialRequest,
+    updated_at: String,
+) -> Result<PreparedRotation, ApiError> {
     let (event, payload) = validate_admin_access_change_value(
         request.access_change_event,
         brain_id,
@@ -275,7 +299,6 @@ fn prepare_rotation(
         target.map(UserId::as_str),
         Some(request.new_key_version),
     )?;
-    let updated_at = server_timestamp(state);
     let grants = grant_requests_to_metadata(
         &request.grants,
         folder_id,
@@ -419,16 +442,20 @@ pub(crate) async fn rotate_folder_key_handler(
     notification_state.publish_access_update(&notification_brain_id);
     Ok(Json(RotateFolderKeyResponse {
         metadata,
-        rotation: FolderKeyRotationReceipt {
-            folder_id: outcome.folder_id.to_string(),
-            previous_key_version: outcome.previous_key_version,
-            new_key_version: outcome.new_key_version,
-            recipient_npubs: outcome.recipients.iter().map(ToString::to_string).collect(),
-            cut_off_npubs: outcome
-                .cut_off_holders
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-        },
+        rotation: rotation_receipt(&outcome),
     }))
+}
+
+pub(crate) fn rotation_receipt(outcome: &FolderKeyRotationOutcome) -> FolderKeyRotationReceipt {
+    FolderKeyRotationReceipt {
+        folder_id: outcome.folder_id.to_string(),
+        previous_key_version: outcome.previous_key_version,
+        new_key_version: outcome.new_key_version,
+        recipient_npubs: outcome.recipients.iter().map(ToString::to_string).collect(),
+        cut_off_npubs: outcome
+            .cut_off_holders
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
+    }
 }

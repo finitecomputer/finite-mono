@@ -2,6 +2,7 @@
 
 mod access_report;
 mod admin;
+mod admin_demotion;
 mod args;
 mod clock;
 mod embedding_provider;
@@ -33,6 +34,7 @@ pub use error::CliError;
 pub use models::{ActivityEntry, ConflictEntry, ConflictState};
 
 pub(crate) use admin::*;
+pub(crate) use admin_demotion::*;
 pub(crate) use args::*;
 pub(crate) use clock::*;
 pub(crate) use folder_key_rotation::*;
@@ -2962,28 +2964,20 @@ fn folder<W: Write>(
                     break;
                 }
             }
-            let bootstrap_route = format!("/v1/brains/{brain_id}/sync/bootstrap");
-            let bootstrap = signed_json_request(env, args, "GET", &bootstrap_route, None)?;
-            let expected_object_count = bootstrap
-                .get("objects")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    CliError::InvalidInput(
-                        "Folder deletion confirmation could not read current objects".to_owned(),
-                    )
-                })?
-                .iter()
-                .filter(|object| {
-                    !object
-                        .get("deleted")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                        && object
-                            .get("folderId")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|folder| expected_folder_ids.contains(folder))
-                })
-                .count();
+            // The server computes the live object count without sending any
+            // ciphertext. The local metadata view must agree on the subtree and
+            // key version; the deletion transaction checks both again.
+            let preview = fetch_folder_deletion_preview(env, args, &brain_id, folder_id)?;
+            let previewed_folder_ids = preview.folder_ids.iter().cloned().collect::<BTreeSet<_>>();
+            if previewed_folder_ids.len() != preview.folder_ids.len()
+                || previewed_folder_ids != expected_folder_ids
+                || preview.current_key_version != folder.current_key_version
+            {
+                return Err(CliError::InvalidInput(format!(
+                    "Folder {folder_id} changed while preparing its deletion; nothing was deleted. Retry `fbrain folder delete {folder_id}`"
+                )));
+            }
+            let expected_object_count = preview.object_count;
             let deletion_event = admin_access_change_event(
                 env,
                 &brain_id,
@@ -3598,28 +3592,6 @@ fn admin_operation<W: Write>(
             let response = signed_json_request(env, args, "PUT", &route, Some(body))?;
             write_command_response(output, json, &response)
         }
-        ("role", "revoke") => {
-            let brain_id = command_brain_id(args, env)?;
-            let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
-            let target = resolve_identity_npub(env, args, &raw_target)?;
-            let event = admin_access_change_event(
-                env,
-                &brain_id,
-                AdminAccessAction::RemoveAdmin,
-                None,
-                Some(&target),
-                None,
-            )?;
-            let route = format!("/v1/admin/brains/{brain_id}/roles/admin/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({ "accessChangeEvent": event })),
-            )?;
-            write_command_response(output, json, &response)
-        }
         ("folder-access", "grant") => {
             let brain_id = command_brain_id(args, env)?;
             let folder_id =
@@ -3713,11 +3685,15 @@ fn admin<W: Write>(
                     "admin is the only role managed by this command, got {role}"
                 )));
             }
-            if positional_role.is_some() {
+            let role_args = if positional_role.is_some() {
                 &args[2..]
             } else {
                 &args[1..]
+            };
+            if action == "revoke" {
+                return admin_role_revoke(role_args, env, json, output);
             }
+            role_args
         }
         _ => {
             return Err(CliError::InvalidCommand(format!(
@@ -4817,6 +4793,8 @@ mod tests {
     use tempfile::TempDir;
 
     mod access_report_tests;
+    mod admin_demotion_tests;
+    mod folder_delete_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
 

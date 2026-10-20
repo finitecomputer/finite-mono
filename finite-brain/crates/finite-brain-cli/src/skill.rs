@@ -190,8 +190,9 @@ are signed admin events, and Folder Keys rotate on revocation; the CLI
 prepares rotation material automatically; never hand-build rotation bodies.
 
 A key that holds a Folder's current key without entitlement shows as
-`revocationIncomplete` in `fbrain access list` (for example after
-`admin role revoke admin`, which rotates no keys). An admin who can open that
+`revocationIncomplete` in `fbrain access list` (for example after a demotion
+by an older Brain server; `admin role revoke admin` now rotates those Folder
+Keys in the same change). An admin who can open that
 Folder clears it with `fbrain admin folder-access rotate --folder <folder-id>`,
 which generates a fresh key for exactly the entitled keys and lists every key
 it cut off in `cutOffNpubs`. `fbrain admin folder-access revoke --folder

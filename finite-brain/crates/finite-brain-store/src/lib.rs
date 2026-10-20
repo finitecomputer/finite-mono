@@ -18,6 +18,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod access_report;
+mod admin_demotion;
 mod approvals;
 mod brains;
 mod folder_access;
@@ -38,6 +39,7 @@ pub use access_report::{
     MAX_ACCESS_REPORT_IDENTITIES, MAX_ACCESS_REPORT_OUTGOING_MOUNTS, ParticipationEvidence,
     ParticipationKind,
 };
+pub use admin_demotion::{AdminDemotionRequest, admin_demotion_rotation_folders};
 pub use folder_key_rotation::{
     FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
     folder_key_required_recipients, stale_folder_key_holders,
@@ -680,6 +682,14 @@ pub struct FolderDeletionExpectation {
     pub object_count: usize,
 }
 
+/// Server-computed scope shown to a client before destructive confirmation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionPreview {
+    pub folder_ids: BTreeSet<FolderId>,
+    pub object_count: usize,
+    pub root_key_version: u32,
+}
+
 /// Retained facts needed to validate an exact retry after a Folder is gone.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FolderDeletionReplay {
@@ -818,7 +828,8 @@ pub struct EncryptedExportFolderAccess {
     pub user_ids: Vec<UserId>,
 }
 
-/// One Folder Key rotation prepared for atomic Member removal.
+/// One Folder Key rotation prepared for an atomic roster change: Member
+/// removal or admin demotion.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MemberFolderRotation {
     pub folder_id: FolderId,
@@ -3450,6 +3461,7 @@ mod tests {
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
 
+    mod admin_demotion_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
 
@@ -5263,6 +5275,150 @@ mod tests {
 
         assert_eq!(share.created_by_npub, agent);
         assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn folder_deletion_preview_matches_the_scope_deletion_accepts() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let strategy = FolderId::new("strategy").unwrap();
+        let child = Folder {
+            id: FolderId::new("strategy-child").unwrap(),
+            name: DisplayName::new("folder_name", "Child").unwrap(),
+            parent_folder_id: Some(strategy.clone()),
+            path: SafeRelativePath::new("folder_path", "Strategy/Child").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &child,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-strategy-child-admin",
+                    "strategy-child",
+                    1,
+                    admin.as_str(),
+                    admin.as_str(),
+                )],
+            )
+            .unwrap();
+        for record in [
+            revision_record("event-live", "obj_000000000201", 1, None, "live"),
+            revision_record("event-gone", "obj_000000000202", 1, None, "gone"),
+            tombstone_record("event-gone-delete", "obj_000000000202", 2, 1),
+            revision_record_for(
+                "strategy-child",
+                "event-child-live",
+                "obj_000000000203",
+                1,
+                None,
+                "child",
+            ),
+            revision_record_for(
+                "team-notes",
+                "event-sibling-live",
+                "obj_000000000204",
+                1,
+                None,
+                "sibling",
+            ),
+        ] {
+            store.submit_sync_record(&brain_id, &record).unwrap();
+        }
+
+        // Tombstoned objects and objects outside the subtree are not counted.
+        let preview = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(
+            preview,
+            FolderDeletionPreview {
+                folder_ids: BTreeSet::from([strategy.clone(), child.id.clone()]),
+                object_count: 2,
+                root_key_version: 1,
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &strategy, &UserId::new("npub-member").unwrap())
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "Folder deletion requires brain destructive authority".to_owned(),
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &FolderId::new("missing").unwrap(), &admin)
+                .unwrap_err(),
+            StoreError::MissingFolder {
+                folder_id: "missing".to_owned(),
+            }
+        );
+
+        // A write after the preview makes the echoed scope stale.
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-late", "obj_000000000205", 1, None, "late"),
+            )
+            .unwrap();
+        let stale = FolderDeletionExpectation {
+            folder_ids: preview.folder_ids.clone(),
+            object_count: preview.object_count,
+        };
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &strategy,
+                    &admin,
+                    preview.root_key_version,
+                    "event-delete-stale-preview",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                    Some(&stale),
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder subtree changed after destructive confirmation".to_owned(),
+                current_revision: None,
+            }
+        );
+
+        let fresh = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(fresh.object_count, 3);
+        let deleted = store
+            .delete_folder_subtree(
+                &brain_id,
+                &strategy,
+                &admin,
+                fresh.root_key_version,
+                "event-delete-fresh-preview",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+                Some(&FolderDeletionExpectation {
+                    folder_ids: fresh.folder_ids,
+                    object_count: fresh.object_count,
+                }),
+            )
+            .unwrap();
+        assert_eq!(deleted.folder_count, 2);
+        assert_eq!(deleted.object_count, 3);
+        let sibling = store
+            .load_current_object(
+                &brain_id,
+                &FolderId::new("team-notes").unwrap(),
+                &ObjectId::new("obj_000000000204").unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!sibling.deleted);
     }
 
     #[test]
@@ -8338,7 +8494,7 @@ mod tests {
     }
 
     #[test]
-    fn demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
+    fn legacy_demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("brain.sqlite3");
         let mut store = BrainStore::open(&db).unwrap();
@@ -8358,7 +8514,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &old_grant)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         // Reopen persisted pre-repair state, as a server upgrade would.
         drop(store);
         let mut store = BrainStore::open(&db).unwrap();
@@ -8473,7 +8629,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &retained)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         let repair = grant("repair", "strategy", 1, "npub-admin", member.as_str());
         let key_record = folder_key_grant_control_record(&repair, "repair-key-record");
         let access_record = folder_access_control_record(
@@ -8553,15 +8709,29 @@ mod tests {
         store.add_member(&brain_id, &member).unwrap();
         store.add_admin(&brain_id, &member).unwrap();
 
-        store.remove_admin(&brain_id, &member).unwrap();
-        assert_eq!(
-            store
-                .remove_admin(&brain_id, &UserId::new("npub-admin").unwrap())
-                .unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: "organization brain must keep at least one admin".to_owned()
-            }
-        );
+        let rotations = [MemberFolderRotation {
+            folder_id: FolderId::new("private-project").unwrap(),
+            new_key_version: 2,
+            grants: vec![grant(
+                "private-project-admin-v2",
+                "private-project",
+                2,
+                "npub-admin",
+                "npub-admin",
+            )],
+            reencrypted_records: Vec::new(),
+        }];
+        store
+            .remove_admin(
+                &brain_id,
+                AdminDemotionRequest {
+                    removed_user_id: &member,
+                    rotations: &rotations,
+                    updated_at: "2026-06-23T00:00:00.000Z",
+                    control_records: &[],
+                },
+            )
+            .unwrap();
 
         store.remove_member(&brain_id, &member).unwrap();
         let stored = store.load_brain(&brain_id).unwrap();
@@ -9469,6 +9639,29 @@ mod tests {
             self.grant_folder_access_with_control_records(
                 brain_id, folder_id, user_id, grant, &records,
             )
+        }
+    }
+
+    /// Demote an admin the way Brain servers did before demotion rotated
+    /// Folder Keys: drop the role row and keep every wrap. Production Brains
+    /// still hold state written this way, so stale-wrap fixtures start here.
+    trait LegacyAdminDemotionTestExt {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId);
+    }
+
+    impl LegacyAdminDemotionTestExt for BrainStore {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId) {
+            let removed = self
+                .conn
+                .execute(
+                    "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                    params![brain_id.as_str(), user_id.as_str()],
+                )
+                .unwrap();
+            assert_eq!(
+                removed, 1,
+                "legacy demotion fixture target must be an admin"
+            );
         }
     }
 

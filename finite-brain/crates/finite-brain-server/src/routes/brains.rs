@@ -688,39 +688,6 @@ pub(crate) async fn add_admin_handler(
     Ok(Json(response))
 }
 
-pub(crate) async fn remove_admin_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
-    body: Bytes,
-) -> Result<Json<BrainMetadataResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: AdminEventRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
-    let target = UserId::new(target_identity.npub.clone())?;
-    let (event, payload) = validate_admin_access_change_value(
-        request.access_change_event,
-        &brain_id,
-        &actor,
-        AdminAccessAction::RemoveAdmin,
-        None,
-        Some(target.as_str()),
-        None,
-    )?;
-    let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
-    let notification_state = state.clone();
-    let notification_brain_id = brain_id.clone();
-    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.remove_admin_with_control_records(brain_id, &target, &control_records)
-    })?;
-    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
-    Ok(Json(response))
-}
-
 pub(crate) async fn list_brain_invitations_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

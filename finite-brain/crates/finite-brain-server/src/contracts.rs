@@ -224,6 +224,19 @@ pub struct FolderDeleteRequest {
     pub expected_object_count: usize,
 }
 
+/// Server-computed scope of a permanent Folder deletion, read without object
+/// payloads. The confirming client echoes `folderIds` and `objectCount` back as
+/// `FolderDeleteRequest.expectedFolderIds`/`expectedObjectCount`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeletionPreviewResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub folder_ids: Vec<String>,
+    pub object_count: usize,
+    pub current_key_version: u32,
+}
+
 /// Counts and sync cursor returned after permanent Folder deletion.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -726,6 +739,36 @@ pub struct RotateFolderKeyResponse {
     #[serde(flatten)]
     pub metadata: BrainMetadataResponse,
     pub rotation: FolderKeyRotationReceipt,
+}
+
+/// One Folder Key rotation inside an admin demotion: the standalone rotation
+/// material plus the Folder it rotates. Its signed access-change event is a
+/// `rotate-folder-key` for that Folder and new key version.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminRotationRequest {
+    pub folder_id: String,
+    #[serde(flatten)]
+    pub material: FolderKeyRotationMaterialRequest,
+}
+
+/// Body of `POST /v1/admin/brains/{brain}/roles/admin/{target}/demotion`: the
+/// signed `remove-admin` event and one rotation per Folder the demoted key
+/// reaches only through the admin role (empty when there are none).
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminRequest {
+    pub access_change_event: serde_json::Value,
+    pub rotations: Vec<DemoteAdminRotationRequest>,
+}
+
+/// Admin demotion response: Brain metadata plus one receipt per rotation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub rotations: Vec<FolderKeyRotationReceipt>,
 }
 
 /// Create Brain Invitation request.
