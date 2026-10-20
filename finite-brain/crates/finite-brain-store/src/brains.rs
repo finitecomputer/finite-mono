@@ -380,45 +380,6 @@ impl BrainStore {
         Ok(())
     }
 
-    /// Remove an Organization Brain Admin while preserving at least one admin.
-    pub fn remove_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
-        self.remove_admin_with_control_records(brain_id, user_id, &[])
-    }
-
-    /// Remove an Organization Brain Admin and append its signed record atomically.
-    pub fn remove_admin_with_control_records(
-        &mut self,
-        brain_id: &BrainId,
-        user_id: &UserId,
-        control_records: &[SyncRecordInput],
-    ) -> Result<(), StoreError> {
-        let brain = self.load_core_brain(brain_id)?;
-        if brain.kind != BrainKind::Organization {
-            return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization brain".to_owned(),
-            });
-        }
-        if !brain.admins.contains(user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "brain admin does not exist".to_owned(),
-            });
-        }
-        if brain.admins.len() == 1 {
-            return Err(StoreError::BrokenInvariant {
-                reason: "organization brain must keep at least one admin".to_owned(),
-            });
-        }
-
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
-            params![brain_id.as_str(), user_id.as_str()],
-        )?;
-        sync_records::append_sync_records(&tx, brain_id, control_records)?;
-        tx.commit()?;
-        Ok(())
-    }
-
     /// Remove a Brain Member after role and restricted access cleanup.
     pub fn remove_member(
         &mut self,

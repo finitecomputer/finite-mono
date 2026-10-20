@@ -544,6 +544,7 @@ impl BrainStore {
                 .unwrap_or_default();
             remaining_access.remove(removed_user_id);
             validate_folder_key_rotation_material(
+                &stored.brain,
                 &post_removal_brain,
                 folder,
                 &remaining_access,
