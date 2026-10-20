@@ -25,6 +25,39 @@ pub(crate) async fn folder_access_handler(
 use finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
 use finite_brain_store::FolderDeletionExpectation;
 
+/// Read-only pre-flight for `DELETE /folders/{folder_id}`: the subtree and its
+/// live object count, without downloading object ciphertext. Same authority as
+/// the deletion itself.
+pub(crate) async fn folder_deletion_preview_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+) -> Result<Json<FolderDeletionPreviewResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    spawn_store(state, move |state| {
+        let brain_id = BrainId::new(brain_id)?;
+        let folder_id = FolderId::new(folder_id)?;
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_direct_delete_authority(&stored, &actor)?;
+        let preview = store.folder_deletion_preview(&brain_id, &folder_id, &UserId::new(actor)?)?;
+        Ok(Json(FolderDeletionPreviewResponse {
+            brain_id: brain_id.to_string(),
+            folder_id: folder_id.to_string(),
+            folder_ids: preview
+                .folder_ids
+                .into_iter()
+                .map(|folder_id| folder_id.to_string())
+                .collect(),
+            object_count: preview.object_count,
+            current_key_version: preview.root_key_version,
+        }))
+    })
+    .await
+}
+
 pub(crate) async fn delete_folder_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

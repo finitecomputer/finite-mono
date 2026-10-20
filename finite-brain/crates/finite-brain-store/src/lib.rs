@@ -677,6 +677,14 @@ pub struct FolderDeletionExpectation {
     pub object_count: usize,
 }
 
+/// Server-computed scope shown to a client before destructive confirmation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionPreview {
+    pub folder_ids: BTreeSet<FolderId>,
+    pub object_count: usize,
+    pub root_key_version: u32,
+}
+
 /// Retained facts needed to validate an exact retry after a Folder is gone.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct FolderDeletionReplay {
@@ -5261,6 +5269,150 @@ mod tests {
 
         assert_eq!(share.created_by_npub, agent);
         assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn folder_deletion_preview_matches_the_scope_deletion_accepts() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let strategy = FolderId::new("strategy").unwrap();
+        let child = Folder {
+            id: FolderId::new("strategy-child").unwrap(),
+            name: DisplayName::new("folder_name", "Child").unwrap(),
+            parent_folder_id: Some(strategy.clone()),
+            path: SafeRelativePath::new("folder_path", "Strategy/Child").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &child,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-strategy-child-admin",
+                    "strategy-child",
+                    1,
+                    admin.as_str(),
+                    admin.as_str(),
+                )],
+            )
+            .unwrap();
+        for record in [
+            revision_record("event-live", "obj_000000000201", 1, None, "live"),
+            revision_record("event-gone", "obj_000000000202", 1, None, "gone"),
+            tombstone_record("event-gone-delete", "obj_000000000202", 2, 1),
+            revision_record_for(
+                "strategy-child",
+                "event-child-live",
+                "obj_000000000203",
+                1,
+                None,
+                "child",
+            ),
+            revision_record_for(
+                "team-notes",
+                "event-sibling-live",
+                "obj_000000000204",
+                1,
+                None,
+                "sibling",
+            ),
+        ] {
+            store.submit_sync_record(&brain_id, &record).unwrap();
+        }
+
+        // Tombstoned objects and objects outside the subtree are not counted.
+        let preview = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(
+            preview,
+            FolderDeletionPreview {
+                folder_ids: BTreeSet::from([strategy.clone(), child.id.clone()]),
+                object_count: 2,
+                root_key_version: 1,
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &strategy, &UserId::new("npub-member").unwrap())
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "Folder deletion requires brain destructive authority".to_owned(),
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &FolderId::new("missing").unwrap(), &admin)
+                .unwrap_err(),
+            StoreError::MissingFolder {
+                folder_id: "missing".to_owned(),
+            }
+        );
+
+        // A write after the preview makes the echoed scope stale.
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-late", "obj_000000000205", 1, None, "late"),
+            )
+            .unwrap();
+        let stale = FolderDeletionExpectation {
+            folder_ids: preview.folder_ids.clone(),
+            object_count: preview.object_count,
+        };
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &strategy,
+                    &admin,
+                    preview.root_key_version,
+                    "event-delete-stale-preview",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                    Some(&stale),
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder subtree changed after destructive confirmation".to_owned(),
+                current_revision: None,
+            }
+        );
+
+        let fresh = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(fresh.object_count, 3);
+        let deleted = store
+            .delete_folder_subtree(
+                &brain_id,
+                &strategy,
+                &admin,
+                fresh.root_key_version,
+                "event-delete-fresh-preview",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+                Some(&FolderDeletionExpectation {
+                    folder_ids: fresh.folder_ids,
+                    object_count: fresh.object_count,
+                }),
+            )
+            .unwrap();
+        assert_eq!(deleted.folder_count, 2);
+        assert_eq!(deleted.object_count, 3);
+        let sibling = store
+            .load_current_object(
+                &brain_id,
+                &FolderId::new("team-notes").unwrap(),
+                &ObjectId::new("obj_000000000204").unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!sibling.deleted);
     }
 
     #[test]

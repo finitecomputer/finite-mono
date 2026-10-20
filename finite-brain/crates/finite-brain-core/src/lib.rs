@@ -106,7 +106,8 @@ pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 pub const ROTATION_BODY_READ_DEADLINE_SECONDS: u64 = 60;
 /// Seconds an authorized rotation request may wait, in arrival order, for an
 /// admission permit before the server answers 503: two body deadlines, so a
-/// queued request reaches the front within one deadline of any stall ahead.
+/// request with nobody waiting ahead of it reaches the front within one
+/// deadline of any stall ahead; each earlier waiter can add another deadline.
 pub const ROTATION_ADMISSION_WAIT_SECONDS: u64 = 2 * ROTATION_BODY_READ_DEADLINE_SECONDS;
 /// Maximum Folder rotations accepted in one admin demotion: at most every
 /// native Folder of the Brain.

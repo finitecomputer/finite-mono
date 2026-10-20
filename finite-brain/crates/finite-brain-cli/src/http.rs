@@ -269,6 +269,26 @@ pub(crate) fn is_brain_access_loss(error: &CliError) -> bool {
     )
 }
 
+/// Phrase in the Brain server's fallback answer for an unknown API route.
+const SERVER_ROUTE_NOT_FOUND: &str = "route not found";
+
+/// An older Brain server answers a route it predates with its unknown-route
+/// 404, or with 405 when only the method is new. Map either to the caller's
+/// `CliError::Unsupported` so commands fail closed with an upgrade message
+/// instead of falling back to a weaker path; every other error passes through.
+pub(crate) fn unsupported_on_older_server(
+    error: CliError,
+    unsupported: impl FnOnce() -> CliError,
+) -> CliError {
+    match error {
+        CliError::HttpStatus { status: 404, body } if body.contains(SERVER_ROUTE_NOT_FOUND) => {
+            unsupported()
+        }
+        CliError::HttpStatus { status: 405, .. } => unsupported(),
+        other => other,
+    }
+}
+
 pub(crate) fn signed_json_request(
     env: &CliEnvironment,
     args: &[String],

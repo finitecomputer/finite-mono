@@ -2005,6 +2005,200 @@ fn built_fbrain_process_admin_demotion_rotates_role_only_folder_keys() {
     server_thread.join().unwrap();
 }
 
+/// Folder deletion used to download the whole sync bootstrap to count live
+/// objects, which fails the CLI's 10 MiB JSON response cap on a real Brain
+/// before the DELETE is sent. The deletion preview carries no ciphertext.
+#[test]
+fn built_fbrain_folder_delete_succeeds_on_a_brain_over_the_json_response_cap() {
+    const PAYLOAD_PAGES: usize = 30;
+    const PAGE_BYTES: usize = 400 * 1024;
+    const JSON_RESPONSE_CAP_BYTES: usize = 10 * 1024 * 1024;
+
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("owner");
+    fs::create_dir_all(&home).unwrap();
+    let keys = Keys::generate();
+    let secret = home.join("import-key");
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    let imported = run(
+        &home,
+        &home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    fs::remove_file(secret).unwrap();
+    let owner = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    // The fixture's unrelated Personal Brain needs a distinct agent key.
+    let fixture_agent = NostrPublicKey::from_protocol(Keys::generate().public_key())
+        .to_npub()
+        .unwrap();
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(&owner, &fixture_agent, &owner, &owner);
+    let invoke = |cwd: &Path, args: &[&str]| -> Output {
+        command(&home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run_json = |cwd: &Path, args: &[&str]| -> Value {
+        let output = invoke(cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    run_json(&home, &["brain", "create", "organization", "Bulk"]);
+    let tree = home.join("tree");
+    run_json(&home, &["open", "bulk", tree.to_str().unwrap()]);
+    for name in ["Payload", "Empty", "Notes"] {
+        run_json(&tree, &["folder", "create", name]);
+    }
+    run_json(
+        &tree,
+        &[
+            "folder",
+            "create",
+            "inner",
+            "--name",
+            "Inner",
+            "--parent",
+            "notes",
+            "--path",
+            "Notes/Inner",
+        ],
+    );
+    run_json(&tree, &["sync", "now"]);
+    let page = |index: usize| -> String {
+        let mut body = format!("# Payload page {index}\n\n");
+        let mut line = 0_usize;
+        while body.len() < PAGE_BYTES {
+            body.push_str(&format!(
+                "payload {index} line {line:08} {}\n",
+                "x".repeat(40)
+            ));
+            line += 1;
+        }
+        body
+    };
+    for index in 0..PAYLOAD_PAGES {
+        fs::write(
+            tree.join(format!("Payload/page-{index:02}.md")),
+            page(index),
+        )
+        .unwrap();
+    }
+    fs::write(tree.join("Notes/Inner/kept-until-delete.md"), "# Inner\n").unwrap();
+    run_json(&tree, &["sync", "now"]);
+
+    // An empty sibling Folder.
+    let deleted = run_json(&tree, &["folder", "delete", "empty"]);
+    assert_eq!(deleted["deletedFolderIds"], json!(["empty"]));
+    assert_eq!(deleted["folderCount"], 1);
+    assert_eq!(deleted["objectCount"], 0);
+    // A subtree with live objects: the server-side count must match the
+    // objects this Working Tree synced into it.
+    let state: Value = serde_json::from_slice(
+        &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
+    )
+    .unwrap();
+    let synced_paths = state["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| matches!(object["folderId"].as_str(), Some("notes" | "inner")))
+        .map(|object| object["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        synced_paths.contains(&"kept-until-delete.md".to_owned()),
+        "{synced_paths:?}"
+    );
+    let deleted = run_json(&tree, &["folder", "delete", "notes"]);
+    let mut deleted_ids = deleted["deletedFolderIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    deleted_ids.sort();
+    assert_eq!(deleted_ids, ["inner", "notes"]);
+    assert_eq!(deleted["folderCount"], 2);
+    assert_eq!(
+        deleted["objectCount"],
+        synced_paths.len(),
+        "{synced_paths:?}"
+    );
+    assert!(!tree.join("Empty").exists());
+    assert!(!tree.join("Notes").exists());
+
+    let folders = run_json(&tree, &["folder", "list"]);
+    let folder_ids = folders
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(folder_ids.contains(&"payload"), "{folder_ids:?}");
+    for gone in ["empty", "notes", "inner"] {
+        assert!(!folder_ids.contains(&gone), "{gone}: {folder_ids:?}");
+    }
+    let retry = invoke(&tree, &["folder", "delete", "empty"]);
+    assert!(!retry.status.success());
+
+    // A fresh Working Tree proves the other Folder is intact, and its cached
+    // bootstrap proves the Brain's ciphertext is over the old 10 MiB cap.
+    let fresh = home.join("fresh-tree");
+    run_json(&home, &["open", "bulk", fresh.to_str().unwrap()]);
+    run_json(&fresh, &["sync", "now"]);
+    for index in 0..PAYLOAD_PAGES {
+        assert_eq!(
+            fs::read_to_string(fresh.join(format!("Payload/page-{index:02}.md"))).unwrap(),
+            page(index),
+            "page {index}"
+        );
+    }
+    assert!(!fresh.join("Empty").exists());
+    assert!(!fresh.join("Notes").exists());
+    let bootstrap: Value = serde_json::from_slice(
+        &fs::read(fresh.join(".finitebrain/encrypted-sync/bootstrap.json")).unwrap(),
+    )
+    .unwrap();
+    let ciphertext_bytes: usize = bootstrap["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|object| object["ciphertext"].as_str().map_or(0, str::len))
+        .sum();
+    assert!(
+        ciphertext_bytes > JSON_RESPONSE_CAP_BYTES,
+        "bootstrap ciphertext is only {ciphertext_bytes} bytes"
+    );
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
 /// Open the grant in `export` addressed to `keys` for one Folder version.
 fn open_grant(keys: &Keys, export: &Value, folder_id: &str, key_version: u32) -> Option<FolderKey> {
     let npub = NostrPublicKey::from_protocol(keys.public_key())

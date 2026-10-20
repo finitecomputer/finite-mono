@@ -185,11 +185,13 @@ whole two-minute admission wait (slots stayed taken), or at once when the
 admission queue was already full (no waiting place at all). Both count
 towards the report below.
 
-Arrival order serves a waiting admin ahead of anyone who arrives later, and
-while the slots are merely busy it is admitted within about one 60-second
-upload. It does not stop a flood: anyone who can create a Brain on this
-server (any key can) and keep many requests open can keep the queue full and
-delay rotations for as long as they sustain that load. Report repeated 503s
+Arrival order serves a waiting admin ahead of anyone who arrives later. When
+the slots are busy and nobody is waiting ahead of it, it is admitted within
+about one 60-second upload; every request already waiting ahead of it can add
+another, and the two-minute wait still applies. It does not stop a flood:
+anyone who can create a Brain on this server (any key can) and keep many
+requests open can keep the queue full and delay rotations for as long as they
+sustain that load. Report repeated 503s
 of either kind to the server operator instead of retrying in a loop.
 
 Member removal does not yet clear Folders where the removed key holds a

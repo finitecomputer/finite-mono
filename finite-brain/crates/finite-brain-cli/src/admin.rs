@@ -11,11 +11,11 @@ use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
 use nostr::{Keys, Kind, Tag};
 
 use crate::{
-    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
-    SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
-    normalize_folder_access, open_brain_session_folder_keys_for_collaboration, read_agent_state,
-    read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
-    write_working_tree_state,
+    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, FolderDeletionPreviewView,
+    LocalSigner, SessionFolderKeyring, deterministic_id, find_agent_state, load_signer,
+    mutate_agent_state, normalize_folder_access, open_brain_session_folder_keys_for_collaboration,
+    read_agent_state, read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp,
+    unix_timestamp, unsupported_on_older_server, write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -26,6 +26,38 @@ pub(crate) fn fetch_brain_metadata(
     let path = format!("/v1/brains/{brain_id}/metadata");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
+}
+
+/// Read the server's scope for a permanent Folder deletion. This replaces
+/// counting live objects out of the full sync bootstrap, which carries every
+/// object's ciphertext and exceeds the JSON response cap on real Brains.
+/// An older server has no such route: fail closed instead of falling back to
+/// the whole-Brain download.
+pub(crate) fn fetch_folder_deletion_preview(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+) -> Result<FolderDeletionPreviewView, CliError> {
+    let path = format!("/v1/brains/{brain_id}/folders/{folder_id}/deletion-preview");
+    let response = signed_json_request(env, args, "GET", &path, None).map_err(|error| {
+        unsupported_on_older_server(error, || unsupported_folder_deletion_preview(&path))
+    })?;
+    let preview: FolderDeletionPreviewView = serde_json::from_value(response).map_err(|_| {
+        CliError::HttpResponseDecode("Folder deletion preview response is malformed".to_owned())
+    })?;
+    if preview.brain_id != brain_id || preview.folder_id != folder_id {
+        return Err(CliError::HttpResponseDecode(
+            "Folder deletion preview describes a different Folder".to_owned(),
+        ));
+    }
+    Ok(preview)
+}
+
+fn unsupported_folder_deletion_preview(path: &str) -> CliError {
+    CliError::Unsupported(format!(
+        "this Brain server does not provide the Folder deletion preview (GET {path}). Upgrade the Brain server; fbrain no longer downloads the whole Brain to confirm a deletion, and nothing was deleted"
+    ))
 }
 
 /// Plan and submit one convergent Organization Brain collaboration request.
