@@ -637,6 +637,10 @@ fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
             axum::routing::delete(delete_folder_handler),
         )
         .route(
+            "/brains/{brain_id}/folders/{folder_id}/deletion-preview",
+            get(folder_deletion_preview_handler),
+        )
+        .route(
             "/brains/{brain_id}/folders/{folder_id}/invitations",
             get(list_folder_share_links_handler).post(create_folder_invitation_handler),
         )
@@ -3254,6 +3258,29 @@ mod tests {
             None,
             Some(1),
         );
+        for keys in [&agent_keys, &owner_keys] {
+            let preview = authed_request(
+                router.clone(),
+                keys,
+                "GET",
+                "/v1/brains/personal/folders/agent-notes/deletion-preview",
+                None,
+                TEST_NOW + 3,
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::OK);
+            let preview: FolderDeletionPreviewResponse = read_json(preview).await;
+            assert_eq!(
+                preview,
+                FolderDeletionPreviewResponse {
+                    brain_id: "personal".to_owned(),
+                    folder_id: "agent-notes".to_owned(),
+                    folder_ids: vec!["agent-notes".to_owned()],
+                    object_count: 1,
+                    current_key_version: 1,
+                }
+            );
+        }
         let stale_delete_body = serde_json::json!({
             "deletionEvent": deletion_event.clone(),
             "expectedFolderIds": ["agent-notes"],
@@ -3382,6 +3409,169 @@ mod tests {
             "permanent deletion requires brain destructive authority",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn folder_deletion_preview_is_admin_only_and_is_the_scope_delete_accepts() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let add_member_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "add-preview-test-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "PUT",
+                &format!("/v1/admin/brains/acme/members/{member_npub}"),
+                Some(add_member_body),
+                TEST_NOW,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let object_body = object_write_body(
+            &admin_keys,
+            RevisionFixture {
+                brain_id: "acme",
+                folder_id: "getting-started",
+                object_id: "obj_000000000301",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "preview note",
+                nonce: 31,
+                record_type: false,
+            },
+        );
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "PUT",
+                "/v1/brains/acme/folders/getting-started/objects/obj_000000000301",
+                Some(object_body),
+                TEST_NOW + 1,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let preview_path = "/v1/brains/acme/folders/getting-started/deletion-preview";
+
+        let unsigned = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(preview_path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                unsigned.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ),
+            "{}",
+            unsigned.status()
+        );
+        // Members can read the Folder but hold no destructive authority, so
+        // they cannot probe the subtree size either.
+        let denied = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            preview_path,
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(
+            denied,
+            StatusCode::FORBIDDEN,
+            "permanent deletion requires brain destructive authority",
+        )
+        .await;
+        let missing = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/folders/no-such-folder/deletion-preview",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let preview = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            preview_path,
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview: FolderDeletionPreviewResponse = read_json(preview).await;
+        assert_eq!(
+            preview,
+            FolderDeletionPreviewResponse {
+                brain_id: "acme".to_owned(),
+                folder_id: "getting-started".to_owned(),
+                folder_ids: vec!["getting-started".to_owned()],
+                object_count: 1,
+                current_key_version: 1,
+            }
+        );
+
+        let delete_body = serde_json::json!({
+            "deletionEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "delete-previewed-folder",
+                AdminAccessAction::DeleteFolder,
+                Some("getting-started"),
+                None,
+                Some(preview.current_key_version),
+            ),
+            "expectedFolderIds": preview.folder_ids,
+            "expectedObjectCount": preview.object_count,
+        })
+        .to_string();
+        let deleted = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            "/v1/brains/acme/folders/getting-started",
+            Some(delete_body),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let deleted: FolderDeleteResponse = read_json(deleted).await;
+        assert_eq!(deleted.deleted_folder_ids, vec!["getting-started"]);
+        assert_eq!(deleted.object_count, 1);
+
+        let gone =
+            authed_request(router, &admin_keys, "GET", preview_path, None, TEST_NOW + 5).await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

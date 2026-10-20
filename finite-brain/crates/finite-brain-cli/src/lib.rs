@@ -2960,28 +2960,20 @@ fn folder<W: Write>(
                     break;
                 }
             }
-            let bootstrap_route = format!("/v1/brains/{brain_id}/sync/bootstrap");
-            let bootstrap = signed_json_request(env, args, "GET", &bootstrap_route, None)?;
-            let expected_object_count = bootstrap
-                .get("objects")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    CliError::InvalidInput(
-                        "Folder deletion confirmation could not read current objects".to_owned(),
-                    )
-                })?
-                .iter()
-                .filter(|object| {
-                    !object
-                        .get("deleted")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                        && object
-                            .get("folderId")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|folder| expected_folder_ids.contains(folder))
-                })
-                .count();
+            // The server computes the live object count without sending any
+            // ciphertext. The local metadata view must agree on the subtree and
+            // key version; the deletion transaction checks both again.
+            let preview = fetch_folder_deletion_preview(env, args, &brain_id, folder_id)?;
+            let previewed_folder_ids = preview.folder_ids.iter().cloned().collect::<BTreeSet<_>>();
+            if previewed_folder_ids.len() != preview.folder_ids.len()
+                || previewed_folder_ids != expected_folder_ids
+                || preview.current_key_version != folder.current_key_version
+            {
+                return Err(CliError::InvalidInput(format!(
+                    "Folder {folder_id} changed while preparing its deletion; nothing was deleted. Retry `fbrain folder delete {folder_id}`"
+                )));
+            }
+            let expected_object_count = preview.object_count;
             let deletion_event = admin_access_change_event(
                 env,
                 &brain_id,
@@ -4794,6 +4786,7 @@ mod tests {
     use tempfile::TempDir;
 
     mod access_report_tests;
+    mod folder_delete_tests;
     mod folder_key_rotation_tests;
 
     #[test]
