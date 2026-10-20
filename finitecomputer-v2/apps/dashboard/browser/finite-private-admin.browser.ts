@@ -7,6 +7,12 @@ import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import {
+  createAdminAgentFixture,
+  exerciseAgentDialogMutations,
+  handleAdminAgentRequest,
+  type AdminAgentFixture,
+} from "./admin-agent-fixture";
 
 const CORE_TOKEN = "browser-core-token";
 const OPERATOR_ORG_ID = "workos_org_browser_operator";
@@ -118,6 +124,8 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
     await page.getByRole("dialog", { name: "Private Agent" }).locator("span").filter({ hasText: /^fp_key_1$/u }).waitFor({ state: "visible" });
     await page.getByRole("dialog", { name: "Private Agent" }).getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByLabel("Filter agents").fill("");
+    await exerciseAgentDialogMutations(page, core.state.adminAgents);
     await page.getByRole("tab", { name: "Email", exact: true }).click();
     await page.getByRole("heading", { name: "Change sign-in email" }).waitFor({ state: "visible" });
     assert.equal(await page.getByLabel("Filter agents").count(), 0);
@@ -202,9 +210,10 @@ function startDashboard(port: number, coreUrl: string) {
 }
 
 async function startFakeCore() {
-  const state = {
-    issuancePosts: [] as Array<Record<string, unknown>>,
+  const state: FakeCoreState = {
+    issuancePosts: [],
     resetPosts: 0,
+    adminAgents: createAdminAgentFixture(),
   };
   const server = http.createServer(async (request, response) => {
     try {
@@ -226,10 +235,16 @@ async function startFakeCore() {
   };
 }
 
+type FakeCoreState = {
+  issuancePosts: Array<Record<string, unknown>>;
+  resetPosts: number;
+  adminAgents: AdminAgentFixture;
+};
+
 async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  state: { issuancePosts: Array<Record<string, unknown>>; resetPosts: number }
+  state: FakeCoreState
 ) {
   if (
     request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
@@ -239,36 +254,7 @@ async function handleCoreRequest(
     return;
   }
 
-  if (request.method === "GET" && request.url === "/api/core/v1/finite-private/admin-state") {
-    writeJson(response, 200, finitePrivateAdminState());
-    return;
-  }
-
-  if (request.method === "GET" && request.url === "/api/core/v1/admin/runtimes") {
-    writeJson(response, 200, [
-      {
-        project_display_name: "Private Agent",
-        owner_email: "private@finite.vip",
-        project_id: "project_private",
-        agent_runtime_id: "runtime_private",
-        source_host_id: "finite-host-browser",
-        source_machine_id: "finite-kata-browser",
-        runtime_artifact_id: "artifact_browser",
-        runtime_artifact_version_label: "browser-test",
-        runtime_status: "online",
-        last_heartbeat_at: "2026-05-28T12:00:00Z",
-        runtime_updated_at: "2026-05-28T12:01:00Z",
-        hermes_available: true,
-        published_app_urls: [],
-        active_finite_private_key_count: 1,
-        runtime_link_active: true,
-        runtime_capabilities: {
-          restart: true,
-          recover_known_good_chat: true,
-          runtime_upgrade: false,
-        },
-      },
-    ]);
+  if (await handleAdminAgentRequest(request, response, state.adminAgents)) {
     return;
   }
 
@@ -447,101 +433,6 @@ function usageProject() {
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
     },
-  };
-}
-
-function finitePrivateAdminState() {
-  return {
-    accounts: [
-      {
-        userId: "user_private",
-        email: "private@finite.vip",
-        grant: {
-          id: "fp_grant_1",
-          user_id: "user_private",
-          limit_profile_id: "finite-private-generous-v2",
-          status: "active",
-          current_window_started_at: "2026-05-28T12:00:00Z",
-          current_window_used_units: 84,
-          created_at: "2026-05-28T12:00:00Z",
-          updated_at: "2026-05-28T12:01:00Z",
-        },
-        apiKeys: [
-          {
-            id: "fp_key_1",
-            grant_id: "fp_grant_1",
-            project_id: "project_private",
-            agent_runtime_id: "runtime_private",
-            key_hash: "hash-only",
-            status: "active",
-            created_at: "2026-05-28T12:00:00Z",
-            updated_at: "2026-05-28T12:01:00Z",
-          },
-        ],
-        projects: [
-          {
-            id: "project_private",
-            displayName: "Private Agent",
-            agentRuntimeId: "runtime_private",
-          },
-        ],
-      },
-    ],
-    profiles: [
-      {
-        id: "finite-private-generous-v2",
-        burst_window_seconds: 18_000,
-        burst_limit_units: 200_000_000,
-        weekly_limit_units: null,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-      {
-        id: "finite-private-generous-5x-v1",
-        burst_window_seconds: 18_000,
-        burst_limit_units: 500_000_000,
-        weekly_limit_units: null,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    grants: [
-      {
-        id: "fp_grant_1",
-        user_id: "user_private",
-        limit_profile_id: "finite-private-generous-v2",
-        status: "active",
-        current_window_started_at: "2026-05-28T12:00:00Z",
-        current_window_used_units: 84,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    apiKeys: [
-      {
-        id: "fp_key_1",
-        grant_id: "fp_grant_1",
-        project_id: "project_private",
-        agent_runtime_id: "runtime_private",
-        key_hash: "hash-only",
-        status: "active",
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    adminAuditEvents: [
-      {
-        id: "fp_event_1",
-        action: "finite_private.grant.approve",
-        target_type: "grant",
-        target_id: "fp_grant_1",
-        grant_id: "fp_grant_1",
-        api_key_id: null,
-        actor: "core-service",
-        metadata: {},
-        created_at: "2026-05-28T12:00:00Z",
-      },
-    ],
   };
 }
 

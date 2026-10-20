@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { adminRuntimeMatchesSearch, type RuntimeFinitePrivateGrantSummary } from "./admin-ops";
-import { adminUserAuditEvents, adminUserTableCells, compareAdminTableCells } from "./admin-users-table";
+import { adminUserAuditEvents, adminUserTableCells, compareAdminTableCells, findAdminAgentSelection } from "./admin-users-table";
 import type { CoreAdminRuntimeOverview } from "./core-client";
 
 const runtime: CoreAdminRuntimeOverview = {
@@ -71,4 +71,17 @@ test("column sorting handles numeric usage, natural text, timestamps and missing
     assert.ok(compareAdminTableCells(cell("Unavailable"), cell("0"), direction) > 0);
     assert.equal(compareAdminTableCells(cell("same"), cell("same"), direction), 0);
   }
+});
+
+test("the open agent resolves from the latest rows and reports a disappeared selection", () => {
+  const before = [{ account: "account-before", runtimeEntries: [{ runtime, usage: 84 }] }];
+  const after = [
+    { account: "other-account", runtimeEntries: [{ runtime: { ...runtime, agent_runtime_id: "runtime-two" }, usage: 5 }] },
+    { account: "account-after", runtimeEntries: [{ runtime, usage: 0 }] },
+  ];
+  assert.deepEqual(findAdminAgentSelection(before, "runtime-one"), { account: "account-before", entry: before[0].runtimeEntries[0] });
+  assert.deepEqual(findAdminAgentSelection(after, "runtime-one"), { account: "account-after", entry: after[1].runtimeEntries[0] });
+  assert.equal(findAdminAgentSelection(after, "runtime-missing"), null);
+  assert.equal(findAdminAgentSelection([], "runtime-one"), null);
+  assert.equal(findAdminAgentSelection(after, null), null);
 });

@@ -20,14 +20,16 @@ import {
 } from "@/app/actions";
 import {
   AdminFinitePrivateProfileForm,
+  AdminKeyRotationReceipts,
   AdminRotateKeyForm,
   ConfirmSubmitButton,
+  useAdminKeyRotation,
 } from "@/components/admin-ops-forms";
 import {
   FinitePrivateUsageProgress,
   formatWeightedTokens,
 } from "@/components/finite-private-usage-progress";
-import { adminUserAuditEvents, adminUserTableCells, compareAdminTableCells, type AdminTableSort } from "@/lib/admin-users-table";
+import { adminUserAuditEvents, adminUserTableCells, compareAdminTableCells, findAdminAgentSelection, type AdminTableSort } from "@/lib/admin-users-table";
 import { AdminUsersToolbar } from "@/components/admin-ops-tabs";
 import { AdminTableScroll } from "@/components/admin-table-scroll";
 import styles from "@/styles/admin-users-table.module.css";
@@ -71,7 +73,7 @@ export function AdminUsersPanel({
   finitePrivate: CoreFinitePrivateAdminStateResult;
 }) {
   const [sort, setSort] = useState<AdminTableSort>({ column: "Email", direction: "ascending" });
-  const [selectedAgent, setSelectedAgent] = useState<{ entry: ProvisionedRuntimeEntry; account: CoreFinitePrivateAdminAccount | null } | null>(null);
+  const [selectedRuntimeId, setSelectedRuntimeId] = useState<string | null>(null);
   const selectedRowRef = useRef<HTMLTableRowElement | null>(null);
   const [query, setQuery] = useState("");
   const [pageSize, setPageSize] = useState(25);
@@ -104,6 +106,10 @@ export function AdminUsersPanel({
         };
       }),
     [finitePrivate.state, result.runtimes]
+  );
+  const selectedAgent = useMemo(
+    () => findAdminAgentSelection(userEntries, selectedRuntimeId),
+    [selectedRuntimeId, userEntries]
   );
   const filteredUserEntries = useMemo(
     () =>
@@ -141,10 +147,12 @@ export function AdminUsersPanel({
 
   return (
     <section className={styles.panel}>
-      <Dialog open={selectedAgent !== null} onOpenChange={(open) => { if (!open) setSelectedAgent(null); }}>
+      <Dialog open={selectedRuntimeId !== null} onOpenChange={(open) => { if (!open) setSelectedRuntimeId(null); }}>
         <DialogContent className={`${dialogStyles.dialog} max-h-[90dvh] gap-0 overflow-y-auto p-0 sm:max-w-[1080px]`}
           onCloseAutoFocus={(event) => { event.preventDefault(); selectedRowRef.current?.focus({ preventScroll: true }); }}>
-          {selectedAgent && <AdminAgentDetails entry={selectedAgent.entry} account={selectedAgent.account} profiles={finitePrivate.state?.profiles ?? []} />}
+          {selectedRuntimeId && (
+            <AdminAgentDialogBody key={selectedRuntimeId} runtimeId={selectedRuntimeId} selection={selectedAgent} profiles={finitePrivate.state?.profiles ?? []} />
+          )}
         </DialogContent>
       </Dialog>
       {finitePrivate.error && <p role="status" className="text-sm text-muted-foreground">Finite Private details unavailable: {finitePrivate.error}</p>}
@@ -196,7 +204,7 @@ export function AdminUsersPanel({
                   ))}
                 </tr></thead>
                 <tbody>
-                  {paginatedRows.map(({ account, entry }) => {
+                  {paginatedRows.map(({ entry }) => {
                     const id = entry.runtime.agent_runtime_id;
                     const cells = entry.cells;
                     return (
@@ -205,13 +213,13 @@ export function AdminUsersPanel({
                         onClick={(event) => {
                           if (window.getSelection()?.toString()) return;
                           selectedRowRef.current = event.currentTarget;
-                          setSelectedAgent({ entry, account });
+                          setSelectedRuntimeId(id);
                         }}
                         onKeyDown={(event) => {
                           if (event.key !== "Enter" && event.key !== " ") return;
                           event.preventDefault();
                           selectedRowRef.current = event.currentTarget;
-                          setSelectedAgent({ entry, account });
+                          setSelectedRuntimeId(id);
                         }}>
                         {cells.map((cell) => (
                           <td key={cell.label} className={cell.numeric ? styles.numeric : undefined}>
@@ -265,10 +273,40 @@ export function AdminUsersPanel({
   );
 }
 
-function AdminAgentDetails({ entry, account, profiles }: {
+/** Keyed by runtime ID so rotation receipts never carry over to another agent. */
+function AdminAgentDialogBody({ runtimeId, selection, profiles }: {
+  runtimeId: string;
+  selection: { entry: ProvisionedRuntimeEntry; account: CoreFinitePrivateAdminAccount | null } | null;
+  profiles: CoreFinitePrivateLimitProfile[];
+}) {
+  const [rotationReceipts, rotateKey] = useAdminKeyRotation();
+  if (!selection) {
+    return (
+      <>
+        <header className={dialogStyles.header}>
+          <DialogTitle className={dialogStyles.title}>Agent unavailable</DialogTitle>
+          <DialogDescription className="mt-2">
+            Runtime {runtimeId} is not in the latest admin data. It may have been removed, or Core may be unavailable.
+          </DialogDescription>
+        </header>
+        {rotationReceipts.length > 0 && (
+          <div className={`${dialogStyles.main} grid gap-3`}><AdminKeyRotationReceipts receipts={rotationReceipts} /></div>
+        )}
+      </>
+    );
+  }
+  return (
+    <AdminAgentDetails entry={selection.entry} account={selection.account} profiles={profiles}
+      rotationReceipts={rotationReceipts} rotateKey={rotateKey} />
+  );
+}
+
+function AdminAgentDetails({ entry, account, profiles, rotationReceipts, rotateKey }: {
   entry: ProvisionedRuntimeEntry;
   account: CoreFinitePrivateAdminAccount | null;
   profiles: CoreFinitePrivateLimitProfile[];
+  rotationReceipts: ReturnType<typeof useAdminKeyRotation>[0];
+  rotateKey: ReturnType<typeof useAdminKeyRotation>[1];
 }) {
   const { runtime, finitePrivateGrant } = entry;
   const grantId = finitePrivateGrant?.grantId ?? account?.grant.id;
@@ -303,7 +341,8 @@ function AdminAgentDetails({ entry, account, profiles }: {
             <p className={dialogStyles.description}>Current burst window · shared by agents on this grant.</p>
             <div className={dialogStyles.usageRow}>
               {grantId && profileId && assignable.length > 0 ? (
-                <AdminFinitePrivateProfileForm grantId={grantId} currentProfileId={profileId} profiles={assignable} />
+                // Remount when the saved profile changes so the select follows refreshed data.
+                <AdminFinitePrivateProfileForm key={`${grantId}:${profileId}`} grantId={grantId} currentProfileId={profileId} profiles={assignable} />
               ) : null}
               <div className={dialogStyles.usage}>
                 {usedUnits != null && profile ? (
@@ -320,8 +359,9 @@ function AdminAgentDetails({ entry, account, profiles }: {
           <section className={dialogStyles.section}>
             <h3>Account keys</h3>
             <p className={dialogStyles.description}>Manage access for {account?.email ?? runtime.owner_email ?? "this account"}. Revoking a key stops requests that use it.</p>
+            <div className="mb-4 grid gap-3 empty:hidden"><AdminKeyRotationReceipts receipts={rotationReceipts} /></div>
             {account?.apiKeys.length ? account.apiKeys.map((apiKey) => (
-              <FinitePrivateAccountKey key={apiKey.id} apiKey={apiKey} account={account} plain />
+              <FinitePrivateAccountKey key={apiKey.id} apiKey={apiKey} account={account} rotateKey={rotateKey} plain />
             )) : <p className="text-sm text-muted-foreground">No account key details available.</p>}
           </section>
           <section className={dialogStyles.section}>
@@ -444,15 +484,18 @@ function RuntimeActions({ runtime, finitePrivateAccount, finitePrivateGrant }: {
 function FinitePrivateAccountKey({
   apiKey,
   account,
+  rotateKey,
   plain = false,
 }: {
   apiKey: CoreFinitePrivateApiKey;
   account: CoreFinitePrivateAdminAccount;
+  rotateKey: (formData: FormData) => void;
   plain?: boolean;
 }) {
   const project = account.projects.find((candidate) => candidate.id === apiKey.project_id);
   return (
-    <div className={plain ? "flex flex-wrap items-start justify-between gap-3 border-t border-border py-4" : "flex flex-wrap items-start justify-between gap-3 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3"}>
+    <div role="group" aria-label={`Finite Private key ${apiKey.id}`}
+      className={plain ? "flex flex-wrap items-start justify-between gap-3 border-t border-border py-4" : "flex flex-wrap items-start justify-between gap-3 rounded-[var(--radius-card-inner)] border border-border bg-black/10 p-3"}>
       <div className="min-w-0 text-xs text-muted-foreground">
         <div className="flex flex-wrap items-center gap-2">
           <span className="truncate font-mono text-foreground">{apiKey.id}</span>
@@ -464,7 +507,7 @@ function FinitePrivateAccountKey({
       </div>
       {apiKey.status === "active" ? (
         <div className="flex flex-wrap items-start gap-2">
-          <AdminRotateKeyForm keyId={apiKey.id} />
+          <AdminRotateKeyForm keyId={apiKey.id} action={rotateKey} />
           <form action={adminOpsRevokeFinitePrivateKeyAction}>
             <input type="hidden" name="keyId" value={apiKey.id} />
             <ConfirmSubmitButton

@@ -210,12 +210,38 @@ export function AdminFinitePrivateProfileForm({
   );
 }
 
-/** Per-key rotate form; Core generates the replacement raw key and returns it once. */
-export function AdminRotateKeyForm({ keyId }: { keyId: string }) {
-  const [state, formAction] = useActionState(adminOpsRotateKeyAction, IDLE_STATE);
+/**
+ * Rotation receipts belong to the surrounding view, not the key row: after the
+ * refresh the old key is no longer active and its row loses the Rotate form.
+ * Every replacement raw key stays visible until that view unmounts; only the
+ * latest error is kept.
+ */
+export function useAdminKeyRotation() {
+  return useActionState(
+    async (receipts: OneTimeKeyActionState[], formData: FormData) => [
+      ...receipts.filter((receipt) => receipt.status === "issued"),
+      await adminOpsRotateKeyAction(IDLE_STATE, formData),
+    ],
+    []
+  );
+}
 
+export function AdminKeyRotationReceipts({ receipts }: { receipts: OneTimeKeyActionState[] }) {
+  return receipts.map((receipt) => (
+    <OneTimeKeyPanel key={receipt.status === "issued" ? receipt.keyId : receipt.status} state={receipt} />
+  ));
+}
+
+/** Per-key rotate form; Core generates the replacement raw key and returns it once. */
+export function AdminRotateKeyForm({
+  keyId,
+  action,
+}: {
+  keyId: string;
+  action: (formData: FormData) => void;
+}) {
   return (
-    <form action={formAction} className={formStyles.field}>
+    <form action={action} className={formStyles.field}>
       <input type="hidden" name="keyId" value={keyId} />
       <ConfirmSubmitButton
         variant="outline"
@@ -227,7 +253,6 @@ export function AdminRotateKeyForm({ keyId }: { keyId: string }) {
         <RotateCcwIcon />
         Rotate
       </ConfirmSubmitButton>
-      <OneTimeKeyPanel state={state} />
     </form>
   );
 }

@@ -102,6 +102,23 @@ export function adminUserAuditEvents(
   ).sort((a, b) => b.created_at.localeCompare(a.created_at));
 }
 
+/**
+ * The agent dialog stores only a runtime ID and re-reads it from the latest
+ * rows, so revalidated server data replaces the open view. Null means the
+ * selected runtime is no longer returned.
+ */
+export function findAdminAgentSelection<Entry extends { runtime: { agent_runtime_id: string } }, Account>(
+  groups: { account: Account; runtimeEntries: Entry[] }[],
+  runtimeId: string | null,
+): { account: Account; entry: Entry } | null {
+  if (runtimeId == null) return null;
+  for (const { account, runtimeEntries } of groups) {
+    const entry = runtimeEntries.find((candidate) => candidate.runtime.agent_runtime_id === runtimeId);
+    if (entry) return { account, entry };
+  }
+  return null;
+}
+
 export type AdminTableSort = { column: string; direction: "ascending" | "descending" };
 const tableCollator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
