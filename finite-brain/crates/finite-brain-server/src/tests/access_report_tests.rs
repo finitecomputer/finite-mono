@@ -180,10 +180,14 @@ fn core_fixture(
             hex_of(&cast.mount_admin),
             Known::Human("mount-controller@dest.example"),
         ),
-        // Would leak if the outsider's key were ever sent.
+        // Would leak if the outsider's or arbitrary key were ever sent.
         (
             hex_of(&cast.outsider),
             Known::Human("outsider-core@example.org"),
+        ),
+        (
+            hex_of(&cast.arbitrary),
+            Known::Agent("Arbitrary Agent", "arbitrary-owner@example.org"),
         ),
     ]);
     let lookup = move |request: &CoreLookupRequest| {
@@ -474,12 +478,14 @@ async fn synthetic_brain(cast: &Cast) -> (ServerState, Router, tempfile::TempDir
     assert_eq!(accept.status(), StatusCode::OK);
 
     // Stored labels last, so route-side alias refreshes cannot overwrite
-    // them. The outsider's alias predates the report: anyone's lookup may
-    // have written it, and it must never surface for an admin-added key.
+    // them. These aliases predate the report: anyone's lookup may have
+    // written them. For admin-added keys only a Directory (finite.vip) name
+    // may surface; any other domain can claim any key.
     record_alias(&state, &cast.unconfirmed, "unconfirmed-name@example.test");
     record_alias(&state, &cast.replaced, "replaced-name@example.test");
     record_alias(&state, &cast.replacement, "replacement-name@example.test");
     record_alias(&state, &cast.outsider, "outsider-name@example.test");
+    record_alias(&state, &cast.arbitrary, "arbitrary-name@finite.vip");
     (state, router, scratch)
 }
 
@@ -622,19 +628,40 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
         "inviteTokenRedemption"
     );
 
-    // Admin-added keys never get a description or alias, even when Core or a
-    // stored alias knows them: adding a key must not unlock discovery.
+    // Admin-added keys never get a Core description, even when Core knows
+    // them: adding a key must not unlock discovery through Core. The
+    // description is exactly the withheld shape, with no Core field.
+    let withheld = serde_json::json!({ "state": "notShared", "reason": "noParticipation" });
     for keys in [
         &cast.replaced,
         &cast.replacement,
         &cast.arbitrary,
         &cast.outsider,
+        &cast.guest,
+        &cast.demoted,
     ] {
         let identity = row(&report, keys);
         assert!(identity.get("participation").is_none());
-        assert_eq!(identity["description"]["state"], "notShared");
-        assert_eq!(identity["description"]["reason"], "noParticipation");
-        assert!(identity.get("storedNip05").is_none());
+        assert_eq!(identity["description"], withheld);
+    }
+    // A stored Directory name is a public binding, so it is shown for every
+    // key with one, dated and not rechecked. Arbitrary is one Core would
+    // resolve: the name comes from Brain's alias, never from Core.
+    let arbitrary = row(&report, &cast.arbitrary);
+    assert_eq!(
+        arbitrary["storedNip05"],
+        serde_json::json!({ "name": "arbitrary-name@finite.vip", "storedAt": "2026-05-01T00:00:00Z" })
+    );
+    // Off-Directory aliases (any domain can claim any key) and keys with no
+    // stored name show none.
+    for keys in [
+        &cast.replaced,
+        &cast.replacement,
+        &cast.outsider,
+        &cast.guest,
+        &cast.demoted,
+    ] {
+        assert!(row(&report, keys).get("storedNip05").is_none());
     }
     let text = report.to_string();
     for leaked in [
@@ -642,6 +669,8 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
         "outsider-core@example.org",
         "replaced-name@example.test",
         "replacement-name@example.test",
+        "Arbitrary Agent",
+        "arbitrary-owner@example.org",
     ] {
         assert!(!text.contains(leaked), "{leaked}");
     }
@@ -750,16 +779,17 @@ async fn access_report_names_exact_keys_with_evidence_and_honest_coverage() {
     assert_eq!(again["identities"], report["identities"]);
     assert_eq!(durable_state(&state, &cast), before);
 
-    // The report's entitlement rule is the server's folder_visible rule, and
-    // stored aliases are read only for participating page keys.
+    // The report's entitlement rule is the server's folder_visible rule.
+    // Stored aliases are read for every page key; the report filters them.
     let store = state.store.lock().unwrap();
     let acme = BrainId::new("acme").unwrap();
     let snapshot = store.access_report_snapshot(&acme, None, 100).unwrap();
     assert!(crate::access_report::entitlement_matches_folder_visible(
         &snapshot.authority
     ));
-    assert!(!snapshot.aliases.contains_key(&user(&cast.outsider)));
-    assert!(snapshot.aliases.contains_key(&user(&cast.unconfirmed)));
+    for keys in [&cast.outsider, &cast.arbitrary, &cast.unconfirmed] {
+        assert!(snapshot.aliases.contains_key(&user(keys)));
+    }
 }
 
 #[tokio::test]
@@ -945,10 +975,15 @@ async fn access_report_keeps_every_row_when_core_cannot_describe() {
             row(&report, &cast.unconfirmed)["storedNip05"]["name"],
             "unconfirmed-name@example.test"
         );
+        assert_eq!(
+            row(&report, &cast.arbitrary)["storedNip05"]["name"],
+            "arbitrary-name@finite.vip"
+        );
         assert!(row(&report, &cast.outsider).get("storedNip05").is_none());
         let text = report.to_string();
         assert!(!text.contains("someone-else@example.org"));
         assert!(!text.contains("outsider-name@example.test"));
+        assert!(!text.contains("arbitrary-owner@example.org"));
         assert!(nip05_urls.lock().unwrap().is_empty());
     }
 }
@@ -1104,7 +1139,7 @@ async fn access_report_pages_are_stable_bounded_and_bound_to_one_authority() {
             snapshot
                 .aliases
                 .keys()
-                .all(|key| snapshot.verified_participation.contains_key(key))
+                .all(|key| snapshot.evidence_keys.contains(key))
         );
         assert!(
             snapshot

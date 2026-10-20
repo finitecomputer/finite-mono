@@ -51,7 +51,9 @@ Give the exact npub with every key that is not `resolved`: it is that key's
 only identity. `notShared` deliberately reveals nothing about whether an
 account exists, so never guess who a key is from a name, an email, timing or
 who invited it. `storedNip05` is a stored public name with its stored time,
-not rechecked and not a mailbox.
+not rechecked and not a mailbox. A key that never acted carries one only for
+its `finite.vip` Directory name: say it as that key's public name, never as
+proof of who controls the key.
 
 Core describes only keys that have themselves acted in this Brain: joined,
 approved, or wrote a Brain record. Folder Key wraps delivered during sync do
@@ -61,7 +63,8 @@ Finite account, which happens when the person approves a Brain request in
 Finite Chat. If this Brain's Core is older and answers only v1 descriptions,
 the account must also have shared contact with this Brain through that
 approval. Nothing backfills older keys, so many stay `unknown` or `notShared`
-(shown as "Unknown" on the roster); a new Personal Brain can too.
+(shown as "Unknown" on the roster unless the key has a stored public name); a
+new Personal Brain can too.
 
 Never change access, join, write or approve only to make a name appear. Join
 a Brain only when your owner asks you to.
@@ -81,8 +84,9 @@ cannot recall plaintext it already read.
 ## Dashboard Roster
 
 Brain admins see a read-only roster on the dashboard Brain page. It shows
-each key's name or email only when the report resolved it, otherwise
-"Unknown" with the npub. Its roles map from `brainRole`: `personalAgent` is
+each key's name or email only when the report resolved it, otherwise its
+`storedNip05` name marked "Public name", otherwise "Unknown", always with the
+npub. Its roles map from `brainRole`: `personalAgent` is
 "Personal agent", `mountParticipant` is "Shared folder", and
 `retainedMountAccess` and `noCurrentRole` are "Removed".
 

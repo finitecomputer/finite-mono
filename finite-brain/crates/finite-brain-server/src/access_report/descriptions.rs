@@ -3,9 +3,12 @@
 //! mutex is never held across these awaits.
 //!
 //! Brain decides eligibility: only keys with recorded participation by that
-//! exact key are sent to Core or shown a stored alias. Brain asks Core v2,
-//! which applies no per-Brain sharing scope (FIN-166); an older Core answers
-//! v1 and still enforces the account/Brain sharing scope.
+//! exact key are sent to Core or shown any stored alias. Every other key may
+//! show only a stored Identity Directory (`finite.vip`) name, the key's public
+//! Directory binding: for a managed Agent its Agent name, for a person their
+//! Finite VIP Email. It is shown whatever kind of key it is, by decision.
+//! Brain asks Core v2, which applies no per-Brain sharing scope (FIN-166); an
+//! older Core answers v1 and still enforces the account/Brain sharing scope.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -22,13 +25,25 @@ const CORE_OVERALL_TIMEOUT: Duration = Duration::from_secs(4);
 
 pub(crate) const NOT_PARTICIPATING: &str = "noParticipation";
 
+/// The Identity Directory's NIP-05 domain. Its well-known document is the
+/// binding authority for names under it. Any other domain's document can
+/// claim any key, and any caller's lookup stores that claim.
+const DIRECTORY_NIP05_DOMAIN: &str = "finite.vip";
+
+fn directory_name(name: &str) -> bool {
+    name.rsplit_once('@').is_some_and(|(local, domain)| {
+        !local.is_empty() && domain.eq_ignore_ascii_case(DIRECTORY_NIP05_DOMAIN)
+    })
+}
+
 pub(crate) struct PageDescriptions {
     pub(crate) coverage: DescriptionCoverage,
     pub(crate) rows: BTreeMap<String, (IdentityDescriptionView, Option<StoredAliasView>)>,
 }
 
 /// Describe the page's rows. Keys without recorded participation get
-/// `notShared`/`noParticipation` and no alias, whatever Core holds.
+/// `notShared`/`noParticipation`, whatever Core holds, and only a stored
+/// Directory name.
 pub(crate) async fn describe_page(
     state: &ServerState,
     snapshot: &AccessReportSnapshot,
@@ -44,13 +59,6 @@ pub(crate) async fn describe_page(
     let asked = eligible.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut described = BTreeMap::new();
     for row in rows {
-        if row.participation.is_none() || row.hex.is_empty() {
-            described.insert(
-                row.npub.clone(),
-                (IdentityDescriptionView::withheld(NOT_PARTICIPATING), None),
-            );
-            continue;
-        }
         let stored_alias = snapshot
             .aliases
             .iter()
@@ -61,6 +69,16 @@ pub(crate) async fn describe_page(
                     stored_at: alias.nip05_verified_at.clone(),
                 })
             });
+        if row.participation.is_none() || row.hex.is_empty() {
+            described.insert(
+                row.npub.clone(),
+                (
+                    IdentityDescriptionView::withheld(NOT_PARTICIPATING),
+                    stored_alias.filter(|alias| directory_name(&alias.name)),
+                ),
+            );
+            continue;
+        }
         let description = match by_hex.get(&row.hex) {
             Some(core) => view(core, &asked),
             None => IdentityDescriptionView::bare(
@@ -198,5 +216,28 @@ fn coverage(
         reason: reason.map(ToOwned::to_owned),
         checked_at,
         checked_keys,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::directory_name;
+
+    #[test]
+    fn only_exact_directory_domain_names_count_as_directory_names() {
+        for name in ["ada@finite.vip", "ada-1a2b@FINITE.VIP", "_@finite.vip"] {
+            assert!(directory_name(name), "{name}");
+        }
+        for name in [
+            "ada@evil.example",
+            "ada@sub.finite.vip",
+            "ada@finite.vip.evil.example",
+            "ada@notfinite.vip",
+            "@finite.vip",
+            "finite.vip",
+            "",
+        ] {
+            assert!(!directory_name(name), "{name}");
+        }
     }
 }
