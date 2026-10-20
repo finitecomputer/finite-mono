@@ -15,6 +15,7 @@ use crate::config::{
     ConfigManager, ConfigOfferPolicyV1, HermesConfigOfferV1, MODEL_CONFIG_PATH,
     TELEGRAM_CONFIG_PATH,
 };
+use crate::google_scopes::accepted_google_scopes;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
@@ -464,13 +465,7 @@ impl ConnectionManager {
 
     pub(crate) fn apply_google(&self, request: GoogleApplyRequest) -> Result<(), AgentdError> {
         validate_google_request(&request)?;
-        let expected_scopes = self.google_scopes()?;
-        let supplied_scopes = request.scopes.iter().cloned().collect::<BTreeSet<_>>();
-        if supplied_scopes != expected_scopes {
-            return Err(AgentdError::InvalidPayload(
-                "Google did not grant the requested Finite Workspace access".to_owned(),
-            ));
-        }
+        let token = self.google_token(&request)?;
 
         let client_path = self.hermes_home.join("google_client_secret.json");
         let token_path = self.hermes_home.join("google_token.json");
@@ -489,7 +484,6 @@ impl ConnectionManager {
                 "redirect_uris": [request.redirect_uri],
             }
         });
-        let token = google_authorized_user_token(&request, &expected_scopes);
         let metadata = json!({
             "email": request.connected_email.to_ascii_lowercase(),
             "connected_at_ms": now_ms(),
@@ -682,6 +676,11 @@ impl ConnectionManager {
             ));
         }
         Ok(scopes.into_iter().collect())
+    }
+
+    fn google_token(&self, request: &GoogleApplyRequest) -> Result<Value, AgentdError> {
+        let granted = accepted_google_scopes(&request.scopes, &self.google_scopes()?)?;
+        Ok(google_authorized_user_token(request, &granted))
     }
 
     fn check_google_auth(&self) -> Result<(), AgentdError> {
@@ -1097,17 +1096,21 @@ mod tests {
         assert!(validate_telegram_token("not-a-token").is_err());
     }
 
-    #[test]
-    fn google_token_uses_the_standard_authorized_user_shape() {
-        let request = GoogleApplyRequest {
+    fn google_request(scopes: &[&str]) -> GoogleApplyRequest {
+        GoogleApplyRequest {
             client_id: "client-id".to_owned(),
             client_secret: "client-secret".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             access_token: "access-token".to_owned(),
             redirect_uri: "https://finite.example/google/callback".to_owned(),
             connected_email: "person@example.com".to_owned(),
-            scopes: vec!["https://www.googleapis.com/auth/drive".to_owned()],
-        };
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn google_token_uses_the_standard_authorized_user_shape() {
+        let request = google_request(&["https://www.googleapis.com/auth/drive"]);
         let scopes = request.scopes.iter().cloned().collect();
 
         let token = google_authorized_user_token(&request, &scopes);
@@ -1115,6 +1118,33 @@ mod tests {
         assert_eq!(token["type"], "authorized_user");
         assert_eq!(token["refresh_token"], "refresh-token");
         assert_eq!(token["scopes"][0], "https://www.googleapis.com/auth/drive");
+    }
+
+    #[test]
+    fn google_token_records_only_the_scopes_the_person_granted() {
+        let (_temp, manager) = manager();
+        let drive = "https://www.googleapis.com/auth/drive";
+        let email = "https://www.googleapis.com/auth/userinfo.email";
+        let contract = [
+            drive,
+            "https://www.googleapis.com/auth/gmail.send",
+            "openid",
+            email,
+        ];
+        let references = manager.google_skill_root().join("references");
+        fs::create_dir_all(&references).unwrap();
+        fs::write(
+            references.join("google-workspace-scopes.json"),
+            serde_json::to_vec(&contract).unwrap(),
+        )
+        .unwrap();
+
+        let token = manager
+            .google_token(&google_request(&["openid", email, drive]))
+            .unwrap();
+
+        assert_eq!(token["scopes"], json!([drive, email, "openid"]));
+        assert!(manager.google_token(&google_request(&[drive])).is_err());
     }
 
     #[test]
