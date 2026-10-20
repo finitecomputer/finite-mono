@@ -7,9 +7,9 @@ import {
   HostedAgentControlError,
 } from "@/lib/hosted-agent-controls";
 import {
+  acceptedGoogleWorkspaceScopes,
   googleWorkspaceOAuthConfig,
   googleWorkspaceDashboardUrl,
-  GOOGLE_WORKSPACE_SCOPES,
   unsealGoogleWorkspaceState,
 } from "@/lib/google-workspace-oauth";
 
@@ -69,8 +69,8 @@ export async function GET(request: Request) {
     if (!tokenResponse.ok || !accessToken || !refreshToken || !scopeValue) {
       return redirect("failed");
     }
-    const scopes = scopeValue.split(/\s+/u).filter(Boolean);
-    if (!sameScopes(scopes)) return redirect("failed");
+    const scopes = acceptedGoogleWorkspaceScopes(scopeValue);
+    if (!scopes) return redirect("failed");
 
     const userInfoResponse = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
       headers: { authorization: `Bearer ${accessToken}` },
@@ -105,12 +105,4 @@ export async function GET(request: Request) {
 
 function requiredString(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
-}
-
-function sameScopes(scopes: string[]) {
-  const granted = new Set(scopes);
-  return (
-    granted.size === GOOGLE_WORKSPACE_SCOPES.length &&
-    GOOGLE_WORKSPACE_SCOPES.every((scope) => granted.has(scope))
-  );
 }

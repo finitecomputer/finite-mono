@@ -37,6 +37,9 @@ operations can be used, and deliberately requests no Apps Script scope. The
 Python wrapper below currently exposes Docs read only; do not imply that it can
 write a Doc or use Apps Script.
 
+The person may decline some of these permissions on Google's consent screen.
+`scopes` in `$HERMES_HOME/google_token.json` lists what was actually granted.
+
 ## Login emails
 
 When the human explicitly asks the Agent to retrieve or use a login code for
@@ -260,7 +263,7 @@ All commands return JSON. Parse with `jq` or read directly. Key fields:
 |---------|-----|
 | `NOT_AUTHENTICATED` | Run setup Steps 2-5 above |
 | `REFRESH_FAILED` | Token revoked or expired — redo Steps 3-5 |
-| `HttpError 403: Insufficient Permission` | Missing API scope — `$GSETUP --revoke` then redo Steps 3-5 |
+| `HttpError 403: Insufficient Permission` | The person did not grant that permission (see `scopes` in `google_token.json`). Do not revoke. Tell them what is missing; they can reconnect Google Workspace from the dashboard to grant it. Unmanaged Hermes: `$GSETUP --revoke` then redo Steps 3-5 |
 | `HttpError 403: Access Not Configured` | API not enabled — user needs to enable it in Google Cloud Console |
 | `ModuleNotFoundError` | Hosted Runtime: report an image packaging failure; dependencies are pinned in the image. Unmanaged Hermes: run `$GSETUP --install-deps` explicitly. |
 | Advanced Protection blocks auth | Workspace admin must allowlist the OAuth client ID |

@@ -211,8 +211,10 @@ Before enabling the connection:
    People, and Google Apps Script APIs in that project.
 3. Configure the consent screen with the exact checked-in scope contract in
    `finite-skills/skills/productivity/google-workspace-finite/references/google-workspace-scopes.json`.
-   This includes the OpenID identity scopes used to bind the connected email;
-   omitting an API or requested scope makes the dashboard reject the grant.
+   This includes the OpenID identity scopes used to bind the connected email.
+   The dashboard rejects a grant missing `openid` or `userinfo.email`, or with
+   no Workspace scope. Otherwise the agent connects with whichever contract
+   scopes were granted, so an omitted API or scope leaves it without that access.
 4. Put only the corresponding values in `/etc/finite/dashboard.env`, under
    the names `GOOGLE_WORKSPACE_CLIENT_ID` and
    `GOOGLE_WORKSPACE_CLIENT_SECRET`. `WORKOS_COOKIE_PASSWORD` is also required
