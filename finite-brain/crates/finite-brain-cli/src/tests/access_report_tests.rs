@@ -522,15 +522,31 @@ fn access_list_renders_withheld_ambiguous_and_unknown_keys_by_exact_key() {
     let mut first: Value = serde_json::from_str(&first_page('a')).unwrap();
     first["identities"][0]["description"] =
         serde_json::json!({ "state": "notShared", "reason": "noParticipation" });
+    // A key that never acted may still carry its stored Directory name.
+    first["identities"][0]["storedNip05"] =
+        serde_json::json!({ "name": "admin-name@finite.vip", "storedAt": "2026-05-01T00:00:00Z" });
     first["identities"][1]["description"] = serde_json::json!({ "state": "ambiguous" });
     let mut second: Value = serde_json::from_str(&second_page('a', 'a')).unwrap();
     second["identities"][0]["description"] = serde_json::json!({ "state": "unknown" });
-    let (url, server) =
-        start_scripted_capture_server(vec![(200, first.to_string()), (200, second.to_string())]);
+    let (url, server) = start_scripted_capture_server(vec![
+        (200, first.to_string()),
+        (200, second.to_string()),
+        (200, first.to_string()),
+        (200, second.to_string()),
+    ]);
     let text = String::from_utf8(run_list(&url, &tmp, false).unwrap()).unwrap();
     assert!(text.contains(
         "npub1syntheticadmin · details not shared (this key has not acted in this Brain) · admin"
     ));
+    assert!(text.contains(
+        "stored NIP-05: admin-name@finite.vip (stored 2026-05-01T00:00:00Z; not rechecked; not a mailbox)"
+    ));
+    let json: Value = serde_json::from_slice(&run_list(&url, &tmp, true).unwrap()).unwrap();
+    assert_eq!(
+        json["identities"][0]["storedNip05"]["name"],
+        "admin-name@finite.vip"
+    );
+    assert_eq!(json["identities"][0]["description"]["state"], "notShared");
     assert!(text.contains("npub1syntheticagent · conflicting identity records · member"));
     assert!(text.contains("npub1syntheticremoved · identity not described · noCurrentRole"));
     assert!(!text.contains("@example.org"));

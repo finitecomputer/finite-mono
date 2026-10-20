@@ -18,7 +18,8 @@ same facts. Existing Chat agents use this CLI result through the FiniteBrain
 skill. There is no new Chat message protocol. The dashboard Brain page shows
 admins a read-only roster through the Agent's Brain plugin: each key's role,
 Folders, and, only when Core resolved it, kind, name, email and responsible
-account email.
+account email. Otherwise it shows the key's stored public name when the report
+carries one.
 
 The full report, including shared account contact, is admin-only in v1. Ordinary
 metadata visibility does not confer access to every Folder or private contact.
@@ -105,7 +106,13 @@ npub1… · identity source unavailable · removed · Private Tasks: revocation 
 Human names may be absent in Core; a shared account email is an honest readable
 fallback. Agent NIP-05 names are not contact mailboxes. Cached public aliases are
 separate evidence, labelled with their stored observation time and lack of a
-fresh check. Do not make outbound name verification a prerequisite for reporting.
+fresh check. `storedAt` is when the Brain server last resolved that name to the
+key, for a request on any Brain it hosts. A key that never acted shows only a
+stored Identity Directory (`finite.vip`) name, because any other domain's NIP-05
+document can claim any key. That name is the key's public Directory binding:
+for a managed Agent its Agent name, for a person their Finite VIP Email. By
+decision it is shown whatever kind of key it is. Do not make outbound name
+verification a prerequisite for reporting.
 
 Core not configured, old protocol, timeout or outage leaves every access row
 available and marks descriptions unavailable. Reject malformed batches, unknown
@@ -158,12 +165,14 @@ coupling the two product features.
   `storedAt`). Page coverage is `descriptions` (`checked`, `notConfigured`,
   `notNeeded`, `unavailable`, `unsupported`) with Core's `checkedAt`.
 - Keys without recorded participation get `notShared` with reason
-  `noParticipation` and are never sent to Core. Participation evidence is
-  Invite Token redemption, npub Brain Invitation acceptance, Folder Invitation
-  acceptance, addressed Mount Offer acceptance, an accepted authenticated
-  Brain record, or an applied Approval by its exact signer
-  (`brain_approval_nonces`). Approval targets do not inherit it. Folder Key
-  Grant records do not count: any key-holding client delivers pending wraps
+  `noParticipation` and are never sent to Core. They carry `storedNip05` only
+  when the stored name is a `finite.vip` Directory name; participating keys
+  carry any stored name. Core descriptions still require participation.
+  Participation evidence is Invite Token redemption, npub Brain Invitation
+  acceptance, Folder Invitation acceptance, addressed Mount Offer acceptance,
+  an accepted authenticated Brain record, or an applied Approval by its exact
+  signer (`brain_approval_nonces`). Approval targets do not inherit it. Folder
+  Key Grant records do not count: any key-holding client delivers pending wraps
   during sync without a request from its owner.
 - SCHEMA_V30 adds only indexes for those reads. Grant evidence is the stored
   issuer, time and provenance; signed-audit re-verification, the Identity

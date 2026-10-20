@@ -5,6 +5,7 @@ Native Hermes authenticates before routing.
 
 import asyncio
 import re
+from datetime import datetime
 
 from fastapi import APIRouter, Request
 from hermes_cli.finite_dashboard_reads import (
@@ -31,6 +32,9 @@ PERSONAL_BRAIN_ID = re.compile(r"personal-[0-9a-f]{16}")
 CONSENT_VERSION = "finite-brain-personal-agent-consent-v1"
 MAX_CONSENT_TAGS = 32
 MAX_CONSENT_CONTENT = 8192
+RFC3339 = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})"
+)
 
 
 async def read_overview():
@@ -168,6 +172,16 @@ def optional_text(value):
     return None if value is None else text(value)
 
 
+def rfc3339(value):
+    try:
+        if RFC3339.fullmatch(text(value, 64)):
+            datetime.fromisoformat(value)
+            return value
+    except ValueError:
+        pass
+    raise InvalidInventory()
+
+
 async def read_identities(brain_id):
     # The browser supplies only a Brain ID. The Agent's signer and the fixed
     # commands stay Agent-owned; Brain enforces admin authority on the report.
@@ -198,6 +212,11 @@ async def read_identities(brain_id):
         if description.get("state") != "resolved":
             description = {}
         owner = description.get("responsibleAccount")
+        # The public name Brain stored for this exact key, whatever Core
+        # resolved: any stored name for a key that acted in this Brain, else
+        # only its finite.vip Directory name.
+        stored = row.get("storedNip05")
+        stored = None if stored is None else record(stored)
         identities.append(
             {
                 "npub": text(row.get("npub"), 128),
@@ -208,6 +227,10 @@ async def read_identities(brain_id):
                 "ownerEmail": None
                 if owner is None
                 else text(record(owner).get("email")),
+                "publicName": None if stored is None else text(stored.get("name")),
+                "publicNameStoredAt": None
+                if stored is None or stored.get("storedAt") is None
+                else rfc3339(stored.get("storedAt")),
                 "folders": [
                     {
                         "id": text(folder.get("folderId"), 256),
