@@ -232,12 +232,14 @@ export function adminRuntimeMatchesSearch(
   account: AdminUserSearchAccount | null | undefined,
   query: string,
   finitePrivate: RuntimeFinitePrivateGrantSummary | null | undefined = null,
+  displayedValues: string[] = [],
 ): boolean {
   const tokens = adminSearchTokens(query);
   if (tokens.length === 0) {
     return true;
   }
   const haystack = adminSearchText([
+    displayedValues,
     runtime.project_id,
     runtime.project_display_name,
     runtime.owner_email,

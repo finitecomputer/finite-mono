@@ -1,0 +1,53 @@
+.surface [data-slot="input"],
+.surface [data-slot="select-trigger"] {
+  height: 40px;
+}
+
+.surface [data-slot="button"] {
+  min-height: 40px;
+  height: auto;
+  width: fit-content;
+  max-width: 100%;
+  justify-self: start;
+  padding: 8px 20px;
+  white-space: normal;
+}
+
+.surface label {
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
+.field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.form {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.issueForm {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.inviteFields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  align-items: start;
+  gap: 16px;
+  max-width: 560px;
+}
+
+@media (max-width: 480px) {
+  .inviteFields { grid-template-columns: minmax(0, 1fr); }
+}

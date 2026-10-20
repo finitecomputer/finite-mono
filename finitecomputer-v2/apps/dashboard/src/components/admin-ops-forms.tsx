@@ -1,5 +1,6 @@
 "use client";
 
+import formStyles from "@/styles/admin-forms.module.css";
 import * as React from "react";
 import { useActionState, useState } from "react";
 import {
@@ -128,7 +129,7 @@ export function AdminFriendKeyIssueForm({
   return (
     <form
       action={formAction}
-      className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4"
+      className={formStyles.issueForm}
     >
       <div className="flex items-center gap-2 font-semibold text-foreground">
         <KeyRoundIcon className="size-4" />
@@ -138,11 +139,11 @@ export function AdminFriendKeyIssueForm({
         Approves a Finite Private grant for the email and issues a fresh key.
         The raw key is shown once, below.
       </p>
-      <div className="grid gap-2">
+      <div className={formStyles.field}>
         <Label htmlFor="adminFriendKeyEmail">Friend email</Label>
         <Input id="adminFriendKeyEmail" name="email" type="email" required />
       </div>
-      <div className="grid gap-2">
+      <div className={formStyles.field}>
         <Label htmlFor="adminFriendKeyLimitProfile">Limit profile</Label>
         {profiles.length > 0 ? (
           <Select name="limitProfileId" defaultValue={profiles[0].id} required>
@@ -187,7 +188,7 @@ export function AdminFinitePrivateProfileForm({
       className="flex flex-wrap items-end gap-2"
     >
       <input type="hidden" name="grantId" value={grantId} />
-      <div className="grid min-w-56 gap-1.5">
+      <div className={`${formStyles.field} min-w-56`}>
         <Label htmlFor={`finitePrivateProfile-${grantId}`}>Usage limit</Label>
         <Select name="limitProfileId" defaultValue={currentProfileId} required>
           <SelectTrigger id={`finitePrivateProfile-${grantId}`} className="w-full">
@@ -209,12 +210,38 @@ export function AdminFinitePrivateProfileForm({
   );
 }
 
-/** Per-key rotate form; Core generates the replacement raw key and returns it once. */
-export function AdminRotateKeyForm({ keyId }: { keyId: string }) {
-  const [state, formAction] = useActionState(adminOpsRotateKeyAction, IDLE_STATE);
+/**
+ * Rotation receipts belong to the surrounding view, not the key row: after the
+ * refresh the old key is no longer active and its row loses the Rotate form.
+ * Every replacement raw key stays visible until that view unmounts; only the
+ * latest error is kept.
+ */
+export function useAdminKeyRotation() {
+  return useActionState(
+    async (receipts: OneTimeKeyActionState[], formData: FormData) => [
+      ...receipts.filter((receipt) => receipt.status === "issued"),
+      await adminOpsRotateKeyAction(IDLE_STATE, formData),
+    ],
+    []
+  );
+}
 
+export function AdminKeyRotationReceipts({ receipts }: { receipts: OneTimeKeyActionState[] }) {
+  return receipts.map((receipt) => (
+    <OneTimeKeyPanel key={receipt.status === "issued" ? receipt.keyId : receipt.status} state={receipt} />
+  ));
+}
+
+/** Per-key rotate form; Core generates the replacement raw key and returns it once. */
+export function AdminRotateKeyForm({
+  keyId,
+  action,
+}: {
+  keyId: string;
+  action: (formData: FormData) => void;
+}) {
   return (
-    <form action={formAction} className="grid gap-2">
+    <form action={action} className={formStyles.field}>
       <input type="hidden" name="keyId" value={keyId} />
       <ConfirmSubmitButton
         variant="outline"
@@ -226,7 +253,6 @@ export function AdminRotateKeyForm({ keyId }: { keyId: string }) {
         <RotateCcwIcon />
         Rotate
       </ConfirmSubmitButton>
-      <OneTimeKeyPanel state={state} />
     </form>
   );
 }
@@ -242,7 +268,7 @@ export function AdminLaunchCodeBatchIssueForm() {
   return (
     <form
       action={formAction}
-      className="grid gap-3 rounded-[var(--radius-card-inner)] border border-border bg-white/[0.03] p-4"
+      className={formStyles.issueForm}
     >
       <div className="flex items-center gap-2 font-semibold text-foreground">
         <KeyRoundIcon className="size-4" />
@@ -251,16 +277,16 @@ export function AdminLaunchCodeBatchIssueForm() {
       <p className="text-sm text-muted-foreground">
         Choose a named, exact-size batch. Codes are shown once after issuance and are never available in later views.
       </p>
-      <div className="grid gap-3 md:grid-cols-4">
-        <div className="grid gap-2 md:col-span-1">
+      <div className={formStyles.inviteFields}>
+        <div className={formStyles.field}>
           <Label htmlFor="launchCodeBatchName">Batch name</Label>
           <Input id="launchCodeBatchName" name="name" maxLength={120} required placeholder="July training" />
         </div>
-        <div className="grid gap-2">
+        <div className={formStyles.field}>
           <Label htmlFor="launchCodeBatchCount">Exact code count</Label>
           <Input id="launchCodeBatchCount" name="codeCount" type="number" min={1} max={1000} defaultValue={1} required />
         </div>
-        <div className="grid gap-2">
+        <div className={formStyles.field}>
           <Label htmlFor="launchCodeBatchHostingTier">Hosting tier</Label>
           <Select name="hostingTier" defaultValue="standard">
             <SelectTrigger id="launchCodeBatchHostingTier" className="w-full">
@@ -272,7 +298,7 @@ export function AdminLaunchCodeBatchIssueForm() {
             </SelectContent>
           </Select>
         </div>
-        <div className="grid gap-2">
+        <div className={formStyles.field}>
           <Label htmlFor="launchCodeBatchExpiry">Expiry (hours)</Label>
           <Input
             id="launchCodeBatchExpiry"
