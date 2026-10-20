@@ -98,10 +98,14 @@ after confirming the exact npub with them. Never remove, restore, re-grant or
 act on another Brain because of a description or its absence.
 
 From the Brain's Working Tree, `fbrain admin member remove --target <npub>`
-removes Membership and rotates the Folder Keys the key was entitled to,
-preparing the new grants and re-encrypted Folder objects itself. If
-preparation fails, stop on the reported blocker and never create or edit a raw
-rotation body. `fbrain admin role revoke admin --target <npub>` removes the
+removes Membership and rotates every Folder whose current key the key holds:
+the Folders it reads and any Folder it still shows as `revocationIncomplete`,
+for example from a demotion by an older Brain server. The server names those
+Folders and refuses a removal that skips one, and `fbrain` prepares the new
+grants and re-encrypted Folder objects itself. Report each `rotatedFolders`
+entry (its `reason` is `readable` or `staleCurrentGrant`). If preparation
+fails, stop on the reported blocker and never create or edit a raw rotation
+body. `fbrain admin role revoke admin --target <npub>` removes the
 Admin role and, in the same change, rotates every Folder Key the key held only
 as an admin (`admin_only` Folders, and `restricted` Folders without its
 explicit access). Folders it still reaches through explicit Folder access or
@@ -165,10 +169,13 @@ capped at 64 MiB. If the CLI refuses with `needs a <size>-byte rotation
 request, over the ... limit` (nothing was sent), the Folder's pages are too
 large to re-encrypt at once: report the Folder and size and stop.
 
-Member removal rotates, in one request, every Folder the Member can read. A
-`rotate` does not shrink that request: the Member stays entitled and the
-removal still re-encrypts the Folder. Only where the Member reads a large
-Folder through an explicit Folder grant can you first run
+Member removal rotates, in one request, every Folder the Member can read or
+still holds the current key for. A `rotate` does not shrink that request for
+a Folder the Member reads: the Member stays entitled and the removal still
+re-encrypts the Folder. It does shrink it for a Folder the Member only holds
+as `revocationIncomplete`: after `admin folder-access rotate --folder
+<folder-id>` that Folder drops out of the removal. Only where the Member reads
+a large Folder through an explicit Folder grant can you first run
 `admin folder-access revoke --folder <folder-id> --target <npub>` for that
 Folder (it ends that access), then retry the removal. When the Member reads
 the large Folders through its role, such as `all_members` Folders, nothing
@@ -194,11 +201,22 @@ requests open can keep the queue full and delay rotations for as long as they
 sustain that load. Report repeated 503s
 of either kind to the server operator instead of retrying in a loop.
 
-Member removal does not yet clear Folders where the removed key holds a
-current key without entitlement, for example from a demotion by an older Brain
-server. Run
-`access list` before removing a Member; afterwards rotate every Folder still
-listed for that key.
+Member removal clears removal pending for the removed key itself. Run it as
+an admin that can open the current key of every Folder it rotates; if
+preparation stops on a Folder this key cannot open, run the removal from
+another admin that holds that key. If it fails with HTTP 413 `exceeds ...
+limit`, rotate the removed key's `revocationIncomplete` Folders first with
+`folder-access rotate`, then remove the Member.
+
+Every refusal below changes nothing. An older Brain server answers with
+`unsupported: ... cannot say which Folders member removal must rotate`:
+report that the Brain server needs an upgrade before this `fbrain` can remove
+Members. HTTP 409 naming Folders where the Member still holds the current key
+means the removal skipped them: upgrade `fbrain` if it is an older version,
+otherwise rerun the removal so it fetches a fresh plan. HTTP 409 saying
+member removal must rotate exactly a set of Folder Keys, or a Folder that
+changed while the removal was prepared, means another admin changed access
+in between: rerun the removal.
 
 Run `access list` again afterwards. Done when the key holds the intended role
 and no Folder shows `revocationIncomplete` for it. Report any that remain as

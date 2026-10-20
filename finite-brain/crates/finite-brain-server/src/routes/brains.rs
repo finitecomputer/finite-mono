@@ -600,8 +600,9 @@ pub(crate) async fn remove_member_handler(
     let notification_brain_ids = control_records_by_brain.keys().cloned().collect::<Vec<_>>();
     let actor_user_id = UserId::new(&actor)?;
     let notification_state = state.clone();
+    let mut skipped_stale_grants = Vec::new();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.remove_member_with_rotations_and_control_records(
+        let result = store.remove_member_with_rotations_and_control_records(
             brain_id,
             &actor_user_id,
             &target,
@@ -609,12 +610,49 @@ pub(crate) async fn remove_member_handler(
             &mount_rotations,
             &updated_at,
             &control_records_by_brain,
-        )
+        );
+        if let Err(StoreError::FolderRotationSetMismatch {
+            supplied_folder_ids,
+            ..
+        }) = &result
+        {
+            // Same store lock, same rule: name the stale-grant Folders the
+            // request skipped so the caller knows what to do.
+            let planned = finite_brain_store::member_removal_folder_rotations(
+                &store.load_brain(brain_id)?,
+                &target,
+            )?;
+            skipped_stale_grants = finite_brain_store::member_removal_skipped_stale_grant_folders(
+                &planned,
+                supplied_folder_ids,
+            );
+        }
+        result
+    })
+    .map_err(|error| {
+        if skipped_stale_grants.is_empty() {
+            error
+        } else {
+            stale_grant_rotations_skipped(&target, &skipped_stale_grants)
+        }
     })?;
     for affected_brain_id in notification_brain_ids {
         notification_state.publish_access_update_for(&affected_brain_id, target.as_str());
     }
     Ok(Json(response))
+}
+
+/// A removal that rotated every Folder the Member reads but skipped Folders
+/// where it still holds the current key without entitlement. Same 409 as any
+/// rotation-set mismatch; nothing was changed.
+fn stale_grant_rotations_skipped(target: &UserId, folder_ids: &[String]) -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        format!(
+            "member removal omitted rotations for Folders where {target} still holds the current Folder Key without being entitled to it: [{}]; nothing was changed. Upgrade fbrain if using an older version; otherwise retry the removal to refresh its plan",
+            folder_ids.join(", ")
+        ),
+    )
 }
 
 pub(crate) async fn add_admin_handler(
