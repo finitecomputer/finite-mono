@@ -11,6 +11,7 @@ mod error;
 mod folder_key_rotation;
 mod http;
 mod identity_authority;
+mod member_removal;
 mod models;
 mod output;
 mod personal_brain;
@@ -39,6 +40,7 @@ pub(crate) use clock::*;
 pub(crate) use folder_key_rotation::*;
 pub(crate) use http::*;
 pub(crate) use identity_authority::*;
+pub(crate) use member_removal::*;
 pub(crate) use models::*;
 pub(crate) use output::*;
 pub(crate) use requester_context::*;
@@ -3413,26 +3415,38 @@ fn admin_operation<W: Write>(
             )?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let post_removal_metadata = metadata_after_member_removal(&metadata, &target);
-            let mut rotations = Vec::new();
-            for folder in &metadata.folders {
-                let recipients =
-                    folder_required_recipients(&metadata, &folder.access, &folder.access_user_ids)?;
-                if !recipients.iter().any(|recipient| recipient == &target) {
-                    continue;
-                }
-                let prepared = prepare_folder_access_removal(
+            // The server names every Folder whose current key the target reads
+            // or still holds without entitlement; the removal must rotate all.
+            let plan = fetch_member_removal_plan(env, args, &brain_id, &target)?;
+            let removed = BTreeSet::from([target.clone()]);
+            let mut rotations = Vec::with_capacity(plan.folder_rotations.len());
+            let mut rotated_folders = Vec::with_capacity(plan.folder_rotations.len());
+            for planned in &plan.folder_rotations {
+                let prepared = prepare_folder_key_rotation(
                     env,
                     args,
                     &post_removal_metadata,
                     &brain_id,
-                    &folder.id,
-                    &target,
+                    &planned.folder_id,
+                    FolderKeyRotationIntent::RemoveAccess(&removed),
                 )?;
+                if prepared.previous_key_version != planned.current_key_version {
+                    return Err(CliError::InvalidInput(format!(
+                        "Folder {} changed while member removal was prepared; nothing was changed, retry the removal",
+                        planned.folder_id
+                    )));
+                }
                 rotations.push(serde_json::json!({
-                    "folderId": folder.id,
-                    "newKeyVersion": prepared["newKeyVersion"],
-                    "grants": prepared["grants"],
-                    "reencryptedRecords": prepared["reencryptedRecords"],
+                    "folderId": planned.folder_id,
+                    "newKeyVersion": prepared.new_key_version,
+                    "grants": prepared.body["grants"],
+                    "reencryptedRecords": prepared.body["reencryptedRecords"],
+                }));
+                rotated_folders.push(serde_json::json!({
+                    "folderId": planned.folder_id,
+                    "reason": planned.reason,
+                    "previousKeyVersion": prepared.previous_key_version,
+                    "newKeyVersion": prepared.new_key_version,
                 }));
             }
             let mounts_route = format!("/v1/brains/{brain_id}/mounts");
@@ -3522,7 +3536,14 @@ fn admin_operation<W: Write>(
             )?;
             let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             let authoritative: BrainMetadataView = serde_json::from_value(response)?;
-            if authoritative.members.iter().any(|member| member == &target)
+            let every_planned_folder_rotated = rotated_folders.iter().all(|rotated| {
+                authoritative.folders.iter().any(|folder| {
+                    rotated["folderId"] == folder.id.as_str()
+                        && rotated["newKeyVersion"] == folder.current_key_version
+                })
+            });
+            if !every_planned_folder_rotated
+                || authoritative.members.iter().any(|member| member == &target)
                 || authoritative
                     .folders
                     .iter()
@@ -3550,7 +3571,9 @@ fn admin_operation<W: Write>(
                     "Member removal left an active Mount participation".to_owned(),
                 ));
             }
-            write_command_response(output, json, &serde_json::to_value(authoritative)?)
+            let mut receipt = serde_json::to_value(authoritative)?;
+            receipt["rotatedFolders"] = serde_json::Value::Array(rotated_folders);
+            write_command_response(output, json, &receipt)
         }
         ("role", "grant") => {
             let brain_id = command_brain_id(args, env)?;
@@ -4773,6 +4796,7 @@ mod tests {
     mod admin_demotion_tests;
     mod folder_delete_tests;
     mod folder_key_rotation_tests;
+    mod member_removal_tests;
 
     #[test]
     fn invite_accept_input_parses_url_fragment_and_bare_token() {

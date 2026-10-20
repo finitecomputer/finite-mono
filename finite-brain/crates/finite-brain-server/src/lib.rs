@@ -721,6 +721,10 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
             )),
         )
         .route(
+            "/brains/{brain_id}/members/{target_npub}/removal-plan",
+            get(member_removal_plan_handler),
+        )
+        .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
             axum::routing::put(add_admin_handler).delete(remove_admin_handler),
         )
@@ -10531,4 +10535,5 @@ mod tests {
     mod access_report_tests;
     mod admin_demotion_tests;
     mod folder_key_rotation_tests;
+    mod member_removal_tests;
 }
