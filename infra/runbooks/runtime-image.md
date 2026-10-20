@@ -135,21 +135,19 @@ custody, or an empty-target restore. Those remain separate paid-cohort gates;
 do not describe the boot repair or a provider-volume restart as product
 Recovery Readiness.
 
-### 3. Promote to the Kata hosts
+### 3. Promote in Core, then align the Kata host pins
 
-The runner does **not** read an image tag directly. On each active NixOS Kata
-host (lat3, lat4, and lat5) the env is `/etc/finite/runner.env` (secrets bootstrap —
-`infra/nixos/README.md`; template:
-`infra/nixos/hosts/finite-lat-{3,4,5}/runner.env.example`). The pin is:
+Core picks the image for a new Agent. When it leases the creation, it binds
+the newest promoted, unretired OCI artifact (unless the request already names
+one) into the persisted `RuntimeSpec`
+([runner contract](../../finitecomputer-v2/docs/runner-contract-v1.md#placement-and-capabilities)),
+and the Kata Runner launches that spec's image. Promotion in Core is the step
+that changes new launches. The host pin does not, and existing Agents move only
+through §4a.
 
-- **`FC_RUNNER_RUNTIME_ARTIFACT_ID`** (e.g.
-  `finite-agent-runtime-canary-20260702-41b0c6d`) — product launches fetch
-  the promoted artifact **kind, reference, and state schema from Core**
-  using this ID.
+Do it in two steps, **in this order**:
 
-So promotion is two steps — **in this order**:
-
-1. Register the new pinned image as an artifact in Core.
+1. Register the new pinned image as an artifact in Core and promote it.
    Use Core's service-authenticated runtime-artifact registration endpoint;
    supply the OCI kind, immutable digest reference, source revision, and state
    schema, then promote that artifact for the Kata class. Recovery support is
@@ -157,19 +155,35 @@ So promotion is two steps — **in this order**:
    image whose exact digest passed the one-shot recovery receiver tests. The
    additive field defaults to `false`, so older/N-1 artifacts and rollbacks do
    not inherit a control their image cannot execute.
-2. Edit `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on every
-   Kata host (lat3, lat4, and lat5; lat1 is leftover/inactive only). That operator
-   file is the only place the pin exists: the Nix-rendered shared env
-   deliberately carries no default, and the unit fails closed at start
-   (`FC_RUNNER_RUNTIME_ARTIFACT_ID is required`) if it is missing. No restart
-   needed: the timer re-invokes the runner with the new env (set
-   `FC_RUNNER_DRAIN=true` first if you want in-flight launches to settle).
+2. Point `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` at the
+   same artifact on every Kata host (lat3, lat4, and lat5; lat1 is
+   leftover/inactive only). Template:
+   `infra/nixos/hosts/finite-lat-{3,4,5,7}/runner.env.example`; secrets
+   bootstrap: `infra/nixos/README.md`. This is a separate, low-risk step, but
+   keep it current:
+   - Every Runner cycle requires the pin and resolves it against Core before
+     doing any work. That operator file is the only place the pin exists: the
+     Nix-rendered shared env deliberately carries no default, and the Runner
+     fails closed (`FC_RUNNER_RUNTIME_ARTIFACT_ID is required`) without it.
+   - `scripts/finite-status` takes the newest promoted, unretired artifact in
+     Core as its target, marks a host's pin red when it differs, and lists
+     Agents not on the target as stragglers.
+   - The pinned image is only the Runner's fallback for a creation lease
+     without a Core `RuntimeSpec`. Current Core binds a spec to every Kata
+     creation lease.
+
+   No restart needed: the timer starts each cycle as a fresh process that
+   rereads the file (set `FC_RUNNER_DRAIN=true` first if you want in-flight
+   launches to settle).
 
 > **Order matters (learned 2026-08-27):** finish step 1 before touching any
-> host pin. A pin referencing an id Core does not know makes every runner
-> cycle fail closed with `HTTP 404 {"error":"runtime artifact is not
-> configured"}` — reverting the pin to the previous registered id restores
-> capacity immediately.
+> host pin. A pin naming an id Core does not know makes every Runner cycle on
+> that host fail closed with `HTTP 404 {"error":"runtime artifact is not
+> configured"}`, before health reports, lifecycle controls or creations run.
+> Reverting the pin to the previous registered id restores capacity
+> immediately. Core still serves a retired artifact on this path, so retiring
+> the pinned artifact does not stop the Runner, but finite-status flags the
+> pin until it moves.
 
 When introducing the artifact-capability column, drain new Kata creation before
 the Core/Runner generation switch, register the new recovery-capable digest

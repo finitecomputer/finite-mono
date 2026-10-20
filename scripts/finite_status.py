@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # status run shows the rollback window. PR 2 (cleanup/chat-store-delete-old)
 # deletes this constant and its line.
 CHAT_ENGINE_ROLLOUT_WINDOW_SINCE = "2026-08-31"
-CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-10-14"
+CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-10-21"
 
 # Every operational name lives here. The contract test keeps entries that are
 # owned by Nix aligned with their declaring modules.
@@ -164,6 +164,7 @@ CONTRACT: dict[str, Any] = {
             "207.188.7.157": "finite-lat-3",
             "152.236.34.15": "finite-lat-4",
             "64.34.93.213": "finite-lat-5",
+            "64.34.89.107": "finite-lat-7",
         },
     },
     # Direct web chat cutover (infra/runbooks/direct-chat-cutover.md). The
@@ -233,6 +234,15 @@ CONTRACT: dict[str, Any] = {
             "recovery": False,
             # Nix kataHostAddress: where Agent contact endpoints are published.
             "kata_host_address": "10.254.3.5",
+        },
+        "finite-lat-7": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
+            "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.6",
         },
     },
     "thresholds": {

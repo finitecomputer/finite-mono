@@ -44,6 +44,19 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 65
 fi
 
+application_rev="$(python3 - <<'PY'
+import json
+with open("flake.lock", encoding="utf-8") as fh:
+    lock = json.load(fh)
+print(lock["nodes"]["lat2-app-source"]["locked"]["rev"])
+PY
+)"
+[[ "$application_rev" =~ ^[0-9a-f]{40}$ ]]
+git merge-base --is-ancestor "$application_rev" "$rev" || {
+  echo "refusing application source outside the reviewed host revision's ancestry" >&2
+  exit 65
+}
+
 current_system="$(nix eval --option builders '' --impure --raw --expr builtins.currentSystem)"
 if [[ "$current_system" != "x86_64-linux" ]]; then
   echo "refusing to build on system ${current_system}: expected x86_64-linux" >&2
@@ -129,6 +142,7 @@ manifest = {
     "host": "finite-lat-2",
     "repository": "finitecomputer/finite-mono",
     "rev": "$rev",
+    "application_rev": "$application_rev",
     "builder_system": "$current_system",
     "system": "$system_path",
     "disko": "$disko_path",

@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
+import { sealData } from "iron-session";
 
 import { chromium, type Browser, type Page } from "playwright";
 
@@ -247,6 +248,111 @@ type FakeSitesState = {
   redemptions: number;
   privateContentRequests: number;
 };
+
+test("organization launch code: explicit submission, auth continuation and binding retry", { timeout: 180_000 }, async () => {
+  await resetDashboardDevDirs();
+  const core = await startFakeCore();
+  const hosted = await startFakeHostedDevice();
+  hosted.state.app.identity.account_id = "a".repeat(64);
+  hosted.state.bindingAuthorizations = [];
+  const port = await freePort();
+  const dashboard = startDashboard(port, core.url, hosted.url, "http://127.0.0.1:1", {
+    workosAuth: true, distDir: ".next-browser-test",
+  });
+  const output = collectOutput(dashboard);
+  let browser: Browser | null = null;
+  try {
+    await waitForDashboard(port, output);
+    browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    page.setDefaultTimeout(30_000);
+    const base = `http://127.0.0.1:${port}`;
+    const requestedUrls: string[] = [];
+    page.on("request", request => requestedUrls.push(request.url()));
+    await page.goto(base);
+    assert.equal(await page.getByRole("link", { name: "Enter organization launch code" }).getAttribute("href"), "/code");
+    await onboardingScreenshots(page, "code-entry-home");
+    await page.goto(`${base}/code#code=finite_synthetic_org&name=Organization%20Agent`);
+    await page.getByLabel("Launch code", { exact: true }).waitFor();
+    await waitFor(async () => await page.getByLabel("Launch code", { exact: true }).inputValue() === "finite_synthetic_org");
+    assert.equal(new URL(page.url()).hash, "");
+    assert.equal(await page.getByLabel("Agent name").inputValue(), "Organization Agent");
+    assert.equal(core.state.creationPosts.length, 0);
+    assert.equal(await page.getByRole("button", { name: "Create agent", exact: true }).count(), 0);
+    await onboardingScreenshots(page, "code-before-auth");
+    const unauthenticated = await context.request.post(`${base}/code/redeem`, {
+      headers: { origin: base }, data: { launchCode: "finite_synthetic_org" },
+    });
+    assert.equal(unauthenticated.status(), 401);
+    assert.equal(core.state.creationPosts.length, 0);
+    // Synthetic WorkOS authorization return: real login URL generation and
+    // sealed session cookie, with no external identity-provider requests.
+    let authVisited = false;
+    await page.route(`${base}/login?**`, async route => {
+      const loginResponse = await route.fetch({ maxRedirects: 0 });
+      const authorizationUrl = loginResponse.headers().location;
+      assert(authorizationUrl, "login must redirect to authentication");
+      assert(!authorizationUrl.includes("finite_synthetic_org"));
+      authVisited = true;
+      const token = `fixture.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
+      const cookie = await sealData({ accessToken: token, user: { id: "user_browser", email: "browser@finite.vip", emailVerified: true } }, {
+        password: "browser-test-cookie-password-32-characters-minimum",
+      });
+      await context.addCookies([{ name: "wos-session", value: cookie, url: base, httpOnly: true, sameSite: "Lax" }]);
+      await route.fulfill({ status: 302, headers: { location: `${base}/code` } });
+    });
+    await page.getByRole("link", { name: "Log in", exact: true }).click();
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    assert(authVisited);
+    await waitFor(async () => await page.getByRole("button", { name: "Create agent", exact: true }).isEnabled());
+    assert.equal(await page.getByLabel("Launch code", { exact: true }).inputValue(), "finite_synthetic_org");
+    assert.equal(core.state.creationPosts.length, 0, "auth return must not redeem");
+    await page.reload();
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    assert.equal(core.state.creationPosts.length, 0, "reload must not redeem");
+    await onboardingScreenshots(page, "code-ready");
+    const forbidden = await context.request.post(`${base}/code/redeem`, {
+      headers: { origin: "https://other.example" }, data: { launchCode: "finite_synthetic_org" },
+    });
+    assert.equal(forbidden.status(), 403);
+    assert.equal(core.state.creationPosts.length, 0);
+    core.state.creationError = "Invalid launch code";
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "Invalid launch code" }).waitFor();
+    await page.getByLabel("Launch code", { exact: true }).fill("finite_corrected_org");
+    core.state.creationError = null;
+    hosted.state.bindingAuthorizationFailuresRemaining = 1;
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "binding authorization is temporarily unavailable" }).waitFor();
+    assert.equal(core.state.creationResults.size, 1);
+    const accepted = core.state.creationPosts.at(-1) as Record<string, unknown>;
+    assert.equal(accepted.launchCode, "finite_corrected_org");
+    assert.equal(accepted.ownerChatAccountId, hosted.state.app.identity.account_id);
+    assert.equal(accepted.hostingTier, undefined);
+    // Reopening the personalized link must preserve the consumed code's retry key.
+    await page.goto(base);
+    await page.goto(`${base}/code#code=finite_corrected_org&name=Organization%20Agent`);
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    await page.route(`${base}/dashboard?**`, route => route.fulfill({ status: 200, contentType: "text/html", body: "<h1>Dashboard handoff</h1>" }));
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.waitForURL(url => url.pathname === "/dashboard");
+    assert.equal(core.state.creationResults.size, 1, "binding retry must not create another project");
+    assert.equal((core.state.creationPosts.at(-1) as Record<string, unknown>).idempotencyKey, accepted.idempotencyKey);
+    assert.equal(hosted.state.bindingAuthorizations.length, 2);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem("finite-organization-launch-code")), null);
+    assert(!requestedUrls.some(url => url.includes("finite_synthetic_org") && !url.includes("#")), "code must not enter request URLs");
+    await context.close();
+  } catch (error) {
+    throw new Error(`${String(error)}\nDashboard output:\n${output()}`);
+  } finally {
+    await browser?.close();
+    await stopChildProcess(dashboard);
+    core.server.close();
+    hosted.server.close();
+    await resetDashboardDevDirs();
+  }
+});
 
 test("dashboard agent creation browser states", { timeout: 300_000 }, async () => {
   await resetDashboardDevDirs();
@@ -2207,6 +2313,7 @@ function startDashboard(
     stripeConfigured?: boolean;
     runtimeRetirement?: boolean;
     distDir?: string;
+    workosAuth?: boolean;
   } = {}
 ) {
   const adminOrganizationId = "org_browser_admin";
@@ -2240,7 +2347,9 @@ function startDashboard(
         FC_DASHBOARD_TRIALS_ENABLED: options.stripeConfigured ? "true" : "false",
         FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT: options.runtimeRetirement ? "1" : "",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
-        FC_WORKOS_AUTH_ENABLED: "0",
+        FC_WORKOS_AUTH_ENABLED: options.workosAuth ? "1" : "0",
+        WORKOS_API_KEY: options.workosAuth ? "sk_test_local_fixture" : "",
+        WORKOS_CLIENT_ID: options.workosAuth ? "client_local_fixture" : "",
         NEXT_PUBLIC_WORKOS_REDIRECT_URI: `http://127.0.0.1:${port}/callback`,
         STRIPE_SECRET_KEY: options.stripeConfigured ? "sk_test_browser_fixture" : "",
         STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: options.stripeConfigured

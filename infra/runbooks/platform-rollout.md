@@ -46,6 +46,11 @@ the 2026-08-18 wave proved unexercised lanes fail serially on deploy night.
 
 - **Deployed rev:** the change-set is merged to `main`; CI is green at exactly
   that revision (merge-commit SHA, not your local tree).
+- **App-plane source:** the rollout's `lat2-app-source` pin includes the
+  intended application changes, including the dashboard module and digest.
+  The artifact records this as `application_rev`
+  separately from the host configuration revision; update the pin through
+  [deploy-core.md](deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
 - **Preflight census clean:** `scripts/rollout_preflight.py` (see
   [#682](https://github.com/finitecomputer/finite-mono/pull/682)) exits 0 —
   every `runtime_control_requests.status` inside the legacy four values
@@ -180,7 +185,8 @@ product probe. A layer is green only when both agree.
    the reviewed build. The Caddy edge forwards the services' routers verbatim;
    hit one public route per service through the edge.
 3. **Dashboard byte-equality:** host-running digest equals the pinned
-   `@sha256:` in `modules/dashboard.nix`. An exit-0 command proves nothing;
+   `@sha256:` in `modules/dashboard.nix` at the locked application revision.
+   An exit-0 command proves nothing;
    compare digests.
 4. **Pins:** finite-status shows the artifact pin matched/green on every active
    Kata host;
@@ -189,7 +195,7 @@ product probe. A layer is green only when both agree.
    vocabulary preserved unless deliberately exercising the new one; no
    unexpected non-terminal rows.
 6. **Launch one throwaway fresh agent** end-to-end (create → chat turn →
-   reply arrives in-thread). Pin flips affect new launches only, which makes
+   reply arrives in-thread). Promotion affects new launches only, which makes
    this the only check that exercises what you actually shipped. Keep an eye
    out for replies landing home-chat (fallback engaged ≠ lost message; still
    investigate why the route didn't resolve).
@@ -237,8 +243,8 @@ before choosing a lever; multiple levers below compose in this order.
   `FC_RUNNER_RUNTIME_ARTIFACT_ID` on each host (timer applies without
   restart). Existing agents keep their launch-time digest either way; only
   new launches change.
-- **R4 — Dashboard:** revert the digest in `modules/dashboard.nix`, rebuild,
-  re-verify byte-equality.
+- **R4 — Dashboard:** revert the digest in `modules/dashboard.nix`, advance the
+  application pin to that reviewed fix, rebuild and re-verify byte-equality.
 - **R-last resort — Data restore:** only via
   [`postgres-backup-restore.md`](postgres-backup-restore.md) /
   [`litestream-chat-replication.md`](litestream-chat-replication.md) with the

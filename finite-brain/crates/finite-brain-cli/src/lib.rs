@@ -11,6 +11,7 @@ mod http;
 mod identity_authority;
 mod models;
 mod output;
+mod personal_brain;
 mod requester_context;
 mod search;
 mod semantic_index;
@@ -157,7 +158,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -2192,13 +2193,14 @@ fn resolve_unique_personal_brain(
     select_unique_personal_brain(response)
 }
 
+// "personal" means this key's own Personal Brain. Anyone can add a key as a
+// member of their own Personal Brain, so a member role never qualifies.
 fn select_unique_personal_brain(response: VisibleBrainsResponse) -> Result<String, CliError> {
     let personal = response
         .brains
         .into_iter()
         .filter(|brain| {
-            brain.kind == "personal"
-                && matches!(brain.role.as_str(), "owner" | "personal_agent" | "member")
+            brain.kind == "personal" && matches!(brain.role.as_str(), "owner" | "personal_agent")
         })
         .collect::<Vec<_>>();
     match personal.as_slice() {
@@ -2691,6 +2693,9 @@ fn brain<W: Write>(
             let response =
                 signed_json_request_to_server(env, &server_url, "POST", "/v1/brains", Some(body))?;
             write_command_response(output, json, &response)
+        }
+        "personal-agent-consent" => {
+            personal_brain::personal_agent_consent(&args[1..], env, json, output)
         }
         "rename" => {
             let mut values = args[1..].to_vec();
@@ -5090,8 +5095,14 @@ mod tests {
 
     #[test]
     fn packaged_invite_guidance_matches_the_supported_invite_surface() {
-        let skill = include_str!(
-            "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+        // The skill routes invitations to its sharing reference.
+        let skill = concat!(
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+            ),
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/references/sharing.md"
+            ),
         );
         let reference = include_str!(
             "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
@@ -5117,7 +5128,7 @@ mod tests {
         for (source, text) in [
             ("help", help.as_str()),
             ("--skill", guide.as_str()),
-            ("SKILL.md", skill),
+            ("finitebrain skill", skill),
             ("fbrain-cli.md", reference),
             ("generated AGENTS.md template", generated.as_str()),
         ] {
@@ -5131,7 +5142,7 @@ mod tests {
 
         // Syntax and terminology guards supplement source review; they cannot
         // prove that arbitrary natural-language guidance describes the contract.
-        for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+        for (source, text) in [("--skill", guide.as_str()), ("finitebrain skill", skill)] {
             let normalized = normalized_invite_examples(text);
             for contract in [
                 "--target <npub|hex|NIP-05>",
@@ -8570,6 +8581,94 @@ mod tests {
             assert!(!identity_file.exists());
             assert!(output.is_empty());
         }
+    }
+
+    #[test]
+    fn personal_agent_consent_never_mints_an_identity() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let identity_file = signer::identity_paths(&env).unwrap().identity_file();
+        let owner =
+            finite_nostr::NostrPublicKey::from_protocol(nostr::Keys::generate().public_key())
+                .to_npub()
+                .unwrap();
+        let mut output = Vec::new();
+        let error = run_with_env(
+            [
+                "brain",
+                "personal-agent-consent",
+                "--owner",
+                owner.as_str(),
+                "--server",
+                "http://127.0.0.1:1",
+                "--json",
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Identity(_)), "{error:?}");
+        assert!(!identity_file.exists());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn personal_agent_consent_names_the_owner_and_the_signed_brain_origin() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let owner_keys = nostr::Keys::generate();
+        let owner = finite_nostr::NostrPublicKey::from_protocol(owner_keys.public_key())
+            .to_npub()
+            .unwrap();
+        let mut env = env_for(&tmp);
+        // Requests travel through the transport URL but sign the public origin.
+        env.server_url = Some("http://127.0.0.1:13002".to_owned());
+        env.public_base_url = Some("https://brain.example".to_owned());
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "brain",
+                "personal-agent-consent",
+                "--owner",
+                owner_keys.public_key().to_hex().as_str(),
+                "--json",
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        let consent = nostr::Event::from_json(result["consent"].to_string()).unwrap();
+        let payload = finite_brain_core::verify_personal_agent_consent_event(&consent).unwrap();
+        let agent = finite_nostr::NostrPublicKey::from_protocol(
+            nostr::Keys::new(
+                nostr::SecretKey::parse(
+                    "0000000000000000000000000000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+            )
+            .public_key(),
+        )
+        .to_npub()
+        .unwrap();
+        assert_eq!(result["agentNpub"], agent.as_str());
+        assert_eq!(payload.agent_npub, agent);
+        assert_eq!(result["ownerNpub"], owner.as_str());
+        assert_eq!(payload.owner_npub, owner);
+        assert_eq!(
+            result["brainId"],
+            finite_brain_core::personal_brain_id_for_owner(&owner)
+                .unwrap()
+                .as_str()
+        );
+        assert_eq!(result["brainServer"], "https://brain.example");
+        assert_eq!(payload.brain_server, "https://brain.example");
+        assert_eq!(result["expiresAt"], payload.expires_at);
+        assert_eq!(payload.expires_at - consent.created_at.as_secs(), 600);
     }
 
     #[test]
@@ -13407,6 +13506,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, "personal-owned");
+    }
+
+    #[test]
+    fn personal_brain_selection_skips_another_owners_brain_where_this_key_is_a_member() {
+        let selected = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![
+                VisibleBrainSummary {
+                    brain_id: "personal-someone-else".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "member".to_owned(),
+                },
+                VisibleBrainSummary {
+                    brain_id: "personal-own".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "personal_agent".to_owned(),
+                },
+            ],
+        })
+        .unwrap();
+        assert_eq!(selected, "personal-own");
+
+        let error = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![VisibleBrainSummary {
+                brain_id: "personal-someone-else".to_owned(),
+                kind: "personal".to_owned(),
+                role: "member".to_owned(),
+            }],
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no personal Brain is visible"));
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub(crate) struct HostedHermesGuard {
     cgroup: PathBuf,
     invocation: String,
     proxy_unit: String,
+    /// Unit tests record proxy stops here instead of driving systemd.
+    #[cfg(test)]
+    proxy_log: Option<PathBuf>,
 }
 
 impl HostedHermesGuard {
@@ -37,6 +40,7 @@ impl HostedHermesGuard {
             cgroup,
             invocation: "test-invocation".into(),
             proxy_unit: "unused-test-proxy.service".into(),
+            proxy_log: Some(root.join("proxy.log")),
         }
     }
 
@@ -79,6 +83,8 @@ impl HostedHermesGuard {
             cgroup,
             invocation: state["InvocationID"].clone(),
             proxy_unit: proxy_unit.into(),
+            #[cfg(test)]
+            proxy_log: None,
         };
         guard.quiescent()?;
         match std::fs::read_to_string(guard.marker()) {
@@ -138,7 +144,49 @@ impl HostedHermesGuard {
         self.clear_marker()
     }
 
+    /// Clear this invocation's own marker after a failed command, on the same
+    /// terms a successor invocation clears a predecessor's in `acquire`: no
+    /// process but this one is left in the Runner cgroup, and the proxy is
+    /// stopped before the marker goes. The caller's `proof` must also show
+    /// that the provider state the failed command left behind is settled; it
+    /// runs between the two quiescence checks. Any refusal keeps the marker,
+    /// so a new invocation stays the only other way to clear it.
+    pub(crate) fn resolve_own_failed_mutation(
+        &self,
+        proof: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
+        self.quiescent()?;
+        match std::fs::read_to_string(self.marker()) {
+            Ok(owner) if owner == self.invocation => {}
+            Ok(_) => {
+                return Err(refused(
+                    "the unresolved mutation belongs to another invocation",
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(refused("no unresolved provider mutation to resolve"));
+            }
+            Err(_) => return Err(refused("cannot read operation marker")),
+        }
+        proof()?;
+        self.quiescent()?;
+        self.stop_proxy()?;
+        self.clear_marker()
+    }
+
     pub(crate) fn stop_proxy(&self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(log) = self.proxy_log.as_ref() {
+            let marked = self.marker().exists();
+            let mut log = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .map_err(|_| refused("cannot record test proxy stop"))?;
+            writeln!(log, "stop marker={marked}")
+                .map_err(|_| refused("cannot record test proxy stop"))?;
+            return Ok(());
+        }
         let before = service_state(&self.proxy_unit)?;
         if before.get("LoadState").map(String::as_str) != Some("loaded")
             || before.get("KillMode").map(String::as_str) != Some("control-group")
@@ -387,5 +435,79 @@ mod tests {
         );
         std::fs::write(child.join("cgroup.procs"), "unreadable PID").unwrap();
         assert!(cgroup_processes(root.path()).is_err());
+    }
+
+    fn proxy_log(root: &Path) -> String {
+        std::fs::read_to_string(root.join("proxy.log")).unwrap_or_default()
+    }
+
+    #[test]
+    fn own_failed_mutation_resolves_only_when_quiescent_owned_and_proven() {
+        let root = tempfile::tempdir().unwrap();
+        let guard = HostedHermesGuard::for_failed_mutation_test(root.path());
+        let marker = root.path().join("mutation-in-progress");
+
+        // Nothing to resolve without a marker.
+        assert!(guard.resolve_own_failed_mutation(|| Ok(())).is_err());
+
+        guard.begin_mutation(false).unwrap();
+        assert!(marker.exists());
+
+        // A surviving command in the Runner cgroup refuses before the proof.
+        std::fs::write(
+            root.path().join("cgroup/cgroup.procs"),
+            format!("{}\n4242\n", std::process::id()),
+        )
+        .unwrap();
+        let mut proof_ran = false;
+        assert!(
+            guard
+                .resolve_own_failed_mutation(|| {
+                    proof_ran = true;
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(!proof_ran && marker.exists());
+        std::fs::write(
+            root.path().join("cgroup/cgroup.procs"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        // A failed proof keeps the marker and leaves the proxy alone.
+        assert!(
+            guard
+                .resolve_own_failed_mutation(|| Err(refused("not proven")))
+                .is_err()
+        );
+        assert!(marker.exists());
+        assert_eq!(proxy_log(root.path()), "");
+
+        // Another invocation's marker is never resolved in-process.
+        std::fs::write(&marker, "another-invocation").unwrap();
+        assert!(guard.resolve_own_failed_mutation(|| Ok(())).is_err());
+        assert!(marker.exists());
+        std::fs::write(&marker, "test-invocation").unwrap();
+
+        // A command left behind by the proof itself refuses after the proof.
+        let procs = root.path().join("cgroup/cgroup.procs");
+        assert!(
+            guard
+                .resolve_own_failed_mutation(|| {
+                    std::fs::write(&procs, format!("{}\n4243\n", std::process::id())).unwrap();
+                    Ok(())
+                })
+                .is_err()
+        );
+        assert!(marker.exists());
+        assert_eq!(proxy_log(root.path()), "");
+        std::fs::write(&procs, std::process::id().to_string()).unwrap();
+
+        // Proven: the proxy stops while the marker still fences, then it clears.
+        guard.resolve_own_failed_mutation(|| Ok(())).unwrap();
+        assert!(!marker.exists());
+        assert_eq!(proxy_log(root.path()), "stop marker=true\n");
+        guard.before_publication().unwrap();
     }
 }

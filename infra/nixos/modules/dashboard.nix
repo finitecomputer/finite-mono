@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # October 12 signup and fresh Agent recovery status, built from 036b2e58.
-    # Core/Chat Rust retains qualified a3cbda97 inputs; excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/38314673205
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ca15806f1a87dd5e3e4e945396e547053cc3223f16472853282dbb1f7a7ad815";
+    # Organization launch-code setup on the retained production generation,
+    # built from 404737fe; excludes unrelated trial-archive migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/38924002203
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:c398350ce57141f04ec7d78f77068ec019e703c17651136e0e5d3f9f05fa2df0";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With

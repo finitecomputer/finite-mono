@@ -46,8 +46,14 @@ jobs:
           set -euo pipefail
           [[ "$REV" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$REV"
-          git fetch origin main --depth=1
-          git merge-base --is-ancestor "$REV" origin/main
+          if [[ "$GITHUB_REF" =~ ^refs/heads/release/runner-hosts-[A-Za-z0-9._-]+$ ]]; then
+            # Isolated Runner release: build only the dispatched branch head.
+            git fetch origin "$GITHUB_REF" --depth=1
+            test "$(git rev-parse FETCH_HEAD)" = "$REV"
+          else
+            git fetch origin main --depth=1
+            git merge-base --is-ancestor "$REV" origin/main
+          fi
           scripts/build-lat4-nixos-closure-artifact \
             "$REV" \
             target/lat4-nixos-closure

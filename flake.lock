@@ -140,6 +140,23 @@
         "type": "github"
       }
     },
+    "lat2-app-source": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792164560,
+        "narHash": "sha256-1pAs3GGBFhnZ+DVKoSFowsD3Wkl0c/pc+TQxHaQ09vU=",
+        "owner": "finitecomputer",
+        "repo": "finite-mono",
+        "rev": "aa22ef38ffc6562e7c232aa25a593e89a612f8bf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "finitecomputer",
+        "repo": "finite-mono",
+        "rev": "aa22ef38ffc6562e7c232aa25a593e89a612f8bf",
+        "type": "github"
+      }
+    },
     "nix-vm-test": {
       "inputs": {
         "nixpkgs": [
@@ -343,6 +360,7 @@
         "flake-utils": "flake-utils",
         "hermes-agent": "hermes-agent",
         "hermes-nixpkgs": "hermes-nixpkgs",
+        "lat2-app-source": "lat2-app-source",
         "nixos-anywhere": "nixos-anywhere",
         "nixos-images": "nixos-images",
         "nixpkgs": "nixpkgs",

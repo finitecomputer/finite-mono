@@ -85,8 +85,15 @@ operation, with no challenge route, borrowed Brain proof URL or new signing API.
 ## Private contact disclosure
 
 An admin can add an arbitrary key to a Brain. That action does not authorize
-reverse discovery of private account information. Autonomous agent participation
-also does not authorize publishing its account holder's contact.
+reverse discovery of private account information. Under v1, autonomous agent
+participation also does not authorize publishing its account holder's contact;
+v2 accepts that risk (see "Disclosure without a sharing scope").
+
+The disclosure scope, its revocation and the successor-scope rule below apply to
+v1 requests only. A v2 request applies no scope, so revoking one does not
+withhold contact from a v2 answer, and v2 has no per-account opt-out. Under v2
+the description credential describes any linked key Brain sends for any Brain
+ID; Brain's participation rule is the only gate.
 
 Core owns one disclosure scope per stable account, exact Brain server identity
 and exact Brain ID. A trusted account-authenticated hosted action establishes it
@@ -113,6 +120,37 @@ For keys outside disclosure scope, return the same `notShared` state regardless
 of whether an internal account match exists. Do not expose account-existence
 information through different private errors. Existing public NIP-05 evidence
 can still be shown separately, with its source and observation time.
+
+## Disclosure without a sharing scope (v2, FIN-166)
+
+Version `finite-core-brain-identity-descriptions-v2` keeps the v1 request and
+response shape and drops the per-Brain sharing scope. Brain sends only keys
+that themselves have recorded participation in that Brain, so participation
+alone decides which keys Core describes. The linked-account, conflict,
+ambiguity, lifecycle and current-owner rules are unchanged. Core keeps serving
+v1 with the v1 policy, so an older Brain discloses nothing new. Brain asks v2
+first and asks v1 only when Core answers exactly 400
+`{"error": "unsupported descriptions version"}`.
+
+Accepted risk (decision recorded in FIN-166, 2026-10-05): any participation by
+an Agent key in a Brain releases the Agent's name and its owner's account email
+to that Brain's admins. That includes participation the owner did not request:
+a non-owner's request in chat, an "Agent instruction" in an invite email, or
+injected content. Folder Key Grant wraps a client delivers while it syncs are
+not participation, so holding a key and syncing releases nothing (see the
+Brain access report contract). Participation by a hosted human key releases
+that human's email. An admin still cannot learn who owns a key only by adding
+it to their Brain.
+
+Owner human keys: v2 lists in `responsibleAccount.humanPublicKeysHex` only the
+owner's keys that are in the same request. Brain also drops listed keys it did
+not ask about, whichever version answered.
+
+Ownership transfer: v2 releases the current owner because an Agent key acted in
+the past. That is sound only while a project's owner never changes. Core has no
+writer that changes `projects.owner_user_id`, and a test fails if one is added.
+A transfer writer must first stop participation recorded before the transfer
+from releasing the new owner.
 
 ## Private batch boundary
 
@@ -224,23 +262,27 @@ Core (`finite-saas-core`):
   name 200 bytes); oversized or control-character values make the row
   `unknown` and are never truncated. Responses over 256 KiB fail with 503.
   Logs carry the Brain id, the requesting admin key and counts, never contact.
-- Disclosure: `resolved` needs an active scope for the responsible account
-  (the current project owner for agents) and a linked account. `ambiguous`
-  is stated only when every implicated account shared with this Brain.
+- Disclosure: `resolved` needs a linked responsible account (the current
+  project owner for agents) and, under v1 only, an active scope for it.
+  `ambiguous` is stated only when every implicated account is linked and,
+  under v1, shared with this Brain. The response `version` echoes the request.
   Missing projects or foreign active links are `notShared`. An inactive
   sibling without completed retirement makes the agent `unknown`.
   `responsibleAccount.humanPublicKeysHex` lists at most 8 of the owner's
-  associated keys and excludes any key that is also pinned as an agent.
+  associated keys (under v2, only keys in the request) and excludes any key
+  that is also pinned as an agent.
 
 Dashboard: `src/lib/brain-identity-observation.ts`, called through `after()`
 from `POST /api/brain/invitations/accept` once the Brain server returns an
 acceptance by the exact hosted key, and from `POST /api/brain/approvals/approve`
 once the Brain server applies a delegation-grant approval signed for that
-exact Brain (how existing admins qualify). Both cards tell the user that the
-action lets the Brain's admins see their account email and that they are
-responsible for their agents there, and send `shareAccountContact: true` with
-that text. A request without it (a tab loaded before the text existed) still
-joins or approves but records no sharing. It loads the key with Hosted Device
+exact Brain (how existing admins qualify). Chat shows only the Approve card;
+the Join card was removed, so the accept route records only for older tabs
+and other callers. The card tells the user that the action lets the Brain's
+admins see their account email and that they are responsible for their agents
+there, and sends `shareAccountContact: true` with that text. A request without
+it (a tab loaded before the text existed) still joins or approves but records
+no sharing. It loads the key with Hosted Device
 `identifyMember` (no mint), retries a lost response once with the same
 operation id, and never changes the join result. Configuration:
 `FC_CORE_BRAIN_IDENTITY_URL` and `FC_CORE_BRAIN_OBSERVATION_TOKEN`; the Brain

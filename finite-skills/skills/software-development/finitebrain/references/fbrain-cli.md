@@ -22,9 +22,7 @@ blocked state; `fbrain` never substitutes another Brain server.
 `FINITE_BRAIN_SERVER_URL` chooses the transport. When
 `FINITE_BRAIN_PUBLIC_BASE_URL` is also set, `fbrain` signs that browser-visible
 canonical origin into Nostr HTTP authorization events while sending the request
-through the transport URL. This lets the current server-side signer adapter
-behave like a future client daemon without teaching Brain multiple identities
-for the same request.
+through the transport URL.
 
 ## Command Map
 
@@ -33,7 +31,7 @@ fbrain [--config-dir <path>] doctor
 fbrain repair
 fbrain auth status|import [--file <path>]|login <email>|redeem <email> <token>
 fbrain signer status|public-key|sign|encrypt|decrypt
-fbrain daemon status|start|stop|logs|tick|watch
+fbrain daemon status|start|stop|logs|tick|watch|supervise
 fbrain sync status|now [--summary]
 fbrain open personal [path]
 fbrain open <brain-id> [path]
@@ -44,8 +42,8 @@ fbrain search <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [
 fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]
 fbrain activity
 fbrain wiki check [--json]
-fbrain access explain|list
-fbrain brain list|create|rename|bootstrap-personal|metadata|export
+fbrain access explain|list|summary
+fbrain brain list|create|rename|personal-agent-consent|metadata|export
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
@@ -62,11 +60,16 @@ fbrain admin folder-access grant|revoke
 fbrain admin ensure-access
 ```
 
-Use `brain bootstrap-personal` for first-time Personal Brain setup. It creates
-the empty user-owned Personal Brain and establishes the authenticated agent as
-its Personal Agent through Brain's account-bound authority. Direct `brain
-create` is for Organization Brains and is not a substitute for this Personal
-Agent bootstrap flow.
+A Personal Brain is created from the Finite dashboard Brain page with two
+signatures: the user's account signs the `POST /v1/brains` request, and the
+Agent signs a consent from `brain personal-agent-consent --owner <npub>`, which
+its runtime's Brain plugin runs when the dashboard asks. The consent binds the
+owner, the owner's Personal Brain ID and the signed Brain origin, and expires
+after 10 minutes. The command uses only an existing identity and never mints
+one. It belongs only to that dashboard flow: never run it or share its output
+on a chat request, because one Agent serves one Personal Brain for good.
+`brain create` is for Organization Brains; Organization Brain IDs shaped like
+`personal-<16 hex>` are reserved for Personal Brains.
 
 ## Rename a Brain
 
@@ -254,37 +257,20 @@ fbrain access list --brain <brain-id> [--json]
 fbrain access summary --brain <brain-id> [--json]
 ```
 
-From `fbrain` 0.7, `access list` is the named access report; its JSON carries
-`"version": "finite-brain-access-report-v1"`. Older CLIs print the metadata
-summary under `access list` with no `version` field; treat that as "use an
-updated operator CLI for the named report", never as a complete report. Do not
-roll the Agent fleet for this task. The named report is one server snapshot
-with coverage
-per scope, exact keys, permitted identity descriptions, Folder entitlements
-and their recorded sources, current-grant readiness with issuer and time, and
-Folders mounted in from other Brains. Every page must carry the same `authorityFingerprint`;
+From `fbrain` 0.7, `access list` is the named access report: one server
+snapshot of exact keys, their identity descriptions, Folder entitlements and
+current-grant readiness. Every page carries the same `authorityFingerprint`;
 if Brain access changes mid-read the CLI restarts the report, and it refuses
-partial, foreign, or inconsistent pages. It requires the acting key's own
-admin standing and fails with `unsupported` on an older server. `access
-summary` is the older metadata view of Folder recipients; it names no
-identities and proves no coverage.
-
-Descriptions are separate from permission. A `resolved` human shows the
-account's shared email; a `resolved` agent shows its name, lifecycle and
-responsible account. `notShared` means Core has nothing shared for this Brain,
-or (`noParticipation`) the key has not acted in this Brain, so it was never
-looked up. `ambiguous`, `unknown` and `unavailable` say exactly that.
-`storedNip05` is a stored public name with its stored time, not rechecked and
-not a mailbox. Incoming Mount source access can remain unverified even when
-native Folder and current-grant checks are complete. Content edits do not
-invalidate an access-report cursor.
+partial, foreign or inconsistent pages. Content edits do not invalidate its
+cursor. `access summary` is the older metadata view of Folder recipients.
+[who-has-access.md](who-has-access.md) explains how to read and report both.
 
 `access` is read-only. Mutations live under the explicit `admin`, `invite`,
 `collaborator`, and `mount` workflows. The CLI prepares Folder Key rotation
-automatically; never author or pass a raw rotation payload.
+automatically for Folder and Mount revocation. If preparation fails, stop on
+the reported blocker; never author or pass a raw rotation payload.
 
 ```sh
-fbrain brain bootstrap-personal --json
 fbrain brain create organization "Org Brain" --json
 fbrain brain metadata --brain <brain-id>
 fbrain brain export --brain <brain-id>
@@ -334,51 +320,23 @@ through public NIP-05. Brain does not consult account authorities; a name
 without a matching NIP-05 record fails with the resolver's error rather than
 falling back to a guess.
 
-`collaborator ensure-admin` is the normal email-first Organization Brain
-sharing operation. Do not precede it with an ad hoc public NIP-05 probe. The
-command resolves the Managed Agent Email through public NIP-05 and returns one
-typed receipt:
+`collaborator ensure-admin` is the normal Organization Brain sharing
+operation, and its typed receipt is `complete`, `partial` or `indeterminate`.
+The member, role and `folder-access` commands are advanced primitives that
+change one relationship each. [sharing.md](sharing.md) is the contract for
+both and for reporting their receipts.
 
-- `complete` proves Admin Brain Role plus current Folder readiness across the
-  authoritative Folder snapshot.
-- `partial` preserves useful progress but names every known incomplete Folder.
-  Retry this exact idempotent command from a named current key holder when the
-  receipt supplies a holder email. Otherwise ask another current Folder reader
-  who can open the listed Folder to retry; never invent or expose a holder
-  identity, and do not report the collaboration as complete.
-- `indeterminate` means the mutation may have committed but its postcondition
-  was not proved. Retry the exact command and inspect its next receipt; do not
-  claim either success or a clean failure.
-
-Human reports should use the target email, safe Folder paths, counts, reason
-codes, and holder emails. Do not paste the raw receipt or expose Member Identity
-keys, wrapped events, auth material, Folder Keys, or grant plaintext.
-
-Low-level `admin` commands are advanced primitives. Member and role commands
-change Brain-wide relationships, while `folder-access` targets one Folder;
-they do not prove complete Organization Brain Collaboration and are not the
-normal sharing workflow.
+`admin ensure-access` returns `state: complete` or `grantsMissing`; a Folder
+whose `repair` is `needsKeyHolder` needs an admin who holds that Folder's
+current key.
 
 ## Invitations And Sharing
 
-The finitebrain skill's Brain Invitations section is the contract for choosing
-between a key-addressed invitation and an email capability invitation, for
-`deliveryStatus` values, for membership versus readable Folders, and for the
-unsupported cases. This section lists the command syntax.
-
-`invite brain list` lists received invitations only when run without `--brain`
-from outside any Brain Working Tree, with the intended server selected.
-Inside a Working Tree it infers that Brain and lists issued invitations,
-just like `--brain <id>`; that scoped listing requires admin standing.
-To answer "have I been invited to anything?", use the outside-tree form; `brain list --json` rows with
-`role: "invited"` are the same incoming invitations from the Brain side.
-`invite brain inspect` and `accept` want the invitation id
-(`invitation-...`); an invite code (`invite-...`) is resolved to its id by
-the code's public `llms.txt` instructions URL.
-
-When the user asks whether anything is waiting for them, check both sides:
-your own `fbrain invite brain list` outside any Brain Working Tree for
-invitations addressed to your principal, and their pending approval and invitation cards in chat.
+[sharing.md](sharing.md) is the contract for choosing an invitation type,
+reading `deliveryStatus`, Membership versus readable Folders, finding incoming
+invitations, and the unsupported cases. This section lists the command
+syntax. `invite brain inspect|accept` and `invite folder accept` take the
+invitation id positionally or with `--id`.
 
 ```sh
 fbrain invite brain create --brain <brain-id> --target <npub|hex|NIP-05>
@@ -415,12 +373,8 @@ fbrain mount participant remove <mount-id> <npub|hex|NIP-05>
 fbrain mount revoke <mount-id>
 ```
 
-Invitations, Invite Tokens, and Mount Offers default to seven days. The CLI
-accepts `--expires-in` in whole hours or days from `1h` through `30d`. An
-older Brain server can reject `1h` when the request arrives a few seconds
-late; report the error and preserve the requested expiry until the user
-chooses a longer duration or the server is updated. A leading client clock
-can exceed the strict `30d` ceiling. Brain
+Invitations, Invite Tokens, and Mount Offers take the same `--expires-in`
+bounds and seven-day default described in [sharing.md](sharing.md). Brain
 Invitations create Members. Folder Invitations create bounded Guest access.
 Mounts are source-backed and work between either Brain kind; the CLI opens and
 wraps required Folder grants in memory.

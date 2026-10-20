@@ -16,6 +16,8 @@ does not replace the stop-the-world Recovery Snapshot.
 
 - The exact mono commit is pushed and its production NixOS configuration
   evaluates successfully.
+- The rollout revision's `lat2-app-source` pin includes the Brain change;
+  advance it through the shared [application release procedure](deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
 - The reviewed revision has a successful `Lat2 NixOS Closure` workflow artifact
   and the deploy operator can SSH to `root@64.34.80.19`. Do not evaluate or
   build the production closure on the Mac, clawland, lat1, or lat2.
@@ -44,10 +46,9 @@ just deploy-lat2-closure "$ARTIFACT_DIR" --activate
 The script validates the manifest, copies the prebuilt file binary cache to
 lat2, dry-activates during `--prepare`, activates only on the explicit
 `--activate` boundary, and proves `/run/current-system` equals the artifact's
-exact `SYSTEM` path. It does not evaluate or build on lat1 or lat2. Brain is
-built with the rest of the
-monorepo from that revision; no source tarball or legacy-repo deploy is part of
-the path.
+exact `SYSTEM` path. It does not evaluate or build on lat1 or lat2. Brain uses
+the locked `lat2-app-source` revision recorded as `application_rev` in the
+artifact; no source tarball or legacy-repo deploy is part of the path.
 
 ## Verify
 
