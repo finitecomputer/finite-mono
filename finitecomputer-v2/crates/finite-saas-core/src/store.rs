@@ -1,7 +1,9 @@
 mod account_email;
+mod front_door_preference;
 pub mod hosted_hermes;
 pub mod runtime_credentials;
 pub use account_email::{AccountEmailChangePreview, AccountEmailChangeRequest};
+pub use front_door_preference::FrontDoorPreference;
 
 use crate::billing;
 use crate::launch_codes::{

@@ -9,6 +9,29 @@ impl CoreStore {
         postgres_visible_projects_for_workos_user(&**client, workos_user_id).await
     }
 
+    /// `/me`'s visible projects plus the read-only front-door preference,
+    /// resolved from the same user lookup so `/me` keeps its query count.
+    pub async fn visible_projects_and_migration_for_workos_user(
+        &self,
+        workos_user_id: &str,
+    ) -> CoreResult<(Vec<VisibleProject>, Option<String>)> {
+        let client = self.connection().await?;
+        let Some(user) = client
+            .query_opt(
+                "SELECT id, core_rfc3339(migrated_at) AS migrated_at
+                 FROM users WHERE workos_user_id = $1",
+                &[&workos_user_id],
+            )
+            .await
+            .map_err(store_error)?
+        else {
+            return Ok((Vec::new(), None));
+        };
+        let projects =
+            postgres_visible_projects_for_user(&**client, &user.get::<_, String>("id")).await?;
+        Ok((projects, user.get("migrated_at")))
+    }
+
     /// Resolve only the exact current runtime of a self-service Project owned
     /// by this WorkOS user. Location discovery never grants membership or uses
     /// source-machine aliases, and cannot revive an inactive runtime link.

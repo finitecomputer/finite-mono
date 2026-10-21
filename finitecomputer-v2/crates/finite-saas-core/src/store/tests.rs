@@ -266,6 +266,7 @@ mod creation_concurrency;
 mod creation_lifecycle;
 mod creation_placement;
 mod creation_recovery;
+mod front_door_preference;
 mod health;
 mod host_release;
 mod launch_codes;

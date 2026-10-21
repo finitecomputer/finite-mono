@@ -415,6 +415,16 @@ export type CoreMe = {
   workos_user_id: string;
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
+  /**
+   * When this user turned on "use the new Finite by default" (null while
+   * off). Additive; an N-1 Core omits it, which reads as off.
+   */
+  migrated_at?: string | null;
+};
+
+export type CoreFrontDoorPreference = {
+  use_new_finite: boolean;
+  migrated_at: string | null;
 };
 
 export type CoreMeResult = {
@@ -709,6 +719,25 @@ export async function requestCoreAgentCreation(input: CoreAgentCreationInput) {
     }
     throw error;
   }
+}
+
+/** Set or clear the signed-in user's own front-door preference in Core. */
+export async function setCoreFrontDoorPreference(useNewFinite: boolean) {
+  const status = coreBridgeStatus();
+  if (!status.configured) {
+    throw new Error(`Finite Core is not configured: ${status.missing.join(", ")}`);
+  }
+  const account = await getAccountAuthContext();
+  if (!coreAccountReady(account)) {
+    throw new Error("Sign in again to change this setting.");
+  }
+  const result = await coreFetch<CoreFrontDoorPreference>(
+    "/api/core/v1/me/front-door-preference",
+    account,
+    { method: "PUT", body: JSON.stringify({ useNewFinite }) }
+  );
+  invalidateCoreReadCache();
+  return result;
 }
 
 export async function linkCoreStripeCustomer(stripeCustomerId: string) {

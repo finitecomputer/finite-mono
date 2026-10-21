@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import type { ReactNode } from "react";
 import {
   ActivityIcon,
+  ArrowUpRightIcon,
   BanIcon,
   CreditCardIcon,
   KeyRoundIcon,
@@ -18,6 +19,7 @@ import {
   RotateCcwIcon,
   ShieldCheckIcon,
   ServerIcon,
+  SparklesIcon,
 } from "lucide-react";
 
 import {
@@ -87,6 +89,16 @@ import {
   unsealAgentOnboardingDraft,
   type AgentOnboardingDraft,
 } from "@/lib/agent-onboarding";
+import {
+  FRONT_DOOR_SETTINGS_ANCHOR,
+  FRONT_DOOR_SETTINGS_PATH,
+  accountMigrated,
+  frontDoorAgentCreationMovedMessage,
+  frontDoorOffersAgentCreation,
+  legacySubscriptionNeedsDashboard,
+  loadFrontDoorConfig,
+  type FrontDoorConfig,
+} from "@/lib/front-door";
 
 function shortValue(value: string | null | undefined, length = 12) {
   if (!value) {
@@ -103,6 +115,7 @@ type DashboardSearchParams = {
   billing?: string | string[];
   billingSyncStartedAt?: string | string[];
   creation?: string | string[];
+  frontDoorError?: string | string[];
   machine?: string | string[];
   machineId?: string | string[];
   new?: string | string[];
@@ -144,16 +157,34 @@ export default async function DashboardPage({
   ]);
 
   const { core, billing, finitePrivateUsage } = await loadCoreDashboardSummary();
+  const frontDoor = loadFrontDoorConfig();
+  const agentCreationOffered = frontDoorOffersAgentCreation(frontDoor, viewer.isAdmin);
   if (core.configured || !viewer.isAdmin) {
     const draft = await unsealAgentOnboardingDraft(
       (await cookies()).get(AGENT_DRAFT_COOKIE)?.value,
       account.workosUserId
     );
     const coreProjects = coreProductProjects(core.me?.projects ?? []);
+    // Once the front door moves creation, `?new=1` only resumes a checkout
+    // that was already paid for; otherwise it explains where creation went.
+    const newAgentFlowRequested = requestedNewAgentFlow &&
+      (agentCreationOffered || draftStartedStripeCheckout(draft));
+    // A tracked launch (`?creation=`, e.g. a paid setup just completed) shows
+    // its own progress; the explanation is only for the bare entry point.
+    const creationMovedRequested = requestedNewAgentFlow && !newAgentFlowRequested &&
+      !trackedCreationRequestId;
+    // Once creation has moved, a saved checkout is retried only when Core
+    // confirms the payment; otherwise the retry could never succeed.
+    const paidSetupRetryable = draftStartedStripeCheckout(draft) &&
+      billing.billing?.customer_org.billing_class === "standard" &&
+      !billing.billing.requires_billing;
     // First login and resumed creation use the same flow as New agent. The
     // query flag is only an entry point for accounts that already have agents.
-    const isNewAgentFlow = requestedNewAgentFlow || Boolean(trackedCreationRequestId) ||
-      Boolean(core.me && !core.error && coreProjects.length === 0);
+    // Once creation has moved, an agentless account gets the ordinary view so
+    // its billing (Manage billing) stays reachable.
+    const isNewAgentFlow = newAgentFlowRequested || Boolean(trackedCreationRequestId) ||
+      Boolean(core.me && !core.error && coreProjects.length === 0 &&
+        (agentCreationOffered || draftStartedStripeCheckout(draft)));
     const agentCreationRequests = core.me?.agent_creation_requests ?? [];
     const initialAgentCreationRequests =
       coreInitialAgentCreationRequests(agentCreationRequests);
@@ -171,7 +202,7 @@ export default async function DashboardPage({
     // only restores read-only progress tracking; it never submits creation or
     // chooses among multiple requests. A runtime-less existing Project alone
     // is not evidence that this account should create another Agent.
-    if (!requestedNewAgentFlow && !trackedCreationRequestId && !agentCreationError &&
+    if (!newAgentFlowRequested && !trackedCreationRequestId && !agentCreationError &&
         core.me && !core.error && pendingInitialCreationRequests.length === 1 &&
         !coreProjects.some((project) => coreProjectOverviewHref(project))) {
       redirect(`/dashboard?creation=${encodeURIComponent(pendingInitialCreationRequests[0].id)}`);
@@ -279,6 +310,20 @@ export default async function DashboardPage({
         {!isNewAgentFlow && !finitePrivateUsage.usage && finitePrivateUsage.error ? (
           <FinitePrivateUsageUnavailablePanel error={finitePrivateUsage.error} />
         ) : null}
+        {!isNewAgentFlow && core.me ? (
+          <FrontDoorPreferencePanel
+            config={frontDoor}
+            useNewFinite={accountMigrated(core.me)}
+            keptHereBy={
+              viewer.isAdmin
+                ? "operator"
+                : billing.billing && legacySubscriptionNeedsDashboard(billing.billing)
+                  ? "billing"
+                  : null
+            }
+            saveFailed={firstSearchParam(query.frontDoorError) === "1"}
+          />
+        ) : null}
       </>
     );
 
@@ -324,9 +369,18 @@ export default async function DashboardPage({
                 <CoreAgentCreationFailedPanel requests={failedAgentCreationRequests} />
               ) : null}
               {billingReturn.kind === "cancelled" ? (
-                <BillingCheckoutCancelledNotice />
+                <BillingCheckoutCancelledNotice canRestart={agentCreationOffered} />
               ) : null}
-              {draftStartedStripeCheckout(draft) && (agentCreationError || billingReturnParam === "success") ? (
+              {paidSetupRetryable && !agentCreationOffered ? (
+                // A checkout paid before the front door flipped still finishes
+                // its exact saved request; no new setup is offered.
+                <PaidAgentCreationRetryPanel
+                  error={agentCreationError ?? null}
+                  name={draft.displayName}
+                />
+              ) : !agentCreationOffered ? (
+                <FrontDoorCreationMovedPanel config={frontDoor} />
+              ) : draftStartedStripeCheckout(draft) && (agentCreationError || billingReturnParam === "success") ? (
                 <PaidAgentCreationRetryPanel
                   error={agentCreationError ?? billing.error ?? "Payment status is unavailable. Retry your saved setup in a moment."}
                   name={draft.displayName}
@@ -357,6 +411,7 @@ export default async function DashboardPage({
                 projects={coreProjects}
                 agentCreationRequests={agentCreationRequests}
                 accessBlocked={Boolean(billing.billing?.trial_access?.blocked)}
+                agentCreationOffered={agentCreationOffered}
               />
               {renderAccountSections()}
               {showPendingCreationPanel ? (
@@ -426,6 +481,9 @@ export default async function DashboardPage({
           />
         ) : null}
         {agentRemoval === "requested" ? <AgentRemovalRequestedNotice /> : null}
+        {creationMovedRequested && homeView.kind !== "create-agent" ? (
+          <FrontDoorCreationMovedPanel config={frontDoor} />
+        ) : null}
         {renderHomePanels(homeView)}
       </div>
     );
@@ -831,10 +889,12 @@ function CoreProjectsPanel({
   projects,
   agentCreationRequests,
   accessBlocked,
+  agentCreationOffered,
 }: {
   projects: CoreVisibleProject[];
   agentCreationRequests: CoreAgentCreationRequestSummary[];
   accessBlocked: boolean;
+  agentCreationOffered: boolean;
 }) {
   return (
     <section className="ocean-utility-card">
@@ -848,7 +908,7 @@ function CoreProjectsPanel({
             {accessBlocked ? "Update your payment details to resume dashboard access." : "Open an agent workspace or jump straight into chat."}
           </p>
         </div>
-        {!accessBlocked ? <Button asChild variant="outline" size="sm" className="ml-auto">
+        {!accessBlocked && agentCreationOffered ? <Button asChild variant="outline" size="sm" className="ml-auto">
           <Link href="/dashboard?new=1">
             <PlusIcon />
             New agent
@@ -1022,7 +1082,7 @@ function CoreAgentCreationFailedPanel({
   );
 }
 
-function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: string }) {
+function PaidAgentCreationRetryPanel({ error, name }: { error: string | null; name: string }) {
   return (
     <section className="grid w-full justify-items-center gap-6 text-center">
       <AgentOnboardingStageSync stage="launch" />
@@ -1030,10 +1090,92 @@ function PaidAgentCreationRetryPanel({ error, name }: { error: string; name: str
       <p className="max-w-md text-pretty text-muted-foreground">
         Your checkout is saved. Retry this setup to continue with the same agent request.
       </p>
-      <p role="alert" className="max-w-md text-sm text-destructive">{error}</p>
+      {error ? <p role="alert" className="max-w-md text-sm text-destructive">{error}</p> : null}
       <Button asChild size="xl">
         <a href="/dashboard/agent-creation-requests/complete">Retry agent setup</a>
       </Button>
+    </section>
+  );
+}
+
+function FrontDoorPreferencePanel({
+  config,
+  useNewFinite,
+  keptHereBy,
+  saveFailed,
+}: {
+  config: FrontDoorConfig;
+  useNewFinite: boolean;
+  /** A stay rule that outranks the setting for this account, if any. */
+  keptHereBy: "operator" | "billing" | null;
+  saveFailed: boolean;
+}) {
+  if (!config.enabled) return null;
+  const status = !useNewFinite
+    ? "Off: signing in to finite.computer opens this dashboard."
+    : keptHereBy === "operator"
+      ? "On, but operator accounts always keep this dashboard."
+      : keptHereBy === "billing"
+        ? "On, but while your Finite Computer subscription is active this dashboard stays open so you can manage billing."
+        : "On: signing in to finite.computer opens the new Finite.";
+  return (
+    <section
+      id={FRONT_DOOR_SETTINGS_ANCHOR}
+      className="ocean-utility-card scroll-mt-20"
+      aria-labelledby="front-door-preference-title"
+    >
+      <div className="ocean-utility-card__header">
+        <span className="ocean-utility-card__icon" aria-hidden>
+          <SparklesIcon className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 id="front-door-preference-title" className="ocean-utility-card__title">
+            Use the new Finite by default
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {status} Your agents here keep running either way. Come back any
+            time at <code>{FRONT_DOOR_SETTINGS_PATH}</code>.
+          </p>
+          {saveFailed ? (
+            <p role="alert" className="mt-2 text-sm text-destructive">
+              Your setting could not be saved. Try again.
+            </p>
+          ) : null}
+        </div>
+        <form method="post" action={FRONT_DOOR_SETTINGS_PATH}>
+          <input type="hidden" name="useNewFinite" value={useNewFinite ? "false" : "true"} />
+          <Button type="submit" variant="outline" size="sm">
+            {useNewFinite ? "Keep using this dashboard" : "Use the new Finite by default"}
+          </Button>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+function FrontDoorCreationMovedPanel({ config }: { config: FrontDoorConfig }) {
+  if (!config.enabled) return null;
+  return (
+    <section className="ocean-utility-card" aria-labelledby="front-door-creation-moved">
+      <div className="ocean-utility-card__header">
+        <span className="ocean-utility-card__icon" aria-hidden>
+          <SparklesIcon className="size-5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <h2 id="front-door-creation-moved" className="ocean-utility-card__title">
+            New agents live in the new Finite
+          </h2>
+          <p className="text-sm text-muted-foreground">
+            {frontDoorAgentCreationMovedMessage(config)}
+          </p>
+        </div>
+        <Button asChild variant="outline" size="sm">
+          <a href={config.targetUrl}>
+            Open the new Finite
+            <ArrowUpRightIcon data-icon="inline-end" />
+          </a>
+        </Button>
+      </div>
     </section>
   );
 }
@@ -1152,7 +1294,7 @@ function BillingSyncTimeoutPanel({
   );
 }
 
-function BillingCheckoutCancelledNotice() {
+function BillingCheckoutCancelledNotice({ canRestart }: { canRestart: boolean }) {
   return (
     <section className="ocean-utility-card">
       <div className="ocean-utility-card__header">
@@ -1162,7 +1304,9 @@ function BillingCheckoutCancelledNotice() {
         <div>
           <h2 className="ocean-utility-card__title">Checkout cancelled</h2>
           <p className="text-sm text-muted-foreground">
-            No charge was made. Start checkout again whenever you are ready.
+            {canRestart
+              ? "No charge was made. Start checkout again whenever you are ready."
+              : "No charge was made."}
           </p>
         </div>
       </div>
