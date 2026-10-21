@@ -346,3 +346,5 @@ async fn description_inputs_are_bounded_and_strict() {
     })
     .await;
 }
+
+mod scoped;

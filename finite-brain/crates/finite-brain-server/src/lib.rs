@@ -138,7 +138,7 @@ type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + S
 #[derive(Clone)]
 struct CoreDescriptionClient {
     brain_server: String,
-    lookup: core_descriptions::CoreDescriptionLookup,
+    lookup: core_descriptions::scoped::ScopedDescriptionLookup,
 }
 
 /// Server-visible Brain invitation email payload.
@@ -215,7 +215,8 @@ impl ServerState {
         base_url: &str,
         credential: impl Into<String>,
     ) -> Result<Self, String> {
-        let lookup = core_descriptions::http_core_description_lookup(base_url, credential.into())?;
+        let lookup =
+            core_descriptions::scoped::http_scoped_description_lookup(base_url, credential.into())?;
         self.core_descriptions = Some(CoreDescriptionClient {
             brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
             lookup,
@@ -237,7 +238,7 @@ impl ServerState {
     ) -> Self {
         self.core_descriptions = Some(CoreDescriptionClient {
             brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
-            lookup: Arc::new(lookup),
+            lookup: core_descriptions::scoped::legacy_fixture(Arc::new(lookup)),
         });
         self
     }

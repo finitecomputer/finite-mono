@@ -2,7 +2,7 @@
 //! nothing updates identity aliases, Core state or any cache. The store
 //! mutex is never held across these awaits.
 //!
-//! Brain decides eligibility: only keys with recorded participation by that
+//! Legacy policy: Brain decides eligibility: only keys with recorded participation by that
 //! exact key are sent to Core or shown any stored alias. Every other key may
 //! show only a stored Identity Directory (`finite.vip`) name, the key's public
 //! Directory binding: for a managed Agent its Agent name, for a person their
@@ -16,9 +16,11 @@ use std::time::Duration;
 use finite_brain_store::AccessReportSnapshot;
 
 use super::contracts::*;
-use crate::core_descriptions::{
-    CORE_BATCH_KEYS, CoreDescription, CoreLookupFailure, CoreLookupRequest, validate_core_response,
+use crate::core_descriptions::scoped::{
+    OperatorAnnotation, OperatorRecord, ScopedCoreDescription, ScopedLookupReport,
+    ScopedLookupRequest, validate_scoped_response,
 };
+use crate::core_descriptions::{CORE_BATCH_KEYS, CoreDescription, CoreLookupFailure};
 use crate::{ServerState, authority_concurrency};
 
 const CORE_OVERALL_TIMEOUT: Duration = Duration::from_secs(4);
@@ -38,27 +40,43 @@ fn directory_name(name: &str) -> bool {
 
 pub(crate) struct PageDescriptions {
     pub(crate) coverage: DescriptionCoverage,
-    pub(crate) rows: BTreeMap<String, (IdentityDescriptionView, Option<StoredAliasView>)>,
+    pub(crate) rows: BTreeMap<String, DescribedRow>,
 }
 
-/// Describe the page's rows. Keys without recorded participation get
-/// `notShared`/`noParticipation`, whatever Core holds, and only a stored
-/// Directory name.
+pub(crate) struct DescribedRow {
+    pub(crate) description: IdentityDescriptionView,
+    pub(crate) stored_alias: Option<StoredAliasView>,
+    pub(crate) annotation: Option<OperatorAnnotation>,
+    pub(crate) record: Option<OperatorRecord>,
+}
+
+/// Core receives all page keys in v3, but may describe a non-participating key
+/// only through an exact scoped record. Brain alone supplies participation.
 pub(crate) async fn describe_page(
     state: &ServerState,
     snapshot: &AccessReportSnapshot,
     rows: &[AccessIdentityRow],
     actor_hex: &str,
 ) -> PageDescriptions {
-    let eligible = rows
+    let page = rows
+        .iter()
+        .filter(|row| !row.hex.is_empty())
+        .map(|row| row.hex.clone())
+        .collect::<Vec<_>>();
+    let participating = rows
         .iter()
         .filter(|row| row.participation.is_some() && !row.hex.is_empty())
         .map(|row| row.hex.clone())
         .collect::<Vec<_>>();
-    let (coverage, by_hex) = core_descriptions(state, snapshot, &eligible, actor_hex).await;
-    let asked = eligible.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    let (coverage, by_hex, legacy) =
+        core_descriptions(state, snapshot, &page, &participating, actor_hex).await;
+    let asked = participating
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let mut described = BTreeMap::new();
     for row in rows {
+        let non_participating = row.participation.is_none() || row.hex.is_empty();
         let stored_alias = snapshot
             .aliases
             .iter()
@@ -68,20 +86,15 @@ pub(crate) async fn describe_page(
                     name,
                     stored_at: alias.nip05_verified_at.clone(),
                 })
-            });
-        if row.participation.is_none() || row.hex.is_empty() {
-            described.insert(
-                row.npub.clone(),
-                (
-                    IdentityDescriptionView::withheld(NOT_PARTICIPATING),
-                    stored_alias.filter(|alias| directory_name(&alias.name)),
-                ),
-            );
-            continue;
-        }
-        let description = match by_hex.get(&row.hex) {
-            Some(core) => view(core, &asked),
-            None => IdentityDescriptionView::bare(
+            })
+            .filter(|alias| !non_participating || directory_name(&alias.name));
+        let core = by_hex.get(&row.hex);
+        let mut description = if non_participating && (legacy || row.hex.is_empty()) {
+            IdentityDescriptionView::withheld(NOT_PARTICIPATING)
+        } else if let Some(core) = core {
+            view(&core.legacy(), &asked)
+        } else {
+            IdentityDescriptionView::bare(
                 "unavailable",
                 Some(
                     coverage
@@ -89,9 +102,20 @@ pub(crate) async fn describe_page(
                         .as_deref()
                         .unwrap_or("identity source unavailable"),
                 ),
-            ),
+            )
         };
-        described.insert(row.npub.clone(), (description, stored_alias));
+        if non_participating && description.state == "notShared" {
+            description.reason = Some(NOT_PARTICIPATING.to_owned());
+        }
+        described.insert(
+            row.npub.clone(),
+            DescribedRow {
+                description,
+                stored_alias,
+                annotation: core.and_then(|r| r.operator_annotation.clone()),
+                record: core.and_then(|r| r.operator_record.clone()),
+            },
+        );
     }
     PageDescriptions {
         coverage,
@@ -131,24 +155,30 @@ fn view(core: &CoreDescription, asked: &BTreeSet<&str>) -> IdentityDescriptionVi
     }
 }
 
-/// Query Core for the eligible page keys. Any failure leaves every access
-/// row intact and marks descriptions unavailable, never `unknown`.
+/// A partial page is never trusted. All attempts share the existing permit
+/// and bounded outer wait; each HTTP chunk has its own three-attempt deadline.
 async fn core_descriptions(
     state: &ServerState,
     snapshot: &AccessReportSnapshot,
-    eligible: &[String],
+    page: &[String],
+    participating: &[String],
     actor_hex: &str,
-) -> (DescriptionCoverage, BTreeMap<String, CoreDescription>) {
+) -> (
+    DescriptionCoverage,
+    BTreeMap<String, ScopedCoreDescription>,
+    bool,
+) {
     let mut by_hex = BTreeMap::new();
-    if eligible.is_empty() {
+    if page.is_empty() {
         return (
             coverage(
                 "notNeeded",
-                Some("no key on this page has recorded participation by that exact key"),
+                Some("this page has no canonical keys"),
                 None,
                 0,
             ),
             by_hex,
+            true,
         );
     }
     let Some(client) = state.core_descriptions.clone() else {
@@ -160,49 +190,96 @@ async fn core_descriptions(
                 0,
             ),
             by_hex,
+            true,
         );
     };
     let mut checked_at = None;
-    for chunk in eligible.chunks(CORE_BATCH_KEYS) {
-        let request = CoreLookupRequest {
+    let mut protocol = None;
+    let mut negotiation = None;
+    let mut all_legacy = true;
+    for chunk in page.chunks(CORE_BATCH_KEYS) {
+        let request = ScopedLookupRequest {
             brain_server: client.brain_server.clone(),
             brain_id: snapshot.authority.brain.id.to_string(),
             requested_by_hex: actor_hex.to_owned(),
             keys: chunk.to_vec(),
+            participating_keys: chunk
+                .iter()
+                .filter(|key| participating.contains(key))
+                .cloned()
+                .collect(),
         };
         let lookup = client.lookup.clone();
-        let result = tokio::time::timeout(CORE_OVERALL_TIMEOUT, async move {
+        let failure = |reason: &str| ScopedLookupReport {
+            result: Err(CoreLookupFailure::Unavailable(reason.to_owned())),
+            legacy: false,
+            negotiation: "direct",
+        };
+        let report = tokio::time::timeout(CORE_OVERALL_TIMEOUT, async move {
             let permit = authority_concurrency()
                 .acquire()
                 .await
-                .map_err(|_| CoreLookupFailure::Unavailable("worker".to_owned()))?;
+                .map_err(|_| "worker")?;
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                lookup(&request).and_then(|response| validate_core_response(&request, response))
+                let mut report = lookup(&request);
+                if !report.legacy {
+                    report.result = report.result.and_then(|r| {
+                        r.map(|response| validate_scoped_response(&request, response))
+                            .transpose()
+                    });
+                }
+                report
             })
             .await
-            .map_err(|_| CoreLookupFailure::Unavailable("worker".to_owned()))?
+            .map_err(|_| "worker")
         })
         .await
-        .unwrap_or_else(|_| Err(CoreLookupFailure::Unavailable("timeout".to_owned())));
-        match result {
-            Ok(response) => {
+        .map(|r| r.unwrap_or_else(failure))
+        .unwrap_or_else(|_| failure("timeout"));
+        all_legacy &= report.legacy;
+        negotiation.get_or_insert(report.negotiation.to_owned());
+        match report.result {
+            Ok(Some(response)) => {
+                if protocol.as_ref().is_some_and(|v| v != &response.version)
+                    || negotiation.as_deref() != Some(report.negotiation)
+                {
+                    let mut failed = coverage(
+                        "unavailable",
+                        Some("Core protocol changed within this page"),
+                        None,
+                        0,
+                    );
+                    failed.core_negotiation = negotiation;
+                    return (failed, BTreeMap::new(), false);
+                }
+                protocol.get_or_insert(response.version);
                 checked_at.get_or_insert(response.checked_at);
                 for row in response.results {
                     by_hex.insert(row.public_key_hex.clone(), row);
                 }
             }
-            Err(failure) => {
-                // A partial page is not trusted: drop what earlier chunks said.
-                return (
-                    coverage(failure.state(), Some(&failure.reason()), None, 0),
-                    BTreeMap::new(),
-                );
+            Ok(None) => {} // Empty subset: do not issue a legacy request.
+            Err(error) => {
+                let mut failed = coverage(error.state(), Some(&error.reason()), None, 0);
+                failed.core_negotiation = negotiation;
+                return (failed, BTreeMap::new(), all_legacy);
             }
         }
     }
-    let checked = by_hex.len();
-    (coverage("checked", None, checked_at, checked), by_hex)
+    let mut result = if by_hex.is_empty() && all_legacy {
+        coverage(
+            "notNeeded",
+            Some("no participating keys for the legacy Core"),
+            None,
+            0,
+        )
+    } else {
+        coverage("checked", None, checked_at, by_hex.len())
+    };
+    result.core_protocol_version = protocol;
+    result.core_negotiation = negotiation;
+    (result, by_hex, all_legacy)
 }
 
 fn coverage(
@@ -216,6 +293,8 @@ fn coverage(
         reason: reason.map(ToOwned::to_owned),
         checked_at,
         checked_keys,
+        core_protocol_version: None,
+        core_negotiation: None,
     }
 }
 

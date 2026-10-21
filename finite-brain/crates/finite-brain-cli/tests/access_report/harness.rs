@@ -20,6 +20,7 @@ const DESCRIPTIONS_PATH: &str = "/api/core/internal/v1/brain-identity-descriptio
 pub(super) struct CoreFixture {
     pub(super) known: Arc<Mutex<BTreeMap<String, Value>>>,
     pub(super) calls: Arc<Mutex<Vec<Vec<String>>>>,
+    pub(super) participating: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl CoreFixture {
@@ -35,6 +36,16 @@ impl CoreFixture {
 
     pub(super) fn requested(&self) -> Vec<String> {
         self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn eligible(&self) -> Vec<String> {
+        self.participating
             .lock()
             .unwrap()
             .iter()
@@ -127,13 +138,34 @@ pub(super) fn core_stub(fixture: CoreFixture) -> Server {
                             .map(|key| key.as_str().unwrap().to_owned())
                             .collect::<Vec<_>>();
                         fixture.calls.lock().unwrap().push(keys.clone());
+                        let participating =
+                            if request["version"] == "finite-core-brain-descriptions-v3" {
+                                request["participatingPublicKeysHex"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|key| key.as_str().unwrap().to_owned())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                keys.clone()
+                            };
+                        fixture
+                            .participating
+                            .lock()
+                            .unwrap()
+                            .push(participating.clone());
                         let known = fixture.known.lock().unwrap().clone();
                         let results = keys
                             .iter()
                             .map(|key| {
-                                known.get(key).cloned().unwrap_or_else(
-                                    || json!({"publicKeyHex": key, "state": "notShared"}),
-                                )
+                                participating
+                                    .contains(key)
+                                    .then(|| known.get(key))
+                                    .flatten()
+                                    .cloned()
+                                    .unwrap_or_else(
+                                        || json!({"publicKeyHex": key, "state": "notShared"}),
+                                    )
                             })
                             .collect::<Vec<_>>();
                         Ok(axum::Json(json!({

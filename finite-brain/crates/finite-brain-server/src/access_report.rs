@@ -159,9 +159,11 @@ pub(crate) async fn access_report_handler(
 
         let mut identities = report_rows.rows;
         for row in &mut identities {
-            if let Some((description, stored_nip05)) = page_descriptions.rows.get(&row.npub) {
-                row.description = description.clone();
-                row.stored_nip05 = stored_nip05.clone();
+            if let Some(described) = page_descriptions.rows.get(&row.npub) {
+                row.description = described.description.clone();
+                row.stored_nip05 = described.stored_alias.clone();
+                row.operator_annotation = described.annotation.clone();
+                row.operator_record = described.record.clone();
             }
         }
         let authority = &snapshot.authority;

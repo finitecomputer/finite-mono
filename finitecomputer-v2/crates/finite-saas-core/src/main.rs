@@ -47,6 +47,11 @@ async fn main() -> Result<()> {
         Command::RuntimeCredentialRecoverExact(args) => {
             print_json(&runtime_credential_recovery_command(args).await?)
         }
+        Command::BrainScopedRecords {
+            manifest,
+            expected_manifest_sha256,
+            execute,
+        } => brain_scoped_records_command(manifest, expected_manifest_sha256, execute).await,
         Command::Serve => serve().await,
         Command::RuntimeArtifactUpsert {
             artifact_id,

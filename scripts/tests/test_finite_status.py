@@ -3223,7 +3223,8 @@ class BrainIdentityStatusTests(unittest.TestCase):
         self.assertEqual(exit.exception.code, 0)
         report = json.loads(stdout.getvalue())
         self.assertEqual(report["schema_version"], "finite.brain-identity-status.v1")
-        self.assertEqual(report["brain_identity"], identity)
+        self.assertEqual(report["brain_identity"], {**identity, "scoped_records": {
+            "state": "notChecked", "reason": "scoped record facts were not collected"}})
 
     def test_query_failure_or_invalid_json_is_a_collection_error(self):
         for completed in (

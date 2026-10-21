@@ -2,6 +2,10 @@
 //! scoped exact-key description snapshot. See
 //! `finitecomputer-v2/docs/brain-identity-descriptions-v1.md`.
 
+mod scoped;
+mod scoped_operations;
+mod snapshot;
+
 use super::*;
 use crate::brain_identity::{
     AgentLifecycle, BrainAccountObservationRequest, BrainIdentityDescriptionsRequest,
@@ -220,6 +224,7 @@ struct AccountRow {
     /// `None` when the stored email is over the wire bound.
     email: Option<String>,
     linked: bool,
+    workos_subject: Option<String>,
     updated_at: String,
 }
 
@@ -441,180 +446,16 @@ impl CoreStore {
         .await
         .map_err(store_error)?;
 
-        let keys = &request.public_keys_hex;
-        let npub_by_key = keys
-            .iter()
-            .filter_map(|key| npub_for_hex(key).map(|npub| (key.clone(), npub)))
-            .collect::<BTreeMap<_, _>>();
-        let npubs = npub_by_key.values().cloned().collect::<Vec<_>>();
-
-        let humans = tx
-            .query(
-                "SELECT id, user_id, public_key_hex, core_rfc3339(last_observed_at) AS last_observed_at,
-                        revision
-                 FROM account_brain_principals
-                 WHERE status = 'active' AND public_key_hex = ANY($1)",
-                &[keys],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| {
-                (
-                    row.get::<_, String>("public_key_hex"),
-                    HumanAssociationRow {
-                        id: row.get("id"),
-                        user_id: row.get("user_id"),
-                        last_observed_at: row.get("last_observed_at"),
-                        revision: row.get("revision"),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let agent_rows = agent_pin_rows(&*tx, &npubs).await?;
-        let mut agents_by_npub: BTreeMap<&str, Vec<&AgentPinRow>> = BTreeMap::new();
-        for row in &agent_rows {
-            agents_by_npub
-                .entry(row.npub.as_str())
-                .or_default()
-                .push(row);
-        }
-
-        let mut implicated = humans
-            .values()
-            .map(|row| row.user_id.clone())
-            .collect::<BTreeSet<_>>();
-        implicated.extend(
-            agent_rows
-                .iter()
-                .filter_map(|row| row.consistent.as_ref())
-                .map(|pin| pin.owner_user_id.clone()),
-        );
-        let implicated = implicated.into_iter().collect::<Vec<_>>();
-
-        // v1: only accounts that shared with this exact Brain. v2: every
-        // implicated account, because Brain asks only about keys that acted
-        // in this Brain themselves.
-        let releasable = if request.requires_sharing_scope() {
-            tx.query(
-                "SELECT user_id FROM account_brain_sharing_scopes
-                 WHERE revoked_at IS NULL AND brain_server = $1 AND brain_id = $2
-                   AND user_id = ANY($3)",
-                &[&request.brain_server, &request.brain_id, &implicated],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| row.get::<_, String>("user_id"))
-            .collect::<BTreeSet<_>>()
-        } else {
-            implicated.iter().cloned().collect::<BTreeSet<_>>()
-        };
-        let releasable_ids = releasable.iter().cloned().collect::<Vec<_>>();
-        // v2 names only an owner's human keys that are in this same request,
-        // never keys outside it; without a sharing scope those would link the
-        // owner across Brains.
-        let hint_scope = (!request.requires_sharing_scope()).then_some(keys);
-        let accounts = tx
-            .query(
-                "SELECT id,
-                        CASE WHEN octet_length(normalized_email) <= $2 THEN normalized_email END
-                          AS normalized_email,
-                        link_status, core_rfc3339(updated_at) AS updated_at
-                 FROM users WHERE id = ANY($1)",
-                &[&releasable_ids, &(MAX_CONTACT_BYTES as i32)],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| {
-                (
-                    row.get::<_, String>("id"),
-                    AccountRow {
-                        email: row.get("normalized_email"),
-                        linked: row.get::<_, String>("link_status") == "linked",
-                        updated_at: row.get("updated_at"),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        // Bounded in SQL: at most MAX_RESPONSIBLE_HUMAN_KEYS rows per releasable
-        // account, read through the (user_id, public_key_hex) partial index.
-        let mut human_keys_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for row in tx
-            .query(
-                "SELECT account.id AS user_id, account_key.public_key_hex
-                 FROM unnest($1::text[]) AS account(id)
-                 CROSS JOIN LATERAL (
-                   SELECT public_key_hex FROM account_brain_principals
-                   WHERE user_id = account.id AND status = 'active'
-                     AND ($3::text[] IS NULL OR public_key_hex = ANY($3))
-                   ORDER BY public_key_hex
-                   LIMIT $2
-                 ) AS account_key
-                 ORDER BY account.id, account_key.public_key_hex",
-                &[
-                    &releasable_ids,
-                    &(MAX_RESPONSIBLE_HUMAN_KEYS as i64),
-                    &hint_scope,
-                ],
-            )
-            .await
-            .map_err(store_error)?
-        {
-            human_keys_by_account
-                .entry(row.get::<_, String>("user_id"))
-                .or_default()
-                .push(row.get("public_key_hex"));
-        }
-        // A human key that is also pinned as an agent is a conflicting
-        // record, not a hint. Exclude it with one bounded, indexed equality
-        // read over the (at most 8 per account) candidate keys.
-        let hint_npubs = human_keys_by_account
-            .values()
-            .flatten()
-            .filter_map(|key| npub_for_hex(key))
-            .collect::<Vec<_>>();
-        let pinned_hints = tx
-            .query(
-                "SELECT DISTINCT health_reporting_npub FROM agent_runtimes
-                 WHERE health_reporting_npub = ANY($1)",
-                &[&hint_npubs],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| row.get::<_, String>("health_reporting_npub"))
-            .collect::<BTreeSet<_>>();
-        for keys in human_keys_by_account.values_mut() {
-            keys.retain(|key| npub_for_hex(key).is_some_and(|npub| !pinned_hints.contains(&npub)));
-        }
+        let hints =
+            (!request.requires_sharing_scope()).then_some(request.public_keys_hex.as_slice());
+        let snapshot =
+            snapshot::IdentitySnapshot::load(&*tx, request, &request.public_keys_hex, &[], hints)
+                .await?;
         tx.commit().await.map_err(store_error)?;
-
-        // An account may disclose only when it is a linked (WorkOS-verified)
-        // account and, under v1, has shared with this exact Brain.
-        let disclosable = |user_id: &str| {
-            releasable.contains(user_id)
-                && accounts.get(user_id).is_some_and(|account| account.linked)
-        };
-        let empty = Vec::new();
-        Ok(keys
+        Ok(request
+            .public_keys_hex
             .iter()
-            .map(|key| {
-                let human = humans.get(key);
-                let pins = npub_by_key
-                    .get(key)
-                    .and_then(|npub| agents_by_npub.get(npub.as_str()))
-                    .unwrap_or(&empty);
-                describe_key(
-                    key,
-                    human,
-                    agent_evidence(pins),
-                    &disclosable,
-                    &accounts,
-                    &human_keys_by_account,
-                )
-            })
+            .map(|key| snapshot.describe(key))
             .collect())
     }
 }

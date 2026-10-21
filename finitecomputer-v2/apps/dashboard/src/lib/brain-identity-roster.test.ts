@@ -6,7 +6,8 @@ import { HostedHermesStatusError } from "./hosted-hermes-status";
 const key = "npub1ccz8l9zpa47k6vz9gphftsrumpw80rjt3nhnefat4symjhrsnmjs38mnyd";
 const human = { npub: key, role: "admin", kind: "human", name: null, email: "maya@example.test", ownerEmail: null, folders: [{ id: "f1", state: "ready" }] };
 const report = { version: 1, brainId: "demo", identities: [human] };
-const unnamed = { publicName: null, publicNameStoredAt: null };
+const extensions = { lifecycle: null, operatorAnnotation: null };
+const unnamed = { publicName: null, publicNameStoredAt: null, ...extensions };
 
 test("resolved humans, agents and unknown keys keep only the roster fields", () => {
   const agent = { ...human, npub: key.replace("ccz8", "ddz8"), role: "member", kind: "agent", name: "Ada", email: null, ownerEmail: "maya@example.test" };
@@ -19,7 +20,7 @@ test("resolved humans, agents and unknown keys keep only the roster fields", () 
 test("a stored public name passes through with or without its stored time", () => {
   const named = { ...human, kind: null, email: null, publicName: "cara@finite.vip", publicNameStoredAt: "2026-09-17T20:39:30Z" };
   const untimed = { ...named, npub: key.replace("ccz8", "ddz8"), publicNameStoredAt: null };
-  assert.deepEqual(parseBrainIdentities({ ...report, identities: [named, untimed] }, "demo"), [named, untimed]);
+  assert.deepEqual(parseBrainIdentities({ ...report, identities: [named, untimed] }, "demo"), [{ ...named, ...extensions }, { ...untimed, ...extensions }]);
 });
 
 test("stored times keep the server's whole-second form, fractions and offsets", () => {
@@ -52,4 +53,25 @@ test("foreign Brains, duplicate or malformed keys, unknown kinds and oversized l
     { ...report, identities: [{ ...human, publicName: "cara@finite.vip", publicNameStoredAt: "2026-13-01T00:00:00Z" }] },
     { ...report, identities: [{ ...human, publicName: "cara@finite.vip", publicNameStoredAt: 1790000000 }] },
   ]) assert.throws(() => parseBrainIdentities(value, "demo"), error => error instanceof HostedHermesStatusError && error.kind === "unsupported");
+});
+
+test("dated annotations and current lifecycle remain optional and never supply an Owner", () => {
+  const operatorAnnotation = { kind: "historical_identity", label: "Previous example Agent", observedAt: "2026-01-01T00:00:00Z" };
+  const historical = { ...human, kind: null, email: null, operatorAnnotation };
+  assert.deepEqual(parseBrainIdentities({ ...report, identities: [historical] }, "demo")[0].operatorAnnotation, operatorAnnotation);
+  assert.equal(parseBrainIdentities({ ...report, identities: [{ ...human, ownerEmail: "injected@example.test" }] }, "demo")[0].ownerEmail, null);
+  const retired = { ...human, kind: "agent", name: "Example", email: null, lifecycle: "retired" };
+  assert.equal(parseBrainIdentities({ ...report, identities: [retired] }, "demo")[0].lifecycle, "retired");
+  for (const broken of [
+    { ...operatorAnnotation, kind: "owner" }, { ...operatorAnnotation, label: " leading" },
+    { ...operatorAnnotation, label: "Unicode —" }, { ...operatorAnnotation, label: "x".repeat(121) },
+    { ...operatorAnnotation, observedAt: "2026-02-30T00:00:00Z" },
+    { ...operatorAnnotation, observedAt: "2026-01-01T00:00:00+00:00" },
+    { ...operatorAnnotation, ownerEmail: "injected@example.test" },
+  ]) {
+    const row = parseBrainIdentities({ ...report, identities: [{ ...historical, operatorAnnotation: broken }] }, "demo")[0];
+    assert.equal(row.operatorAnnotation, null);
+    assert.equal(row.ownerEmail, null);
+    assert.equal(row.name, null);
+  }
 });

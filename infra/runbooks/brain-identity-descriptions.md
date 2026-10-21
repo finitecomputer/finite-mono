@@ -10,7 +10,7 @@ The initial v1 release introduced the access report route, `fbrain access list`
 and `access summary`, hosted contact-sharing disclosures, and additive Core and
 Brain schemas. Its optional connections stay off until configured: the
 dashboard observation hook, Core's private listener and Brain's description
-client. Existing configured deployments use the v2 upgrade procedure below;
+client. Existing configured deployments use the versioned upgrade procedures below;
 do not repeat first-time configuration or clear their settings. This runbook
 does not authorize a deploy, a backfill or any data repair; each needs its own
 explicit approval.
@@ -38,10 +38,11 @@ loopback (see the [port map](../nixos/README.md#port-map-consolidated-box)).
 | --- | --- | --- |
 | Core | Private listener with two routes: trusted hosted observations (writer) and scoped exact-key descriptions (reader) | Any of its four variables is unset or invalid |
 | Dashboard | After an Approve that Brain confirmed, tells Core which existing hosted key acted and that the account shares contact with that Brain's admins. The retained invitation-accept API can also record an explicit sharing request, but has no current Chat UI caller. | Either of its two variables is unset |
-| Brain | Asks Core to describe participating report keys | Either of its two variables is unset or invalid |
+| Brain | Sends the report page and its participating subset to Core; only exact eligible keys can receive descriptions | Either of its two variables is unset or invalid |
 
-Descriptions never grant or remove access. If Core is off, old or down, every
-access row still appears and descriptions read `unavailable`.
+Descriptions never grant or remove access. Optional Core failures preserve the
+access rows. Description availability and legacy fallback follow the protocol
+contract; nonparticipants are not silently added to a legacy lookup.
 
 ## Configuration (names and locations only)
 
@@ -157,6 +158,69 @@ To return to the v1 policy, roll back the closure (Core or Brain alone is
 enough). To stop all descriptions, remove `/etc/finite/brain-identity.env` as
 in Rollback.
 
+## Scoped operator catch-up (v3)
+
+The [v3 contract](../../finitecomputer-v2/docs/brain-scoped-roster-v3.md) adds
+exact-Brain operator attribution, not global associations. It changes Core,
+Brain, the Runtime plugin and existing dashboard cells. No user action is
+required. An additive migration does not make activation interruption-free:
+the app closure and selected Runtime upgrades still restart services. Use an
+approved maintenance window, fresh recovery evidence and the existing deployment
+gates whenever those restarts could interrupt users.
+
+1. Freeze the reviewed source/artifact hashes and the private evidence/candidate.
+   Rehearse real PostgreSQL apply, preview, races, exact retries, rollback and
+   empty-target backup restore. Run actual old/new binaries and all required
+   viewer combinations against a complete synthetic report. Resolve review
+   findings before producing executable manifests.
+2. Refresh platform health, actual backup timer results, recovery snapshot,
+   schema, roster roles/grants and identity invariants. Qualify enough rollback
+   time; do not overlap active backups or another operator. Build off-host and
+   prepare the exact closure through the current deployment procedure.
+3. Activate the reviewed Core/Brain/dashboard closure in the selected window.
+   Preserve existing identity configuration. Check health and the direct v3
+   protocol probe, then actual Brain/admin-viewer v3 coverage. No records are
+   applied at this stage. Old Core ignores scoped records; a legacy fallback
+   cannot pass the v3 gate.
+4. Qualify the Runtime plugin artifact on the designated canary and upgrade
+   only the approved admin-viewer cohort, one Agent at a time using the current
+   Runtime upgrade procedure and watch periods. Confirm all required viewers
+   can render dated annotations before applying any batch. A successful old
+   viewer that drops annotations is insufficient.
+5. Repeat the complete maintained roster inventory and hosted current-selector
+   census. A hosted match requires only the public selector from `identity.json`
+   plus its matching `hosted-web` store row under the same subject's data root.
+   Use private copies and the maintained probe; do not read secrets or infer
+   current ownership from historical store presence. Reconcile every candidate
+   to the fresh exact Brain roster, account subject and source evidence. Leave
+   unsupported identities Unknown; retain non-controller historical wording.
+6. Create one private manifest per exact Brain, binding the configured server,
+   linked operator, evidence digests and current application window. Under the
+   existing global Core CLI coordination lock, and with Core stable, preview
+   each using `finite-saas-core brain-scoped-records --manifest PATH`. Verify
+   expected created/no-op rows and the natural keys, not random preview IDs.
+   Protect files/receipts as private. No direct database edits substitute for
+   the writer.
+7. Apply a designated canary Brain with the identical manifest and preview's
+   `--expected-manifest-sha256`, adding `--execute`. Keep the committed receipt.
+   Verify the exact roster, unchanged access, v3 coverage, expected annotations,
+   no new binding conflicts and Chat old-history/reload/new-message checks.
+   Continue one Brain at a time only while every gate passes. A failure stops
+   future batches; report completed and remaining scope separately.
+8. For attribution rollback, preview a fresh `retire` manifest naming the
+   creating `targetOperationId`, then execute with its reviewed digest. It must
+   match every created afterimage; drift stops the whole retirement. It does
+   not retire existing/no-op rows or undo normal observations. Do not restore
+   databases, alter roles, replace identity stores or merge accounts to undo
+   labels. Software rollback uses the qualified previous artifacts and retains
+   additive tables and audit receipts.
+
+`--brain-identity` must report scoped coverage as checked and the expected
+conflict count. `--brain-roster ID` must report checked v3 for every page;
+its direct-Core evidence is not a substitute for the actual admin viewer.
+Record every Brain/Agent's final state and residual Unknown rows. Completion
+requires the approved full scope and all required end-to-end checks.
+
 ## Reading the agent counters
 
 `scripts/finite-status --brain-identity` reports counts only.
@@ -202,5 +266,7 @@ Brain SQLite Recovery Set; restoring them restores descriptions, not keys.
   participation from releasing the new owner; a Core test enforces this.
 - Core returns no NIP-05: a reserved agent name is not publication evidence.
   Brain shows its own stored aliases separately, dated and not rechecked.
-- Keys that never acted in a Brain are never sent to Core, so admin-added keys
-  stay undescribed until they act.
+- Under legacy v1/v2, keys that never acted are not sent to Core. V3 sends the
+  exact page with a participating subset and permits only scoped operator
+  records to describe those additional keys; adding an arbitrary key to a
+  Brain still cannot reveal its controller.

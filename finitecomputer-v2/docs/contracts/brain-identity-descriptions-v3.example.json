@@ -1,0 +1,214 @@
+{
+  "version": "finite-core-brain-descriptions-v3",
+  "brainId": "brain_example",
+  "checkedAt": "2026-01-01T00:00:00Z",
+  "results": [
+    {
+      "publicKeyHex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Example Agent 1",
+      "lifecycle": "active",
+      "responsibleAccount": {
+        "email": "owner@example.test",
+        "source": "coreAccountContact",
+        "observedAt": "2026-01-01T00:00:00Z"
+      },
+      "source": {
+        "kind": "finiteRuntimeRecord",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "revision": "normal-example"
+      }
+    },
+    {
+      "publicKeyHex": "0202020202020202020202020202020202020202020202020202020202020202",
+      "state": "resolved",
+      "kind": "human",
+      "accountEmail": "human@example.test",
+      "source": {
+        "kind": "operatorScopedRecord",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "revision": "operator-record-example-2"
+      },
+      "operatorRecord": {
+        "state": "used",
+        "revision": "operator-record-example-2",
+        "observedAt": "2026-01-01T00:00:00Z"
+      }
+    },
+    {
+      "publicKeyHex": "0303030303030303030303030303030303030303030303030303030303030303",
+      "state": "notShared",
+      "operatorAnnotation": {
+        "kind": "historical_identity",
+        "label": "Previous example Agent",
+        "observedAt": "2026-01-01T00:00:00Z"
+      },
+      "operatorRecord": {
+        "state": "used",
+        "revision": "operator-record-example-3",
+        "observedAt": "2026-01-01T00:00:00Z"
+      }
+    },
+    {
+      "publicKeyHex": "0404040404040404040404040404040404040404040404040404040404040404",
+      "state": "notShared",
+      "operatorAnnotation": {
+        "kind": "invitation_key",
+        "label": "Example invitation key",
+        "observedAt": "2026-01-01T00:00:00Z"
+      },
+      "operatorRecord": {
+        "state": "used",
+        "revision": "operator-record-example-4",
+        "observedAt": "2026-01-01T00:00:00Z"
+      }
+    },
+    {
+      "publicKeyHex": "0505050505050505050505050505050505050505050505050505050505050505",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "0606060606060606060606060606060606060606060606060606060606060606",
+      "state": "unknown"
+    },
+    {
+      "publicKeyHex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "state": "ambiguous"
+    },
+    {
+      "publicKeyHex": "0808080808080808080808080808080808080808080808080808080808080808",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Example Agent 8",
+      "lifecycle": "retired",
+      "responsibleAccount": {
+        "email": "owner@example.test",
+        "source": "coreAccountContact",
+        "observedAt": "2026-01-01T00:00:00Z"
+      },
+      "source": {
+        "kind": "finiteRuntimeRecord",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "revision": "normal-example"
+      },
+      "operatorRecord": {
+        "state": "conflict",
+        "revision": "operator-record-example-8",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "reason": "agentBindingChanged"
+      }
+    },
+    {
+      "publicKeyHex": "0909090909090909090909090909090909090909090909090909090909090909",
+      "state": "resolved",
+      "kind": "human",
+      "accountEmail": "human@example.test",
+      "source": {
+        "kind": "hostedDeviceObservation",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "revision": "normal-example"
+      },
+      "operatorRecord": {
+        "state": "suppressed",
+        "revision": "operator-record-example-9",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "reason": "normalResultPrecedence"
+      }
+    },
+    {
+      "publicKeyHex": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+      "state": "resolved",
+      "kind": "agent",
+      "displayName": "Example Agent 10",
+      "lifecycle": "offboarding",
+      "responsibleAccount": {
+        "email": "owner@example.test",
+        "source": "coreAccountContact",
+        "observedAt": "2026-01-01T00:00:00Z"
+      },
+      "source": {
+        "kind": "operatorScopedRecord",
+        "observedAt": "2026-01-01T00:00:00Z",
+        "revision": "operator-record-example-10"
+      },
+      "operatorRecord": {
+        "state": "used",
+        "revision": "operator-record-example-10",
+        "observedAt": "2026-01-01T00:00:00Z"
+      }
+    },
+    {
+      "publicKeyHex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1010101010101010101010101010101010101010101010101010101010101010",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1111111111111111111111111111111111111111111111111111111111111111",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1212121212121212121212121212121212121212121212121212121212121212",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1313131313131313131313131313131313131313131313131313131313131313",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1414141414141414141414141414141414141414141414141414141414141414",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1515151515151515151515151515151515151515151515151515151515151515",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1616161616161616161616161616161616161616161616161616161616161616",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1717171717171717171717171717171717171717171717171717171717171717",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1818181818181818181818181818181818181818181818181818181818181818",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1919191919191919191919191919191919191919191919191919191919191919",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+      "state": "notShared"
+    },
+    {
+      "publicKeyHex": "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+      "state": "notShared"
+    }
+  ]
+}
