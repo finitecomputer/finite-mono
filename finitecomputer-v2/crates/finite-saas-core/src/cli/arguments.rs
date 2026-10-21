@@ -9,6 +9,17 @@ pub(crate) struct Args {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Root-only exact-Brain descriptive backfill; default rolls back all writes.
+    #[command(name = "brain-scoped-records")]
+    BrainScopedRecords {
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+        /// Digest printed by the reviewed preview. Required for --execute.
+        #[arg(long)]
+        expected_manifest_sha256: Option<String>,
+        #[arg(long, requires = "expected_manifest_sha256")]
+        execute: bool,
+    },
     /// Root-only: reserve a registered Kata host and bind one unused Launch Code.
     #[command(name = "launch-code-target-exact")]
     LaunchCodeTargetExact {

@@ -100,6 +100,10 @@ pub(crate) struct DescriptionCoverage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) checked_at: Option<String>,
     pub(crate) checked_keys: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) core_protocol_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) core_negotiation: Option<String>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
@@ -135,6 +139,10 @@ pub(crate) struct AccessIdentityRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) participation: Option<ParticipationView>,
     pub(crate) description: IdentityDescriptionView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) operator_annotation: Option<crate::core_descriptions::scoped::OperatorAnnotation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) operator_record: Option<crate::core_descriptions::scoped::OperatorRecord>,
     /// A stored public NIP-05 alias for this key, with its stored time. A
     /// cached claim, not rechecked by the report and never a mailbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]

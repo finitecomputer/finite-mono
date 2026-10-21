@@ -4,6 +4,8 @@
 //! Core describes an exact public key; Brain decides that key's access. See
 //! `finitecomputer-v2/docs/brain-identity-descriptions-v1.md`.
 
+pub mod scoped;
+
 use crate::auth::CoreAuth;
 use bech32::{Bech32, Hrp};
 use serde::{Deserialize, Serialize};

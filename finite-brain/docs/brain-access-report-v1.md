@@ -183,9 +183,13 @@ coupling the two product features.
   A Core outage, old Core or invalid batch keeps every row and marks
   participating keys `unavailable`; malformed, partial, foreign or
   extra-key batches are refused whole.
-- Brain asks Core descriptions v2 and asks v1 only when Core answers exactly
-  400 `{"error": "unsupported descriptions version"}`; any other failure stays
-  a failure. Either version's answer is accepted. An owner's
-  `humanPublicKeysHex` keeps only keys Brain asked about on that page.
+- Brain asks [Core v3](../../finitecomputer-v2/docs/brain-scoped-roster-v3.md)
+  with the page and its canonical participating subset. Exact scoped records
+  can describe nonparticipants; other nonparticipants retain the Directory-only
+  alias policy. Only the two documented schema/version rejections reconstruct
+  v2 from the subset, then v1 on version rejection. Owner human-key hints remain
+  restricted to that subset; operator-sourced hints are refused. Optional
+  `descriptions.coreProtocolVersion` and `coreNegotiation` retain legacy states.
+  Optional row `operatorAnnotation` and `operatorRecord` do not change access.
 - `fbrain access list --brain <id>` renders text and `--json`; `fbrain access
   summary` keeps the older metadata view.

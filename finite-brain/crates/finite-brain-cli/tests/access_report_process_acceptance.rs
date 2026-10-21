@@ -237,9 +237,16 @@ fn built_cli_reports_core_descriptions_only_for_exact_participating_keys() {
             .to_string()
             .contains("private-added@other-domain.example")
     );
-    // The admin-added key was never sent to Core.
-    assert!(!core.requested().contains(&hex(&added_key)));
+    // V3 sends the page, but the admin-added key is outside the canonical
+    // participating subset and has no scoped operator record in this fixture.
+    assert!(core.requested().contains(&hex(&added_key)));
+    assert!(!core.eligible().contains(&hex(&added_key)));
     assert!(core.requested().contains(&hex(&owner_key)));
+    assert!(core.eligible().contains(&hex(&owner_key)));
+    assert_eq!(
+        before["descriptions"]["coreProtocolVersion"],
+        "finite-core-brain-descriptions-v3"
+    );
     let human_before = execute(
         &binary,
         &owner,

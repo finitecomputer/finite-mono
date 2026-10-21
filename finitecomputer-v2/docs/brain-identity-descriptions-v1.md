@@ -154,6 +154,11 @@ from releasing the new owner.
 
 ## Private batch boundary
 
+The additive [v3 scoped operator protocol](brain-scoped-roster-v3.md) extends
+this endpoint with an exact-Brain exception for reviewed legacy keys. It does
+not alter v1/v2 request shapes, policy or global associations. The v3 contract
+defines the participating subset, precedence, diagnostics and negotiation.
+
 Route: `POST /api/core/internal/v1/brain-identity-descriptions` on a
 service-owned private router. Route tests freeze the path and protocol. Caddy must not maintain a second per-route allowlist.
 

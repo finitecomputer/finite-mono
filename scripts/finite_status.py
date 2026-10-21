@@ -228,6 +228,9 @@ STATUS_BUNDLE_FILES = (
     "finite-status",
     "finite_status.py",
     "finite_status_brain_roster.py",
+    "finite_status_hosted_identity.py",
+    "finite_status_brain_scoped.py",
+    "finite_status_brain_protocol.py",
     "finite_tinfoil_status.py",
     "kata_guest_probe.py",
     "kata_network_probe.py",
@@ -1110,6 +1113,10 @@ SELECT json_build_object('schema_present', false);
 
 def collect_brain_identity() -> dict[str, Any]:
     """Aggregate, contact-free Brain identity description state from Core."""
+    if __package__:
+        from . import finite_status_brain_scoped as scoped
+    else:
+        import finite_status_brain_scoped as scoped
     result = run_read_only(
         [
             "psql",
@@ -1126,7 +1133,7 @@ def collect_brain_identity() -> dict[str, Any]:
         input_text=(
             "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
             "SET LOCAL statement_timeout = '15s';\n"
-            f"{BRAIN_IDENTITY_QUERY}ROLLBACK;\n"
+            f"{BRAIN_IDENTITY_QUERY}{scoped.IDENTITY_QUERY}ROLLBACK;\n"
         ),
     )
     if result.returncode != 0:
@@ -1134,15 +1141,22 @@ def collect_brain_identity() -> dict[str, Any]:
         detail = message[-1] if message else f"exit {result.returncode}"
         raise CollectionError(f"read-only Brain identity query failed: {detail}")
     try:
-        identity = json.loads(result.stdout)
-    except ValueError as error:
+        if len(result.stdout.encode()) > scoped.MAX_FACT_BYTES:
+            raise ValueError("scoped facts exceeded byte limit")
+        parts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        if not parts or not all(isinstance(part, dict) for part in parts):
+            raise ValueError("invalid identity facts")
+        identity = parts[0]
+        facts = next((part["scoped_record_facts"] for part in parts[1:] if "scoped_record_facts" in part), None)
+        identity["scoped_records"] = scoped.identity_summary(facts)
+    except (ValueError, KeyError, TypeError) as error:
         raise CollectionError("Brain identity query returned invalid JSON") from error
     return {
         "schema_version": "finite.brain-identity-status.v1",
         "generated_at": isoformat(utc_now()),
         "exit_code": 0,
         "limitations": [
-            "Counts only: no email, account id, key or Brain id is read into this report.",
+            "Aggregate counts and opaque conflict record ids only: no contact, account id, key or Brain id is returned.",
             "Hosted humans are described only after a qualifying action; absent associations are not errors.",
             "Agent keys with ambiguous, foreign-link or unsupported lifecycle records are described as "
             "notShared or unknown by Core, never guessed; they need read-only investigation, not repair.",
@@ -2818,7 +2832,76 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     return raw
 
 
-def collect_brain_roster(brain_id: str) -> dict[str, Any]:
+def collect_brain_hosted_census(key_file: Path) -> dict[str, Any]:
+    """Inspect only exact requested public keys across every hosted user root."""
+    if __package__:
+        from . import finite_status_hosted_identity as census
+        from . import finite_status_brain_roster as roster
+    else:
+        import finite_status_hosted_identity as census
+        import finite_status_brain_roster as roster
+    started = isoformat(utc_now())
+    try:
+        with key_file.open("rb") as source:
+            data = source.read(64 * 1024 + 1)
+        keys = json.loads(data) if len(data) <= 64 * 1024 else None
+        if (not isinstance(keys, list) or not 1 <= len(keys) <= census.MAX_KEYS
+                or any(not isinstance(key, str) or not census.HEX.fullmatch(key) for key in keys)
+                or len(set(keys)) != len(keys)):
+            raise CollectionError("census input must contain 1-512 distinct canonical public key hexes")
+    except (OSError, ValueError):
+        raise CollectionError("census public-key input unreadable or invalid") from None
+    result = run_read_only(
+        ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+         "--set", "ON_ERROR_STOP=1", "--dbname", CONTRACT["database"]["name"]],
+        environment=postgres_environment(),
+        input_text=(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '15s';\n"
+            "WITH candidates AS (SELECT id AS account, link_status,"
+            " CASE WHEN octet_length(normalized_email) <= 254 THEN normalized_email END AS email,"
+            " encode(sha256(convert_to(workos_user_id, 'UTF8')), 'hex') AS storage"
+            " FROM users WHERE workos_user_id IS NOT NULL ORDER BY id LIMIT 2001)"
+            " SELECT json_build_object('checked_at', core_rfc3339(now()),"
+            " 'accounts', COALESCE(json_agg(candidates), '[]'::json)) FROM candidates;\n"
+            "ROLLBACK;\n"
+        ),
+    )
+    if result.returncode != 0 or len(result.stdout) > 2 * 1024 * 1024:
+        raise CollectionError("read-only hosted account census failed or exceeded bound")
+    try:
+        core = json.loads(result.stdout)
+        if (not isinstance(core, dict) or not isinstance(core.get("accounts"), list)
+                or any(not isinstance(account, dict) for account in core["accounts"])
+                or not isinstance(core.get("checked_at"), str)
+                or parse_time(core["checked_at"]) is None):
+            raise census.CensusError("invalid Core census payload")
+        report = census.collect(
+            roster.HOSTED_DATA_ROOT, keys, core["accounts"], scratch_copy_sqlite,
+            lambda database, sql: sqlite_json_query(database, sql, timeout=15))
+    except (census.CensusError, OSError, ValueError, KeyError, TypeError) as error:
+        detail = str(error) if isinstance(error, census.CensusError) else type(error).__name__
+        raise CollectionError(f"hosted identity census unavailable: {detail}") from None
+    report["evidence"] = {"startedAt": started, "coreCheckedAt": core["checked_at"],
+                          "hostedDataRoot": str(roster.HOSTED_DATA_ROOT)}
+    report["generated_at"] = isoformat(utc_now())
+    return report
+
+
+def collect_brain_inventory() -> dict[str, Any]:
+    """Operator-only inventory of the configured Brain store, without contacts."""
+    if __package__:
+        from . import finite_status_brain_roster as roster
+    else:
+        import finite_status_brain_roster as roster
+    try:
+        return roster.collect_inventory(
+            roster.BRAIN_DATABASE, scratch_copy_sqlite, sqlite_json_query)
+    except roster.RosterError as error:
+        raise CollectionError(str(error)) from error
+
+
+def collect_brain_roster(brain_id: str, *, skip_hosted: bool = False) -> dict[str, Any]:
     """Opt-in operator roster: exact Brain keys with platform identity evidence.
 
     Brain facts come from a private scratch copy of the Brain store; Core
@@ -2827,8 +2910,10 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
     """
     if __package__:  # imported as scripts.finite_status (tests)
         from . import finite_status_brain_roster as roster
+        from . import finite_status_brain_protocol as protocol
     else:
         import finite_status_brain_roster as roster
+        import finite_status_brain_protocol as protocol
 
     def directory(npubs: list[str]) -> dict[str, Any]:
         # The operator token is read here and used only in its request
@@ -2886,7 +2971,7 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
     try:
         core = roster.parse_core_output(result.stdout)
         unknown = roster.unknown_hexes(brain, core)
-        core["hosted"] = roster.collect_hosted(
+        core["hosted"] = None if skip_hosted else roster.collect_hosted(
             roster.hosted_candidates(core, unknown),
             unknown,
             scratch_copy_sqlite,
@@ -2897,6 +2982,12 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
         report = roster.build_report(brain, core, brain_id)
     except roster.RosterError as error:
         raise CollectionError(str(error)) from error
+    try:
+        description_environment = read_environment_values(
+            Path(CONTRACT["database"]["environment_file"]), protocol.ENV_NAMES)
+    except CollectionError:
+        description_environment = {}
+    report["evidence"]["coreDescriptionProtocol"] = protocol.collect(brain, brain_id, description_environment)
     report["generated_at"] = isoformat(utc_now())
     return report
 
@@ -4796,10 +4887,23 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
+        "--brain-hosted-census", type=Path, metavar="PUBLIC_KEY_JSON",
+        help="operator-only: match exact hex public keys against all hosted current selectors and store metadata",
+    )
+    mode.add_argument(
+        "--brain-inventory",
+        action="store_true",
+        help="operator-only: enumerate all Brains in this host's store, without keys or contacts; emits JSON",
+    )
+    mode.add_argument(
         "--brain-roster",
         metavar="BRAIN_ID",
         help="operator-only: exact keys of one Brain with platform identity evidence and"
              " account emails; read-only; emits JSON",
+    )
+    parser.add_argument(
+        "--brain-roster-skip-hosted", action="store_true",
+        help="with --brain-roster, leave Hosted store evidence notChecked; useful for a metadata census",
     )
     mode.add_argument(
         "--brain-identity",
@@ -4818,6 +4922,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.brain_roster_skip_hosted and not options.brain_roster:
+        parser.error("--brain-roster-skip-hosted requires --brain-roster")
     if options.guest_agent_probe and not options.runtime_lifecycle:
         parser.error("--guest-agent-probe requires --runtime-lifecycle")
     if options.brain_roster is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", options.brain_roster):
@@ -4867,8 +4973,13 @@ def main(arguments: list[str] | None = None) -> None:
             report = collect_finite_private_usage()
         elif options.brain_identity:
             report = collect_brain_identity()
+        elif options.brain_hosted_census:
+            report = collect_brain_hosted_census(options.brain_hosted_census)
+        elif options.brain_inventory:
+            report = collect_brain_inventory()
         elif options.brain_roster:
-            report = collect_brain_roster(options.brain_roster)
+            report = (collect_brain_roster(options.brain_roster, skip_hosted=True)
+                      if options.brain_roster_skip_hosted else collect_brain_roster(options.brain_roster))
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -4901,6 +5012,8 @@ def main(arguments: list[str] | None = None) -> None:
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity
+        or options.brain_inventory
+        or options.brain_hosted_census
         or options.brain_roster
         or options.runtime_route
         or options.runtime_lifecycle
