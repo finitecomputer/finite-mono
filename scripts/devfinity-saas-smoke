@@ -171,10 +171,21 @@ start_chat_updates() {
   updates_pid=$!
 }
 
+# The Hosted Web Device syncs while a viewer's updates stream is open. A
+# browser's EventSource reconnects by itself; this stream is a single curl, and
+# with direct web chat enabled the dashboard answers 503 until a new agent's
+# native Hermes is reachable, so reopen it whenever it has ended.
+keep_chat_updates() {
+  if [[ -n "$updates_pid" ]] && ! kill -0 "$updates_pid" 2>/dev/null; then
+    start_chat_updates
+  fi
+}
+
 wait_for_connected_chat() {
   local started
   started="$(date +%s)"
   while true; do
+    keep_chat_updates
     if chat_state && node - "$chat_state_json" <<'JS'
 const fs = require("node:fs");
 const state = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -356,6 +367,7 @@ wait_for_remote_reply_after() {
   local working_seen=0
   started="$(date +%s)"
   while true; do
+    keep_chat_updates
     chat_state
     if scoped_working_present "$room_id" "$topic_id" "$chat_id"; then
       working_seen=1

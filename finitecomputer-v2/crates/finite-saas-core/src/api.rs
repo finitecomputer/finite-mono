@@ -134,6 +134,24 @@ pub fn router_with_hosted_hermes_origins(
     agent_creation_placement: Option<RuntimePlacement>,
     hosted_hermes_origins: HostedHermesOrigins,
 ) -> Router {
+    router_with_hosted_hermes(
+        store,
+        auth,
+        agent_creation_placement,
+        hosted_hermes_origins,
+        Default::default(),
+    )
+}
+
+/// As [`router_with_hosted_hermes_origins`], with an explicit native session
+/// transport (a local harness's development ingress).
+pub fn router_with_hosted_hermes(
+    store: CoreStore,
+    auth: CoreAuth,
+    agent_creation_placement: Option<RuntimePlacement>,
+    hosted_hermes_origins: HostedHermesOrigins,
+    native_sessions: crate::hosted_hermes_session::NativeSessions,
+) -> Router {
     let runtime_upgrades_enabled = env::var("FC_CORE_ENABLE_RUNTIME_UPGRADES")
         .ok()
         .is_some_and(|value| matches!(value.trim(), "1" | "true" | "TRUE"));
@@ -147,6 +165,7 @@ pub fn router_with_hosted_hermes_origins(
         runtime_retirement_enabled,
         agent_creation_placement,
         hosted_hermes_origins,
+        native_sessions,
     )
 }
 
@@ -179,6 +198,7 @@ pub fn router_with_runtime_features(
         runtime_retirement_enabled,
         None,
         HostedHermesOrigins::default(),
+        Default::default(),
     )
 }
 
@@ -189,6 +209,7 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
     runtime_retirement_enabled: bool,
     agent_creation_placement: Option<RuntimePlacement>,
     hosted_hermes_origins: HostedHermesOrigins,
+    native_sessions: crate::hosted_hermes_session::NativeSessions,
 ) -> Router {
     let standard_stripe_price_id = optional_env_value("FC_CORE_STANDARD_STRIPE_PRICE_ID")
         .or_else(|| optional_env_value("STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID"));
@@ -200,7 +221,7 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         runtime_upgrades_enabled,
         runtime_retirement_enabled,
         hosted_hermes_origins,
-        native_sessions: Default::default(),
+        native_sessions,
     };
     router_from_state(state)
 }

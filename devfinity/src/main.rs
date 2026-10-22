@@ -10,8 +10,8 @@ use devfinity::workos_fixture::{
     serve as serve_workos_fixture,
 };
 use devfinity::{
-    AgentRunConfig, ProcessComposeMode, Stack, StackProfile, is_retryable_postgres_startup,
-    store_inference_key,
+    AgentRunConfig, ProcessComposeMode, Stack, StackProfile, hosted_hermes,
+    is_retryable_postgres_startup, store_inference_key,
 };
 
 const MAX_POSTGRES_PORT_ATTEMPTS: usize = 5;
@@ -58,6 +58,51 @@ enum Command {
         #[arg(long)]
         state_dir: PathBuf,
     },
+    /// Publish this host's eligible runtimes through the Runner-rendered
+    /// hosted Hermes ingress (supervised by the docker-saas stack).
+    #[command(name = "hosted-hermes-ingress")]
+    HostedHermesIngress(HostedHermesIngressArgs),
+    /// Forward each local runtime's loopback Core URL to Core's runtime
+    /// listener (supervised by the docker-saas stack).
+    #[command(name = "runtime-core-bridge")]
+    RuntimeCoreBridge(RuntimeCoreBridgeArgs),
+}
+
+#[derive(Debug, Args)]
+struct HostedHermesIngressArgs {
+    /// Core URL reachable from this host; the Runner token comes from
+    /// FC_CORE_RUNNER_API_TOKEN.
+    #[arg(long)]
+    core_url: String,
+    #[arg(long)]
+    source_host_id: String,
+    /// Synthetic HTTPS origin host, mapped to the loopback listener.
+    #[arg(long)]
+    public_host: String,
+    /// Loopback TLS listener port; also the public origin port.
+    #[arg(long)]
+    port: u16,
+    /// Exact dashboard browser origins allowed by the native API edge.
+    #[arg(long = "allowed-origin")]
+    allowed_origins: Vec<String>,
+    /// Caddy's private admin socket (short absolute path).
+    #[arg(long)]
+    admin_socket: PathBuf,
+    /// Manifest, rendered config and Caddy data/CA directory.
+    #[arg(long)]
+    state_dir: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct RuntimeCoreBridgeArgs {
+    #[arg(long)]
+    source_host_id: String,
+    /// Core runtime listener port, also used on each runtime's loopback.
+    #[arg(long)]
+    port: u16,
+    /// Docker host address as seen from runtimes.
+    #[arg(long, default_value = "host.docker.internal")]
+    upstream_host: String,
 }
 
 #[derive(Debug, Args)]
@@ -222,6 +267,32 @@ fn run() -> anyhow::Result<ExitCode> {
             prepare_workos_fixture_if_missing(&paths, &format!("http://{listen}"))?;
             let runtime = tokio::runtime::Runtime::new()?;
             runtime.block_on(serve_workos_fixture(listen, paths))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::HostedHermesIngress(args) => {
+            hosted_hermes::run_ingress(hosted_hermes::IngressConfig {
+                core_url: args.core_url,
+                runner_token: std::env::var("FC_CORE_RUNNER_API_TOKEN")
+                    .context("FC_CORE_RUNNER_API_TOKEN is required for route targets")?,
+                source_host_id: args.source_host_id,
+                public_host: args.public_host,
+                port: args.port,
+                allowed_origins: args.allowed_origins,
+                admin_socket: args.admin_socket,
+                state_dir: args.state_dir,
+                docker_bin: PathBuf::from("docker"),
+                renderer_bin: PathBuf::from("finite-saas-runner"),
+                caddy_bin: PathBuf::from("caddy"),
+            })?;
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::RuntimeCoreBridge(args) => {
+            hosted_hermes::run_core_bridge(hosted_hermes::CoreBridgeConfig {
+                source_host_id: args.source_host_id,
+                port: args.port,
+                upstream_host: args.upstream_host,
+                docker_bin: PathBuf::from("docker"),
+            })?;
             Ok(ExitCode::SUCCESS)
         }
     }

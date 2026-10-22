@@ -246,6 +246,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 ),
                 host_port: optional_u16("FC_RUNNER_DOCKER_HOST_PORT", 18080)?,
                 container_port: optional_u16("FC_RUNNER_DOCKER_CONTAINER_PORT", 8080)?,
+                hermes_host_port: optional_u16_value("FC_RUNNER_DOCKER_HERMES_HOST_PORT")?,
                 public_base_url: optional_env_value("FC_RUNNER_DOCKER_PUBLIC_BASE_URL"),
                 pull_policy: optional_env_value("FC_RUNNER_DOCKER_PULL_POLICY")
                     .or_else(|| Some("missing".to_string())),
@@ -804,6 +805,16 @@ fn optional_ip_addr(name: &str, default: &str) -> Result<IpAddr> {
     optional_env(name, default)
         .parse::<IpAddr>()
         .with_context(|| format!("{name} must be an IP address"))
+}
+
+fn optional_u16_value(name: &str) -> Result<Option<u16>> {
+    optional_env_value(name)
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .with_context(|| format!("{name} must be an integer between 1 and 65535"))
+        })
+        .transpose()
 }
 
 fn optional_u32_value(name: &str) -> Result<Option<u32>> {

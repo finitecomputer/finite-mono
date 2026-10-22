@@ -225,6 +225,12 @@ The tests distinguish Node protocol evidence from actual-browser qualification,
 local temporary CA trust from deployed TLS, and retained draft sessions from
 accepted model-turn durability.
 
+Devfinity's Docker profile composes the same path with a real local agent; see
+[the local harness](../../docs/local-integration-harness.md#hosted-hermes-access).
+Its Core sets the development-only `FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON`,
+which makes the native session exchange trust only that ingress's local CA and
+resolve origin hosts to a loopback address. Production leaves it unset.
+
 ## Shared access implementation
 
 Account API (existing private Core listener, signed WorkOS identity):

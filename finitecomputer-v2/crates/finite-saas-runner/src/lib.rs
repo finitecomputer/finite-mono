@@ -2896,6 +2896,10 @@ pub struct DockerConfig {
     pub agent_picture_url: String,
     pub host_port: u16,
     pub container_port: u16,
+    /// Optional loopback publication of the guest's native Hermes listener
+    /// (8642) for a local hosted-Hermes ingress. Like `host_port`, it is a
+    /// fixed single-runtime reservation; unset keeps the native port private.
+    pub hermes_host_port: Option<u16>,
     pub public_base_url: Option<String>,
     pub pull_policy: Option<String>,
     pub max_container_count: Option<u32>,
@@ -2925,6 +2929,12 @@ impl DockerConfig {
             return Err(RunnerError::MissingFinitechatServerUrl);
         }
         if self.host_port == 0 || self.container_port == 0 {
+            return Err(RunnerError::InvalidDockerHostPort);
+        }
+        if self
+            .hermes_host_port
+            .is_some_and(|port| port == 0 || port == self.host_port)
+        {
             return Err(RunnerError::InvalidDockerHostPort);
         }
         if let Some(kind) = self.runtime_artifact_kind
@@ -2972,6 +2982,7 @@ impl Default for DockerConfig {
             agent_picture_url: DEFAULT_FINITE_AGENT_PICTURE_URL.to_string(),
             host_port: 18080,
             container_port: DEFAULT_DOCKER_CONTAINER_PORT,
+            hermes_host_port: None,
             public_base_url: None,
             pull_policy: Some("missing".to_string()),
             max_container_count: None,
@@ -3366,6 +3377,17 @@ fn docker_run_command(
             "127.0.0.1:{}:{}",
             plan.host_port, plan.container_port
         )),
+    ];
+    if let Some(port) = config.hermes_host_port {
+        args.extend([
+            OsString::from("-p"),
+            OsString::from(format!(
+                "127.0.0.1:{port}:{}",
+                hosted_hermes_inventory::HERMES_CONTAINER_PORT
+            )),
+        ]);
+    }
+    args.extend([
         OsString::from("-v"),
         OsString::from(format!("{}:/data", plan.state_root.display())),
         OsString::from("--label"),
@@ -3385,7 +3407,7 @@ fn docker_run_command(
             "computer.finite.v2.project_id={}",
             lease.project.id
         )),
-    ];
+    ]);
     if let Some(policy) = config
         .pull_policy
         .as_deref()
@@ -6409,6 +6431,10 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["-p", "127.0.0.1:18081:8080"])
         );
+        assert!(
+            args.iter().all(|arg| !arg.ends_with(":8642")),
+            "native Hermes stays private unless explicitly published"
+        );
         assert!(args.windows(2).any(|pair| {
             pair == [
                 "-v",
@@ -6450,6 +6476,40 @@ mod tests {
                 .map(String::as_str),
             Some("ghcr.io/finitecomputer/finite-chat-hermes-runtime:local")
         );
+    }
+
+    #[test]
+    fn docker_publishes_native_hermes_only_on_an_explicit_loopback_port() {
+        let config = DockerConfig {
+            source_host_id: "local-docker".to_string(),
+            image: "ghcr.io/finitecomputer/agent-runtime:local".to_string(),
+            work_root: PathBuf::from("/var/lib/finite/runner"),
+            host_port: 18081,
+            hermes_host_port: Some(18642),
+            ..DockerConfig::default()
+        };
+        config.validate().unwrap();
+        let lease = sample_lease("agent_request_hermes");
+        let plan = docker_launch_plan(&config, &lease);
+        let command = docker_run_command(&config, &plan, &lease, &RuntimeLaunchOptions::default());
+        let args = os_strings_to_strings(&command.args);
+        let published = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-p")
+            .map(|pair| pair[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(published, ["127.0.0.1:18081:8080", "127.0.0.1:18642:8642"]);
+
+        for port in [0, 18081] {
+            let invalid = DockerConfig {
+                hermes_host_port: Some(port),
+                ..config.clone()
+            };
+            assert!(matches!(
+                invalid.validate(),
+                Err(RunnerError::InvalidDockerHostPort)
+            ));
+        }
     }
 
     #[test]

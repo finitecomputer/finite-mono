@@ -14,6 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+pub mod hosted_hermes;
 pub mod workos_fixture;
 use workos_fixture::{
     CLIENT_ID as WORKOS_FIXTURE_CLIENT_ID, CUSTOMER_EMAIL as WORKOS_FIXTURE_CUSTOMER_EMAIL,
@@ -64,12 +65,14 @@ enum ManagedProcess {
     AppleNetworkProbe,
     RuntimeArtifact,
     Runner,
+    RuntimeCoreBridge,
+    HostedHermesIngress,
     DashboardDeps,
     Dashboard,
 }
 
 impl ManagedProcess {
-    const ALL: [Self; 17] = [
+    const ALL: [Self; 19] = [
         Self::ProcessCompose,
         Self::WorkosFixture,
         Self::ServiceBinaries,
@@ -85,6 +88,8 @@ impl ManagedProcess {
         Self::AppleNetworkProbe,
         Self::RuntimeArtifact,
         Self::Runner,
+        Self::RuntimeCoreBridge,
+        Self::HostedHermesIngress,
         Self::DashboardDeps,
         Self::Dashboard,
     ];
@@ -106,6 +111,8 @@ impl ManagedProcess {
             Self::AppleNetworkProbe => "apple-network-probe",
             Self::RuntimeArtifact => "runtime-artifact",
             Self::Runner => "runner",
+            Self::RuntimeCoreBridge => "runtime-core-bridge",
+            Self::HostedHermesIngress => "hosted-hermes-ingress",
             Self::DashboardDeps => "dashboard-deps",
             Self::Dashboard => "dashboard",
         }
@@ -273,6 +280,28 @@ const DEVFINITY_USAGE_TOKEN: &str = "devfinity-finite-private-usage-token";
 const MACOS_UNIX_SOCKET_PATH_MAX: usize = 103;
 const CACHED_INFERENCE_KEY_FILE: &str = "finite-private-upstream.key";
 const DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE_ENV: &str = "DEVFINITY_DOCKER_RUNTIME_IMAGE_ENGINE";
+/// Synthetic hosted-Hermes origin host. agentd requires a non-loopback HTTPS
+/// public URL; Core, curl and browsers map this reserved name to loopback.
+const HOSTED_HERMES_PUBLIC_HOST: &str = "agents.devfinity.test";
+
+fn dashboard_ingress_resolver_source() -> String {
+    format!(
+        r#"// Written by devfinity. Resolves the local hosted-Hermes ingress host
+// to loopback for the dashboard's server-side fetches.
+const dns = require("node:dns");
+const lookup = dns.lookup;
+dns.lookup = function (hostname, options, callback) {{
+  if (hostname !== "{HOSTED_HERMES_PUBLIC_HOST}") return lookup.apply(this, arguments);
+  if (typeof options === "function") {{ callback = options; options = {{}}; }}
+  if (typeof options === "number") options = {{ family: options }};
+  if (options && options.all) {{
+    return process.nextTick(callback, null, [{{ address: "127.0.0.1", family: 4 }}]);
+  }}
+  return process.nextTick(callback, null, "127.0.0.1", 4);
+}};
+"#
+    )
+}
 const WORKOS_STAGING_API_KEY_ENV: &str = "WORKOS_STAGING_API_KEY";
 const WORKOS_STAGING_CLIENT_ID_ENV: &str = "WORKOS_STAGING_CLIENT_ID";
 const WORKOS_STAGING_OPERATOR_ORG_ID_ENV: &str = "WORKOS_STAGING_OPERATOR_ORG_ID";
@@ -344,13 +373,13 @@ pub fn store_inference_key(state_dir: PathBuf, input: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn devfinity_runner_credentials_json(profile: StackProfile) -> String {
+fn devfinity_runner_credentials_json(profile: StackProfile, source_host_id: &str) -> String {
     serde_json::json!([{
         "credentialId": DEVFINITY_RUNNER_CREDENTIAL_ID,
         "tokenEnv": DEVFINITY_RUNNER_TOKEN_ENV,
         "runnerId": profile.runner_id(),
         "runnerClasses": [profile.runner_class()],
-        "sourceHostId": profile.source_host_id(),
+        "sourceHostId": source_host_id,
         "revoked": false,
     }])
     .to_string()
@@ -373,6 +402,7 @@ pub struct Stack {
     process_compose_control_dir: PathBuf,
     process_compose_socket: PathBuf,
     ports: Ports,
+    port_offset: u16,
     postgres_instance_id: String,
     core_token: String,
     hosted_web_device_token: String,
@@ -402,6 +432,12 @@ struct Ports {
     finite_private_limiter: u16,
     workos_fixture: u16,
     runtime_agent: u16,
+    /// Core's dedicated agent-facing runtime listener.
+    core_runtime: u16,
+    /// Loopback TLS listener of the local hosted-Hermes ingress.
+    hermes_ingress: u16,
+    /// Loopback publication of the runtime's native Hermes port 8642.
+    runtime_hermes: u16,
 }
 
 impl Stack {
@@ -454,7 +490,11 @@ impl Stack {
                 finite_private_limiter: offset_port(18002, port_offset)?,
                 workos_fixture: offset_port(14199, port_offset)?,
                 runtime_agent: runtime_agent_port,
+                core_runtime: offset_port(14201, port_offset)?,
+                hermes_ingress: offset_port(18643, port_offset)?,
+                runtime_hermes: offset_port(18642, port_offset)?,
             },
+            port_offset,
             postgres_instance_id: random_postgres_instance_id()?,
             core_token: "devfinity-core-service-token".to_string(),
             hosted_web_device_token: "devfinity-hosted-web-device-token".to_string(),
@@ -629,6 +669,9 @@ impl Stack {
                 self.workos_fixture_dir(),
             ]);
         }
+        if self.hosted_hermes_enabled() {
+            dirs.push(self.hosted_hermes_dir());
+        }
         for dir in dirs {
             fs::create_dir_all(&dir)
                 .with_context(|| format!("failed to create {}", dir.display()))?;
@@ -643,6 +686,9 @@ impl Stack {
         } else {
             self.write_secret_files()?;
             self.write_dashboard_tsconfig()?;
+            if self.hosted_hermes_enabled() {
+                self.write_dashboard_ingress_resolver()?;
+            }
         }
         self.write_env_file()?;
         self.write_postgres_script()?;
@@ -675,7 +721,8 @@ impl Stack {
             }
             WorkosMode::Staging(config) => (config.api_key.clone(), None),
         };
-        let runner_credentials_json = devfinity_runner_credentials_json(self.profile);
+        let runner_credentials_json =
+            devfinity_runner_credentials_json(self.profile, &self.source_host_id());
         let identity_operator_token = random_local_secret()?;
         write_mode_600(
             &self.core_secret_file(),
@@ -841,6 +888,20 @@ impl Stack {
                 self.apple_host_access.runtime_host, self.apple_host_access.source
             );
             println!("  image:      {}", self.runtime_image_ref);
+        }
+        if self.hosted_hermes_enabled() {
+            println!(
+                "  hermes:     {} via 127.0.0.1:{} (CA {})",
+                self.hosted_hermes_origin(),
+                self.ports.hermes_ingress,
+                self.hosted_hermes_ca_file().display()
+            );
+            println!(
+                "  core rt:    http://{}:{} (source host {})",
+                self.service_bind_host(),
+                self.ports.core_runtime,
+                self.source_host_id()
+            );
         }
         println!();
         println!("  env file:   {}", self.run_dir.join("env").display());
@@ -1284,6 +1345,10 @@ impl Stack {
             self.write_apple_network_probe(&mut yaml);
             self.write_runtime_artifact(&mut yaml);
             self.write_runner(&mut yaml);
+            if self.hosted_hermes_enabled() {
+                self.write_runtime_core_bridge(&mut yaml);
+                self.write_hosted_hermes_ingress(&mut yaml);
+            }
         }
         self.write_dashboard_deps(&mut yaml);
         self.write_dashboard(&mut yaml);
@@ -1320,6 +1385,9 @@ impl Stack {
         ];
         if self.profile.includes_runtime() {
             commands.extend(["finite-saas-local", "finite-saas-runner"]);
+        }
+        if self.hosted_hermes_enabled() {
+            commands.push("caddy");
         }
         commands
     }
@@ -1575,6 +1643,27 @@ wait "$postgres_pid"
                 .to_string(),
             ),
         ];
+        if self.hosted_hermes_enabled() {
+            core_environment.extend([
+                (
+                    "FC_CORE_RUNTIME_BIND",
+                    format!("{}:{}", self.service_bind_host(), self.ports.core_runtime),
+                ),
+                (
+                    "FC_CORE_HOSTED_HERMES_ORIGINS_JSON",
+                    serde_json::json!({ self.source_host_id(): self.hosted_hermes_origin() })
+                        .to_string(),
+                ),
+                (
+                    "FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON",
+                    serde_json::json!({
+                        "rootCertificateFile": self.hosted_hermes_ca_file(),
+                        "loopbackAddress": "127.0.0.1",
+                    })
+                    .to_string(),
+                ),
+            ]);
+        }
         if self.workos_mode.is_fixture() {
             core_environment.extend([
                 (
@@ -2116,77 +2205,85 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::FiniteIdentity);
         let _ = writeln!(yaml, "        condition: process_healthy");
-        self.write_environment(
-            yaml,
-            &[
-                ("FC_RUNNER_CLASS", self.profile.runner_class().to_string()),
-                ("FC_CORE_URL", self.core_url()),
-                ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
-                ("FC_RUNNER_ID", self.profile.runner_id().to_string()),
+        let mut runner_environment = vec![
+            ("FC_RUNNER_CLASS", self.profile.runner_class().to_string()),
+            ("FC_CORE_URL", self.core_url()),
+            ("FINITE_IDENTITY_AUTHORITY", self.finite_identity_url()),
+            ("FC_RUNNER_ID", self.profile.runner_id().to_string()),
+            ("FC_RUNNER_SOURCE_HOST_ID", self.source_host_id()),
+            (
+                "FC_RUNNER_WORK_ROOT",
+                self.runner_dir().display().to_string(),
+            ),
+            (
+                "FC_RUNNER_FINITECHAT_SERVER_URL",
+                self.runtime_finitechat_url(),
+            ),
+            (
+                "FC_RUNNER_RUNTIME_ENV_JSON",
+                self.runtime_product_environment().to_string(),
+            ),
+            (
+                "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",
+                self.apple_container_name_prefix.clone(),
+            ),
+            (
+                "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE",
+                self.runtime_image_ref.clone(),
+            ),
+            (
+                "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
+                self.ports.runtime_agent.to_string(),
+            ),
+            (
+                "FC_RUNNER_APPLE_CONTAINER_CONTAINER_PORT",
+                "8080".to_string(),
+            ),
+            (
+                "FC_RUNNER_DOCKER_HOST_PORT",
+                self.ports.runtime_agent.to_string(),
+            ),
+            ("FC_RUNNER_DOCKER_CONTAINER_PORT", "8080".to_string()),
+            (
+                "FC_RUNNER_DOCKER_PULL_POLICY",
+                if self.prebuilt_runtime_image {
+                    "missing"
+                } else {
+                    "never"
+                }
+                .to_string(),
+            ),
+            ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
+            ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
+            (
+                "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
+                if self.inference_mode == InferenceMode::ChainedLimiter {
+                    format!("{}/v1", self.runtime_limiter_root_url())
+                } else {
+                    std::env::var("FC_RUNNER_FINITE_PRIVATE_BASE_URL")
+                        .ok()
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_else(|| {
+                            "https://finite-private.finite.containers.tinfoil.dev/v1".to_string()
+                        })
+                },
+            ),
+        ];
+        if self.hosted_hermes_enabled() {
+            // A creation lease provisions the scoped runtime credential and
+            // injects FINITE_CORE_URL/FINITE_CORE_CREDENTIAL, as in production.
+            runner_environment.extend([
                 (
-                    "FC_RUNNER_SOURCE_HOST_ID",
-                    self.profile.source_host_id().to_string(),
+                    "FC_RUNNER_RUNTIME_CORE_URL",
+                    self.runtime_core_loopback_url(),
                 ),
                 (
-                    "FC_RUNNER_WORK_ROOT",
-                    self.runner_dir().display().to_string(),
+                    "FC_RUNNER_DOCKER_HERMES_HOST_PORT",
+                    self.ports.runtime_hermes.to_string(),
                 ),
-                (
-                    "FC_RUNNER_FINITECHAT_SERVER_URL",
-                    self.runtime_finitechat_url(),
-                ),
-                (
-                    "FC_RUNNER_RUNTIME_ENV_JSON",
-                    self.runtime_product_environment().to_string(),
-                ),
-                (
-                    "FC_RUNNER_APPLE_CONTAINER_NAME_PREFIX",
-                    self.apple_container_name_prefix.clone(),
-                ),
-                (
-                    "FC_RUNNER_APPLE_CONTAINER_LOCAL_IMAGE_REFERENCE",
-                    self.runtime_image_ref.clone(),
-                ),
-                (
-                    "FC_RUNNER_APPLE_CONTAINER_HOST_PORT",
-                    self.ports.runtime_agent.to_string(),
-                ),
-                (
-                    "FC_RUNNER_APPLE_CONTAINER_CONTAINER_PORT",
-                    "8080".to_string(),
-                ),
-                (
-                    "FC_RUNNER_DOCKER_HOST_PORT",
-                    self.ports.runtime_agent.to_string(),
-                ),
-                ("FC_RUNNER_DOCKER_CONTAINER_PORT", "8080".to_string()),
-                (
-                    "FC_RUNNER_DOCKER_PULL_POLICY",
-                    if self.prebuilt_runtime_image {
-                        "missing"
-                    } else {
-                        "never"
-                    }
-                    .to_string(),
-                ),
-                ("FC_RUNNER_MAX_SANDBOXES", "1".to_string()),
-                ("FC_RUNNER_IDLE_INTERVAL_MS", "1000".to_string()),
-                (
-                    "FC_RUNNER_FINITE_PRIVATE_BASE_URL",
-                    if self.inference_mode == InferenceMode::ChainedLimiter {
-                        format!("{}/v1", self.runtime_limiter_root_url())
-                    } else {
-                        std::env::var("FC_RUNNER_FINITE_PRIVATE_BASE_URL")
-                            .ok()
-                            .filter(|value| !value.trim().is_empty())
-                            .unwrap_or_else(|| {
-                                "https://finite-private.finite.containers.tinfoil.dev/v1"
-                                    .to_string()
-                            })
-                    },
-                ),
-            ],
-        );
+            ]);
+        }
+        self.write_environment(yaml, &runner_environment);
         // Runner performs a synchronous provider/artifact preflight before it
         // enters its retrying serve loop. Surface a static wiring failure as a
         // failed local stack instead of leaving a launch form backed by no
@@ -2195,27 +2292,98 @@ wait "$postgres_pid"
         let _ = writeln!(yaml, "      restart: exit_on_failure");
     }
 
-    fn write_dashboard(&self, yaml: &mut String) {
-        let process = ManagedProcess::Dashboard;
-        let dashboard_dir = self.repo_root.join("finitecomputer-v2/apps/dashboard");
+    fn write_runtime_core_bridge(&self, yaml: &mut String) {
+        let process = ManagedProcess::RuntimeCoreBridge;
         let _ = writeln!(yaml, "  {process}:");
-        self.write_process_header(yaml, "Finite dashboard dev server", &dashboard_dir, process);
+        self.write_process_header(
+            yaml,
+            "Forward each local runtime's loopback Core URL to Core's runtime listener",
+            &self.repo_root,
+            process,
+        );
+        self.write_managed_command(
+            yaml,
+            process,
+            &[format!(
+                "exec devfinity runtime-core-bridge --source-host-id {} --port {} --upstream-host {}",
+                shell_quote(&self.source_host_id()),
+                self.ports.core_runtime,
+                shell_quote(&self.apple_host_access.runtime_host),
+            )],
+            &[],
+        );
+        let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
+    }
+
+    fn write_hosted_hermes_ingress(&self, yaml: &mut String) {
+        let process = ManagedProcess::HostedHermesIngress;
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(
+            yaml,
+            "Runner-rendered hosted Hermes ingress (Caddy) for local runtimes",
+            &self.repo_root,
+            process,
+        );
         self.write_managed_command(
             yaml,
             process,
             &[
                 format!(
                     ". {}",
-                    shell_quote(&self.dashboard_auth_secret_file().display().to_string())
+                    shell_quote(&self.runner_auth_secret_file().display().to_string())
                 ),
                 format!(
-                    "exec pnpm run dev --hostname 127.0.0.1 --port {}",
-                    self.ports.dashboard
+                    concat!(
+                        "exec devfinity hosted-hermes-ingress ",
+                        "--core-url {} --source-host-id {} --public-host {} --port {} ",
+                        "--allowed-origin {} --admin-socket {} --state-dir {}"
+                    ),
+                    shell_quote(&self.core_url()),
+                    shell_quote(&self.source_host_id()),
+                    HOSTED_HERMES_PUBLIC_HOST,
+                    self.ports.hermes_ingress,
+                    shell_quote(&self.dashboard_origin()),
+                    shell_quote(&self.hosted_hermes_admin_socket().display().to_string()),
+                    shell_quote(&self.hosted_hermes_dir().display().to_string()),
                 ),
             ],
             &[],
         );
         let _ = writeln!(yaml, "    depends_on:");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::ServiceBinaries);
+        let _ = writeln!(yaml, "        condition: process_completed_successfully");
+        let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
+        let _ = writeln!(yaml, "        condition: process_healthy");
+        let _ = writeln!(yaml, "    availability:");
+        let _ = writeln!(yaml, "      restart: always");
+    }
+
+    fn write_dashboard(&self, yaml: &mut String) {
+        let process = ManagedProcess::Dashboard;
+        let dashboard_dir = self.repo_root.join("finitecomputer-v2/apps/dashboard");
+        let _ = writeln!(yaml, "  {process}:");
+        self.write_process_header(yaml, "Finite dashboard dev server", &dashboard_dir, process);
+        let mut command = vec![format!(
+            ". {}",
+            shell_quote(&self.dashboard_auth_secret_file().display().to_string())
+        )];
+        if self.hosted_hermes_enabled() {
+            command.push(self.dashboard_wait_for_ingress_ca());
+        }
+        command.push(format!(
+            "exec pnpm run dev --hostname 127.0.0.1 --port {}",
+            self.ports.dashboard
+        ));
+        self.write_managed_command(yaml, process, &command, &[]);
+        let _ = writeln!(yaml, "    depends_on:");
+        if self.hosted_hermes_enabled() {
+            let _ = writeln!(yaml, "      {}:", ManagedProcess::HostedHermesIngress);
+            let _ = writeln!(yaml, "        condition: process_started");
+        }
         let _ = writeln!(yaml, "      {}:", ManagedProcess::DashboardDeps);
         let _ = writeln!(yaml, "        condition: process_completed_successfully");
         let _ = writeln!(yaml, "      {}:", ManagedProcess::Core);
@@ -2285,6 +2453,24 @@ wait "$postgres_pid"
                 ("WORKOS_CLIENT_ID", config.client_id.clone()),
                 ("FC_WORKOS_OPERATOR_ORG_ID", config.operator_org_id.clone()),
             ]),
+        }
+        if self.hosted_hermes_enabled() {
+            // Direct web chat reaches each agent through the local ingress,
+            // the way Core's FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON does.
+            dashboard_environment.extend([
+                ("FC_DIRECT_CHAT_RUNTIME_IDS", "*".to_string()),
+                (
+                    "NODE_EXTRA_CA_CERTS",
+                    self.hosted_hermes_ca_file().display().to_string(),
+                ),
+                (
+                    "NODE_OPTIONS",
+                    format!(
+                        "--require={}",
+                        self.dashboard_ingress_resolver_file().display()
+                    ),
+                ),
+            ]);
         }
         for name in [
             "GOOGLE_WORKSPACE_CLIENT_ID",
@@ -2932,6 +3118,16 @@ wait "$postgres_pid"
                     ManagedProcess::Runner => {
                         vec![String::from("finite-saas-runner"), String::from("serve")]
                     }
+                    ManagedProcess::RuntimeCoreBridge => vec![
+                        String::from("devfinity"),
+                        String::from("runtime-core-bridge"),
+                        self.source_host_id(),
+                    ],
+                    ManagedProcess::HostedHermesIngress => vec![
+                        String::from("devfinity"),
+                        String::from("hosted-hermes-ingress"),
+                        self.hosted_hermes_dir().display().to_string(),
+                    ],
                     ManagedProcess::DashboardDeps => vec![
                         String::from("pnpm"),
                         String::from("install"),
@@ -3036,6 +3232,17 @@ wait "$postgres_pid"
                 vec![String::from("devfinity-host-network-probe")],
             ),
             OrphanProcessSpec::new(
+                ManagedProcess::HostedHermesIngress,
+                vec![
+                    String::from("caddy"),
+                    String::from("run"),
+                    self.hosted_hermes_dir()
+                        .join("caddy.json")
+                        .display()
+                        .to_string(),
+                ],
+            ),
+            OrphanProcessSpec::new(
                 ManagedProcess::Dashboard,
                 vec![
                     self.repo_root
@@ -3074,6 +3281,12 @@ wait "$postgres_pid"
                 if *process == ManagedProcess::FinitePrivateLimiter {
                     return self.profile.includes_runtime()
                         && self.inference_mode == InferenceMode::ChainedLimiter;
+                }
+                if matches!(
+                    process,
+                    ManagedProcess::RuntimeCoreBridge | ManagedProcess::HostedHermesIngress
+                ) {
+                    return self.hosted_hermes_enabled();
                 }
                 if *process == ManagedProcess::WorkosFixture {
                     return self.workos_mode.is_fixture();
@@ -3188,11 +3401,102 @@ wait "$postgres_pid"
             let _ = writeln!(urls, "runtime_image={}", self.runtime_image_ref);
             let _ = writeln!(urls, "runtime_artifact_prefix={RUNTIME_ARTIFACT_ID_PREFIX}");
         }
+        if self.hosted_hermes_enabled() {
+            let _ = writeln!(urls, "source_host_id={}", self.source_host_id());
+            let _ = writeln!(
+                urls,
+                "core_runtime=http://127.0.0.1:{}",
+                self.ports.core_runtime
+            );
+            let _ = writeln!(urls, "hosted_hermes_origin={}", self.hosted_hermes_origin());
+            let _ = writeln!(
+                urls,
+                "hosted_hermes_ingress=127.0.0.1:{}",
+                self.ports.hermes_ingress
+            );
+            let _ = writeln!(
+                urls,
+                "hosted_hermes_ca={}",
+                self.hosted_hermes_ca_file().display()
+            );
+        }
         urls
     }
 
     fn core_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.ports.core)
+    }
+
+    /// Docker runtimes are discovered by source-host labels, so parallel
+    /// docker-saas stacks (distinct `DEVFINITY_PORT_OFFSET`) need distinct
+    /// source hosts; otherwise one Runner counts another stack's agent.
+    fn source_host_id(&self) -> String {
+        if self.profile == StackProfile::DockerSaas && self.port_offset != 0 {
+            format!("{}-{}", self.profile.source_host_id(), self.port_offset)
+        } else {
+            self.profile.source_host_id().to_string()
+        }
+    }
+
+    /// The real hosted-Hermes access path is wired for the Docker provider
+    /// only. Apple Container would need its own native-port publication and
+    /// runtime-loopback bridge before it could opt in.
+    fn hosted_hermes_enabled(&self) -> bool {
+        self.profile == StackProfile::DockerSaas
+    }
+
+    fn hosted_hermes_origin(&self) -> String {
+        format!(
+            "https://{HOSTED_HERMES_PUBLIC_HOST}:{}",
+            self.ports.hermes_ingress
+        )
+    }
+
+    fn hosted_hermes_dir(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::HostedHermesIngress)
+    }
+
+    /// Caddy's local CA root; trusted only by this stack's Core and by
+    /// clients that opt in, never by a system store.
+    fn hosted_hermes_ca_file(&self) -> PathBuf {
+        self.hosted_hermes_dir()
+            .join("data/caddy/pki/authorities/local/root.crt")
+    }
+
+    /// A Node preload that resolves the ingress host to loopback in the
+    /// dashboard's processes, so no host resolver change is needed.
+    fn dashboard_ingress_resolver_file(&self) -> PathBuf {
+        self.process_state_dir(ManagedProcess::Dashboard)
+            .join("hosted-hermes-resolver.cjs")
+    }
+
+    fn write_dashboard_ingress_resolver(&self) -> Result<()> {
+        let path = self.dashboard_ingress_resolver_file();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        fs::write(&path, dashboard_ingress_resolver_source())
+            .with_context(|| format!("failed to write {}", path.display()))
+    }
+
+    /// Node reads NODE_EXTRA_CA_CERTS once at start, and Caddy creates its
+    /// local CA when the ingress first starts.
+    fn dashboard_wait_for_ingress_ca(&self) -> String {
+        format!(
+            "for _ in $(seq 120); do [ -s {ca} ] && break; sleep 0.5; done; [ -s {ca} ] || {{ echo \"hosted Hermes CA missing: \"{ca} >&2; exit 1; }}",
+            ca = shell_quote(&self.hosted_hermes_ca_file().display().to_string()),
+        )
+    }
+
+    fn hosted_hermes_admin_socket(&self) -> PathBuf {
+        self.process_compose_control_dir.join("hermes-caddy.sock")
+    }
+
+    /// The agent's view of Core's runtime listener: its own loopback, which
+    /// the runtime Core bridge forwards to the Docker host.
+    fn runtime_core_loopback_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.ports.core_runtime)
     }
 
     fn dashboard_url(&self) -> String {
@@ -3668,6 +3972,29 @@ wait "$postgres_pid"
                 "DEVFINITY_RUNTIME_URL",
                 format!("http://127.0.0.1:{}", self.ports.runtime_agent),
             ));
+        }
+        if self.hosted_hermes_enabled() {
+            // Client contract for reaching the ingress like a browser would:
+            // `curl --resolve "$HOST:$PORT:127.0.0.1" --cacert "$CA" ...`.
+            values.extend([
+                ("DEVFINITY_SOURCE_HOST_ID", self.source_host_id()),
+                (
+                    "DEVFINITY_HOSTED_HERMES_HOST",
+                    HOSTED_HERMES_PUBLIC_HOST.to_string(),
+                ),
+                (
+                    "DEVFINITY_HOSTED_HERMES_PORT",
+                    self.ports.hermes_ingress.to_string(),
+                ),
+                (
+                    "DEVFINITY_HOSTED_HERMES_ORIGIN",
+                    self.hosted_hermes_origin(),
+                ),
+                (
+                    "DEVFINITY_HOSTED_HERMES_CA_FILE",
+                    self.hosted_hermes_ca_file().display().to_string(),
+                ),
+            ]);
         }
         values
     }
@@ -4866,11 +5193,168 @@ mod tests {
         assert!(!yaml.contains("--engine docker"));
     }
 
+    fn process_section(yaml: &str, process: ManagedProcess) -> &str {
+        let header = format!("\n  {process}:\n");
+        let tail = yaml.split(&header).nth(1).unwrap_or_default();
+        let end = tail
+            .match_indices("\n  ")
+            .find(|(index, _)| !tail[index + 3..].starts_with(' '))
+            .map_or(tail.len(), |(index, _)| index);
+        &tail[..end]
+    }
+
+    fn docker_stack_with_offset(offset: u16) -> Stack {
+        let mut stack = Stack::new(PathBuf::from("/tmp/devfinity-hosted-hermes-test"))
+            .unwrap()
+            .with_profile(StackProfile::DockerSaas);
+        stack.port_offset = offset;
+        for (port, base) in [
+            (&mut stack.ports.core, 14200),
+            (&mut stack.ports.dashboard, 13002),
+            (&mut stack.ports.runtime_agent, 18080),
+            (&mut stack.ports.core_runtime, 14201),
+            (&mut stack.ports.hermes_ingress, 18643),
+            (&mut stack.ports.runtime_hermes, 18642),
+        ] {
+            *port = offset_port(base, offset).unwrap();
+        }
+        // As prepare_host_environment selects for Docker.
+        stack.apple_host_access = AppleHostAccess {
+            runtime_host: "host.docker.internal".to_string(),
+            bind_host: "0.0.0.0".to_string(),
+            source: "Docker host-gateway alias",
+        };
+        stack
+    }
+
+    #[test]
+    fn docker_saas_serves_the_hosted_hermes_access_path_through_a_local_ingress() {
+        let stack = docker_stack_with_offset(300);
+        let yaml = stack.process_compose_yaml();
+        let ca = "/tmp/devfinity-hosted-hermes-test/runs/default/hosted-hermes-ingress/data/caddy/pki/authorities/local/root.crt";
+
+        let core = process_section(&yaml, ManagedProcess::Core);
+        assert!(core.contains("FC_CORE_RUNTIME_BIND=0.0.0.0:14501"));
+        assert!(core.contains(
+            r#"FC_CORE_HOSTED_HERMES_ORIGINS_JSON={\"devfinity-docker-300\":\"https://agents.devfinity.test:18943\"}"#
+        ));
+        let ingress_json = core
+            .lines()
+            .find(|line| line.contains("FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON="))
+            .unwrap();
+        assert!(ingress_json.contains(r#"\"loopbackAddress\":\"127.0.0.1\""#));
+        assert!(ingress_json.contains(&format!(r#"\"rootCertificateFile\":\"{ca}\""#)));
+
+        let runner = process_section(&yaml, ManagedProcess::Runner);
+        assert!(runner.contains("FC_RUNNER_SOURCE_HOST_ID=devfinity-docker-300"));
+        assert!(runner.contains("FC_RUNNER_RUNTIME_CORE_URL=http://127.0.0.1:14501"));
+        assert!(runner.contains("FC_RUNNER_DOCKER_HERMES_HOST_PORT=18942"));
+        assert!(runner.contains("FC_RUNNER_DOCKER_HOST_PORT=18380"));
+        assert!(runner.contains("FC_RUNNER_MAX_SANDBOXES=1"));
+
+        let bridge = process_section(&yaml, ManagedProcess::RuntimeCoreBridge);
+        assert!(bridge.contains(
+            "exec devfinity runtime-core-bridge --source-host-id 'devfinity-docker-300' --port 14501 --upstream-host 'host.docker.internal'"
+        ));
+        assert!(bridge.contains("restart: always"));
+
+        let ingress = process_section(&yaml, ManagedProcess::HostedHermesIngress);
+        assert!(ingress.contains("secrets/runner-auth.sh"));
+        assert!(ingress.contains(&format!(
+            "exec devfinity hosted-hermes-ingress --core-url 'http://127.0.0.1:14500' --source-host-id 'devfinity-docker-300' --public-host agents.devfinity.test --port 18943 --allowed-origin 'http://127.0.0.1:13302' --admin-socket '{}' --state-dir '/tmp/devfinity-hosted-hermes-test/runs/default/hosted-hermes-ingress'",
+            stack.hosted_hermes_admin_socket().display()
+        )));
+        assert!(ingress.contains("core:\n        condition: process_healthy"));
+        assert!(!ingress.contains(DEVFINITY_RUNNER_TOKEN));
+
+        let dashboard = process_section(&yaml, ManagedProcess::Dashboard);
+        assert!(dashboard.contains("FC_DIRECT_CHAT_RUNTIME_IDS=*"));
+        assert!(dashboard.contains(&format!("NODE_EXTRA_CA_CERTS={ca}")));
+        assert!(dashboard.contains(&format!(
+            "NODE_OPTIONS=--require={}",
+            stack.dashboard_ingress_resolver_file().display()
+        )));
+        assert!(dashboard.contains("hosted-hermes-ingress:\n        condition: process_started"));
+        assert!(dashboard.contains("hosted Hermes CA missing"));
+        assert!(dashboard_ingress_resolver_source().contains("\"agents.devfinity.test\""));
+
+        // The renderer only accepts a short, plain admin socket path.
+        let socket = stack.hosted_hermes_admin_socket().display().to_string();
+        assert!(socket.len() <= 100 && socket.ends_with("/hermes-caddy.sock"));
+        assert!(stack.service_binary_names().contains(&"caddy"));
+        for process in [
+            ManagedProcess::RuntimeCoreBridge,
+            ManagedProcess::HostedHermesIngress,
+        ] {
+            assert!(stack.enabled_processes().contains(&process));
+        }
+        let environment = stack.env_values();
+        for (name, value) in [
+            ("DEVFINITY_SOURCE_HOST_ID", "devfinity-docker-300"),
+            ("DEVFINITY_HOSTED_HERMES_HOST", "agents.devfinity.test"),
+            ("DEVFINITY_HOSTED_HERMES_PORT", "18943"),
+            (
+                "DEVFINITY_HOSTED_HERMES_ORIGIN",
+                "https://agents.devfinity.test:18943",
+            ),
+            ("DEVFINITY_HOSTED_HERMES_CA_FILE", ca),
+        ] {
+            assert!(
+                environment.contains(&(name, value.to_string())),
+                "missing {name}={value}"
+            );
+        }
+        assert!(
+            stack
+                .urls_text()
+                .contains("hosted_hermes_ingress=127.0.0.1:18943\n")
+        );
+
+        let default_ports = docker_stack_with_offset(0).process_compose_yaml();
+        assert!(default_ports.contains("FC_CORE_RUNTIME_BIND=0.0.0.0:14201"));
+        assert!(default_ports.contains("FC_RUNNER_DOCKER_HERMES_HOST_PORT=18642"));
+        assert!(default_ports.contains("--public-host agents.devfinity.test --port 18643"));
+    }
+
+    #[test]
+    fn hosted_hermes_wiring_is_scoped_to_the_docker_profile() {
+        for profile in [StackProfile::AppleSaas, StackProfile::ServicesOnly] {
+            let stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+                .unwrap()
+                .with_profile(profile);
+            let yaml = stack.process_compose_yaml();
+            for absent in [
+                "FC_CORE_RUNTIME_BIND",
+                "FC_CORE_HOSTED_HERMES_ORIGINS_JSON",
+                "FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON",
+                "FC_RUNNER_RUNTIME_CORE_URL",
+                "FC_RUNNER_DOCKER_HERMES_HOST_PORT",
+                "\n  runtime-core-bridge:\n",
+                "\n  hosted-hermes-ingress:\n",
+                "FC_DIRECT_CHAT_RUNTIME_IDS",
+                "NODE_EXTRA_CA_CERTS",
+                "hosted-hermes-resolver.cjs",
+            ] {
+                assert!(!yaml.contains(absent), "{profile:?} contains {absent}");
+            }
+            assert!(!stack.service_binary_names().contains(&"caddy"));
+            assert!(
+                !stack
+                    .env_values()
+                    .iter()
+                    .any(|(name, _)| name.starts_with("DEVFINITY_HOSTED_HERMES"))
+            );
+        }
+    }
+
     #[test]
     fn runner_credential_metadata_matches_local_runner_identity() {
-        let metadata: serde_json::Value =
-            serde_json::from_str(&devfinity_runner_credentials_json(StackProfile::AppleSaas))
-                .unwrap();
+        let stack = Stack::new(PathBuf::from(".local-state/devfinity-test")).unwrap();
+        let metadata: serde_json::Value = serde_json::from_str(&devfinity_runner_credentials_json(
+            StackProfile::AppleSaas,
+            &stack.source_host_id(),
+        ))
+        .unwrap();
 
         assert_eq!(
             metadata,
@@ -4883,6 +5367,34 @@ mod tests {
                 "revoked": false,
             }])
         );
+    }
+
+    #[test]
+    fn parallel_docker_stacks_use_offset_scoped_source_hosts() {
+        let mut stack = Stack::new(PathBuf::from(".local-state/devfinity-test"))
+            .unwrap()
+            .with_profile(StackProfile::DockerSaas);
+        stack.port_offset = 0;
+        assert_eq!(stack.source_host_id(), "devfinity-docker");
+        stack.port_offset = 300;
+        assert_eq!(stack.source_host_id(), "devfinity-docker-300");
+        let metadata: serde_json::Value = serde_json::from_str(&devfinity_runner_credentials_json(
+            stack.profile,
+            &stack.source_host_id(),
+        ))
+        .unwrap();
+        assert_eq!(metadata[0]["sourceHostId"], "devfinity-docker-300");
+        assert_eq!(
+            metadata[0]["runnerClasses"],
+            serde_json::json!(["local_docker"])
+        );
+        let yaml = stack.process_compose_yaml();
+        assert!(yaml.contains("FC_RUNNER_SOURCE_HOST_ID=devfinity-docker-300"));
+
+        // Apple isolates parallel stacks by container-name prefix instead.
+        let mut apple = Stack::new(PathBuf::from(".local-state/devfinity-test")).unwrap();
+        apple.port_offset = 300;
+        assert_eq!(apple.source_host_id(), "devfinity-apple");
     }
 
     #[test]
@@ -4903,7 +5415,8 @@ mod tests {
         assert!(core_exports.contains(&format!(
             "export FC_CORE_RUNNER_CREDENTIALS_JSON={}\n",
             shell_quote(&devfinity_runner_credentials_json(
-                StackProfile::ServicesOnly
+                StackProfile::ServicesOnly,
+                &stack.source_host_id()
             ))
         )));
         assert!(core_exports.contains(&format!(
