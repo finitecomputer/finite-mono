@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest import mock
+from uuid import uuid4
 
 from scripts import finite_status, finite_status_brain_bindings as bindings
 
@@ -69,22 +70,36 @@ class PrivateBindingTests(unittest.TestCase):
 
     @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
     def test_real_postgres_selects_only_requested_binding_from_read_only_snapshot(self):
-        fixture = """
-CREATE TEMP TABLE users(id text, normalized_email text, link_status text, workos_user_id text);
-CREATE OR REPLACE FUNCTION core_rfc3339(ts timestamptz) RETURNS text LANGUAGE sql IMMUTABLE
-AS $$ SELECT to_char(ts AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') $$;
+        schema = "binding_probe_" + uuid4().hex
+        command = ["psql", "--no-psqlrc", "-qAt", "--set", "ON_ERROR_STOP=1",
+                   "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]]
+        environment = {**os.environ, "PGOPTIONS": f"-c search_path={schema}"}
+
+        def cleanup():
+            result = subprocess.run(command, input=f"DROP SCHEMA IF EXISTS {schema} CASCADE;",
+                                    text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.addCleanup(cleanup)
+        migration = (Path(__file__).resolve().parents[2] /
+                     "finitecomputer-v2/crates/finite-saas-core/migrations/0017_rfc3339_reads.sql").read_text()
+        timestamp_function = migration[migration.index("CREATE OR REPLACE FUNCTION core_rfc3339"):]
+        timestamp_function = timestamp_function[:timestamp_function.index("$$;") + 3]
+        fixture = f"CREATE SCHEMA {schema};\nSET search_path={schema};\n" + timestamp_function + """
+CREATE TABLE users(id text, normalized_email text, link_status text, workos_user_id text);
 INSERT INTO users VALUES ('account-a','a@example.test','linked','user_synthetic'),
   ('unrequested','private@example.test','linked','user_not_requested');
 """
-        result = subprocess.run(
-            ["psql", "--no-psqlrc", "-qAt", "--set", "ON_ERROR_STOP=1",
-             "--set", 'account_ids=["account-a"]', "--dbname", os.environ["FC_CORE_POSTGRES_TEST_URL"]],
-            input=fixture + bindings.QUERY + "DROP FUNCTION core_rfc3339(timestamptz);\n", text=True, capture_output=True)
+        result = subprocess.run(command, input=fixture, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("user_not_requested", result.stdout)
-        report = bindings.report(["account-a"], json.loads(result.stdout))
+        with mock.patch.dict(finite_status.CONTRACT["database"], {"name": os.environ["FC_CORE_POSTGRES_TEST_URL"]}), \
+                mock.patch.object(finite_status, "postgres_environment", return_value=environment):
+            report = finite_status.collect_brain_scoped_bindings(self.input)
         self.assertTrue(report["coverage"]["complete"])
         self.assertEqual(report["bindings"], [self.row])
+        self.assertIsNotNone(finite_status.parse_time(report["generated_at"]))
+        self.assertNotIn("user_not_requested", json.dumps(report))
+        self.assertNotIn("private@example.test", json.dumps(report))
 
 
 if __name__ == "__main__":
