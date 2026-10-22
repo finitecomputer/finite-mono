@@ -194,6 +194,13 @@ gates whenever those restarts could interrupt users.
    current ownership from historical store presence. Reconcile every candidate
    to the fresh exact Brain roster, account subject and source evidence. Leave
    unsupported identities Unknown; retain non-controller historical wording.
+   For current Core enrollment bindings, use the private, opt-in
+   `scripts/finite-status --brain-scoped-bindings ACCOUNT_ID_JSON` mode with a
+   protected JSON array of 1–100 exact Core account IDs. Redirect its output
+   under `umask 077`; it contains email addresses and WorkOS subjects. Require
+   complete coverage and compare the returned stable account IDs with the
+   candidate. It reads one snapshot and never links an account or authenticates
+   it afresh with WorkOS. Never infer an account ID from an email match.
 6. Create one private manifest per exact Brain, binding the configured server,
    linked operator, evidence digests and current application window. Under the
    existing global Core CLI coordination lock, and with Core stable, preview
