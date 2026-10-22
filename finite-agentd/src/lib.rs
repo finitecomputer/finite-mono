@@ -1,5 +1,6 @@
 mod config;
 mod connections;
+mod control;
 mod daemon;
 mod google_scopes;
 mod hosted_hermes;
