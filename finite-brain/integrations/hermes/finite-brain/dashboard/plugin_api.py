@@ -182,6 +182,56 @@ def rfc3339(value):
     raise InvalidInventory()
 
 
+def operator_annotation(row, description):
+    """Withhold malformed annotations without turning them into contact/alias data."""
+    annotation = row.get("operatorAnnotation")
+    diagnostic = row.get("operatorRecord")
+    if not isinstance(annotation, dict) or set(annotation) != {
+        "kind",
+        "label",
+        "observedAt",
+    }:
+        return None
+    if not isinstance(diagnostic, dict) or diagnostic.get("state") != "used":
+        return None
+    if description.get("state") != "notShared" or any(
+        description.get(field) is not None
+        for field in (
+            "kind",
+            "displayName",
+            "accountEmail",
+            "responsibleAccount",
+            "source",
+            "lifecycle",
+        )
+    ):
+        return None
+    label, observed = annotation.get("label"), annotation.get("observedAt")
+    if annotation.get("kind") not in {"historical_identity", "invitation_key"}:
+        return None
+    if (
+        not isinstance(label, str)
+        or not 1 <= len(label) <= 120
+        or label.strip() != label
+    ):
+        return None
+    if any(not 0x20 <= ord(char) <= 0x7E for char in label):
+        return None
+    if (
+        not isinstance(observed, str)
+        or len(observed) > 40
+        or not observed.endswith("Z")
+    ):
+        return None
+    if diagnostic.get("observedAt") != observed:
+        return None
+    try:
+        rfc3339(observed)
+    except InvalidInventory:
+        return None
+    return {"kind": annotation["kind"], "label": label, "observedAt": observed}
+
+
 async def read_identities(brain_id):
     # The browser supplies only a Brain ID. The Agent's signer and the fixed
     # commands stay Agent-owned; Brain enforces admin authority on the report.
@@ -209,9 +259,23 @@ async def read_identities(brain_id):
     for row in records(report.get("identities"), MAX_IDENTITIES):
         # Name, email and owner exist only when Core resolved this key.
         description = record(row.get("description"))
+        annotation = operator_annotation(row, description)
         if description.get("state") != "resolved":
             description = {}
-        owner = description.get("responsibleAccount")
+        owner = (
+            description.get("responsibleAccount")
+            if description.get("kind") == "agent"
+            else None
+        )
+        lifecycle = (
+            description.get("lifecycle") if description.get("kind") == "agent" else None
+        )
+        if lifecycle is not None and lifecycle not in {
+            "active",
+            "offboarding",
+            "retired",
+        }:
+            raise InvalidInventory()
         # The public name Brain stored for this exact key, whatever Core
         # resolved: any stored name for a key that acted in this Brain, else
         # only its finite.vip Directory name.
@@ -222,6 +286,8 @@ async def read_identities(brain_id):
                 "npub": text(row.get("npub"), 128),
                 "role": text(row.get("brainRole"), 64),
                 "kind": optional_text(description.get("kind")),
+                "lifecycle": lifecycle,
+                "operatorAnnotation": annotation,
                 "name": optional_text(description.get("displayName")),
                 "email": optional_text(description.get("accountEmail")),
                 "ownerEmail": None

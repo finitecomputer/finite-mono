@@ -153,6 +153,61 @@ class BrainScratchTests(unittest.TestCase):
     def collect(self, brain_id="content-brain") -> dict:
         return roster.collect_brain(self.database, brain_id, finite_status.scratch_copy_sqlite, query)
 
+    def test_inventory_includes_empty_and_personal_brains_without_private_fields(self):
+        with contextlib.closing(sqlite3.connect(self.database)) as connection:
+            connection.execute("INSERT INTO brains VALUES (?, ?, ?, ?, ?)",
+                               ("personal-empty", "personal", "Personal", SECRET_MARKER, "today"))
+            connection.commit()
+        before = self.database.read_bytes()
+        report = roster.collect_inventory(self.database, finite_status.scratch_copy_sqlite, query)
+        self.assertEqual(self.database.read_bytes(), before)
+        self.assertEqual(report["coverage"]["state"], "complete")
+        self.assertEqual(report["coverage"]["brainCount"], 3)
+        self.assertEqual([r["id"] for r in report["brains"]],
+                         ["content-brain", "other", "personal-empty"])
+        self.assertTrue(all(set(r) == {"id", "kind", "name"} for r in report["brains"]))
+        self.assertNotIn(SECRET_MARKER, json.dumps(report))
+
+    def test_inventory_overflow_and_invalid_metadata_refuse_incomplete_census(self):
+        with mock.patch.object(roster, "MAX_BRAINS", 1):
+            with self.assertRaisesRegex(roster.RosterError, "exceeded its 1-row bound"):
+                roster.collect_inventory(self.database, finite_status.scratch_copy_sqlite, query)
+        for column, value in [("id", "invalid/id"), ("name", "x" * 257), ("kind", "new-kind")]:
+            with self.subTest(column=column):
+                with contextlib.closing(sqlite3.connect(self.database)) as connection:
+                    connection.execute(f"UPDATE brains SET {column} = ? WHERE id = 'other'", (value,))
+                    connection.commit()
+                with self.assertRaisesRegex(roster.RosterError, "invalid, oversized or duplicate"):
+                    roster.collect_inventory(self.database, finite_status.scratch_copy_sqlite, query)
+                with contextlib.closing(sqlite3.connect(self.database)) as connection:
+                    connection.execute("DELETE FROM brains WHERE id != 'content-brain'")
+                    connection.execute("INSERT INTO brains VALUES ('other','organization','Other',NULL,'today')")
+                    connection.commit()
+
+    def test_inventory_cli_dispatch_is_read_only_and_json(self):
+        expected = {"exit_code": 0, "brains": [], "coverage": {"state": "complete"}}
+        with mock.patch.object(finite_status, "collect_brain_inventory", return_value=expected) as collect, \
+                mock.patch.object(finite_status, "collect_live", side_effect=AssertionError("fleet read")), \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as stopped:
+                finite_status.main(["--brain-inventory"])
+        self.assertEqual(stopped.exception.code, 0)
+        self.assertEqual(json.loads(output.getvalue()), expected)
+        collect.assert_called_once_with()
+
+    def test_metadata_census_skip_is_explicit_and_requires_exact_brain(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as stopped:
+            finite_status.parse_args(["--brain-roster-skip-hosted"])
+        self.assertEqual(stopped.exception.code, 2)
+        expected = {"exit_code": 0, "evidence": {"hostedChatStores": {"state": "notChecked"}}}
+        with mock.patch.object(finite_status, "collect_brain_roster", return_value=expected) as collect, \
+                contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(SystemExit) as stopped:
+                finite_status.main(["--brain-roster", "content-brain", "--brain-roster-skip-hosted"])
+        self.assertEqual(stopped.exception.code, 0)
+        collect.assert_called_once_with("content-brain", skip_hosted=True)
+        self.assertEqual(json.loads(output.getvalue()), expected)
+
     def test_exact_brain_roster_reads_metadata_and_never_payloads(self):
         before = self.database.read_bytes()
         brain = self.collect()

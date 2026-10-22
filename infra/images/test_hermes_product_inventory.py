@@ -242,6 +242,55 @@ print(json.dumps(payload))
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.json()["brains"][0]["folders"])
 
+    def test_scoped_annotations_are_bounded_dated_and_never_owner_contacts(self):
+        annotation = {
+            "kind": "historical_identity",
+            "label": "Previous example Agent",
+            "observedAt": "2026-01-01T00:00:00Z",
+        }
+        row = {
+            "npub": "npub1a",
+            "brainRole": "admin",
+            "folders": [],
+            "description": {"state": "notShared"},
+            "operatorAnnotation": annotation,
+            "operatorRecord": {
+                "state": "used",
+                "revision": "opaque",
+                "observedAt": annotation["observedAt"],
+            },
+        }
+        report = {
+            "version": "finite-brain-access-report-v1",
+            "brainId": "agent-brain",
+            "identities": [row],
+        }
+
+        def fetch(candidate):
+            report["identities"] = [candidate]
+            (self.agent / "access.json").write_text(json.dumps(report))
+            response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()["identities"][0]
+
+        self.assertEqual(fetch(row)["operatorAnnotation"], annotation)
+        for annotation_change in (
+            {"kind": "owner"},
+            {"label": "x" * 121},
+            {"label": "Unicode \u2014"},
+            {"label": " leading"},
+            {"observedAt": "2026-02-30T00:00:00Z"},
+            {"observedAt": "2026-01-01T00:00:00+00:00"},
+            {"ownerEmail": "secret@example.test"},
+        ):
+            projected = fetch({**row, "operatorAnnotation": {**annotation, **annotation_change}})
+            self.assertIsNone(projected["operatorAnnotation"])
+            self.assertIsNone(projected["ownerEmail"])
+            self.assertIsNone(projected["name"])
+        self.assertIsNone(
+            fetch({**row, "operatorRecord": {"state": "conflict"}})["operatorAnnotation"]
+        )
+
     def test_brain_identities_project_roster_fields_and_stored_public_name(self):
         agent = {
             "state": "resolved",
@@ -287,7 +336,14 @@ print(json.dumps(payload))
         response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
         self.assertEqual(response.status_code, 200, response.text)
         unnamed = {"publicName": None, "publicNameStoredAt": None}
-        empty = {"kind": None, "name": None, "email": None, "ownerEmail": None}
+        empty = {
+            "kind": None,
+            "name": None,
+            "email": None,
+            "ownerEmail": None,
+            "lifecycle": None,
+            "operatorAnnotation": None,
+        }
         self.assertEqual(
             response.json()["identities"],
             [
@@ -298,6 +354,8 @@ print(json.dumps(payload))
                     "name": "Ada",
                     "email": None,
                     "ownerEmail": "sam@example.test",
+                    "lifecycle": "active",
+                    "operatorAnnotation": None,
                     **unnamed,
                     "folders": [{"id": "folder", "state": "ready"}],
                 },

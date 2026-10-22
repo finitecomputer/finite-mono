@@ -1,6 +1,8 @@
 use super::*;
 mod credential_recovery;
 pub(super) use credential_recovery::*;
+mod brain_scoped;
+pub(super) use brain_scoped::*;
 mod arguments;
 pub(super) use arguments::*;
 mod lifecycle;

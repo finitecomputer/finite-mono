@@ -487,10 +487,13 @@ class CiHarnessSelectionTests(unittest.TestCase):
         )
 
     def test_finite_status_script_runs_only_finite_status_contract(self) -> None:
-        self.assertEqual(
-            selected("scripts/finite_status.py"),
-            {"run_finite_status_contract"},
-        )
+        for path in (
+            "scripts/finite_status.py",
+            "scripts/finite_status_hosted_identity.py",
+            "scripts/tests/test_finite_status_hosted_identity.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_finite_status_contract"})
 
     def test_runner_host_address_inputs_run_finite_status_and_nix_contracts(self) -> None:
         # finite-status probes Agent contact only at the address each Runner

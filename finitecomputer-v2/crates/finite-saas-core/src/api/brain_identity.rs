@@ -3,6 +3,9 @@
 //! router nor the runtime router mounts them.
 
 use super::*;
+use crate::brain_identity::scoped::{
+    DESCRIPTIONS_VERSION_V3, ScopedDescriptionsRequest, ScopedDescriptionsResponse,
+};
 use crate::brain_identity::{
     BrainAccountObservationRequest, BrainAccountObservationResponse, BrainIdentityConfig,
     BrainIdentityDescriptionsRequest, BrainIdentityDescriptionsResponse, DESCRIPTION_BUDGET,
@@ -107,30 +110,87 @@ async fn describe_identities(
     State(state): State<BrainIdentityState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<BrainIdentityDescriptionsResponse>, ApiError> {
+) -> Result<Json<Value>, ApiError> {
     if !state.config.description_credential_matches(
         header_value(&headers, DESCRIPTION_CREDENTIAL_HEADER).as_deref(),
     ) {
         return Err(ApiError::unauthorized("invalid description credential"));
     }
-    let request: BrainIdentityDescriptionsRequest = serde_json::from_slice(&body)
+    // Detect version-specific semantic violations before strict DTO parsing;
+    // these must never resemble an old Core's negotiation error (P2).
+    let value: Value = serde_json::from_slice(&body)
         .map_err(|_| ApiError::bad_request("invalid descriptions request body"))?;
-    request
-        .validate(&state.config.brain_server)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| ApiError::bad_request("invalid descriptions request body"))?;
+    let version = object.get("version").and_then(Value::as_str).unwrap_or("");
+    let is_v3 = version == DESCRIPTIONS_VERSION_V3;
+    let allowed = [
+        "version",
+        "brainServer",
+        "brainId",
+        "requestedByPublicKeyHex",
+        "publicKeysHex",
+    ];
+    if object.keys().any(|key| {
+        !(allowed.contains(&key.as_str()) || is_v3 && key == "participatingPublicKeysHex")
+    }) {
+        return Err(ApiError::bad_request(
+            "unexpected version-specific descriptions field",
+        ));
+    }
     let checked_at = crate::current_time_iso()?;
-    let results = tokio::time::timeout(
-        DESCRIPTION_BUDGET,
-        state.api.store.describe_brain_identities(&request),
-    )
-    .await
-    .map_err(|_| ApiError::service_unavailable("identity description budget exceeded"))??;
-    // Echo the validated request version: it names the disclosure policy used.
-    let response = BrainIdentityDescriptionsResponse {
-        version: request.version.clone(),
-        brain_id: request.brain_id.clone(),
-        checked_at,
-        results,
+    let (response, brain_id, requested_by, count) = if is_v3 {
+        if !object.contains_key("participatingPublicKeysHex") {
+            return Err(ApiError::bad_request("v3 participating subset is required"));
+        }
+        let request: ScopedDescriptionsRequest = serde_json::from_slice(&body)
+            .map_err(|_| ApiError::bad_request("invalid v3 descriptions fields"))?;
+        request
+            .validate(&state.config.brain_server)
+            .map_err(ApiError::bad_request)?;
+        let results = tokio::time::timeout(
+            DESCRIPTION_BUDGET,
+            state.api.store.describe_scoped_brain_identities(&request),
+        )
+        .await
+        .map_err(|_| ApiError::service_unavailable("identity description budget exceeded"))??;
+        let response = ScopedDescriptionsResponse {
+            version: request.version,
+            brain_id: request.brain_id.clone(),
+            checked_at,
+            results,
+        };
+        (
+            serde_json::to_value(response).map_err(|e| CoreError::Store(e.to_string()))?,
+            request.brain_id,
+            request.requested_by_public_key_hex,
+            request.public_keys_hex.len(),
+        )
+    } else {
+        let request: BrainIdentityDescriptionsRequest = serde_json::from_slice(&body)
+            .map_err(|_| ApiError::bad_request("invalid descriptions request body"))?;
+        request
+            .validate(&state.config.brain_server)
+            .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let results = tokio::time::timeout(
+            DESCRIPTION_BUDGET,
+            state.api.store.describe_brain_identities(&request),
+        )
+        .await
+        .map_err(|_| ApiError::service_unavailable("identity description budget exceeded"))??;
+        let response = BrainIdentityDescriptionsResponse {
+            version: request.version,
+            brain_id: request.brain_id.clone(),
+            checked_at,
+            results,
+        };
+        (
+            serde_json::to_value(response).map_err(|e| CoreError::Store(e.to_string()))?,
+            request.brain_id,
+            request.requested_by_public_key_hex,
+            request.public_keys_hex.len(),
+        )
     };
     if serde_json::to_vec(&response)
         .map_err(|error| CoreError::Store(error.to_string()))?
@@ -144,9 +204,9 @@ async fn describe_identities(
     // Audit: the calling admin's public key, the Brain and counts. Routine
     // logs never carry contact details.
     tracing::info!(
-        brain_id = %request.brain_id,
-        requested_by = %request.requested_by_public_key_hex,
-        keys = request.public_keys_hex.len(),
+        brain_id = %brain_id,
+        requested_by = %requested_by,
+        keys = count,
         "brain identity descriptions"
     );
     Ok(Json(response))

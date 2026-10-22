@@ -3,6 +3,8 @@
 //! audience; it never decides access. See
 //! `finitecomputer-v2/docs/brain-identity-descriptions-v1.md`.
 
+pub(crate) mod scoped;
+
 use std::collections::BTreeSet;
 use std::io::Read;
 use std::net::IpAddr;
@@ -151,11 +153,13 @@ pub(crate) struct CoreLookupRequest {
 
 /// Blocking lookup, called off the async runtime and never while the store
 /// mutex is held.
+#[cfg(test)]
 pub(crate) type CoreDescriptionLookup = Arc<
     dyn Fn(&CoreLookupRequest) -> Result<CoreDescriptionsResponse, CoreLookupFailure> + Send + Sync,
 >;
 
 /// Build the HTTP lookup against Core's private Brain identity listener.
+#[cfg(test)]
 pub(crate) fn http_core_description_lookup(
     base_url: &str,
     credential: String,
@@ -278,10 +282,13 @@ fn refuses_version(response: ureq::Response) -> bool {
     let mut bytes = Vec::new();
     if response
         .into_reader()
-        .take(MAX_ERROR_BYTES)
+        .take(MAX_ERROR_BYTES + 1)
         .read_to_end(&mut bytes)
         .is_err()
     {
+        return false;
+    }
+    if bytes.len() as u64 > MAX_ERROR_BYTES {
         return false;
     }
     serde_json::from_slice::<serde_json::Value>(&bytes)

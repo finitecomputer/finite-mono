@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn scoped_records_preview_is_default_and_execute_requires_reviewed_digest() {
+    let args = [
+        "finite-saas-core",
+        "brain-scoped-records",
+        "--manifest",
+        "private.json",
+    ];
+    assert!(matches!(
+        Args::try_parse_from(args).unwrap().command,
+        Some(Command::BrainScopedRecords {
+            execute: false,
+            expected_manifest_sha256: None,
+            ..
+        })
+    ));
+    assert!(Args::try_parse_from(args.into_iter().chain(["--execute"])).is_err());
+    assert!(Args::try_parse_from(["finite-saas-core", "brain-scoped-records"]).is_err());
+    assert!(matches!(
+        Args::try_parse_from(args.into_iter().chain([
+            "--execute",
+            "--expected-manifest-sha256",
+            &"a".repeat(64)
+        ]))
+        .unwrap()
+        .command,
+        Some(Command::BrainScopedRecords { execute: true, .. })
+    ));
+}
+
+#[test]
 fn canary_retry_requires_exact_ids_and_defaults_to_preview() {
     let args = [
         "finite-saas-core",

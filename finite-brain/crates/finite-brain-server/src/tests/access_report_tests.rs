@@ -1,6 +1,8 @@
 //! Access report through the public signed router. Every identity, name, and
 //! domain here is synthetic.
 
+mod scoped;
+
 use super::*;
 use crate::core_descriptions::{
     CORE_BATCH_KEYS, CoreDescription, CoreDescriptionsResponse, CoreLookupFailure,
@@ -73,7 +75,7 @@ fn lookup_fn(
 ) -> Option<CoreDescriptionClient> {
     Some(CoreDescriptionClient {
         brain_server: TEST_BASE_URL.trim_end_matches('/').to_owned(),
-        lookup: Arc::new(lookup),
+        lookup: crate::core_descriptions::scoped::legacy_fixture(Arc::new(lookup)),
     })
 }
 

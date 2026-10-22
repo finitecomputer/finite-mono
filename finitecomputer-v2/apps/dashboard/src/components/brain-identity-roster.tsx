@@ -24,7 +24,7 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
         <thead><tr><th scope="col">Identity</th><th scope="col">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th></tr></thead>
         <tbody>{data.map(row => <tr key={row.npub}>
           <IdentityCell row={row} />
-          <td>{row.ownerEmail}</td>
+          <td>{row.kind === "agent" ? row.ownerEmail : null}</td>
           <td>{roles[row.role] ?? row.role}</td>
           <td>{row.folders.map(folder => `${folderNames.get(folder.id) ?? folder.id}${folderStates[folder.state] ? ` (${folderStates[folder.state]})` : ""}`).join(", ")}</td>
           <td><span className="font-mono text-xs" title={row.npub}>{`${row.npub.slice(0, 12)}…${row.npub.slice(-6)}`}</span></td>
