@@ -240,6 +240,7 @@ STATUS_BUNDLE_FILES = (
     "finite_status_brain_roster.py",
     "finite_status_hosted_identity.py",
     "finite_status_brain_scoped.py",
+    "finite_status_brain_bindings.py",
     "finite_status_brain_protocol.py",
     "finite_tinfoil_status.py",
     "kata_guest_probe.py",
@@ -2842,6 +2843,29 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     return raw
 
 
+def collect_brain_scoped_bindings(account_file: Path) -> dict[str, Any]:
+    """Opt-in private export for exact scoped-manifest account bindings."""
+    if __package__:
+        from . import finite_status_brain_bindings as bindings
+    else:
+        import finite_status_brain_bindings as bindings
+    try:
+        requested = bindings.account_ids(account_file)
+        result = run_read_only(
+            ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+             "--set", "ON_ERROR_STOP=1", "--set", "account_ids=" + json.dumps(requested),
+             "--dbname", CONTRACT["database"]["name"]],
+            environment=postgres_environment(), input_text=bindings.QUERY)
+        if result.returncode != 0 or len(result.stdout.encode()) > bindings.MAX_BYTES:
+            raise ValueError("binding query failed")
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or not isinstance(payload.get("checkedAt"), str) or parse_time(payload["checkedAt"]) is None:
+            raise ValueError("invalid binding observation time")
+        return bindings.report(requested, payload)
+    except (OSError, ValueError, TypeError, KeyError, CollectionError):
+        raise CollectionError("private Core account binding export unavailable or invalid") from None
+
+
 def collect_brain_hosted_census(key_file: Path) -> dict[str, Any]:
     """Inspect only exact requested public keys across every hosted user root."""
     if __package__:
@@ -4897,6 +4921,10 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
+        "--brain-scoped-bindings", type=Path, metavar="ACCOUNT_ID_JSON",
+        help="operator-only private contact/WorkOS binding export for 1-100 exact Core account IDs",
+    )
+    mode.add_argument(
         "--brain-hosted-census", type=Path, metavar="PUBLIC_KEY_JSON",
         help="operator-only: match exact hex public keys against all hosted current selectors and store metadata",
     )
@@ -4985,6 +5013,8 @@ def main(arguments: list[str] | None = None) -> None:
             report = collect_brain_identity()
         elif options.brain_hosted_census:
             report = collect_brain_hosted_census(options.brain_hosted_census)
+        elif options.brain_scoped_bindings:
+            report = collect_brain_scoped_bindings(options.brain_scoped_bindings)
         elif options.brain_inventory:
             report = collect_brain_inventory()
         elif options.brain_roster:
@@ -5024,6 +5054,7 @@ def main(arguments: list[str] | None = None) -> None:
         or options.brain_identity
         or options.brain_inventory
         or options.brain_hosted_census
+        or options.brain_scoped_bindings
         or options.brain_roster
         or options.runtime_route
         or options.runtime_lifecycle
