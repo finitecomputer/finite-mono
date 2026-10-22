@@ -274,7 +274,7 @@ print(json.dumps(payload))
             return response.json()["identities"][0]
 
         self.assertEqual(fetch(row)["operatorAnnotation"], annotation)
-        for patch in (
+        for annotation_change in (
             {"kind": "owner"},
             {"label": "x" * 121},
             {"label": "Unicode \u2014"},
@@ -283,7 +283,7 @@ print(json.dumps(payload))
             {"observedAt": "2026-01-01T00:00:00+00:00"},
             {"ownerEmail": "secret@example.test"},
         ):
-            projected = fetch({**row, "operatorAnnotation": {**annotation, **patch}})
+            projected = fetch({**row, "operatorAnnotation": {**annotation, **annotation_change}})
             self.assertIsNone(projected["operatorAnnotation"])
             self.assertIsNone(projected["ownerEmail"])
             self.assertIsNone(projected["name"])
