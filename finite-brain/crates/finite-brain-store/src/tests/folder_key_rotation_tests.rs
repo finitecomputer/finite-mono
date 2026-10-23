@@ -931,7 +931,7 @@ fn mount_rotations_enforce_fan_out_at_the_store_boundary() {
             )
         })
         .collect::<Vec<_>>();
-    let records = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
+    let records = (0..=MAX_FOLDER_ACCESS_REMOVAL_RECORDS)
         .map(|index| {
             revision_record_struct(
                 &format!("mount-fanout-record-{index}"),
