@@ -12,7 +12,7 @@ mod rollout_planning;
 
 /// Serializes the tests that point `FC_CORE_DATABASE_URL` at a database,
 /// since the admin commands read it from the process environment.
-static DB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(super) static DB_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Run `test` with `FC_CORE_DATABASE_URL` set to a migrated database, so a
 /// `--dry-run` command exercises the real SQL path.

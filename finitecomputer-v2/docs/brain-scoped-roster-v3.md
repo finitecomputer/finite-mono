@@ -125,9 +125,11 @@ retirement afterward. An older binary must reopen populated tables without
 altering them; a source-only compatibility argument is insufficient.
 
 All Core operator CLI invocations use the deployment's existing global CLI
-coordination lock and never overlap a Core restart: execute repeats startup
-schema DDL. That operational lock is not a new global PostgreSQL advisory lock;
-the transaction itself locks affected accounts, evidence and records.
+coordination lock and never overlap a Core restart. Scoped preview, apply,
+exact replay and retirement connect to the already installed schema without
+running startup migrations; missing schema fails closed. That operational lock
+is not a new global PostgreSQL advisory lock; the transaction itself locks
+affected accounts, evidence and records.
 
 ## Verification signals
 
