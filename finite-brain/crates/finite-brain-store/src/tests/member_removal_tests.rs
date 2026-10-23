@@ -449,3 +449,58 @@ fn removal_after_another_admin_rotated_a_planned_folder_says_to_rerun() {
     let fresh = rotations_for(&store, &replanned);
     remove_demoted(&mut store, &fresh).unwrap();
 }
+
+/// An accepted Folder stays revocable however many objects it holds. The
+/// per-Folder rotation limit once refused more than 1,000 re-encrypted
+/// records, so a Member holding the key of a larger Folder could not be removed.
+#[test]
+fn removal_rotates_a_folder_holding_more_than_a_thousand_objects() {
+    let mut store = demoted_admin_store();
+    // demoted_admin_store already holds obj_000000000001.
+    for index in 2..=1_001 {
+        store
+            .submit_sync_record(
+                &acme(),
+                &revision_record(
+                    &format!("event-create-{index}"),
+                    &format!("obj_{index:012}"),
+                    1,
+                    None,
+                    "create",
+                ),
+            )
+            .unwrap();
+    }
+    let planned = plan(&store, DEMOTED).unwrap();
+    let mut rotations = rotations_for(&store, &planned);
+    let strategy = rotations
+        .iter_mut()
+        .find(|rotation| rotation.folder_id.as_str() == "strategy")
+        .unwrap();
+    strategy.reencrypted_records = (1..=1_001)
+        .map(|index| {
+            revision_record_struct(
+                &format!("event-removal-reencrypt-{index}"),
+                "strategy",
+                &format!("obj_{index:012}"),
+                2,
+                Some(1),
+                "reencrypted",
+            )
+        })
+        .collect();
+
+    remove_demoted(&mut store, &rotations).unwrap();
+
+    assert_eq!(folder(&store, "strategy").current_key_version, 2);
+    assert!(!current_grant_recipients(&store, "strategy").contains(&user(DEMOTED)));
+    assert!(
+        store
+            .load_brain(&acme())
+            .unwrap()
+            .brain
+            .members
+            .iter()
+            .all(|member| member.user_id != user(DEMOTED))
+    );
+}

@@ -3456,7 +3456,8 @@ fn parse_folder_access(value: &str) -> Result<FolderAccessMode, StoreError> {
 mod tests {
     use super::*;
     use finite_brain_core::{
-        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, bootstrap_organization_brain, bootstrap_personal_brain,
+        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        bootstrap_organization_brain, bootstrap_personal_brain,
     };
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
