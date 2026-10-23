@@ -2,6 +2,8 @@
 use super::*;
 use finite_saas_core::brain_identity::scoped::{MAX_MANIFEST_BYTES, ScopedManifest};
 use std::io::Read;
+#[cfg(test)]
+mod tests;
 
 pub(crate) async fn brain_scoped_records_command(
     path: std::path::PathBuf,
@@ -9,6 +11,14 @@ pub(crate) async fn brain_scoped_records_command(
     execute: bool,
 ) -> Result<()> {
     require_root()?;
+    run_scoped_records_command(path, expected_digest, execute).await
+}
+
+async fn run_scoped_records_command(
+    path: std::path::PathBuf,
+    expected_digest: Option<String>,
+    execute: bool,
+) -> Result<()> {
     // Match service configuration parsing, without normalizing the manifest.
     let server = required_env("FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER")?
         .trim()
@@ -32,7 +42,20 @@ pub(crate) async fn brain_scoped_records_command(
     if execute && expected_digest.is_none() {
         bail!("execute requires the reviewed manifest digest");
     }
-    let store = postgres_store_from_env(ImportMode::from_dry_run(!execute)).await?;
+    // This is an operation on an already deployed schema. The service owns
+    // migration: even repeat-safe startup DDL takes broad table locks and can
+    // abort live Core work. Apply, replay and retirement must never run it.
+    let database_url = required_env("FC_CORE_DATABASE_URL")?;
+    let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
+    let store = tokio::time::timeout(timeout, async {
+        if execute {
+            CoreStore::connect(&database_url).await
+        } else {
+            CoreStore::connect_dry_run(&database_url).await
+        }
+    })
+    .await
+    .context("Core Postgres connection timed out")??;
     let receipt = store
         .execute_brain_scoped_manifest(&manifest, &server, time::OffsetDateTime::now_utc())
         .await?;

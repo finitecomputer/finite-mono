@@ -207,7 +207,12 @@ gates whenever those restarts could interrupt users.
    each using `finite-saas-core brain-scoped-records --manifest PATH`. Verify
    expected created/no-op rows and the natural keys, not random preview IDs.
    Protect files/receipts as private. No direct database edits substitute for
-   the writer.
+   the writer. Preview, apply, exact replay and retirement connect to the
+   already installed schema without running startup migrations. Missing schema
+   fails closed; deploy schema through the service release procedure first.
+   Connection establishment is bounded by `FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS`
+   (default 60 seconds); the scoped transaction retains its per-statement and
+   lock timeouts. The command does not automatically retry a failed operation.
 7. Apply a designated canary Brain with the identical manifest and preview's
    `--expected-manifest-sha256`, adding `--execute`. Keep the committed receipt.
    Verify the exact roster, unchanged access, v3 coverage, expected annotations,
