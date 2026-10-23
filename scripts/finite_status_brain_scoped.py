@@ -36,7 +36,10 @@ WITH records AS (
   FROM agent_runtimes r LEFT JOIN projects p ON p.id=r.project_id
   WHERE r.health_reporting_npub IS NOT NULL ORDER BY r.id LIMIT 10001
 )
-SELECT json_build_object('scoped_record_facts', json_build_object(
+-- The collector reads one JSON document per psql output line. json_agg of
+-- composite rows inserts physical newlines; the outer jsonb conversion
+-- serializes the complete document onto one line, including nested arrays.
+SELECT jsonb_build_object('scoped_record_facts', json_build_object(
   'schema_present',true,
   'active',(SELECT count(*) FROM brain_scoped_records WHERE retired_at IS NULL),
   'retired',(SELECT count(*) FROM brain_scoped_records WHERE retired_at IS NOT NULL),

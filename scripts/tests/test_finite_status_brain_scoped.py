@@ -4,7 +4,9 @@ import json
 import os
 import subprocess
 import unittest
+from unittest import mock
 
+from scripts import finite_status
 from scripts import finite_status_brain_scoped as scoped
 from scripts.tests.test_finite_status_brain_roster import npub
 
@@ -22,6 +24,63 @@ def pin(**overrides):
 
 
 class ScopedStatusTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get("FC_CORE_POSTGRES_TEST_URL"), "requires disposable Core Postgres")
+    def test_real_collector_accepts_multiple_pin_and_record_rows(self):
+        fixture = f"""
+CREATE TEMP TABLE brain_scoped_records(id text, public_key_hex text, kind text, account_id text,
+  project_id text, workos_subject text, retired_at timestamptz);
+CREATE TEMP TABLE users(id text, link_status text, workos_user_id text);
+CREATE TEMP TABLE projects(id text, owner_user_id text);
+CREATE TEMP TABLE agent_runtimes(id text, project_id text, health_reporting_npub text, offboarding_phase text);
+CREATE TEMP TABLE project_runtime_links(agent_runtime_id text, project_id text, active boolean);
+CREATE TEMP TABLE account_brain_principals(public_key_hex text, status text, user_id text);
+CREATE TEMP TABLE account_brain_sharing_scopes(brain_server text, brain_id text, revoked_at timestamptz);
+CREATE TEMP TABLE brain_account_observation_receipts(outcome text, recorded_at timestamptz);
+INSERT INTO users VALUES ('a','linked','private-subject');
+INSERT INTO projects VALUES ('p','a');
+INSERT INTO agent_runtimes VALUES ('r1','p','{npub(KEY)}',NULL), ('r2','p','{npub(KEY)}',NULL);
+INSERT INTO project_runtime_links VALUES ('r1','p',true);
+"""
+        records = f"""
+INSERT INTO brain_scoped_records VALUES
+ ('opaque-good','{KEY}','managed_agent','a','p','private-subject',NULL),
+ ('opaque-conflict','{KEY}','managed_agent','a','p','changed-subject',NULL);
+"""
+        original_run = finite_status.run_read_only
+        for rows, active, conflicts in (("", 0, 0), (records, 2, 1)):
+            with self.subTest(active=active):
+                outputs = []
+
+                def run_with_session_fixture(command, *, environment, input_text):
+                    self.assertIn("ISOLATION LEVEL REPEATABLE READ READ ONLY", input_text)
+                    result = original_run(command, environment=environment,
+                                          input_text=fixture + rows + input_text)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    outputs.append(result.stdout)
+                    return result
+
+                # Only the disposable connection and session-local fixture setup
+                # differ. Exercise the real collector, both real SQL documents,
+                # psql transport, parsing and contact-free projection together.
+                with mock.patch.dict(finite_status.CONTRACT["database"],
+                                     {"name": os.environ["FC_CORE_POSTGRES_TEST_URL"]}), \
+                        mock.patch.object(finite_status, "postgres_environment", return_value=dict(os.environ)), \
+                        mock.patch.object(finite_status, "run_read_only", side_effect=run_with_session_fixture):
+                    report = finite_status.collect_brain_identity()
+                self.assertEqual(len(outputs), 1)
+                self.assertEqual(len(outputs[0].splitlines()), 2)
+                summary = report["brain_identity"]["scoped_records"]
+                self.assertEqual(summary["state"], "checked")
+                self.assertTrue(summary["schema_present"])
+                self.assertEqual(summary["active"], active)
+                self.assertEqual(summary["retired"], 0)
+                self.assertEqual(summary["conflictCount"], conflicts)
+                if conflicts:
+                    self.assertEqual(summary["conflicts"], [
+                        {"recordId": "opaque-conflict", "reason": "accountBindingChanged"}])
+                for private in (KEY, npub(KEY), "private-subject", "changed-subject"):
+                    self.assertNotIn(private, json.dumps(report))
+
     def test_same_binding_conflicts_as_core_and_no_contact_dependency(self):
         cases = [
             (record(), [pin()], None),
