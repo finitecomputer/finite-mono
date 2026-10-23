@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -792,7 +793,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         self.assertEqual(runner["pin_status"], "unknown")
         self.assertEqual(runner["pin_state"], "unresolved")
 
-    def test_json_has_five_sections_and_red_exit(self) -> None:
+    def test_json_has_every_section_and_red_exit(self) -> None:
         result = subprocess.run(
             [str(COMMAND), "--json", "--fixture", str(FIXTURE)],
             cwd=ROOT,
@@ -810,6 +811,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 "recovery_boundary",
                 "rollout_state",
                 "chat_plane",
+                "direct_chat",
             },
         )
         self.assertEqual(payload["overall_status"], "red")
@@ -824,9 +826,13 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
                 "recovery_boundary",
                 "rollout_state",
                 "chat_plane",
+                "direct_chat",
             )
         }
         report = {"sections": sections}
+        self.assertEqual(finite_status.report_exit_code(report), 0)
+        # Amber is attention (a pending direct-chat fold), never a failure.
+        sections["direct_chat"]["status"] = "amber"
         self.assertEqual(finite_status.report_exit_code(report), 0)
         sections["host_health"]["status"] = "unknown"
         self.assertEqual(finite_status.report_exit_code(report), 2)
@@ -2233,6 +2239,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
             mock.patch.object(finite_status, "build_recovery", return_value=green),
             mock.patch.object(finite_status, "build_rollout", return_value=green),
             mock.patch.object(finite_status, "build_chat_plane", return_value=green),
+            mock.patch.object(finite_status, "build_direct_chat", return_value=green),
         ):
             return finite_status.build_report({"host_health": host_health}, finite_status.parse_time("2026-10-11T23:00:00Z"))
 
@@ -3203,6 +3210,240 @@ class HostedHermesStatusTests(unittest.TestCase):
         del raw["host_health"]["hosted_hermes"]
         report = finite_status.build_report(raw, now)
         self.assertEqual(report["sections"]["host_health"]["hosted_hermes"]["state"], "not-observed")
+
+
+class DirectChatStatusTests(unittest.TestCase):
+    OWNER = "5e" * 32
+    DIGEST = "7d" * 32
+    OTHER_ACCOUNT = "4b" * 32
+    ROOM = "room-0123456789abcdef"
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.work_root = Path(self.directory.name) / "work"
+        self.kata = self.work_root / "kata"
+        self.kata.mkdir(parents=True)
+        self.outside = Path(self.directory.name) / "outside"
+        self.outside.mkdir()
+
+    def record(self, state_dir: str, contents: str | dict | None) -> Path:
+        """Write <state dir>/agent/direct/fold-status.json, as the sidecar does."""
+        direct = self.kata / state_dir / "agent" / "direct"
+        direct.mkdir(parents=True)
+        path = direct / "fold-status.json"
+        if contents is not None:
+            path.write_text(contents if isinstance(contents, str) else json.dumps(contents))
+        return path
+
+    def fleet(self) -> None:
+        """One synthetic Agent per outcome the probe must tell apart."""
+        (self.kata / "runtime-mls" / "agent").mkdir(parents=True)
+        (self.kata / "runtime-mls" / "agent" / "store.sqlite3").write_text("mls")
+        (self.kata / "runtime-empty").mkdir()
+        self.record("runtime-fold", {
+            "origin": "fold", "source": "agent-store", "owner_account_id": self.OWNER,
+            "rooms": [{"room_id": self.ROOM, "events": 3, "last_applied_seq": 9, "members": 2}],
+            "summary": "1 rooms, 3 events",
+            "digests": [{"room_id": self.ROOM, "digest": self.DIGEST, "topics": []}],
+        })
+        self.record("runtime-fresh", {"origin": "fresh", "source": None, "owner_account_id": self.OWNER,
+                                      "rooms": [{"room_id": self.ROOM}], "summary": "new room"})
+        self.pending_error = (
+            f"direct fold refused: rooms are behind the chat server: {self.ROOM}; owner {self.OTHER_ACCOUNT} "
+            f"npub1{'q' * 58}\n\x1b[31mforged line\ud800\u2028\u202e" + " detail" * 60
+        )
+        self.record("runtime-pending", {"origin": "pending", "error": self.pending_error, "at_unix_seconds": 1_760_000_000})
+        self.record("runtime-malformed", "{not json")
+        self.record("runtime-unrecorded", None)
+
+    def collect(self) -> dict:
+        return finite_status.collect_direct_chat("finite-lat-3", self.work_root)
+
+    def states(self, raw: dict) -> dict[str, str]:
+        return {agent["state_dir"]: agent["state"] for agent in raw["agents"]}
+
+    def test_fleet_counts_each_outcome_and_pending_is_amber(self):
+        self.fleet()
+        section = finite_status.build_direct_chat(self.collect())
+        self.assertEqual(section["status"], "amber")
+        self.assertEqual(section["counts"], {"migrated": 1, "fresh": 1, "pending": 1, "no_direct": 2,
+                                             "unrecorded": 1, "unreadable": 1})
+        self.assertEqual(self.states(section), {
+            "runtime-empty": "no-direct", "runtime-fold": "migrated", "runtime-fresh": "fresh",
+            "runtime-malformed": "unreadable", "runtime-mls": "no-direct", "runtime-pending": "pending",
+            "runtime-unrecorded": "unrecorded",
+        })
+        origins = {agent["state_dir"]: agent["origin"] for agent in section["agents"]}
+        self.assertEqual((origins["runtime-fold"], origins["runtime-fresh"], origins["runtime-pending"],
+                          origins["runtime-mls"]), ("fold", "fresh", "pending", None))
+        pending = next(agent for agent in section["agents"] if agent["state"] == "pending")
+        self.assertEqual(pending["at_unix_seconds"], 1_760_000_000)
+        self.assertLessEqual(len(pending["error"]), finite_status.CONTRACT["direct_chat"]["error_maximum_chars"])
+        self.assertTrue(pending["error"].startswith("direct fold refused: rooms are behind the chat server: room-"))
+        self.assertTrue(pending["error"].endswith("…"))
+        self.assertIn("<redacted>", pending["error"])
+
+    def test_report_never_carries_digests_account_ids_or_control_text(self):
+        self.fleet()
+        raw = finite_status.load_fixture(FIXTURE)
+        raw["direct_chat"] = self.collect()
+        report = finite_status.build_report(raw, finite_status.parse_time(raw["now"]))
+        encoded = json.dumps(report["sections"]["direct_chat"], ensure_ascii=False)
+        human = finite_status.render_human(report)
+        human.encode("utf-8")
+        for text in (encoded, human):
+            for secret in (self.OWNER, self.OTHER_ACCOUNT, self.DIGEST, "npub1", "\x1b", "\ud800", "\u2028", "\u202e", "1 rooms, 3 events"):
+                self.assertNotIn(secret, text)
+        self.assertNotIn("digests", encoded)
+        self.assertIn("Direct chat fold [AMBER]", human)
+        self.assertIn("1 migrated, 1 fresh, 1 pending, 2 no direct dir (older image, MLS chat), "
+                      "1 unrecorded, 1 unreadable", human)
+        self.assertIn("    PENDING runtime-pending: direct fold refused: rooms are behind the chat server", human)
+        self.assertIn("(still serving MLS chat)", human)
+        self.assertIn("    UNREADABLE runtime-malformed: fold record is not valid JSON", human)
+        self.assertIn("    UNRECORDED runtime-unrecorded: direct/ has no fold record", human)
+        self.assertNotIn("forged line\n", human)
+
+    def test_amber_never_changes_the_exit_code(self):
+        self.fleet()
+        green = {"status": "green"}
+        with (
+            mock.patch.object(finite_status, "build_fleet", return_value=green),
+            mock.patch.object(finite_status, "build_host_health", return_value=green),
+            mock.patch.object(finite_status, "build_recovery", return_value=green),
+            mock.patch.object(finite_status, "build_rollout", return_value=green),
+            mock.patch.object(finite_status, "build_chat_plane", return_value=green),
+        ):
+            report = finite_status.build_report({"direct_chat": self.collect()}, finite_status.utc_now())
+        self.assertEqual(report["sections"]["direct_chat"]["status"], "amber")
+        self.assertEqual((report["overall_status"], report["exit_code"]), ("green", 0))
+
+    def test_folded_fresh_and_older_images_are_green(self):
+        self.fleet()
+        for name in ("runtime-pending", "runtime-malformed", "runtime-unrecorded"):
+            shutil.rmtree(self.kata / name)
+        section = finite_status.build_direct_chat(self.collect())
+        self.assertEqual(section["status"], "green")
+        self.assertEqual(sum(section["counts"].values()), 4)
+        self.assertNotIn("PENDING", "\n".join(finite_status.render_direct_chat(section)))
+
+    def test_guest_written_paths_are_never_followed_or_blocking(self):
+        target = self.outside / "fold-status.json"
+        target.write_text(json.dumps({"origin": "pending", "error": "HOST FILE CONTENT"}))
+        self.record("runtime-link", None).symlink_to(target)
+        (self.kata / "runtime-agent-link").mkdir()
+        (self.outside / "direct").mkdir()
+        (self.outside / "direct" / "fold-status.json").write_text(json.dumps({"origin": "fold"}))
+        (self.kata / "runtime-agent-link" / "agent").symlink_to(self.outside)
+        os.mkfifo(self.record("runtime-fifo", None))
+        self.record("runtime-dir", None).mkdir()
+        (self.kata / "runtime-agent-file").mkdir()
+        (self.kata / "runtime-agent-file" / "agent").write_text("not a directory")
+        raw = self.collect()
+        self.assertEqual(set(self.states(raw).values()), {"unreadable"})
+        reasons = {agent["state_dir"]: agent["reason"] for agent in raw["agents"]}
+        self.assertEqual(reasons, {
+            "runtime-agent-file": "unexpected link or file in the fold record path",
+            "runtime-agent-link": "unexpected link or file in the fold record path",
+            "runtime-dir": "fold record is not a regular file",
+            "runtime-fifo": "fold record is not a regular file",
+            "runtime-link": "fold record is not a regular file",
+        })
+        self.assertNotIn("HOST FILE CONTENT", json.dumps(finite_status.build_direct_chat(raw)))
+
+    def test_unreadable_oversized_and_unrecognized_records_are_counted_not_raised(self):
+        self.record("runtime-big", json.dumps({"origin": "fold", "pad": "x" * 64}))
+        self.record("runtime-list", "[]")
+        self.record("runtime-origin", {"origin": "rolled-back"})
+        self.record("runtime-deep", "[" * 1500 + "]" * 1500)
+        self.record("runtime-denied", {"origin": "fold"})
+        real_open = os.open
+
+        def guarded_open(path, flags, *args, dir_fd=None, **kwargs):
+            if path == "fold-status.json" and dir_fd is not None and "runtime-denied" in os.readlink(f"/proc/self/fd/{dir_fd}"):
+                raise PermissionError(errno.EACCES, "denied")
+            return real_open(path, flags, *args, dir_fd=dir_fd, **kwargs)
+
+        with (
+            mock.patch.dict(finite_status.CONTRACT["direct_chat"], {"maximum_record_bytes": 32}),
+            mock.patch.object(finite_status.os, "open", side_effect=guarded_open),
+        ):
+            raw = self.collect()
+        reasons = {agent["state_dir"]: agent["reason"] for agent in raw["agents"]}
+        self.assertEqual(reasons, {
+            "runtime-big": "fold record exceeds size bound",
+            "runtime-deep": "fold record exceeds size bound",
+            "runtime-denied": "cannot read fold record (EACCES)",
+            "runtime-list": "fold record has no recognized origin",
+            "runtime-origin": "fold record has no recognized origin",
+        })
+        # Nested past the parser's depth limit, still inside the size bound.
+        self.record("runtime-deeper", "[" * 100_000 + "]" * 100_000)
+        deep = next(agent for agent in self.collect()["agents"] if agent["state_dir"] == "runtime-deeper")
+        self.assertEqual(deep, {"state_dir": "runtime-deeper", "state": "unreadable",
+                                "reason": "fold record is not valid JSON"})
+        section = finite_status.build_direct_chat(raw)
+        self.assertEqual((section["status"], section["counts"]["unreadable"]), ("amber", 5))
+
+    def test_unexpected_entries_are_ignored_and_absent_state_is_empty(self):
+        (self.kata / "lost+found.d").mkdir()
+        (self.kata / "notes.txt").write_text("x")
+        section = finite_status.build_direct_chat(self.collect())
+        self.assertEqual((section["status"], section["agents"], section["ignored_entries"]), ("green", [], 1))
+        self.assertIn("1 entries ignored", "\n".join(finite_status.render_direct_chat(section)))
+        shutil.rmtree(self.kata)
+        section = finite_status.build_direct_chat(self.collect())
+        self.assertEqual((section["status"], sum(section["counts"].values())), ("green", 0))
+        shutil.rmtree(self.work_root)
+        section = finite_status.build_direct_chat(self.collect())
+        self.assertEqual(section["status"], "unknown")
+        self.assertIn("is not a directory", section["errors"][0])
+
+    def test_work_root_comes_from_the_runner_environment_in_systemd_order(self):
+        self.record("runtime-fold", {"origin": "fold"})
+        shared = Path(self.directory.name) / "runner-shared.env"
+        operator = Path(self.directory.name) / "runner.env"
+        files = {"shared_environment_file": str(shared), "environment_file": str(operator)}
+        with mock.patch.dict(finite_status.CONTRACT["runner"], files):
+            section = finite_status.build_direct_chat(finite_status.collect_direct_chat("finite-lat-3"))
+            self.assertEqual(section["status"], "unknown")
+            self.assertIn("FC_RUNNER_WORK_ROOT is not configured", section["errors"])
+            self.assertEqual(finite_status.render_direct_chat(section)[-1], "  FC_RUNNER_WORK_ROOT is not configured")
+            shared.write_text(f"FC_RUNNER_WORK_ROOT={self.work_root}\n")
+            section = finite_status.build_direct_chat(finite_status.collect_direct_chat("finite-lat-3"))
+            self.assertEqual((section["status"], section["work_root"], section["counts"]["migrated"]),
+                             ("green", str(self.work_root), 1))
+            operator.write_text(f"FC_RUNNER_WORK_ROOT={self.outside}\n")
+            section = finite_status.build_direct_chat(finite_status.collect_direct_chat("finite-lat-3"))
+            self.assertEqual((section["work_root"], section["agents"]), (str(self.outside), []))
+
+    def test_app_host_is_not_applicable_and_missing_evidence_is_unknown(self):
+        raw = finite_status.collect_direct_chat("finite-lat-2", self.work_root)
+        section = finite_status.build_direct_chat(raw)
+        self.assertEqual((section["status"], section["state"]), ("green", "not-applicable"))
+        self.assertIn("not applicable (no Agent state on this host (roles: app))",
+                      finite_status.render_direct_chat(section)[1])
+        missing = finite_status.build_direct_chat(None)
+        self.assertEqual(missing["status"], "unknown")
+        self.assertEqual(finite_status.render_direct_chat(missing)[1], "  direct chat evidence unavailable")
+
+    def test_builder_reprojects_entries_and_bounds_text(self):
+        raw = {"applicable": True, "errors": [], "work_root": "/data/finite-saas-runner", "ignored_entries": 0,
+               "agents": [{"state_dir": "runtime-a", "state": "pending", "error": "z" * 500,
+                           "digests": [self.DIGEST], "owner_account_id": self.OWNER},
+                          {"state_dir": "../escape", "state": "migrated"},
+                          {"state_dir": "runtime-b", "state": "surprising"}]
+               + [{"state_dir": f"runtime-p{index}", "state": "pending", "error": "x"} for index in range(25)]}
+        section = finite_status.build_direct_chat(raw)
+        self.assertNotIn(self.DIGEST, json.dumps(section))
+        self.assertNotIn(self.OWNER, json.dumps(section))
+        self.assertEqual(section["ignored_entries"], 1)
+        self.assertEqual(section["agents"][0], {"state_dir": "runtime-a", "state": "pending", "origin": "pending",
+                                                "error": "z" * 199 + "…"})
+        self.assertEqual(section["agents"][1]["state"], "unreadable")
+        lines = finite_status.render_direct_chat(section)
+        self.assertEqual(lines[-2], "    ... 7 more in --json")
 
 
 class BrainIdentityStatusTests(unittest.TestCase):

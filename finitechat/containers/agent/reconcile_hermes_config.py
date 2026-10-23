@@ -208,6 +208,14 @@ def _has_provider_vision_override(config: dict[str, Any], model: dict[str, Any])
     return False
 
 
+def direct_streaming_enabled(settings: dict[str, str]) -> bool:
+    """Token streaming for Finite Chat: direct transport plus an explicit opt-in."""
+    return (
+        settings.get("FINITECHAT_CHAT_TRANSPORT", "").strip().lower() == "direct"
+        and settings.get("FINITECHAT_DIRECT_STREAMING", "").strip() == "1"
+    )
+
+
 def reconcile_config(
     existing: dict[str, Any] | None,
     settings: dict[str, str],
@@ -326,12 +334,14 @@ def reconcile_config(
     display = _mapping(config, "display")
     display_platforms = _mapping(display, "platforms")
     finitechat_display = _mapping(display_platforms, "finitechat")
-    # Finite Chat is append-only. Hermes' edit-based token streaming and
+    # MLS Finite Chat is append-only. Hermes' edit-based token streaming and
     # accumulated progress bubbles cannot be represented faithfully, so keep
     # these adapter capabilities authoritative even when an older resident
     # config contains incompatible values. Interim assistant commentary stays
     # enabled by Hermes' normal default and is delivered as separate messages.
-    finitechat_display["streaming"] = False
+    # The direct transport keeps running edits as ephemeral drafts, so token
+    # streaming can be opted into there.
+    finitechat_display["streaming"] = direct_streaming_enabled(settings)
     finitechat_display["tool_progress_grouping"] = "separate"
 
     home_channel = settings.get("FINITE_CONFIG_HOME_CHANNEL", "")

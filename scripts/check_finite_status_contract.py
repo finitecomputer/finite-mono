@@ -153,6 +153,36 @@ def main() -> None:
         ROOT / "infra" / "nixos" / "modules" / "caddy.nix",
         ['virtualHosts."chat.finite.computer"', "log"],
     )
+    # The direct-chat fold record is written by the sidecar under the Agent's
+    # home on /data, which the Runner binds from <work root>/kata/<id>/; the
+    # probe reads it from the host, so every path segment and origin it
+    # recognizes must stay the writer's.
+    direct = contract["direct_chat"]
+    require_all(
+        ROOT / "finitechat/crates/finitechat-cli/src/hermes_direct.rs",
+        [
+            f'const DIRECT_DIR: &str = "{direct["direct_dir"]}";',
+            f'const DIRECT_FOLD_STATUS_FILE: &str = "{direct["status_file"]}";',
+            *(f'"origin": "{origin}",' for origin in direct["origins"]),
+            '"error": error.to_string(),',
+            '"at_unix_seconds": now_unix_seconds(),',
+        ],
+    )
+    require_all(
+        ROOT / "finitechat/containers/agent/run_hermes_gateway.sh",
+        [f'agent_home="${{FINITECHAT_HOME:-/data/{direct["agent_home"]}}}"'],
+    )
+    require_all(
+        ROOT / "finitecomputer-v2/crates/finite-saas-runner/src/kata.rs",
+        [
+            f'const KATA_PROVIDER_DIR: &str = "{direct["provider_dir"]}";',
+            'mount.destination == Path::new("/data")',
+        ],
+    )
+    require_all(
+        ROOT / "infra/nixos/modules/kata-runner-host.nix",
+        [f'{direct["work_root_variable"]} = cfg.workRoot;'],
+    )
     # Egress attribution map must match the deployed host addresses.
     host_ips = {
         "finite-lat-1": None,  # retired (ADR 0007); kept for historical rows

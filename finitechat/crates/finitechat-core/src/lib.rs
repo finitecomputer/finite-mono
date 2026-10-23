@@ -2,6 +2,12 @@ mod chat_organization;
 pub use chat_organization::{AppChatPlacement, ChatAddress};
 mod view;
 pub use view::AppView;
+mod direct;
+pub use direct::{
+    DIRECT_WEB_DEVICE_ID, DirectChatDigest, DirectEventDraft, DirectLastView, DirectLog,
+    DirectRequesterContext, DirectRoom, DirectRoomDigest, DirectRoomEngine, DirectSelection,
+    DirectTopicDigest, new_chat_intent_id, room_digest,
+};
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
@@ -946,6 +952,27 @@ pub struct AppBridgeAppliedEvent {
     pub plaintext: Vec<u8>,
 }
 
+/// One room as a Device stores it, for a direct-log fold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectFoldRoom {
+    pub room_id: String,
+    pub display_name: String,
+    pub picture: Option<String>,
+    pub connected: bool,
+    pub local_read_seq: u64,
+    pub last_applied_seq: u64,
+    pub member_account_ids: Vec<String>,
+    /// Stored chat messages and events, unioned and ordered by sequence.
+    pub events: Vec<StoredAppEvent>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectFoldExport {
+    pub device: DeviceRef,
+    pub rooms: Vec<DirectFoldRoom>,
+    pub profiles: Vec<AppProfileSummary>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppBridgeSync {
     pub joined_account_ids: Vec<String>,
@@ -1359,6 +1386,9 @@ enum AppRuntimeCommand {
     RecentBridgeEvents {
         limit: u32,
         response: mpsc::SyncSender<Result<Vec<AppBridgeAppliedEvent>, FiniteChatCoreError>>,
+    },
+    ExportDirectFold {
+        response: mpsc::SyncSender<Result<DirectFoldExport, FiniteChatCoreError>>,
     },
     RoomSyncCursors {
         response: mpsc::SyncSender<Result<Vec<AppRoomSyncCursor>, FiniteChatCoreError>>,
@@ -2314,6 +2344,25 @@ impl FiniteChatRuntime {
             })?
     }
 
+    /// Every decrypted room event this Device stores, with room display data
+    /// and members, for a one-time fold into a direct room log. Read-only:
+    /// nothing is synced, sent or rewritten.
+    pub fn export_direct_fold(&self) -> Result<DirectFoldExport, FiniteChatCoreError> {
+        let (response_tx, response_rx) = mpsc::sync_channel(1);
+        self.command_tx
+            .send(AppRuntimeCommand::ExportDirectFold {
+                response: response_tx,
+            })
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor is stopped".to_owned(),
+            })?;
+        response_rx
+            .recv()
+            .map_err(|_| FiniteChatCoreError::Client {
+                reason: "runtime actor stopped before exporting the direct fold".to_owned(),
+            })?
+    }
+
     pub fn send_runtime_command_request_and_wait(
         &self,
         room_id: String,
@@ -2623,6 +2672,9 @@ fn spawn_app_runtime_worker(
                 }
                 AppRuntimeCommand::RecentBridgeEvents { limit, response } => {
                     let _ = response.send(state.recent_bridge_events(limit));
+                }
+                AppRuntimeCommand::ExportDirectFold { response } => {
+                    let _ = response.send(state.export_direct_fold());
                 }
                 AppRuntimeCommand::RoomSyncCursors { response } => {
                     let _ = response.send(Ok(state.room_sync_cursors()));
@@ -3618,6 +3670,78 @@ impl AppRuntimeState {
                     .collect()
             })
             .map_err(store_error)
+    }
+
+    fn export_direct_fold(&self) -> Result<DirectFoldExport, FiniteChatCoreError> {
+        let owner = self.core.device.device_ref().clone();
+        let store = &self.core.store;
+        let mut events = BTreeMap::<(String, u64, String), StoredAppEvent>::new();
+        for message in store
+            .load_app_messages(&owner, MAX_APP_MESSAGES_U32)
+            .map_err(store_error)?
+        {
+            let event = StoredAppEvent {
+                room_id: message.room_id,
+                seq: message.seq,
+                message_id: message.message_id,
+                sender: message.sender,
+                plaintext: message.plaintext,
+                timestamp_unix_seconds: message.timestamp_unix_seconds,
+            };
+            events.insert(
+                (event.room_id.clone(), event.seq, event.message_id.clone()),
+                event,
+            );
+        }
+        for event in store
+            .load_app_events(&owner, MAX_APP_MESSAGES_U32)
+            .map_err(store_error)?
+        {
+            events
+                .entry((event.room_id.clone(), event.seq, event.message_id.clone()))
+                .or_insert(event);
+        }
+        let cursors = self
+            .core
+            .device
+            .room_sync_cursors()
+            .into_iter()
+            .map(|cursor| (cursor.room_id, cursor.after_seq))
+            .collect::<BTreeMap<_, _>>();
+        let mut rooms = Vec::new();
+        for room in store.load_app_rooms(&owner).map_err(store_error)? {
+            let members = self
+                .core
+                .device
+                .room_members(&room.room_id)
+                .map(|members| {
+                    members
+                        .into_iter()
+                        .map(|member| member.account_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let room_events = events
+                .values()
+                .filter(|event| event.room_id == room.room_id)
+                .cloned()
+                .collect();
+            rooms.push(DirectFoldRoom {
+                last_applied_seq: cursors.get(&room.room_id).copied().unwrap_or_default(),
+                room_id: room.room_id,
+                display_name: room.display_name,
+                picture: room.picture,
+                connected: room.state == StoredAppRoomState::Connected,
+                local_read_seq: room.local_read_seq,
+                member_account_ids: members,
+                events: room_events,
+            });
+        }
+        Ok(DirectFoldExport {
+            device: owner,
+            rooms,
+            profiles: self.profile_cache.values().cloned().collect(),
+        })
     }
 
     /// Durable per-room cursors straight off the device's room state, in the
@@ -13257,7 +13381,7 @@ mod tests {
     use finitechat_server::{HttpServerState, http_router};
     use std::time::{Duration, Instant};
 
-    const NOW: u64 = 1_800_000_000;
+    pub(crate) const NOW: u64 = 1_800_000_000;
 
     #[test]
     fn application_envelope_parsing_stays_within_decode_authority() {
@@ -13709,7 +13833,7 @@ mod tests {
     /// The secret is derived deterministically from the data dir so a store
     /// reopened at the same path recovers the same account, while separate
     /// stores (alice/bob) get distinct accounts.
-    fn with_test_secret(mut options: OpenOptions) -> OpenOptions {
+    pub(crate) fn with_test_secret(mut options: OpenOptions) -> OpenOptions {
         if options.account_secret_hex.is_none() {
             options.account_secret_hex = Some(test_account_secret_hex(&options.data_dir));
         }
@@ -22275,7 +22399,7 @@ mod tests {
         panic!("device link did not converge to exact durable receipts within {MAX_TICKS} ticks");
     }
 
-    fn add_runtime_member(
+    pub(crate) fn add_runtime_member(
         owner: &Arc<FiniteChatRuntime>,
         member: &Arc<FiniteChatRuntime>,
         room_id: &str,
@@ -22315,7 +22439,7 @@ mod tests {
         )
     }
 
-    fn test_profile(account_id: &str, display_name: &str) -> AppProfileSummary {
+    pub(crate) fn test_profile(account_id: &str, display_name: &str) -> AppProfileSummary {
         AppProfileSummary {
             account_id: account_id.to_owned(),
             npub: npub_encode(account_id).unwrap_or_else(|_| account_id.to_owned()),
@@ -22611,7 +22735,7 @@ mod tests {
         None
     }
 
-    fn spawn_live_http_server(path: impl AsRef<Path>) -> String {
+    pub(crate) fn spawn_live_http_server(path: impl AsRef<Path>) -> String {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();

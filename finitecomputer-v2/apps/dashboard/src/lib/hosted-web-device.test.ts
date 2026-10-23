@@ -9,8 +9,10 @@ import {
   hostedDeviceBrainIdentityProvider,
   hostedDeviceConfig,
   hostedDeviceDiagnosticPath,
+  hostedDeviceDirectChatAuthorization,
   hostedDeviceHeaders,
   hostedDeviceOwnerChatAccountId,
+  OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE,
   hostedDeviceProfileImage,
   hostedDeviceRuntimeCommand,
   hostedDeviceState,
@@ -58,35 +60,37 @@ test("hostedDeviceOwnerChatAccountId reads the pre-minted identity account id", 
   );
 });
 
-test("hostedDeviceOwnerChatAccountId fails open for agent creation", async (context) => {
+test("hostedDeviceOwnerChatAccountId refuses agent creation without a usable owner", async (context) => {
   const originalFetch = global.fetch;
   context.after(() => {
     global.fetch = originalFetch;
   });
+  const refused = (error: unknown) =>
+    error instanceof Error && error.message === OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE;
 
-  // No hosted-device config: nothing to fetch, no account id.
-  assert.equal(await hostedDeviceOwnerChatAccountId(null, verifiedAccount), null);
+  // No hosted-device config: no owner, so no agent.
+  await assert.rejects(hostedDeviceOwnerChatAccountId(null, verifiedAccount), refused);
 
-  // Transport failure: warn and continue without the owner identity.
+  // Transport failure: the attempt fails before Core creates anything.
   global.fetch = (async () => {
     throw new Error("connect refused");
   }) as typeof fetch;
-  assert.equal(
-    await hostedDeviceOwnerChatAccountId(
+  await assert.rejects(
+    hostedDeviceOwnerChatAccountId(
       { baseUrl: "https://device.internal", apiToken: "secret" },
       verifiedAccount
     ),
-    null
+    refused
   );
 
-  // A state payload without a 64-hex account id is unusable, not fatal.
+  // A state payload without a 64-hex account id names no owner.
   global.fetch = (async () => Response.json({ identity: { account_id: "npub1not-hex" } })) as typeof fetch;
-  assert.equal(
-    await hostedDeviceOwnerChatAccountId(
+  await assert.rejects(
+    hostedDeviceOwnerChatAccountId(
       { baseUrl: "https://device.internal", apiToken: "secret" },
       verifiedAccount
     ),
-    null
+    refused
   );
 });
 
@@ -361,6 +365,72 @@ test("runtime commands use the narrow hosted-device endpoint", async (context) =
   );
   assert.equal(observedUrl, "https://device.internal/v1/app/runtime-commands");
   assert.match(observedBody, /agent\.connections\.status/u);
+});
+
+test("direct chat authorization asks the hosted device to sign one exact bridge request", async (context) => {
+  const originalFetch = global.fetch;
+  const originalConsoleError = console.error;
+  context.after(() => {
+    global.fetch = originalFetch;
+    console.error = originalConsoleError;
+  });
+  console.error = () => {};
+  const accountId = "ab".repeat(32);
+  const event = { id: "event-1", pubkey: accountId, kind: 27235, created_at: 1, tags: [], content: "", sig: "sig" };
+  let observedUrl = "";
+  let observedHeaders = new Headers();
+  let observedBody: unknown = null;
+  let response: () => Response = () => Response.json({ event, account_id: accountId });
+  global.fetch = (async (input, init) => {
+    observedUrl = String(input);
+    observedHeaders = new Headers(init?.headers);
+    observedBody = JSON.parse(String(init?.body));
+    return response();
+  }) as typeof fetch;
+  const config = { baseUrl: "https://device.internal", apiToken: "internal-token" };
+  const input = {
+    agent_id: "agent_project_1",
+    method: "POST" as const,
+    path: "/v1/app/actions",
+    body_sha256: "cd".repeat(32),
+  };
+
+  assert.deepEqual(await hostedDeviceDirectChatAuthorization(config, verifiedAccount, input), {
+    event,
+    accountId,
+  });
+  assert.equal(observedUrl, "https://device.internal/v1/chat/direct-authorization");
+  assert.deepEqual(observedBody, { version: 1, ...input });
+  assert.equal(observedHeaders.get("authorization"), "Bearer internal-token");
+  assert.equal(observedHeaders.get("x-finite-workos-user-id"), "user_paul");
+  assert.equal(observedHeaders.get("content-type"), "application/json");
+
+  // A response signed by another key, or not a request event, is not usable.
+  for (const invalid of [
+    { event: { ...event, pubkey: "cd".repeat(32) }, account_id: accountId },
+    { event: { ...event, kind: 1 }, account_id: accountId },
+    { event, account_id: "npub1someone" },
+    { account_id: accountId },
+  ]) {
+    response = () => Response.json(invalid);
+    await assert.rejects(
+      hostedDeviceDirectChatAuthorization(config, verifiedAccount, input),
+      (error: unknown) => error instanceof HostedDeviceRequestError && error.status === 502
+    );
+  }
+
+  response = () => Response.json(
+    { error: "chat identity is missing", error_kind: "chat_identity_missing", retryable: false },
+    { status: 409 }
+  );
+  await assert.rejects(
+    hostedDeviceDirectChatAuthorization(config, verifiedAccount, input),
+    (error: unknown) =>
+      error instanceof HostedDeviceRequestError &&
+      error.status === 409 &&
+      error.kind === "chat_identity_missing"
+  );
+  assert.equal(hostedDeviceDiagnosticPath("/v1/chat/direct-authorization"), "/v1/chat/direct-authorization");
 });
 
 test("owner claim replay is an explicit narrow request", async (context) => {

@@ -14,6 +14,22 @@ Brain invitation and approval routes use bounded server-side signed requests.
 WorkOS authentication does not replace Brain membership or Folder Key Grants.
 The removed `/client` browser UI is not a current dashboard surface.
 
+## Web chat transport
+
+Each agent runs one chat mode. Server routes probe the agent's
+`api/plugins/finitechat/v1/app/info` through Core's hosted Hermes session;
+`transport: "direct"` selects the agent's own Finite Chat bridge. A missing
+plugin, another transport or no hosted access selects the legacy Hosted Web
+Device. The hosted device signs each direct request with the user's chat key
+(`/v1/chat/direct-authorization`); the browser API is unchanged.
+
+Decisions are cached 30 seconds per runtime. Native grants are cached until
+10 seconds before expiry, in server memory only; they never reach the browser
+and the WorkOS token never reaches the agent. Outages never move an agent from
+direct to the hosted device: an agent seen direct, or never seen, reads as
+unavailable. Brain and Sites identity calls stay on the hosted device. See
+`src/lib/direct-chat-bridge.ts`.
+
 ## Agent Skills inventory
 
 The Skills page reads the selected agent's `GET /api/skills?inventory=true`
@@ -100,7 +116,8 @@ These commands change only the local fixture under
 `.local-state/web-design-fixture/`. They never contact a provider, Agent
 Runtime, or production service. The fixture backs the canonical dashboard
 components and routes; it is not a second UI and does not prove runtime
-acceptance.
+acceptance. Its Core has no hosted Hermes session, so its chat uses the legacy
+Hosted Web Device path.
 
 The fixture covers chat, the machine overview, restart/recovery presentation,
 and Skyler’s Brain/Sites design previews. It sets the development-only

@@ -174,6 +174,9 @@ ENV FINITE_PRIVATE_CONTROL_URL=https://finite.computer/api/core/v1/finite-privat
 ENV FINITE_PRIVATE_MODEL=glm-5-3-flash
 ENV FINITE_PRIVATE_CONTEXT_LENGTH=393216
 ENV FINITECHAT_HERMES_INBOUND_STREAM=1
+# Web chat reaches this agent's own room log directly (no MLS device on the
+# hosted side); the first start folds the existing Finite Chat device once.
+ENV FINITECHAT_CHAT_TRANSPORT=direct
 ENV FINITE_AGENTD_REQUIRED=1
 
 EXPOSE 8080

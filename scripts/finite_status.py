@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import errno
 import glob
 import hashlib
 import io
@@ -165,6 +166,24 @@ CONTRACT: dict[str, Any] = {
             "64.34.93.213": "finite-lat-5",
             "64.34.89.107": "finite-lat-7",
         },
+    },
+    # Direct web chat cutover (infra/runbooks/direct-chat-cutover.md). The
+    # sidecar folds each Agent's MLS Device once and records the outcome in
+    # <agent home>/direct/fold-status.json (finitechat-cli hermes_direct.rs).
+    # A Kata Runner host binds each Agent's /data from
+    # <FC_RUNNER_WORK_ROOT>/kata/<durable state id>/, so the records are read
+    # from the host without entering a guest. A pending fold keeps the Agent
+    # serving MLS chat: attention (amber), not an outage.
+    "direct_chat": {
+        "work_root_variable": "FC_RUNNER_WORK_ROOT",
+        "provider_dir": "kata",
+        "agent_home": "agent",
+        "direct_dir": "direct",
+        "status_file": "fold-status.json",
+        "origins": {"fold": "migrated", "fresh": "fresh", "pending": "pending"},
+        # The record carries every room's digests; far below this in practice.
+        "maximum_record_bytes": 8 * 1024 * 1024,
+        "error_maximum_chars": 200,
     },
     "hosts": {
         "finite-lat-1": {
@@ -3202,6 +3221,157 @@ def collect_chat_plane(hostname: str, now: datetime) -> dict[str, Any]:
     }
 
 
+# Runner-created durable state directory names (sanitize_sandbox_name).
+DIRECT_CHAT_STATE_DIR = re.compile(r"[A-Za-z0-9_-]{1,63}")
+# Hex runs as long as a digest or account id, and bech32 npubs.
+DIRECT_CHAT_IDENTIFIER = re.compile(r"[0-9A-Fa-f]{32,}|npub1[02-9ac-hj-np-z]{20,}")
+
+
+def bounded_fold_error(value: Any) -> str | None:
+    """A fold error safe to print: one line, no identifiers, bounded length.
+
+    The sidecar writes the error from its own failure, but the record sits in
+    guest-writable /data: strip control characters (and lone surrogates,
+    which cannot be printed as UTF-8) and redact anything shaped like an
+    account id or digest before truncating.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.encode("utf-8", "replace").decode("utf-8")
+    # C0/C1 controls (terminal escapes), line separators and bidi overrides.
+    text = re.sub(r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]+", " ", text).strip()
+    text = DIRECT_CHAT_IDENTIFIER.sub("<redacted>", text)
+    limit = CONTRACT["direct_chat"]["error_maximum_chars"]
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def read_direct_fold_status(state_root: Path) -> dict[str, Any]:
+    """Classify one Agent's fold record, reading only beneath its state root.
+
+    Everything below the state root is guest-writable, so every component
+    is opened without following symlinks and only a regular file is read.
+    Returns the classification only: never digests, rooms or account ids.
+    """
+    contract = CONTRACT["direct_chat"]
+    descriptors: list[int] = []
+    flags = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW
+
+    def unreadable(reason: str) -> dict[str, Any]:
+        return {"state": "unreadable", "reason": reason}
+
+    try:
+        descriptors.append(os.open(state_root, flags | os.O_DIRECTORY))
+        for component in (contract["agent_home"], contract["direct_dir"]):
+            try:
+                descriptors.append(
+                    os.open(component, flags | os.O_DIRECTORY, dir_fd=descriptors[-1])
+                )
+            except FileNotFoundError:
+                # An older image (MLS chat only) never creates direct/.
+                return {"state": "no-direct"}
+        name = contract["status_file"]
+        try:
+            before = os.stat(name, dir_fd=descriptors[-1], follow_symlinks=False)
+        except FileNotFoundError:
+            # direct/ without a record: a first-start fold still running or
+            # interrupted before it recorded anything.
+            return {"state": "unrecorded", "reason": "direct/ has no fold record"}
+        if not stat.S_ISREG(before.st_mode):
+            return unreadable("fold record is not a regular file")
+        descriptors.append(os.open(name, flags | os.O_NONBLOCK, dir_fd=descriptors[-1]))
+        after = os.fstat(descriptors[-1])
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(after.st_mode):
+            return unreadable("fold record changed during observation")
+        bound = contract["maximum_record_bytes"]
+        encoded = b""
+        while len(encoded) <= bound:
+            chunk = os.read(descriptors[-1], bound + 1 - len(encoded))
+            if not chunk:
+                break
+            encoded += chunk
+        if len(encoded) > bound:
+            return unreadable("fold record exceeds size bound")
+    except OSError as error:
+        if error.errno in (errno.ELOOP, errno.ENOTDIR):
+            # O_NOFOLLOW|O_DIRECTORY refuses a symlink or a file in place of
+            # agent/ or direct/.
+            return unreadable("unexpected link or file in the fold record path")
+        return unreadable(f"cannot read fold record ({errno.errorcode.get(error.errno or 0, 'OSError')})")
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    try:
+        record = json.loads(encoded)
+    except (ValueError, RecursionError):
+        return unreadable("fold record is not valid JSON")
+    if not isinstance(record, dict) or record.get("origin") not in contract["origins"]:
+        return unreadable("fold record has no recognized origin")
+    entry: dict[str, Any] = {
+        "state": contract["origins"][record["origin"]],
+        "origin": record["origin"],
+    }
+    if record["origin"] == "pending":
+        entry["error"] = bounded_fold_error(record.get("error"))
+        at = record.get("at_unix_seconds")
+        if type(at) is int and 0 <= at < 2**63:
+            entry["at_unix_seconds"] = at
+    return entry
+
+
+def collect_direct_chat(hostname: str, work_root: Path | None = None) -> dict[str, Any]:
+    """Read every Kata Agent's direct-chat fold record on this Runner host.
+
+    Read-only and host-local: no container exec, no network, no SQLite. The
+    work root is the Runner's own, read from its environment files in
+    systemd order. App-role hosts hold no Agent state.
+    """
+    contract = CONTRACT["direct_chat"]
+    roles = host_roles(hostname)
+    if roles is not None and "runner" not in roles:
+        return {
+            "applicable": False,
+            "reason": f"no Agent state on this host (roles: {', '.join(roles)})",
+        }
+    raw: dict[str, Any] = {"applicable": True, "errors": [], "agents": [], "ignored_entries": 0}
+    if work_root is None:
+        variable = contract["work_root_variable"]
+        values: dict[str, str] = {}
+        errors = []
+        for path_key in ("shared_environment_file", "environment_file"):
+            try:
+                values.update(
+                    read_environment_values(Path(CONTRACT["runner"][path_key]), {variable})
+                )
+            except CollectionError as error:
+                errors.append(str(error))
+        if not values.get(variable):
+            raw["errors"] = errors + [f"{variable} is not configured"]
+            return raw
+        work_root = Path(values[variable])
+    raw["work_root"] = str(work_root)
+    if not work_root.is_dir():
+        raw["errors"].append(f"Runner work root {work_root} is not a directory")
+        return raw
+    provider_root = work_root / contract["provider_dir"]
+    try:
+        with os.scandir(provider_root) as entries:
+            names = sorted(
+                entry.name for entry in entries if entry.is_dir(follow_symlinks=False)
+            )
+    except FileNotFoundError:
+        # No Agent has launched on this host yet.
+        return raw
+    except OSError as error:
+        raw["errors"].append(f"cannot list {provider_root} ({errno.errorcode.get(error.errno or 0, 'OSError')})")
+        return raw
+    for name in names:
+        if not DIRECT_CHAT_STATE_DIR.fullmatch(name):
+            raw["ignored_entries"] += 1
+            continue
+        raw["agents"].append({"state_dir": name, **read_direct_fold_status(provider_root / name)})
+    return raw
+
+
 def expand_fixture(raw: dict[str, Any]) -> dict[str, Any]:
     groups = raw.get("core", {}).pop("runtime_groups", [])
     for group in groups:
@@ -4117,6 +4287,70 @@ def build_chat_plane(raw: dict[str, Any] | None, now: datetime) -> dict[str, Any
     }
 
 
+DIRECT_CHAT_STATES = ("migrated", "fresh", "pending", "no-direct", "unrecorded", "unreadable")
+DIRECT_CHAT_ATTENTION = ("pending", "unrecorded", "unreadable")
+
+
+def build_direct_chat(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Score the direct-chat fold records read on this Runner host.
+
+    Migrated, fresh and no-direct (an older image, MLS chat only) are green.
+    A pending fold, a direct/ without a record, or an unreadable record is
+    amber: that Agent keeps serving MLS chat, so it needs attention but is
+    not an outage, and amber never changes the exit code. Evidence that
+    could not be collected is unknown. Entries are re-projected here so the
+    section never carries digests, rooms or account ids.
+    """
+    if raw is None:
+        return {"status": "unknown", "error": "direct chat evidence unavailable"}
+    contract = CONTRACT["direct_chat"]
+    if raw.get("applicable") is False:
+        return {
+            "status": "green",
+            "applicable": False,
+            "state": "not-applicable",
+            "reason": raw.get("reason", "no Agent state on this host"),
+        }
+    origins = {state: origin for origin, state in contract["origins"].items()}
+    agents = []
+    ignored = int(raw.get("ignored_entries", 0))
+    for agent in raw.get("agents", []):
+        if not isinstance(agent, dict) or not isinstance(agent.get("state_dir"), str) or not DIRECT_CHAT_STATE_DIR.fullmatch(agent["state_dir"]):
+            ignored += 1
+            continue
+        state = agent.get("state") if agent.get("state") in DIRECT_CHAT_STATES else "unreadable"
+        entry: dict[str, Any] = {"state_dir": agent["state_dir"], "state": state, "origin": origins.get(state)}
+        if state == "pending":
+            entry["error"] = bounded_fold_error(agent.get("error"))
+            at = agent.get("at_unix_seconds")
+            if type(at) is int and 0 <= at < 2**63:
+                entry["at_unix_seconds"] = at
+        elif state in ("unrecorded", "unreadable"):
+            entry["reason"] = bounded_fold_error(agent.get("reason")) or "unrecognized fold record"
+        agents.append(entry)
+    counts = {state.replace("-", "_"): 0 for state in DIRECT_CHAT_STATES}
+    for entry in agents:
+        counts[entry["state"].replace("-", "_")] += 1
+    section: dict[str, Any] = {
+        "applicable": True,
+        "work_root": raw.get("work_root"),
+        "record_path": "/".join((
+            contract["provider_dir"], "<state dir>", contract["agent_home"],
+            contract["direct_dir"], contract["status_file"],
+        )),
+        "counts": counts,
+        "agents": agents,
+        "ignored_entries": ignored,
+    }
+    if raw.get("errors"):
+        section.update(status="unknown", errors=list(raw["errors"]))
+    elif any(counts[state] for state in DIRECT_CHAT_ATTENTION):
+        section["status"] = "amber"
+    else:
+        section["status"] = "green"
+    return section
+
+
 def report_exit_code(report: dict[str, Any]) -> int:
     statuses = [section["status"] for section in report["sections"].values()]
     if "red" in statuses:
@@ -4230,6 +4464,7 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         "recovery_boundary": build_recovery(raw.get("recovery"), now),
         "rollout_state": build_rollout(raw.get("rollout")),
         "chat_plane": build_chat_plane(raw.get("chat_plane"), now),
+        "direct_chat": build_direct_chat(raw.get("direct_chat")),
     }
     report = {
         "schema_version": "finite.status.v1",
@@ -4273,6 +4508,42 @@ def human_age(seconds: int | None) -> str:
 
 def badge(status: str) -> str:
     return f"[{status.upper()}]"
+
+
+DIRECT_CHAT_TEXT_LINES = 20
+
+
+def render_direct_chat(direct: dict[str, Any]) -> list[str]:
+    """Counts and the Agents that need attention; never digests or account ids."""
+    lines = [f"Direct chat fold {badge(direct['status'])}"]
+    if direct.get("applicable") is False:
+        lines.append(f"  not applicable ({direct.get('reason', 'no Agent state on this host')})")
+        return lines
+    if "counts" not in direct:
+        lines.append(f"  {direct.get('error', 'direct chat evidence unavailable')}")
+        return lines
+    if direct.get("errors"):
+        lines.extend(f"  {error}" for error in direct["errors"])
+        return lines
+    counts = direct["counts"]
+    lines.append(
+        f"  {direct.get('work_root') or 'unknown work root'}/{direct['record_path']}: "
+        f"{counts['migrated']} migrated, {counts['fresh']} fresh, {counts['pending']} pending, "
+        f"{counts['no_direct']} no direct dir (older image, MLS chat), "
+        f"{counts['unrecorded']} unrecorded, {counts['unreadable']} unreadable"
+    )
+    attention = [agent for agent in direct["agents"] if agent["state"] in DIRECT_CHAT_ATTENTION]
+    for agent in attention[:DIRECT_CHAT_TEXT_LINES]:
+        if agent["state"] == "pending":
+            detail = f"{agent.get('error') or 'no error recorded'} (still serving MLS chat)"
+        else:
+            detail = agent["reason"]
+        lines.append(f"    {agent['state'].upper()} {agent['state_dir']}: {detail}")
+    if len(attention) > DIRECT_CHAT_TEXT_LINES:
+        lines.append(f"    ... {len(attention) - DIRECT_CHAT_TEXT_LINES} more in --json")
+    if direct.get("ignored_entries"):
+        lines.append(f"  {direct['ignored_entries']} entries ignored (not a Runner state directory)")
+    return lines
 
 
 def render_human(report: dict[str, Any]) -> str:
@@ -4539,6 +4810,10 @@ def render_human(report: dict[str, Any]) -> str:
         lines.append(f"  {rollout.get('error', 'unavailable')}")
     lines.append("")
 
+    if direct := sections.get("direct_chat"):
+        lines.extend(render_direct_chat(direct))
+        lines.append("")
+
     chat = sections["chat_plane"]
     lines.append(f"Chat plane {badge(chat['status'])}")
     if not {"server_watermark", "sync_fetch_rate"} <= chat.keys():
@@ -4547,7 +4822,7 @@ def render_human(report: dict[str, Any]) -> str:
         lines.extend(
             [
                 "",
-                "Exit codes: 0 all green; 1 any red; 2 could not determine (when nothing is red).",
+                "Exit codes: 0 all green (amber is attention, not failure); 1 any red; 2 could not determine (when nothing is red).",
             ]
         )
         return "\n".join(lines)
@@ -4593,7 +4868,7 @@ def render_human(report: dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Exit codes: 0 all green; 1 any red; 2 could not determine (when nothing is red).",
+            "Exit codes: 0 all green (amber is attention, not failure); 1 any red; 2 could not determine (when nothing is red).",
         ]
     )
     return "\n".join(lines)
@@ -4614,6 +4889,7 @@ def collect_live() -> tuple[dict[str, Any], datetime]:
         raw.get("core", {}).get("runtimes", []), hostname
     )
     raw["chat_plane"] = collect_chat_plane(hostname, now)
+    raw["direct_chat"] = collect_direct_chat(hostname)
     return raw, now
 
 
@@ -5045,6 +5321,7 @@ def main(arguments: list[str] | None = None) -> None:
                 "recovery_boundary": {"status": "unknown", "error": str(error)},
                 "rollout_state": {"status": "unknown", "error": str(error)},
                 "chat_plane": {"status": "unknown", "error": str(error)},
+                "direct_chat": {"status": "unknown", "error": str(error)},
             },
         }
     if (

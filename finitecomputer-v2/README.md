@@ -79,7 +79,10 @@ not select, poll, push, or activate a skills revision.
 Do not add new v2 dependencies on:
 
 - OpenCode
-- a second dashboard-only chat transport outside Finite Chat
+- a second, parallel chat transport, or a hidden fallback between web chat
+  transports. Web chat goes directly to the agent's own Finite Chat bridge
+  (no MLS hosted device in the chat path); only legacy agents use the Hosted
+  Web Device.
 - dashboard-to-runtime shell, filesystem, Kubernetes, or provider APIs
 - product feature commands or feature-specific status on the Runtime Management
   Pipe

@@ -1,6 +1,7 @@
 # ADR 0011: Hosted web chat uses a revocable device
 
-Status: accepted 2026-07-09
+Status: accepted 2026-07-09; for web chat, superseded by
+[ADR 0013](0013-web-chat-uses-the-agents-direct-room-log.md) once it ships
 
 Finite Computer's launch web-chat surface is a Finite-operated **Hosted Web
 Device** with its own server-held device key and durable store, authorized

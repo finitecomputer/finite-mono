@@ -1,3 +1,5 @@
+#[path = "http/direct_authorization.rs"]
+mod direct_authorization;
 #[path = "http/scoped_views.rs"]
 mod scoped_views;
 
@@ -11,7 +13,7 @@ use finitechat_hosted_device::{
     HostedDeviceConfig, MAX_HOSTED_ATTACHMENT_BYTES, MAX_HOSTED_ATTACHMENTS_PER_MESSAGE,
     MAX_HOSTED_MULTIPART_BODY_BYTES, WORKOS_USER_HEADER, app,
     app_with_final_agent_binding_persist_failures, app_with_profile_bootstrap_room_create_failures,
-    app_with_profile_bootstrap_submit_failures,
+    app_with_profile_bootstrap_submit_failures, digest_all_users,
 };
 use finitechat_proto::{
     DecryptedApplicationEventV1, DurableAppEventKind, RuntimeCommandJsonPayloadV1,
@@ -2081,6 +2083,42 @@ async fn attachment_upload_enforces_count_file_and_request_limits() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
+async fn digest_lists_each_hosted_user_with_their_identity_and_rooms() {
+    let root = TempDir::new().unwrap();
+    assert!(
+        digest_all_users(root.path(), "http://127.0.0.1:9")
+            .unwrap()
+            .is_empty()
+    );
+    let first = state_for(test_app(&root), "user_digest_a").await;
+    let second = state_for(test_app(&root), "user_digest_b").await;
+    let root_path = root.path().to_path_buf();
+    let digests = tokio::task::spawn_blocking(move || {
+        digest_all_users(&root_path, "http://127.0.0.1:9").unwrap()
+    })
+    .await
+    .unwrap();
+    let mut accounts = digests
+        .iter()
+        .map(|user| user["account_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    accounts.sort();
+    let mut expected = vec![
+        first["identity"]["account_id"].as_str().unwrap().to_owned(),
+        second["identity"]["account_id"]
+            .as_str()
+            .unwrap()
+            .to_owned(),
+    ];
+    expected.sort();
+    assert_eq!(accounts, expected);
+    for user in &digests {
+        assert!(user["rooms"].as_array().unwrap().is_empty());
+        assert_eq!(user["user_storage_id"].as_str().unwrap().len(), 64);
+    }
 }
 
 fn test_app(root: &TempDir) -> axum::Router {

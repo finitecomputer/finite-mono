@@ -32,6 +32,9 @@ let
       "finitechat/integrations/hermes/finitechat/adapter.py"
       "finitechat/integrations/hermes/finitechat/plugin.yaml"
       "finitechat/integrations/hermes/finitechat/simplex_topics.py"
+      "finitechat/integrations/hermes/finitechat/dashboard/manifest.json"
+      "finitechat/integrations/hermes/finitechat/dashboard/plugin_api.py"
+      "finitechat/integrations/hermes/finitechat/dashboard/dist/index.js"
     ];
   };
 
@@ -48,7 +51,13 @@ let
       (root + "/src")
     ]
     ++ lib.optional (builtins.pathExists buildScript) buildScript
-    ++ map (path: sourceRoot + "/${path}") (crateCompileInputs.${crate} or [ ]);
+    # lat2 builds these recipes against its pinned, possibly older
+    # lat2-app-source, which may predate an input listed here. Skip the
+    # absent ones: a source that embeds a file still fails loudly at its
+    # include_str!, and one that predates the file never reads it.
+    ++ builtins.filter builtins.pathExists (
+      map (path: sourceRoot + "/${path}") (crateCompileInputs.${crate} or [ ])
+    );
 
   scopedSources =
     crates:

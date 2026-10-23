@@ -4,6 +4,11 @@ Finite Chat owns the Hermes platform plugin and the Rust bridge contract that
 the plugin speaks. finitecomputer can import the plugin or vendor it into its
 runtime image, but it should not fork the transport semantics.
 
+The sidecar behind the plugin serves either the agent's MLS Device or, with
+`FINITECHAT_CHAT_TRANSPORT=direct`, the agent's plaintext room log that web
+chat reaches without MLS ([direct-transport.md](direct-transport.md)). The
+plugin contract below is the same for both.
+
 ## Bridge Commands
 
 The supported plugin distribution path is:

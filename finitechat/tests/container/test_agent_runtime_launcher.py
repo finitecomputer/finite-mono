@@ -574,6 +574,24 @@ class AgentRuntimeLauncherConfigTest(unittest.TestCase):
             },
         )
 
+    def test_reconciler_streams_finitechat_only_on_opted_in_direct_transport(self) -> None:
+        cases = [
+            ({}, False),
+            ({"FINITECHAT_DIRECT_STREAMING": "1"}, False),
+            ({"FINITECHAT_CHAT_TRANSPORT": "direct"}, False),
+            ({"FINITECHAT_CHAT_TRANSPORT": "direct", "FINITECHAT_DIRECT_STREAMING": "1"}, True),
+        ]
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                settings = self._reconciler_settings() | extra
+                reconciled = self._reconcile_config(
+                    {"display": {"platforms": {"finitechat": {"streaming": not expected}}}},
+                    settings,
+                )
+                self.assertIs(
+                    reconciled["display"]["platforms"]["finitechat"]["streaming"], expected
+                )
+
     def test_gateway_launcher_does_not_persist_raw_finite_private_key(self) -> None:
         script = (REPO_ROOT / "containers/agent/run_hermes_gateway.sh").read_text(encoding="utf-8")
 

@@ -98,8 +98,12 @@ async fn bridge_warmup_exit(signal: bool) {
         .unwrap();
     let hosted_pid = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(pid) = std::fs::read_to_string(home.join("native.pid")) {
-                break pid.trim().parse::<i32>().unwrap();
+            // The fake child's `echo $$ > native.pid` creates the file before
+            // writing it, so an empty read means "not yet".
+            if let Ok(pid) = std::fs::read_to_string(home.join("native.pid"))
+                && let Ok(pid) = pid.trim().parse::<i32>()
+            {
+                break pid;
             }
             assert!(
                 daemon.try_wait().unwrap().is_none(),

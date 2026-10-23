@@ -159,8 +159,9 @@ async function launchDraft(
   account: Awaited<ReturnType<typeof getAccountAuthContext>>
 ) {
   // Pre-mint the owner's hosted chat identity and hand its account id to Core
-  // so the lease-time runtime spec can scope chat admission to the owner.
-  // Fail-open: a hosted-device outage must never block agent creation.
+  // so the lease-time runtime spec names the chat's owner. Required, and read
+  // before Core creates anything: a hosted-device outage fails this attempt
+  // cleanly and the same idempotency key retries it.
   const ownerChatAccountId = await hostedDeviceOwnerChatAccountId(
     hostedDeviceConfig(),
     account

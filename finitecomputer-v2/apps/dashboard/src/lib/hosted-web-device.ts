@@ -340,35 +340,41 @@ export async function hostedDeviceState(
 
 const HOSTED_CHAT_ACCOUNT_ID_PATTERN = /^[0-9a-f]{64}$/u;
 
+export const OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE =
+  "Chat isn't ready to set up a new agent right now. Try again in a moment.";
+
 /**
- * The owner's hosted-chat account id (64 hex) for agent-creation granting.
- * Reading app state pre-mints the hosted chat identity on first contact, so a
- * runner lease can never race the mint. Fail-open by contract: any transport,
- * config, or shape problem returns null (with a warning) because agent
- * creation must never be bricked by chat identity availability; Core simply
- * leases the runtime without FINITECHAT_OWNER_NPUBS in that case.
+ * The owner's hosted-chat account id (64 hex) that Core gives the new agent as
+ * FINITECHAT_OWNER_NPUBS. Reading app state pre-mints the hosted chat identity
+ * on first contact, so a runner lease can never race the mint.
+ *
+ * Required: an agent created without its owner has a chat nobody may claim,
+ * because code inside the agent could otherwise claim it first. Any config,
+ * transport or shape problem throws before Core creates anything, so a retry
+ * with the same idempotency key starts clean.
  */
 export async function hostedDeviceOwnerChatAccountId(
   config: HostedDeviceConfig | null,
   account: AccountAuthContext
-): Promise<string | null> {
+): Promise<string> {
   if (!config) {
-    return null;
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
   }
+  let accountId = "";
   try {
     const state = await hostedDeviceState(config, account);
-    const accountId = state.identity?.account_id?.trim().toLowerCase() ?? "";
-    if (!HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId)) {
-      console.warn("Hosted chat identity had no usable account id for agent creation");
-      return null;
-    }
-    return accountId;
+    accountId = state.identity?.account_id?.trim().toLowerCase() ?? "";
   } catch (error) {
     console.warn("Could not pre-mint the hosted chat identity for agent creation", {
       error: error instanceof Error ? error.message : String(error),
     });
-    return null;
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
   }
+  if (!HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId)) {
+    console.warn("Hosted chat identity had no usable account id for agent creation");
+    throw new Error(OWNER_CHAT_IDENTITY_UNAVAILABLE_MESSAGE);
+  }
+  return accountId;
 }
 
 export async function hostedDeviceBrainIdentityProvider(
@@ -485,6 +491,63 @@ export async function hostedDeviceRuntimeCommand(
     },
     65_000
   );
+}
+
+export type HostedDirectChatAuthorizationInput = {
+  agent_id: string;
+  method: "GET" | "POST";
+  /** The agent bridge path and query, starting `/v1/app/`. */
+  path: string;
+  /** SHA-256 hex of the exact request body bytes; present iff POST. */
+  body_sha256: string | null;
+};
+
+export type HostedDirectChatAuthorization = {
+  /** The user-signed NIP-01 request event (kind 27235). */
+  event: Record<string, unknown>;
+  /** The signer: the user's Finite Chat account id (64 hex). */
+  accountId: string;
+};
+
+const DIRECT_CHAT_AUTHORIZATION_KIND = 27235;
+const DIRECT_CHAT_AUTHORIZATION_TIMEOUT_MS = 5_000;
+
+/**
+ * Signs one direct agent-bridge request with the user's existing chat
+ * identity. The hosted device never mints an identity here; a missing one is
+ * a 409 `chat_identity_missing` envelope.
+ */
+export async function hostedDeviceDirectChatAuthorization(
+  config: HostedDeviceConfig,
+  account: AccountAuthContext,
+  input: HostedDirectChatAuthorizationInput
+): Promise<HostedDirectChatAuthorization> {
+  const result = await hostedDeviceJson<unknown>(
+    config,
+    account,
+    "/v1/chat/direct-authorization",
+    { method: "POST", body: JSON.stringify({ version: 1, ...input }) },
+    DIRECT_CHAT_AUTHORIZATION_TIMEOUT_MS
+  );
+  const record = result && typeof result === "object" && !Array.isArray(result)
+    ? result as Record<string, unknown>
+    : {};
+  const event = record.event && typeof record.event === "object" && !Array.isArray(record.event)
+    ? record.event as Record<string, unknown>
+    : null;
+  const accountId = typeof record.account_id === "string" ? record.account_id : "";
+  if (
+    !event ||
+    !HOSTED_CHAT_ACCOUNT_ID_PATTERN.test(accountId) ||
+    event.pubkey !== accountId ||
+    event.kind !== DIRECT_CHAT_AUTHORIZATION_KIND ||
+    typeof event.id !== "string" ||
+    typeof event.sig !== "string" ||
+    !Array.isArray(event.tags)
+  ) {
+    throw new HostedDeviceRequestError("Chat authorization is unavailable right now.", 502);
+  }
+  return { event, accountId };
 }
 
 export async function hostedDeviceUpdates(
@@ -617,6 +680,9 @@ export function hostedDeviceDiagnosticPath(path: string) {
   ) {
     return pathname;
   }
+  if (pathname === "/v1/chat/direct-authorization") {
+    return pathname;
+  }
   if (pathname.startsWith("/v1/brain/")) {
     return "/v1/brain/:operation";
   }
@@ -626,7 +692,8 @@ export function hostedDeviceDiagnosticPath(path: string) {
   return "/unknown";
 }
 
-async function hostedDeviceRequestError(response: Response) {
+/** Reads a failed hosted-device (or agent bridge) response's error envelope. */
+export async function hostedDeviceRequestError(response: Response) {
   const text = await response.text();
   try {
     const parsed = JSON.parse(text) as {

@@ -39,6 +39,9 @@ HERMES_ADAPTER_FILES = (
     "finitechat/integrations/hermes/finitechat/adapter.py",
     "finitechat/integrations/hermes/finitechat/plugin.yaml",
     "finitechat/integrations/hermes/finitechat/simplex_topics.py",
+    "finitechat/integrations/hermes/finitechat/dashboard/manifest.json",
+    "finitechat/integrations/hermes/finitechat/dashboard/plugin_api.py",
+    "finitechat/integrations/hermes/finitechat/dashboard/dist/index.js",
 )
 
 # Files outside a crate's manifest, build script and src/ tree that non-test

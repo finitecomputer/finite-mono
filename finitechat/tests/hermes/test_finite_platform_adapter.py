@@ -278,6 +278,19 @@ class FinitePlatformAdapterTests(unittest.TestCase):
         )
         return self.module.FiniteChatAdapter(PlatformConfig(extra=extra, home_channel=home_channel))
 
+    def test_message_editing_follows_the_opted_in_direct_transport(self):
+        cases = [
+            ({}, False),
+            ({"FINITECHAT_CHAT_TRANSPORT": "direct"}, False),
+            ({"FINITECHAT_CHAT_TRANSPORT": "direct", "FINITECHAT_DIRECT_STREAMING": "1"}, True),
+        ]
+        for env, expected in cases:
+            with self.subTest(env=env), patch.dict(os.environ, env, clear=False):
+                for name in ("FINITECHAT_CHAT_TRANSPORT", "FINITECHAT_DIRECT_STREAMING"):
+                    if name not in env:
+                        os.environ.pop(name, None)
+                self.assertIs(self.adapter().SUPPORTS_MESSAGE_EDITING, expected)
+
     def test_register_exposes_finitechat_platform_contract(self):
         ctx = MockPluginContext()
         with (
