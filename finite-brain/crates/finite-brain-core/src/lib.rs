@@ -76,7 +76,10 @@ pub const MAX_PERSONAL_AGENT_ROTATION_FOLDERS: usize = 100;
 /// Maximum Folder Key Grants accepted for one Folder rotation.
 pub const MAX_FOLDER_ROTATION_GRANTS: usize = 1_000;
 /// Maximum re-encrypted object records accepted for one Folder rotation.
-pub const MAX_FOLDER_ROTATION_RECORDS: usize = 1_000;
+/// Removing access must re-encrypt every live object of the Folder, and one
+/// Folder may hold every current object its Brain accepts, so this equals the
+/// envelope: an accepted Folder must never be too large to revoke.
+pub const MAX_FOLDER_ROTATION_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
 /// Maximum total Folder Key Grants accepted in one Personal Agent request.
 pub const MAX_PERSONAL_AGENT_ROTATION_GRANTS: usize = 10_000;
 /// Maximum total re-encrypted records accepted in one Personal Agent request.
@@ -96,10 +99,10 @@ pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_ob
 /// material: standalone rotation, Folder access removal, Member removal and
 /// Mount participant or Mount revocation. Each re-encrypted page travels with
 /// its signed revision event, so the ordinary 1 MiB request cap would refuse
-/// a Folder whose live pages total about 1 MiB. This explicit budget averages
-/// about 64 KiB per record at the 1,000-record Folder fan-out limit and stays
-/// below the 128 MiB export a client downloads to prepare the rotation;
-/// larger rotations are refused, never truncated.
+/// a Folder whose live pages total about 1 MiB. This explicit budget stays
+/// below the 128 MiB export a client downloads to prepare the rotation and is
+/// the binding bound for a Folder of many large pages; larger rotations are
+/// refused before anything is sent, never truncated.
 pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
 /// Seconds an admitted rotation request may take to deliver its body before
 /// the server answers 408 and releases its admission permit.
@@ -3352,6 +3355,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn every_rotation_admits_a_folder_holding_every_accepted_object() {
+        let full_folder = FolderRotationFanout {
+            grants: 1,
+            reencrypted_records: BRAIN_CAPACITY_ENVELOPE.current_objects,
+        };
+        for operation in [
+            FolderRotationOperation::PersonalAgent,
+            FolderRotationOperation::FolderAccessRemoval,
+            FolderRotationOperation::FolderKeyRotation,
+            FolderRotationOperation::MemberRemoval,
+            FolderRotationOperation::AdminDemotion,
+        ] {
+            validate_folder_rotation_fanout(operation, [full_folder]).unwrap();
+        }
     }
 
     #[test]
