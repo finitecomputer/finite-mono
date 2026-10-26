@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::thread;
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -480,7 +479,8 @@ fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
     assert_eq!(outsider_v1.replace("v1", "never-existed"), outsider_unknown);
     // Former readers learn it was deleted; nobody can recreate the id.
     assert!(
-        refused(&member, &member.dir, url, &["brain", "metadata", "v1"]).contains("brain_deleted")
+        refused(&member, &member.dir, url, &["brain", "metadata", "v1"])
+            .contains("Brain v1 was permanently deleted on the server")
     );
     for person in [&admin, &outsider] {
         assert!(
@@ -508,7 +508,7 @@ fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
             url,
             &["folder", "create", "Revived", "--brain", "v1"]
         )
-        .contains("brain_deleted")
+        .contains("Brain v1 was permanently deleted on the server")
     );
     evidence.pass("invitationsTokensRecreateAndProbingRefused", json!(true));
 
@@ -562,7 +562,8 @@ fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
     );
     let server = Server::start(&database, Some(address));
     assert!(
-        refused(&admin, &admin.dir, url, &["brain", "metadata", "v1"]).contains("brain_deleted")
+        refused(&admin, &admin.dir, url, &["brain", "metadata", "v1"])
+            .contains("Brain v1 was permanently deleted on the server")
     );
     assert!(
         refused(
@@ -659,6 +660,84 @@ fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
             .contains("was permanently deleted on the server")
     );
     evidence.pass("restoreDrillToEmptyTarget", json!({"limits": "one Brain database and one admin identity key; not the hosted five-part Recovery Set"}));
+}
+
+#[test]
+fn deletion_on_an_overridden_server_does_not_stop_the_saved_working_tree() {
+    let scratch = TempDir::new().unwrap();
+    let admin = home(scratch.path(), "admin", ADMIN_SECRET);
+    let saved = Server::start(&scratch.path().join("saved.sqlite3"), None);
+    let other = Server::start(&scratch.path().join("other.sqlite3"), None);
+    for server in [&saved, &other] {
+        ok(
+            &admin,
+            &admin.dir,
+            &server.url,
+            &[
+                "brain",
+                "create",
+                "v1",
+                "--kind",
+                "organization",
+                "--name",
+                "V1",
+            ],
+        );
+    }
+    let tree = admin.dir.join("v1");
+    ok(
+        &admin,
+        &admin.dir,
+        &saved.url,
+        &["open", "v1", tree.to_str().unwrap()],
+    );
+    let tree_state = || -> Value {
+        serde_json::from_slice(&fs::read(tree.join(".finitebrain/agent-state.json")).unwrap())
+            .unwrap()
+    };
+    let preview = ok(&admin, &admin.dir, &other.url, &["brain", "delete", "v1"]);
+    ok(
+        &admin,
+        &tree,
+        &saved.url,
+        &[
+            "brain",
+            "delete",
+            "v1",
+            "--confirm",
+            preview["preview"]["stateDigest"].as_str().unwrap(),
+            "--server",
+            &other.url,
+        ],
+    );
+    assert!(tree_state()["brainDeleted"].is_null(), "{}", tree_state());
+    let error = refused(
+        &admin,
+        &tree,
+        &saved.url,
+        &["sync", "now", "--server", &other.url],
+    );
+    assert!(
+        error.contains("was permanently deleted on the server"),
+        "{error}"
+    );
+    assert!(tree_state()["brainDeleted"].is_null(), "{}", tree_state());
+    // The same ID is still live on the saved server and remains usable.
+    ok(&admin, &tree, &saved.url, &["sync", "now"]);
+    let preview = ok(&admin, &tree, &saved.url, &["brain", "delete", "v1"]);
+    ok(
+        &admin,
+        &tree,
+        &saved.url,
+        &[
+            "brain",
+            "delete",
+            "v1",
+            "--confirm",
+            preview["preview"]["stateDigest"].as_str().unwrap(),
+        ],
+    );
+    assert!(tree_state()["brainDeleted"]["deletedAt"].is_string());
 }
 
 #[test]
@@ -780,18 +859,32 @@ fn supervised_working_tree_stops_on_the_live_deletion_notice() {
     };
     // Later local edits never reach the server: the worker skips the
     // deleted Brain, so the one blocked sync stays the only one.
+    wait_until("the blocked sync outcome", &log_path, || {
+        blocked_activity() == 1
+    });
+    let tick_count = || agent_state()["daemon"]["tickCount"].as_u64().unwrap_or(0);
+    let before_first_edit = tick_count();
     fs::write(
         member_tree.join("Knowledge/wiki/after.md"),
         "# After deletion\n",
     )
     .unwrap();
-    thread::sleep(std::time::Duration::from_secs(2));
+    wait_until(
+        "the worker observing the first post-deletion edit",
+        &log_path,
+        || tick_count() > before_first_edit,
+    );
+    let before_second_edit = tick_count();
     fs::write(
         member_tree.join("Knowledge/wiki/after.md"),
         "# After deletion, again\n",
     )
     .unwrap();
-    thread::sleep(std::time::Duration::from_secs(2));
+    wait_until(
+        "the worker observing the second post-deletion edit",
+        &log_path,
+        || tick_count() > before_second_edit,
+    );
     assert_eq!(blocked_activity(), 1, "{}", agent_state());
     assert!(blocked_lines() <= 1);
     assert!(member_tree.join("Knowledge/wiki/alpha.md").is_file());

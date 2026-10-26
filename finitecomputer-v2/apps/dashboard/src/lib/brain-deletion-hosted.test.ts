@@ -11,6 +11,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { renameBrainFixtureEvent } from "../../browser/brain-deletion-fixture";
 
 const BIN_DIR = process.env.FC_BRAIN_DELETION_PROOF_BIN_DIR?.trim();
 const TOKEN = "synthetic-hosted-device-token";
@@ -86,7 +87,7 @@ test("dashboard Brain deletion signs through the hosted device and the Brain ser
     const route = await import("../app/api/brain/deletion/route");
     const { getAccountAuthContext } = await import("./dashboard-auth");
     const { hostedDeviceConfig } = await import("./hosted-web-device");
-    const { adminAccessChangeEventTemplate, hostedBrainDeletionTransport } = await import("./brain-deletion");
+    const { hostedBrainDeletionTransport } = await import("./brain-deletion");
     const adminTransport = hostedBrainDeletionTransport(hostedDeviceConfig()!, await getAccountAuthContext(), brainOrigin);
     const { npub: adminNpub } = await adminTransport.identify();
     for (const [brainId, name] of [["v1", "V1"], ["content-brain", "Content"], ["marketing-comms-brain", "Marketing Comms"]]) {
@@ -116,8 +117,8 @@ test("dashboard Brain deletion signs through the hosted device and the Brain ser
     evidence.adminPreview = { server: firstScope.server, brainId: firstScope.brainId, deletable: firstScope.deletable };
 
     // A rename after the preview invalidates it; a mistyped confirmation never signs.
-    const renameEvent = await adminTransport.signBrainEvent(adminAccessChangeEventTemplate({
-      brainId: "v1", action: "rename-brain", adminNpub, note: "V1 (renamed)",
+    const renameEvent = await adminTransport.signBrainEvent(renameBrainFixtureEvent({
+      brainId: "v1", adminNpub, note: "V1 (renamed)",
       changeId: "rename-after-preview", createdAt: Math.floor(Date.now() / 1000),
     }));
     await adminTransport.signedRequest("POST", "/v1/brains/v1/rename", JSON.stringify({ accessChangeEvent: renameEvent }));

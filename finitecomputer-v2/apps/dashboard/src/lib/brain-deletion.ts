@@ -45,40 +45,10 @@ function rfc3339Seconds(unixSeconds: number) {
   return new Date(unixSeconds * 1000).toISOString().replace(/\.\d{3}Z$/u, "Z");
 }
 
-/// One unsigned Brain admin access-change event with a note and no Folder,
-/// target or key version. Content and tags must equal
+/// One unsigned delete-brain event with the preview digest as its note.
+/// Content and tags must equal
 /// `AdminAccessChangePayload::canonical_json` and `admin_access_change_tags`
 /// in finite-brain-core byte for byte, or the server refuses the signature.
-export function adminAccessChangeEventTemplate(input: {
-  brainId: string;
-  action: "delete-brain" | "rename-brain";
-  adminNpub: string;
-  note: string;
-  changeId: string;
-  createdAt: number;
-}): BrainEventTemplate {
-  const content = [
-    `"version":${JSON.stringify("finite-brain-admin-access-change-v1")}`,
-    `"brainId":${JSON.stringify(input.brainId)}`,
-    `"changeId":${JSON.stringify(input.changeId)}`,
-    `"action":${JSON.stringify(input.action)}`,
-    `"adminNpub":${JSON.stringify(input.adminNpub)}`,
-    `"note":${JSON.stringify(input.note)}`,
-    `"createdAt":${JSON.stringify(rfc3339Seconds(input.createdAt))}`,
-  ].join(",");
-  return {
-    kind: ADMIN_ACCESS_CHANGE_KIND,
-    created_at: input.createdAt,
-    tags: [
-      ["d", `finite-brain-admin-access-change:${input.brainId}:${input.changeId}`],
-      ["brain", input.brainId],
-      ["action", input.action],
-    ],
-    content: `{${content}}`,
-  };
-}
-
-/// The unsigned `delete-brain` event; its note is the preview state digest.
 export function brainDeletionEventTemplate(input: {
   brainId: string;
   adminNpub: string;
@@ -89,14 +59,25 @@ export function brainDeletionEventTemplate(input: {
   if (!BRAIN_ID_PATTERN.test(input.brainId) || !STATE_DIGEST_PATTERN.test(input.stateDigest)) {
     throw new Error("Brain deletion needs a Brain id and a preview state digest.");
   }
-  return adminAccessChangeEventTemplate({
-    brainId: input.brainId,
-    action: "delete-brain",
-    adminNpub: input.adminNpub,
-    note: input.stateDigest,
-    changeId: input.changeId,
-    createdAt: input.createdAt,
-  });
+  const content = [
+    `"version":${JSON.stringify("finite-brain-admin-access-change-v1")}`,
+    `"brainId":${JSON.stringify(input.brainId)}`,
+    `"changeId":${JSON.stringify(input.changeId)}`,
+    `"action":"delete-brain"`,
+    `"adminNpub":${JSON.stringify(input.adminNpub)}`,
+    `"note":${JSON.stringify(input.stateDigest)}`,
+    `"createdAt":${JSON.stringify(rfc3339Seconds(input.createdAt))}`,
+  ].join(",");
+  return {
+    kind: ADMIN_ACCESS_CHANGE_KIND,
+    created_at: input.createdAt,
+    tags: [
+      ["d", `finite-brain-admin-access-change:${input.brainId}:${input.changeId}`],
+      ["brain", input.brainId],
+      ["action", "delete-brain"],
+    ],
+    content: `{${content}}`,
+  };
 }
 
 export async function previewBrainDeletion(

@@ -195,7 +195,7 @@ fn sync_once_with_local_paths_holding_lock(
     let report = run_working_tree_sync(env, args, activity_kind);
     if let (Err(error), Some(root)) = (&report, root.as_deref())
         && let Some((brain_id, deleted_at)) = brain_deleted_notice(error)
-        && read_agent_state(root)?.brain_id == brain_id
+        && crate::brain_deletion::deletion_is_for_working_tree(env, args, root, &brain_id)?
     {
         return Err(record_brain_deleted(env, root, &brain_id, &deleted_at)?);
     }

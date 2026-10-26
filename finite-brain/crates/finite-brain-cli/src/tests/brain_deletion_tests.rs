@@ -54,6 +54,12 @@ fn only_the_deleted_brain_answer_is_terminal() {
         brain_deleted_notice(&deleted),
         Some(("acme".to_owned(), "2026-10-25T00:00:00Z".to_owned()))
     );
+    assert!(
+        deleted
+            .to_string()
+            .contains("Brain acme was permanently deleted on the server")
+    );
+    assert!(!deleted.to_string().contains("brainDeleted"));
     for other in [
         // An expired sync cursor is also 410, but asks for a rebootstrap.
         CliError::HttpStatus {
@@ -68,6 +74,34 @@ fn only_the_deleted_brain_answer_is_terminal() {
         CliError::Http("connection refused".to_owned()),
     ] {
         assert_eq!(brain_deleted_notice(&other), None, "{other}");
+    }
+}
+
+#[test]
+fn malformed_confirmation_is_reported_before_contacting_the_server() {
+    let tmp = TempDir::new().unwrap();
+    for digest in [
+        format!("sha256:{}", "AB".repeat(32)),
+        "sha256:short".to_owned(),
+    ] {
+        let error = run_with_env(
+            [
+                "brain",
+                "delete",
+                "acme",
+                "--confirm",
+                &digest,
+                "--server",
+                "http://127.0.0.1:9",
+            ],
+            env_for(&tmp),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("exact lowercase sha256:"),
+            "{error}"
+        );
     }
 }
 

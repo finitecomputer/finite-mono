@@ -9,7 +9,7 @@ import {
   deleteBrainExactly,
   previewBrainDeletion,
 } from "./brain-deletion";
-import { deletionConfirmationReady, parseBrainDeletionPreview, previewFacts } from "./brain-deletion-view";
+import { BRAIN_ID_PATTERN, deletionConfirmationReady, parseBrainDeletionPreview, previewFacts } from "./brain-deletion-view";
 
 const DIGEST = `sha256:${"ab".repeat(32)}`;
 
@@ -95,6 +95,21 @@ test("the delete-brain template matches finite-brain-core's canonical event", ()
   assert.throws(() =>
     brainDeletionEventTemplate({ brainId: "v1", adminNpub: "npub1x", stateDigest: "sha256:XY", changeId: "c", createdAt: 1 })
   );
+});
+
+test("deletion accepts case-sensitive Brain IDs without normalizing the confirmation", () => {
+  const brainId = "Marketing-V1_Mixed";
+  assert(BRAIN_ID_PATTERN.test(brainId));
+  const preview = parseBrainDeletionPreview(previewBody({ brainId }));
+  assert.equal(deletionConfirmationReady(preview, brainId), true);
+  assert.equal(deletionConfirmationReady(preview, brainId.toLowerCase()), false);
+  const event = brainDeletionEventTemplate({
+    brainId, adminNpub: "npub1example", stateDigest: DIGEST, changeId: "c", createdAt: 1,
+  });
+  assert.equal(JSON.parse(event.content).brainId, brainId);
+  for (const invalid of ["../V1", "V1/other", "V1?query", " V1"]) {
+    assert.equal(BRAIN_ID_PATTERN.test(invalid), false);
+  }
 });
 
 test("preview parsing keeps the exact scope and refuses inconsistent answers", async () => {

@@ -12,6 +12,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { chromium, type Browser } from "playwright";
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import { renameBrainFixtureEvent } from "./brain-deletion-fixture";
 
 const BIN_DIR = process.env.FC_BRAIN_DELETION_PROOF_BIN_DIR?.trim();
 // The web design fixture's hosted-device credential and account.
@@ -71,7 +72,7 @@ test("Delete Brain previews, refuses a stale confirmation, and deletes through t
 
     // Seed synthetic Brains with the fixture account's hosted key.
     process.env.FC_BRAIN_PUBLIC_ORIGIN = brainOrigin;
-    const { adminAccessChangeEventTemplate, hostedBrainDeletionTransport } = await import("../src/lib/brain-deletion");
+    const { hostedBrainDeletionTransport } = await import("../src/lib/brain-deletion");
     const admin = hostedBrainDeletionTransport(
       { baseUrl: deviceUrl, apiToken: DEVICE_TOKEN },
       { email: "fixture-user@example.test", workosUserId: WORKOS_USER_ID, emailVerified: true, source: "dev" },
@@ -131,8 +132,8 @@ test("Delete Brain previews, refuses a stale confirmation, and deletes through t
     assert.equal(await remove.isDisabled(), true);
 
     // The Brain changes after the preview: the confirmation is refused.
-    const rename = await admin.signBrainEvent(adminAccessChangeEventTemplate({
-      brainId: "v1", action: "rename-brain", adminNpub: npub, note: "V1 renamed",
+    const rename = await admin.signBrainEvent(renameBrainFixtureEvent({
+      brainId: "v1", adminNpub: npub, note: "V1 renamed",
       changeId: "rename-during-review", createdAt: Math.floor(Date.now() / 1000),
     }));
     await admin.signedRequest("POST", "/v1/brains/v1/rename", JSON.stringify({ accessChangeEvent: rename }));

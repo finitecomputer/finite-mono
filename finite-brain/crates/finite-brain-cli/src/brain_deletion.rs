@@ -86,6 +86,18 @@ pub(crate) fn brain_delete<W: Write>(
         .ok_or(CliError::MissingArgument("brain-id"))?;
     BrainId::new(brain_id.clone()).map_err(|error| CliError::InvalidInput(error.to_string()))?;
     let confirmed = option_value(args, "--confirm");
+    if let Some(digest) = confirmed.as_deref()
+        && !digest.strip_prefix("sha256:").is_some_and(|hex| {
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(CliError::InvalidInput(
+            "--confirm requires the exact lowercase sha256:<64 hex characters> digest from the deletion preview; nothing was deleted".to_owned(),
+        ));
+    }
     let preview = fetch_brain_deletion_preview(env, args, &brain_id)?;
     let Some(confirmed) = confirmed else {
         return write_preview(output, json, &preview);
@@ -121,7 +133,7 @@ pub(crate) fn brain_delete<W: Write>(
     .map_err(|error| deletion_request_error(error, &brain_id))?;
     let response: BrainDeleteResponseView = serde_json::from_value(response)?;
     if let Some(root) = find_agent_state(&env.cwd)?
-        && read_agent_state(&root)?.brain_id == brain_id
+        && deletion_is_for_working_tree(env, args, &root, &brain_id)?
     {
         record_brain_deleted(env, &root, &brain_id, &response.receipt.deleted_at)?;
     }
@@ -301,6 +313,25 @@ pub(crate) fn brain_deleted_notice(error: &CliError) -> Option<(String, String)>
         }
         _ => None,
     }
+}
+
+/// A server override may name a different Brain with the same ID. Only the
+/// Working Tree's saved server can make that tree permanently stop syncing.
+pub(crate) fn deletion_is_for_working_tree(
+    env: &CliEnvironment,
+    args: &[String],
+    root: &Path,
+    brain_id: &str,
+) -> Result<bool, CliError> {
+    let state = read_agent_state(root)?;
+    let Some(saved_server) = state.server_url else {
+        return Ok(false);
+    };
+    Ok(state.brain_id == brain_id
+        && saved_server.trim().trim_end_matches('/')
+            == server_url_for_command(env, args)?
+                .trim()
+                .trim_end_matches('/'))
 }
 
 /// Mark the Working Tree at `root` as belonging to a deleted Brain: it never

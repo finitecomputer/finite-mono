@@ -86,7 +86,7 @@ export function BrainDeletionPanel({ brain, onDeleted }: { brain: BrainRow; onDe
       <h2 className="text-base font-semibold">Delete Brain</h2>
       {phase.kind === "closed" && <>
         <p className="text-sm text-muted-foreground">
-          Permanently deletes {brain.name} for everyone. You&apos;ll review exactly what goes first.
+          A current admin can permanently delete {brain.name} for everyone. We&apos;ll check your account&apos;s access and show exactly what would be deleted.
         </p>
         <Button type="button" variant="destructive" onClick={() => void review()}>Review deletion…</Button>
       </>}

@@ -2,7 +2,7 @@
 /// deletion panel: parsing of the Brain server's preview and receipt, and the
 /// confirmation rule. No server-only imports.
 
-export const BRAIN_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,127}$/u;
+export const BRAIN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 export const STATE_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 
 export type BlockingMount = {

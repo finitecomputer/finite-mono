@@ -89,7 +89,16 @@ impl fmt::Display for CliError {
                 write!(f, "invalid successful HTTP response: {reason}")
             }
             Self::HttpStatus { status, body } => {
-                write!(f, "http request rejected with {status}: {}", body.trim())
+                if let Some((brain_id, deleted_at)) =
+                    crate::brain_deletion::brain_deleted_notice(self)
+                {
+                    write!(
+                        f,
+                        "Brain {brain_id} was permanently deleted on the server at {deleted_at}"
+                    )
+                } else {
+                    write!(f, "http request rejected with {status}: {}", body.trim())
+                }
             }
             Self::Identity(reason) => write!(f, "finite identity error: {reason}"),
             Self::InsecureWorkingTree { path, reason } => write!(
