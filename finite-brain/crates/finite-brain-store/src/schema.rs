@@ -406,6 +406,17 @@ CREATE INDEX brain_invite_tokens_by_brain
     ON brain_invite_tokens(brain_id, created_at);
 "#;
 
+/// Brain deletion scope of the retired email-delegation tables, which keep
+/// their deployed legacy Brain column name: (table, predicate on `?1`).
+pub(crate) const LEGACY_DELEGATION_DELETION_SCOPE: [(&str, &str); 3] = [
+    ("brain_email_access_delegations", "vault_id = ?1"),
+    (
+        "brain_email_access_delegation_audit",
+        "delegation_id IN (SELECT id FROM brain_email_access_delegations WHERE vault_id = ?1)",
+    ),
+    ("personal_vault_bootstrap_authorizations", "vault_id = ?1"),
+];
+
 const SCHEMA_V31: &str = r#"
 -- Permanent Organization Brain deletion record. Deliberately outside the
 -- brains foreign-key graph: deleting the Brain row and everything it owns

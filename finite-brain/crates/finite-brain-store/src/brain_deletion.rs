@@ -6,6 +6,7 @@ use rusqlite::types::ValueRef;
 use sha2::{Digest, Sha256};
 
 use crate::folder_key_rotation::begin_authoritative_write;
+use crate::schema::LEGACY_DELEGATION_DELETION_SCOPE;
 use crate::*;
 
 /// Prefix of a Brain deletion state digest.
@@ -72,12 +73,9 @@ const BRAIN_DELETION_SCOPE: &[ScopedRows] = &[
     scoped("share_links", "brain_id = ?1"),
     scoped("personal_agents", "brain_id = ?1"),
     scoped("personal_agent_audit", "brain_id = ?1"),
-    scoped("brain_email_access_delegations", "vault_id = ?1"),
-    scoped(
-        "brain_email_access_delegation_audit",
-        "delegation_id IN (SELECT id FROM brain_email_access_delegations WHERE vault_id = ?1)",
-    ),
-    scoped("personal_vault_bootstrap_authorizations", "vault_id = ?1"),
+    legacy_delegation_scope(0),
+    legacy_delegation_scope(1),
+    legacy_delegation_scope(2),
     scoped(
         "shared_folder_invitations",
         "source_brain_id = ?1 OR destination_brain_id = ?1",
@@ -121,6 +119,11 @@ pub(crate) const BRAIN_DELETION_UNSCOPED_TABLES: &[&str] = &[
     "deleted_brains",
     "deleted_brain_audience",
 ];
+
+const fn legacy_delegation_scope(index: usize) -> ScopedRows {
+    let (table, predicate) = LEGACY_DELEGATION_DELETION_SCOPE[index];
+    scoped(table, predicate)
+}
 
 const fn scoped(table: &'static str, predicate: &'static str) -> ScopedRows {
     ScopedRows {
@@ -655,14 +658,13 @@ fn remove_brain_rows(tx: &Connection, brain_id: &BrainId) -> Result<(), StoreErr
         "DELETE FROM personal_folder_mounts WHERE source_brain_id = ?1",
         id,
     )?;
-    tx.execute(
-        "DELETE FROM brain_email_access_delegations WHERE vault_id = ?1",
-        id,
-    )?;
-    tx.execute(
-        "DELETE FROM personal_vault_bootstrap_authorizations WHERE vault_id = ?1",
-        id,
-    )?;
+    // The audit rows cascade with their delegations.
+    for (table, predicate) in [
+        LEGACY_DELEGATION_DELETION_SCOPE[0],
+        LEGACY_DELEGATION_DELETION_SCOPE[2],
+    ] {
+        tx.execute(&format!("DELETE FROM {table} WHERE {predicate}"), id)?;
+    }
     tx.execute("DELETE FROM brain_record_index WHERE brain_id = ?1", id)?;
     // Folders reference their parent with ON DELETE RESTRICT: remove leaves
     // first, one bounded pass per hierarchy level.
