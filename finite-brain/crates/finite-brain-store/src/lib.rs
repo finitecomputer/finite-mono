@@ -20,6 +20,7 @@ use time::format_description::well_known::Rfc3339;
 mod access_report;
 mod admin_demotion;
 mod approvals;
+mod brain_deletion;
 mod brains;
 mod folder_access;
 mod folder_deletion;
@@ -40,6 +41,10 @@ pub use access_report::{
     ParticipationKind,
 };
 pub use admin_demotion::{AdminDemotionRequest, admin_demotion_rotation_folders};
+pub use brain_deletion::{
+    BRAIN_DELETION_DIGEST_PREFIX, BlockingMount, BrainDeletionOutcome, BrainDeletionPreview,
+    BrainDeletionReceipt, BrainDeletionRequest, DeletedBrainNotice,
+};
 pub use folder_key_rotation::{
     FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
     folder_key_required_recipients, stale_folder_key_holders,
@@ -3463,6 +3468,7 @@ mod tests {
     use tempfile::TempDir;
 
     mod admin_demotion_tests;
+    mod brain_deletion_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
 
@@ -7313,7 +7319,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 30);
+        assert_eq!(version, 31);
         for (status, timestamp, eligible) in [
             ("accepted", Some(now), true),
             ("revoked", Some(now), true),

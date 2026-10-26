@@ -120,6 +120,18 @@ impl BrainStore {
                 params![30, MIGRATION_TIMESTAMP],
             )?;
         }
+
+        // V31 is additive only: the permanent Brain deletion record, its
+        // audience, and a guard that keeps a deleted Brain id retired. A V30
+        // binary reopening a V31 database never looks for version 31, and
+        // the guard trigger still refuses to recreate a deleted Brain id.
+        if !migration_applied(&tx, 31)? {
+            tx.execute_batch(SCHEMA_V31)?;
+            tx.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                params![31, MIGRATION_TIMESTAMP],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -392,6 +404,39 @@ CREATE TABLE brain_invite_tokens (
 
 CREATE INDEX brain_invite_tokens_by_brain
     ON brain_invite_tokens(brain_id, created_at);
+"#;
+
+const SCHEMA_V31: &str = r#"
+-- Permanent Organization Brain deletion record. Deliberately outside the
+-- brains foreign-key graph: deleting the Brain row and everything it owns
+-- never removes this row, so the Brain id stays retired and an exact retry of
+-- the accepted signed deletion returns the same receipt.
+CREATE TABLE deleted_brains (
+    brain_id TEXT PRIMARY KEY NOT NULL,
+    deletion_event_id TEXT NOT NULL UNIQUE,
+    actor_npub TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    state_digest TEXT NOT NULL,
+    folder_count INTEGER NOT NULL CHECK (folder_count >= 0),
+    object_count INTEGER NOT NULL CHECK (object_count >= 0),
+    deletion_event_json TEXT NOT NULL
+);
+
+-- Principals that held access when the Brain was deleted. Only they learn
+-- that the Brain was deleted; everyone else sees an unknown Brain id.
+CREATE TABLE deleted_brain_audience (
+    brain_id TEXT NOT NULL,
+    actor_npub TEXT NOT NULL,
+    PRIMARY KEY (brain_id, actor_npub)
+);
+
+-- Every writer, including older binaries, is refused a deleted Brain id.
+CREATE TRIGGER deleted_brain_ids_stay_retired
+BEFORE INSERT ON brains
+WHEN EXISTS (SELECT 1 FROM deleted_brains WHERE brain_id = NEW.id)
+BEGIN
+    SELECT RAISE(ABORT, 'finite_deleted_brain_id');
+END;
 "#;
 
 const SCHEMA_V30: &str = r#"
@@ -2831,7 +2876,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(latest_version, 30);
+        assert_eq!(latest_version, 31);
         assert_eq!(capacity_count(&store, "legacy-organization", "folders"), 1);
         assert_eq!(capacity_count(&store, "legacy-organization", "members"), 1);
         assert_eq!(
