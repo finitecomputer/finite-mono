@@ -132,11 +132,14 @@ pub(crate) fn brain_delete<W: Write>(
     }
     .map_err(|error| deletion_request_error(error, &brain_id))?;
     let response: BrainDeleteResponseView = serde_json::from_value(response)?;
-    if let Some(root) = find_agent_state(&env.cwd)?
-        && deletion_is_for_working_tree(env, args, &root, &brain_id)?
-    {
-        record_brain_deleted(env, &root, &brain_id, &response.receipt.deleted_at)?;
-    }
+    // The server has committed. Local discovery, scanning or persistence must
+    // not turn that accepted outcome into an error that hides its receipt.
+    let local_warning = record_confirmed_deletion(env, args, &response.receipt)
+        .unwrap_or_else(|error| {
+            Some(format!(
+                "Server deletion succeeded, but could not record or check the local Working Tree's deletion state: {error}. Local files were left in place; keep this receipt and inspect the Working Tree before removing it"
+            ))
+        });
     if json {
         write_json(
             output,
@@ -146,6 +149,7 @@ pub(crate) fn brain_delete<W: Write>(
                 "server": preview.server,
                 "name": preview.name,
                 "receipt": response.receipt,
+                "warnings": local_warning.into_iter().collect::<Vec<_>>(),
             }),
         )
     } else {
@@ -176,8 +180,30 @@ pub(crate) fn brain_delete<W: Write>(
             output,
             "Local Working Trees, exports and other offline copies are not erased; remove them when you no longer need them"
         )?;
+        if let Some(warning) = local_warning {
+            writeln!(output, "Warning: {warning}")?;
+        }
         Ok(())
     }
+}
+
+fn record_confirmed_deletion(
+    env: &CliEnvironment,
+    args: &[String],
+    receipt: &BrainDeletionReceiptView,
+) -> Result<Option<String>, CliError> {
+    let Some(root) = find_agent_state(&env.cwd)? else {
+        return Ok(None);
+    };
+    if !deletion_is_for_working_tree(env, args, &root, &receipt.brain_id)? {
+        return Ok(None);
+    }
+    let deleted = record_brain_deleted(env, &root, &receipt.brain_id, &receipt.deleted_at)?;
+    Ok(deleted.unsynced_paths_error.map(|error| {
+        format!(
+            "Sync stopped, but could not list unsynced local changes: {error}. Local files were left in place; inspect them before removing the Working Tree"
+        )
+    }))
 }
 
 fn fetch_brain_deletion_preview(
@@ -336,14 +362,18 @@ pub(crate) fn deletion_is_for_working_tree(
 
 /// Mark the Working Tree at `root` as belonging to a deleted Brain: it never
 /// syncs again, and its files, including unsynced changes, stay in place.
-/// Returns the terminal error every later sync answers with.
+/// Returns the persisted terminal state. A failed local scan is recorded as
+/// incomplete bookkeeping and must not prevent the terminal marker being saved.
 pub(crate) fn record_brain_deleted(
     env: &CliEnvironment,
     root: &Path,
     brain_id: &str,
     deleted_at: &str,
-) -> Result<CliError, CliError> {
-    let unsynced_paths = pending_working_tree_change_paths(root)?;
+) -> Result<BrainDeletedState, CliError> {
+    let (unsynced_paths, unsynced_paths_error) = match pending_working_tree_change_paths(root) {
+        Ok(paths) => (paths, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    };
     let mut tree_env = env.clone();
     tree_env.cwd = root.to_path_buf();
     let mut recorded = None;
@@ -354,6 +384,7 @@ pub(crate) fn record_brain_deleted(
                 deleted_at: deleted_at.to_owned(),
                 detected_at: now.clone(),
                 unsynced_paths,
+                unsynced_paths_error,
             })
             .clone();
         let error = brain_deleted_error(brain_id, &deleted);
@@ -369,7 +400,7 @@ pub(crate) fn record_brain_deleted(
                 deleted.deleted_at
             ),
         );
-        recorded = Some(error);
+        recorded = Some(deleted);
         Ok(())
     })?;
     recorded.ok_or_else(|| CliError::InvalidInput("Agent State was not updated".to_owned()))
@@ -387,5 +418,6 @@ pub(crate) fn brain_deleted_error(brain_id: &str, deleted: &BrainDeletedState) -
             .cloned()
             .collect(),
         unsynced_count: deleted.unsynced_paths.len(),
+        unsynced_paths_error: deleted.unsynced_paths_error.clone(),
     }
 }

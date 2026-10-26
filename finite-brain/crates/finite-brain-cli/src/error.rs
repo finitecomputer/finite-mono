@@ -65,6 +65,7 @@ pub enum CliError {
         /// The first unsynced local paths, kept in place.
         unsynced_paths: Vec<String>,
         unsynced_count: usize,
+        unsynced_paths_error: Option<String>,
     },
 }
 
@@ -144,6 +145,7 @@ impl fmt::Display for CliError {
                 deleted_at,
                 unsynced_paths,
                 unsynced_count,
+                unsynced_paths_error,
             } => {
                 write!(
                     f,
@@ -159,6 +161,12 @@ impl fmt::Display for CliError {
                         } else {
                             ""
                         }
+                    )?;
+                }
+                if let Some(error) = unsynced_paths_error {
+                    write!(
+                        f,
+                        ". Warning: could not list unsynced local changes: {error}; inspect the preserved files"
                     )?;
                 }
                 write!(

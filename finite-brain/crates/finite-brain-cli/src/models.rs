@@ -37,6 +37,10 @@ pub(crate) struct BrainDeletedState {
     pub(crate) detected_at: String,
     /// Local changes never uploaded before deletion; kept in place.
     pub(crate) unsynced_paths: Vec<String>,
+    /// A failed scan means the paths above are incomplete, not that the tree
+    /// has no unsynced work. It never prevents recording terminal deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unsynced_paths_error: Option<String>,
 }
 
 impl AgentState {

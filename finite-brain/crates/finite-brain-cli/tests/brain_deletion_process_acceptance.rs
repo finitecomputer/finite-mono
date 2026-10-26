@@ -13,6 +13,9 @@ use tempfile::TempDir;
 mod harness;
 use harness::*;
 
+#[path = "brain_deletion/local_bookkeeping.rs"]
+mod local_bookkeeping;
+
 #[test]
 fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
     let scratch = TempDir::new().unwrap();

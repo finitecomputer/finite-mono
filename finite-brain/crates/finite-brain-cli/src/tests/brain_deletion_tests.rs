@@ -113,6 +113,7 @@ fn the_terminal_error_names_kept_unsynced_work_without_listing_everything() {
         unsynced_paths: (0..25)
             .map(|index| format!("Notes/{index:02}.md"))
             .collect(),
+        unsynced_paths_error: None,
     };
     let message = brain_deleted_error("acme", &state).to_string();
     assert!(

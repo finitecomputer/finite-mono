@@ -197,7 +197,8 @@ fn sync_once_with_local_paths_holding_lock(
         && let Some((brain_id, deleted_at)) = brain_deleted_notice(error)
         && crate::brain_deletion::deletion_is_for_working_tree(env, args, root, &brain_id)?
     {
-        return Err(record_brain_deleted(env, root, &brain_id, &deleted_at)?);
+        let deleted = record_brain_deleted(env, root, &brain_id, &deleted_at)?;
+        return Err(brain_deleted_error(&brain_id, &deleted));
     }
     if report.as_ref().is_err_and(is_brain_access_loss) {
         let _ = mutate_agent_state(env, |state, now| {
