@@ -43,7 +43,7 @@ fbrain search-index status [--folder <folder>...]|enable --folder <folder>|disab
 fbrain activity
 fbrain wiki check [--json]
 fbrain access explain|list|summary
-fbrain brain list|create|rename|personal-agent-consent|metadata|export
+fbrain brain list|create|rename|personal-agent-consent|metadata|export|delete
 fbrain folder create|list|delete
 fbrain collaborator ensure-admin
 fbrain invite brain create|list|inspect|accept|revoke
@@ -90,6 +90,13 @@ membership, and key grants stay intact. The rename is signed and appears in
 administrative sync history. Other clients receive the name on refresh or sync.
 An older server rejects this command without mutation; upgrade the server
 before promoting the matching CLI and managed skill revision.
+
+## Delete a Brain
+
+`brain delete <brain-id>` only previews an Organization Brain deletion; the
+preview's `--confirm <stateDigest>` form deletes exactly the previewed state.
+Follow [destructive-operations.md](destructive-operations.md) before running
+it. An older server answers with an upgrade error and changes nothing.
 
 ## Identity
 
@@ -172,6 +179,12 @@ values include `caught-up`, `applied-remote-records`, `pushed-local-changes`, an
 
 Each `remoteChanges` entry produced from a signed sync record includes
 `actorNpub`; `--summary` renders it as `actor=<npub>`.
+
+When the server reports the Brain permanently deleted, the Working Tree records
+`brainDeleted` in Agent State and `fbrain status --json`, and every later sync,
+`daemon watch` tick and supervisor notification stops without contacting the
+server. Its files, including the unsynced changes listed in
+`brainDeleted.unsyncedPaths`, stay in place.
 
 ## Search Evidence
 

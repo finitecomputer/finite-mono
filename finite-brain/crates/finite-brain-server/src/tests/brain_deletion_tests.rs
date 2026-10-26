@@ -510,7 +510,7 @@ async fn personal_brains_cannot_be_deleted_by_their_owner_or_agent() {
     let agent = Keys::generate();
     let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL)
         .with_auth_clock(TEST_NOW, 60);
-    let personal = bootstrap_personal_brain("personal-owner", "Personal", &npub(&owner)).unwrap();
+    let personal = bootstrap_personal_brain("personal-owner", "Personal", npub(&owner)).unwrap();
     state
         .store
         .lock()

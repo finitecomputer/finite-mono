@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use crate::{
     AgentSyncStatus, CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport,
-    find_agent_state, load_signer, mutate_agent_state, option_value,
-    pending_working_tree_change_paths, read_agent_state, reconcile_local_search_paths,
-    reconcile_search_changes, run_working_tree_sync, signed_http_auth_header,
+    brain_deleted_error, brain_deleted_notice, find_agent_state, load_signer, mutate_agent_state,
+    option_value, pending_working_tree_change_paths, read_agent_state,
+    reconcile_local_search_paths, reconcile_search_changes, record_brain_deleted,
+    run_working_tree_sync, signed_http_auth_header,
 };
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
@@ -175,6 +176,14 @@ fn sync_once_with_local_paths_holding_lock(
     discovered_local_paths: Option<Vec<String>>,
     root: Option<PathBuf>,
 ) -> Result<SyncOnceReport, CliError> {
+    // A deleted Brain is terminal: never contact the server again from this
+    // Working Tree, and never move or upload its files.
+    if let Some(root) = root.as_deref() {
+        let state = read_agent_state(root)?;
+        if let Some(deleted) = state.brain_deleted.as_ref() {
+            return Err(brain_deleted_error(&state.brain_id, deleted));
+        }
+    }
     let local_paths = discovered_local_paths.map_or_else(
         || {
             root.as_deref()
@@ -184,6 +193,12 @@ fn sync_once_with_local_paths_holding_lock(
         |paths| Ok(Some(paths)),
     );
     let report = run_working_tree_sync(env, args, activity_kind);
+    if let (Err(error), Some(root)) = (&report, root.as_deref())
+        && let Some((brain_id, deleted_at)) = brain_deleted_notice(error)
+        && read_agent_state(root)?.brain_id == brain_id
+    {
+        return Err(record_brain_deleted(env, root, &brain_id, &deleted_at)?);
+    }
     if report.as_ref().is_err_and(is_brain_access_loss) {
         let _ = mutate_agent_state(env, |state, now| {
             state.sync.status = AgentSyncStatus::PausedAccessRevoked;

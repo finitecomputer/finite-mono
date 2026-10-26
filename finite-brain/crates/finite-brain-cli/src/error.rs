@@ -58,6 +58,14 @@ pub enum CliError {
     MissingArgument(&'static str),
     NotFound(String),
     Unsupported(String),
+    /// The Working Tree's Brain was permanently deleted on the server.
+    BrainDeleted {
+        brain_id: String,
+        deleted_at: String,
+        /// The first unsynced local paths, kept in place.
+        unsynced_paths: Vec<String>,
+        unsynced_count: usize,
+    },
 }
 
 impl fmt::Display for CliError {
@@ -122,6 +130,33 @@ impl fmt::Display for CliError {
             Self::MissingArgument(argument) => write!(f, "missing required argument: {argument}"),
             Self::NotFound(item) => write!(f, "not found: {item}"),
             Self::Unsupported(reason) => write!(f, "unsupported: {reason}"),
+            Self::BrainDeleted {
+                brain_id,
+                deleted_at,
+                unsynced_paths,
+                unsynced_count,
+            } => {
+                write!(
+                    f,
+                    "Brain {brain_id} was permanently deleted on the server at {deleted_at}; this Working Tree no longer syncs and its files were left in place"
+                )?;
+                if *unsynced_count > 0 {
+                    write!(
+                        f,
+                        ". {unsynced_count} unsynced local change(s) were kept here and not uploaded anywhere: {}{}",
+                        unsynced_paths.join(", "),
+                        if *unsynced_count > unsynced_paths.len() {
+                            ", ..."
+                        } else {
+                            ""
+                        }
+                    )?;
+                }
+                write!(
+                    f,
+                    ". Copy anything you still need, then remove the Working Tree"
+                )
+            }
         }
     }
 }
