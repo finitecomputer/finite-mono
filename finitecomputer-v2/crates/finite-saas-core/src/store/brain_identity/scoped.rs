@@ -198,6 +198,7 @@ pub(super) fn binding(
         return Ok(ValidBinding {
             description: IdentityDescription {
                 kind: Some(DescribedKind::Human),
+                display_name: bounded(account.display_name.as_deref(), MAX_DISPLAY_NAME_BYTES),
                 account_email: Some(email),
                 ..IdentityDescription::bare(key, DescriptionState::Resolved)
             },

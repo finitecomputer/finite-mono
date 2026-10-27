@@ -1,5 +1,6 @@
 //! Core domain contracts and the stable crate-root facade.
 
+pub mod account_labels;
 pub mod api;
 pub mod auth;
 pub mod billing;

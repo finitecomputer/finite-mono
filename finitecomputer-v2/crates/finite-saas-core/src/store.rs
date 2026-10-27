@@ -170,6 +170,8 @@ mod health;
 use health::*;
 mod identity_rows;
 use identity_rows::*;
+mod key_aliases;
+pub use key_aliases::KeyAliasError;
 mod launch_code_rows;
 use launch_code_rows::*;
 mod launch_codes;
