@@ -125,6 +125,7 @@ test("Delete Brain previews, refuses a stale confirmation, and deletes through t
     await page.goto(`${base}/dashboard/machines/runtime_web_design/brain`);
     await page.getByRole("button", { name: "V1", exact: true }).click();
     const panel = page.getByRole("region", { name: "Delete V1", exact: true });
+    await panel.getByText("A current admin can permanently delete V1 for everyone.", { exact: false }).waitFor();
     await panel.getByRole("button", { name: "Review deletion…" }).click();
     await panel.getByText("Delete V1 permanently?").waitFor();
     await panel.getByText(brainOrigin, { exact: true }).waitFor();
@@ -140,6 +141,7 @@ test("Delete Brain previews, refuses a stale confirmation, and deletes through t
     await panel.getByLabel("Type v1 to confirm").fill("v1");
     await remove.click();
     await panel.getByRole("alert").filter({ hasText: "changed after its deletion preview" }).waitFor();
+    assert.doesNotMatch(await panel.getByRole("alert").innerText(), /current revision|sync conflict/u);
     assert.equal(await (await admin.signedRequest("GET", "/v1/brains") as { brains: unknown[] }).brains.length, 3);
 
     const artifacts = process.env.FC_BROWSER_ARTIFACT_DIR;
