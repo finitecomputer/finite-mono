@@ -304,7 +304,7 @@ are described only after their next qualifying action.
 
 ## Account names and private aliases
 
-Core migration `0042_account_names_and_key_aliases.sql` adds nullable
+Core migration `0043_account_names_and_key_aliases.sql` adds nullable
 `users.workos_display_name` (with its change time) and `account_key_aliases`.
 Nothing is backfilled. Startup reapplies the additive DDL, including a brief
 exclusive lock on `users`; schedule release startup accordingly.
@@ -326,8 +326,10 @@ existing account-link behavior of `users.updated_at` is unchanged.
 Name reader: a `resolved` human row adds `displayName` under the same gates that
 release its `accountEmail`. Wire shape, versions and `source` are unchanged:
 `source` still describes the key association, and the name is the linked
-account's WorkOS name as of its latest verified dashboard request. Agent rows
-keep the project name. `responsibleAccount` carries no name because current
+account's WorkOS name as of its latest verified dashboard request. This also
+applies to v3 scoped account-chat-key records under their existing exact-scope
+and account-binding checks; names never change the mapping or its provenance.
+Agent rows keep the project name. `responsibleAccount` carries no name because current
 Brain servers parse it strictly.
 
 Private aliases: `POST /api/core/v1/me/key-aliases/lookup` (`publicKeys`, 1-100
@@ -341,9 +343,11 @@ same trim and collapse, with no control or bidirectional-override characters,
 at most 1,000 per account (409 `alias_limit_reached`). An alias is visible only
 to its writer. It is never identity evidence and is not read by descriptions,
 Brain access, ownership, membership, roles or grants. The dashboard roster shows
-an alias first, marked "Your alias", with Finite's own name, email or "Unknown"
-beneath it. When alias lookup fails or Core lacks these routes, the roster shows
-without aliases.
+an alias first, marked "Your alias", with the existing identity label beneath
+it. WorkOS name/email, dated scoped annotation, stored public name, lifecycle
+qualifiers and the final "Unknown" fallback keep their existing precedence.
+When alias lookup fails or Core lacks these routes, the roster shows without
+aliases.
 
 Deploy Core before the dashboard to avoid the older-Core unavailable notice.
 Rollback: older Core ignores the new column and table. Names stop refreshing

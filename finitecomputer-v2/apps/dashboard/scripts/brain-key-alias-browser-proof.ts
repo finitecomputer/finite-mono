@@ -72,12 +72,20 @@ async function main() {
       brainServer: "https://brain.test", brainId: "brain_alpha", observedAt: new Date().toISOString(),
       actionKind: "humanHostedAction", observedHumanPublicKeyHex: config.keys[0], participatingPublicKeyHex: config.keys[0],
     }, ["x-finite-brain-observation-credential", config.observationToken]);
+    await request(config.identityUrl, "/api/core/internal/v1/brain-account-observations", config.other, {
+      version: "finite-core-brain-account-observation-v1", operationId: "browser_alias_observation_0002",
+      brainServer: "https://brain.test", brainId: "brain_alpha", observedAt: new Date().toISOString(),
+      actionKind: "humanHostedAction", observedHumanPublicKeyHex: config.keys[5], participatingPublicKeyHex: config.keys[5],
+    }, ["x-finite-brain-observation-credential", config.observationToken]);
     const descriptions = await request(config.identityUrl, "/api/core/internal/v1/brain-identity-descriptions", "", {
-      version: "finite-core-brain-identity-descriptions-v2", brainServer: "https://brain.test", brainId: "brain_alpha",
-      requestedByPublicKeyHex: config.keys[1], publicKeysHex: config.keys,
+      version: "finite-core-brain-descriptions-v3", brainServer: "https://brain.test", brainId: "brain_alpha",
+      requestedByPublicKeyHex: config.keys[1], publicKeysHex: config.keys, participatingPublicKeysHex: config.keys,
     }, ["x-finite-brain-description-credential", config.descriptionToken]);
     const human = descriptions.results.find((row: { publicKeyHex: string }) => row.publicKeyHex === config.keys[0]);
     assert.equal(human.displayName, "Ada Lovelace");
+    const unnamed = descriptions.results.find((row: { publicKeyHex: string }) => row.publicKeyHex === config.keys[5]);
+    assert.equal(unnamed.displayName, undefined);
+    assert.equal(unnamed.accountEmail, "other@finite.test");
     const base = await startDashboard(config.owner, "runtime-auth-user", "runtime-auth@finite.test");
     const otherBase = await startDashboard(config.other, "alias-browser-other", "other@finite.test");
     browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
@@ -97,8 +105,11 @@ async function main() {
       const json = overview ? { version: 1, brains: [{ id: "brain_alpha", name: "Staff brain", kind: "organization", role: "admin", folders: [] }] }
         : { version: 1, brainId: "brain_alpha", identities: [
           { npub: config.npubs[0], role: "member", kind: "human", name: human.displayName, email: human.accountEmail, ownerEmail: null, folders: [] },
-          { npub: config.npubs[1], role: "admin", kind: "agent", name: "Moss", email: null, ownerEmail: "owner@example.test", folders: [] },
+          { npub: config.npubs[1], role: "admin", kind: "agent", name: "Moss", lifecycle: "retired", email: null, ownerEmail: "owner@example.test", folders: [] },
           { npub: config.npubs[2], role: "member", kind: null, name: null, email: null, ownerEmail: null, folders: [] },
+          { npub: config.npubs[3], role: "member", kind: null, publicName: "Stored person", publicNameStoredAt: "2026-10-01T00:00:00Z", folders: [] },
+          { npub: config.npubs[4], role: "member", kind: null, operatorAnnotation: { kind: "historical_identity", label: "Earlier person", observedAt: "2026-10-01T00:00:00Z" }, folders: [] },
+          { npub: config.npubs[5], role: "member", kind: "human", email: unnamed.accountEmail, folders: [] },
         ] };
       await route.fulfill({ headers, json });
     });
@@ -117,7 +128,7 @@ async function main() {
     await page.getByRole("dialog").waitFor({ state: "hidden" });
     await humanRow.getByText("Ada (staff)", { exact: true }).waitFor();
     await waitFor(() => humanRow.getByRole("button", { name: "Edit alias for Ada (staff)", exact: true }).evaluate(element => element === document.activeElement));
-    assert.match(await humanRow.innerText(), /Ada Lovelace.*runtime-auth@finite.test/);
+    assert.match(await humanRow.innerText(), /Ada Lovelace[\s\S]*runtime-auth@finite.test/);
     await openRoster();
     await humanRow.getByText("Ada (staff)", { exact: true }).waitFor();
     const privateLookup = await fetch(`${otherBase}/api/brain/key-aliases`, {
@@ -143,14 +154,17 @@ async function main() {
     await page.unroute("**/api/brain/key-aliases");
     await page.getByRole("button", { name: "Save alias", exact: true }).click();
     await humanRow.getByText("Research lead", { exact: true }).waitFor();
-    for (const label of ["Moss", "Unknown"]) {
+    for (const label of ["Moss", "Unknown", "Stored person", "Earlier person", "other@finite.test"]) {
       const row = roster.getByRole("row").filter({ hasText: label });
       await row.getByRole("button", { name: /Add alias/ }).click();
       await page.getByRole("textbox", { name: "Alias", exact: true }).fill("Research lead");
       await page.getByText("You already use this alias for another key here. Check the key before saving.", { exact: true }).waitFor();
       await page.getByRole("button", { name: "Save alias", exact: true }).click();
       await row.getByText("Your alias", { exact: true }).waitFor();
-      assert.match(await row.innerText(), label === "Moss" ? /Moss.*Agent/ : /Unknown/);
+      assert((await row.innerText()).includes(label));
+      if (label === "Moss") await row.getByText("Agent (retired)", { exact: true }).waitFor();
+      if (label === "Stored person") await row.getByText("Public name", { exact: true }).waitFor();
+      if (label === "Earlier person") await row.getByText("Historical identity · Evidence 2026-10-01", { exact: true }).waitFor();
       if (label === "Moss") assert.match(await row.innerText(), /owner@example.test/);
       await row.getByRole("button", { name: /Edit alias/ }).click();
       await page.getByRole("button", { name: "Clear alias", exact: true }).click();
@@ -182,7 +196,7 @@ async function main() {
       await page.unroute("**/api/brain/key-aliases");
     }
     assert.deepEqual(errors, []);
-    console.log("PASS: real Core/Postgres + dashboard name display, alias save/reload/edit/clear, viewer isolation, origin rejection, keyboard, bounds, mobile and unavailable fallback");
+    console.log("PASS: real Core/Postgres + dashboard v3 name/fallback display, scoped-label preservation, alias save/reload/edit/clear, viewer isolation, origin rejection, keyboard, bounds, mobile and unavailable fallback");
     console.log("BOUNDARY: WorkOS provider and Agent/Brain roster transport are fixtures; live OAuth, runtime/Brain services and production rollout are not claimed.");
   } finally {
     await browser?.close();

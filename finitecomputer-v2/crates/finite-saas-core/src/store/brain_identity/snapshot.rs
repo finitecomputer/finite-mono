@@ -92,7 +92,11 @@ impl IdentitySnapshot {
                           THEN workos_display_name END AS display_name,
                         link_status, workos_user_id, core_rfc3339(updated_at) AS updated_at
                  FROM users WHERE id = ANY($1)",
-                &[&releasable_ids, &(MAX_CONTACT_BYTES as i32), &(MAX_DISPLAY_NAME_BYTES as i32)],
+                &[
+                    &releasable_ids,
+                    &(MAX_CONTACT_BYTES as i32),
+                    &(MAX_DISPLAY_NAME_BYTES as i32),
+                ],
             )
             .await
             .map_err(store_error)?

@@ -1,6 +1,7 @@
 "use client";
 import { useCallback, useMemo, useRef, useState } from "react";
 import { KeyAliasDialog, type AliasTarget } from "@/components/brain-key-alias-dialog";
+import { IdentityCell, identityLabel } from "@/components/brain-identity-cell";
 import { Button } from "@/components/ui/button";
 import { useAgentInventory } from "@/hooks/use-agent-inventory";
 import { useKeyAliases } from "@/hooks/use-key-aliases";
@@ -16,26 +17,12 @@ const folderStates: Record<string, string> = { grantMissing: "key pending", revo
 
 /** What Finite knows about this key, without any alias. */
 function actualLabel(row: BrainIdentity) {
-  if (row.kind === "agent") return row.name ? `${row.name} · Agent` : null;
-  return [row.name, row.email].filter(Boolean).join(" · ") || null;
+  const { primary, detail } = identityLabel(row);
+  return [primary, detail].filter(Boolean).join(" · ") || null;
 }
 
 function shortKey(npub: string) {
   return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
-}
-
-function Identity({ row, alias }: { row: BrainIdentity; alias: string | null }) {
-  if (alias) {
-    return <>
-      <span>{alias}</span>{" "}
-      <span className="ml-1 inline-block rounded-full border px-1.5 text-[11px] font-normal leading-4 text-muted-foreground align-middle">Your alias</span>
-      <span className="block text-xs font-normal text-muted-foreground">{actualLabel(row) ?? `Unknown · ${shortKey(row.npub)}`}</span>
-    </>;
-  }
-  const detail = row.kind === "agent" ? "Agent" : row.name ? row.email : null;
-  const primary = row.kind === "agent" ? row.name : row.name ?? row.email;
-  if (!primary) return <span className="text-muted-foreground">Unknown</span>;
-  return <>{primary}{detail && <span className="block text-xs text-muted-foreground">{detail}</span>}</>;
 }
 
 export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; brain: BrainRow }) {
@@ -56,9 +43,9 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
         <thead><tr><th scope="col">Identity</th><th scope="col" className="w-24"><span className="sr-only">Your alias</span></th><th scope="col" className="w-48">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th></tr></thead>
         <tbody>{data.map(row => {
           const alias = aliases.aliasFor(row.npub);
-          const name = alias ?? (row.kind === "agent" ? row.name : row.name ?? row.email) ?? `unknown key ${shortKey(row.npub)}`;
+          const name = alias ?? identityLabel(row).primary ?? `unknown key ${shortKey(row.npub)}`;
           return <tr key={row.npub}>
-            <th scope="row"><Identity row={row} alias={alias} /></th>
+            <IdentityCell row={row} alias={alias} />
             <td>{aliases.status === "ready" && <Button type="button" variant="ghost" size="xs"
               aria-label={`${alias ? "Edit" : "Add"} alias for ${name}`}
               onClick={event => {
@@ -67,7 +54,7 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
               }}>
               {alias ? "Edit alias" : "Add alias"}
             </Button>}</td>
-            <td>{row.ownerEmail}</td>
+            <td>{row.kind === "agent" ? row.ownerEmail : null}</td>
             <td>{roles[row.role] ?? row.role}</td>
             <td>{row.folders.map(folder => `${folderNames.get(folder.id) ?? folder.id}${folderStates[folder.state] ? ` (${folderStates[folder.state]})` : ""}`).join(", ")}</td>
             <td><span className="font-mono text-xs" title={row.npub}>{shortKey(row.npub)}</span></td>

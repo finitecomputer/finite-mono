@@ -30,7 +30,7 @@ async fn key_alias_browser_composition() {
         let app = brain_identity::identity_app(db.store.clone());
         let identity_server =
             tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        let keys: Vec<_> = [21, 22, 23]
+        let keys: Vec<_> = [21, 22, 23, 24, 25, 26]
             .into_iter()
             .map(key_aliases::valid_key)
             .collect();
