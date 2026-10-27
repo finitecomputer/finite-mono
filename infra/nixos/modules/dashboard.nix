@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Scoped Brain roster attribution (#1121) on the retained production
-    # generation, built from 2a51182f; excludes unrelated trial migrations.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/39711516885
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:edeb58da6ddac69b511cfecfd3808e4220af90a952e3fe131812b5979c8233ea";
+    # Brain deletion, people management and private aliases on the retained
+    # production generation, built from e64d43ce; excludes trial migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/40523924565
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:7441eb29940e4d9108d8d370b362c397617dddcbc89fdff822b4a052f81a7529";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
