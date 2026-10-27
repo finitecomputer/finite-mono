@@ -7,6 +7,7 @@ not packaging evidence. Every CLI and HOME in these tests is disposable.
 import asyncio
 import base64
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -1159,7 +1160,7 @@ print(json.dumps(payload))
             ],
         )
 
-    def test_remove_admin_demotes_first_and_reports_a_partial_removal(self):
+    def test_remove_admin_demotes_first_and_keeps_nonzero_results_unknown(self):
         self.admin_fixture()
         demote = [
             "admin",
@@ -1185,8 +1186,8 @@ print(json.dumps(payload))
         with self.change_client() as client:
             for failing, state, steps in (
                 ("", "removed", [demote, remove]),
-                ("admin member remove", "demotedNotRemoved", [demote, remove]),
-                ("admin role revoke", "failed", [demote]),
+                ("admin member remove", "unknown", [demote, remove]),
+                ("admin role revoke", "unknown", [demote]),
             ):
                 with self.subTest(failing=failing):
                     (self.agent / "fail").write_text(failing)
@@ -1280,7 +1281,7 @@ print(json.dumps(payload))
         ):
             response = self.client.request(method, f"/api/plugins/finite-brain/{path}", json=body)
             self.assertEqual(response.status_code, 502, path)
-            self.assertEqual(response.json(), {"error": "failed"})
+            self.assertEqual(response.json(), {"error": "unknown"})
         (self.agent / "fail").unlink()
         (self.agent / "slow-change").touch()
         plugin = sys.modules["hermes_dashboard_plugin_finite-brain"]
@@ -1327,7 +1328,58 @@ print(json.dumps(payload))
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        url = f"http://127.0.0.1:{port}"
+        # Forward actual signed requests to the actual store, then inject a
+        # failure only after a successful commit. This does not fake CLI exits.
+        fault = {"mode": None, "route": None, "attempts": 0, "commits": 0, "hits": 0}
+
+        class FaultProxy(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def forward(self):
+                if (
+                    fault["mode"] == "mounts-after-remove"
+                    and fault["commits"]
+                    and self.command == "GET"
+                    and self.path.endswith("/mounts")
+                ):
+                    fault["hits"] += 1
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                if (self.command, self.path) == fault["route"]:
+                    fault["attempts"] += 1
+                connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+                try:
+                    connection.request(self.command, self.path, body, dict(self.headers))
+                    response = connection.getresponse()
+                    payload = response.read()
+                    if (self.command, self.path) == fault["route"] and 200 <= response.status < 300:
+                        fault["commits"] += 1
+                        if fault["mode"] == "lost-response":
+                            fault["hits"] += 1
+                            self.close_connection = True
+                            self.connection.shutdown(socket.SHUT_RDWR)
+                            return
+                    self.send_response(response.status)
+                    for key, value in response.getheaders():
+                        if key.lower() not in ("content-length", "transfer-encoding", "connection"):
+                            self.send_header(key, value)
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                finally:
+                    connection.close()
+
+            do_GET = do_POST = do_DELETE = do_PUT = forward
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), FaultProxy)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        proxy_thread.start()
+        self.addCleanup(proxy.server_close)
+        self.addCleanup(proxy.shutdown)
+        url = f"http://127.0.0.1:{proxy.server_port}"
         log = (lab / "server.log").open("w")
         server = subprocess.Popen(
             [os.environ["FBRAIN_SERVER_TEST_BINARY"]],
@@ -1578,6 +1630,86 @@ print(json.dumps(payload))
                 (lab / "hold").unlink()
                 self.assertEqual(self.wait_for_job(client, job, brain), "removed")
         self.assertEqual({row["npub"] for row in roster()["identities"]}, {npub["alice"]})
+
+        # A Member or Admin can be gone even though its command exits nonzero:
+        # the final mounts GET failed, or the committed DELETE response was lost.
+        # Report uncertainty and let a separate fresh roster establish the truth.
+        with self.change_client() as client:
+            for mode in ("mounts-after-remove", "lost-response"):
+                for admin in (False, True):
+                    label = f"fault-{mode}-{admin}"
+                    cli(label, "auth", "import", "--json")
+                    npub[label] = cli(label, "auth", "status", "--json")["npub"]
+                    invite_and_accept(label)
+                    if admin:
+                        cli(
+                            "alice",
+                            "admin",
+                            "role",
+                            "grant",
+                            "admin",
+                            "--brain",
+                            brain,
+                            "--target",
+                            npub[label],
+                            "--json",
+                        )
+                    before_fault = key_version()["shared-notes"]
+                    fault.update(
+                        mode=mode,
+                        route=("DELETE", f"/v1/admin/brains/{brain}/members/{npub[label]}"),
+                        attempts=0,
+                        commits=0,
+                        hits=0,
+                    )
+                    state = remove(label, client)
+                    fault["mode"] = None
+                    with self.subTest(mode=mode, admin=admin):
+                        # Prove that this is a post-commit error, without a retry.
+                        self.assertEqual(fault["commits"], 1)
+                        self.assertEqual(fault["attempts"], 1)
+                        self.assertEqual(fault["hits"], 1)
+                        self.assertEqual(key_version()["shared-notes"], before_fault + 1)
+                        self.assertNotIn(
+                            npub[label], {row["npub"] for row in roster()["identities"]}
+                        )
+                        self.assertEqual(state, "unknown")
+
+        # The same uncertainty rule covers a committed invite/revoke whose
+        # response never reached the CLI. Neither operation is sent twice.
+        label = "fault-invitation"
+        cli(label, "auth", "import", "--json")
+        npub[label] = cli(label, "auth", "status", "--json")["npub"]
+        fault.update(
+            mode="lost-response",
+            route=("POST", f"/v1/brains/{brain}/invitations"),
+            attempts=0,
+            commits=0,
+            hits=0,
+        )
+        response = change("alice", "POST", f"invitations/{brain}", {"target": npub[label]})
+        fault["mode"] = None
+        self.assertEqual((fault["commits"], fault["hits"]), (1, 1))
+        self.assertEqual(fault["attempts"], 1)
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json(), {"error": "unknown"})
+        inbox = cli(label, "invite", "brain", "list", "--json")["invitations"]
+        self.assertEqual(len(inbox), 1)
+        invitation = inbox[0]["id"]
+        fault.update(
+            mode="lost-response",
+            route=("DELETE", f"/v1/invitations/{invitation}"),
+            attempts=0,
+            commits=0,
+            hits=0,
+        )
+        response = change("alice", "DELETE", f"invitations/{brain}/{invitation}")
+        fault["mode"] = None
+        self.assertEqual((fault["commits"], fault["hits"]), (1, 1))
+        self.assertEqual(fault["attempts"], 1)
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json(), {"error": "unknown"})
+        self.assertEqual(cli(label, "invite", "brain", "list", "--json")["invitations"], [])
         print(f"\nreal Brain removal timings (seconds): {json.dumps(timings)}")
 
 

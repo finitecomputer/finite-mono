@@ -514,16 +514,16 @@ async def change_response(request, brain_id, fields, check, prepare):
         return refuse(error.status, error.code)
     except AccessUnverified:
         return refuse(403, "notAdmin")
-    except ChangeFailed:
-        return refuse(502, "failed")
     except TimeoutError:
         # A change command that started may have finished on the server.
         return refuse(
             504 if step.sent else 503, "unknown" if step.sent else "unavailable"
         )
-    except (OSError, InvalidInventory, ProductUnavailable):
+    except (ChangeFailed, OSError, InvalidInventory, ProductUnavailable):
+        # A nonzero CLI exit can follow a committed change (including a
+        # failed follow-up read). Without a receipt, the result is unknown.
         return refuse(
-            502 if step.sent else 503, "failed" if step.sent else "unavailable"
+            502 if step.sent else 503, "unknown" if step.sent else "unavailable"
         )
     finally:
         if not handed_off:
@@ -642,8 +642,7 @@ def remember_job(job_id, brain_id, state):
 
 async def removal_job(job_id, brain_id, npub, demote):
     """Demote an Admin first (Brain refuses removing one), then remove. Never
-    retried. A job lost to a Hermes restart reads as unknown."""
-    demoted = False
+    retried. A lost job or unconfirmed command result reads as unknown."""
     state = "unknown"
     try:
         if demote:
@@ -652,17 +651,16 @@ async def removal_job(job_id, brain_id, npub, demote):
                     "fbrain", "admin", "role", "revoke", "admin",
                     "--brain", brain_id, "--target", npub, "--json",
                 )  # fmt: skip
-            demoted = True
         async with asyncio.timeout(REMOVAL_STEP_SECONDS):
             await run_change(
                 "fbrain", "admin", "member", "remove",
                 "--brain", brain_id, "--target", npub, "--json",
             )  # fmt: skip
         state = "removed"
-    except (ChangeFailed, OSError):
-        state = "demotedNotRemoved" if demoted else "failed"
-    except TimeoutError:
-        state = "unknown"
+    except (ChangeFailed, OSError, TimeoutError):
+        # Even after confirmed demotion, removal may have committed before
+        # its CLI failed. Keep unknown; a fresh roster establishes access.
+        pass
     finally:
         remember_job(job_id, brain_id, state)
         _slot.held = False

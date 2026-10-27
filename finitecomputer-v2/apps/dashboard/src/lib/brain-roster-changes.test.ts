@@ -85,6 +85,7 @@ test("every change failure maps to a typed outcome and is never retried", async 
     [{ status: 409, body: { error: "busy" } }, "busy"],
     [{ status: 403, body: { error: "notAdmin" } }, "notAdmin"],
     [{ status: 502, body: { error: "failed" } }, "failed"],
+    [{ status: 502, body: { error: "unknown" } }, "unknown"],
     [{ status: 504, body: { error: "unknown" } }, "unknown"],
     [{ status: 503, body: { error: "unavailable" } }, "unavailable"],
     [{ status: 422, body: { error: "notPending" } }, "notPending"],

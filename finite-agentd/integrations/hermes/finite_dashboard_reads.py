@@ -99,7 +99,7 @@ async def read_json(*argv: str):
 
 
 class ChangeFailed(Exception):
-    """A change command exited nonzero. Its diagnostics are never returned."""
+    """A nonzero CLI exit, not proof of non-commit. Diagnostics stay private."""
 
 
 async def _drain_pipe(stream, limit):
@@ -118,7 +118,8 @@ async def run_change(*argv: str):
     """Run one owner-requested change command once.
 
     Never retried here; callers must not retry either. The exit status is the
-    only success signal. Output never kills a change that is already running:
+    only success signal; a nonzero exit leaves the outcome unknown because
+    the CLI may fail after committing. Output never kills a running change:
     a receipt that is too large or not JSON is returned as None. Deadlines and
     cancellation still reap the process, and the caller reports that outcome
     as unknown.
