@@ -364,7 +364,8 @@ async function main() {
     for (const [target, email, role] of [[ownerRow, OWNER.email, "Admin"], [otherRow, OTHER.email, "Member"]] as const) {
       assert.match(await target.innerText(), new RegExp(`Ada Lovelace[\\s\\S]*${email}[\\s\\S]*${role}`, "u"));
     }
-    await bobRow.getByText("Unknown", { exact: true }).waitFor();
+    // Bob participates but no Account is shared for his key; the copy never names a cause.
+    await bobRow.getByText("Identity details are not available to this Brain.", { exact: true }).waitFor();
     await shot("roster-same-name-humans");
 
     // Private aliases through real Core: the same alias on two different keys.

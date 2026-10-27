@@ -69,7 +69,8 @@ test("admin roster renders dated scoped labels in existing cells, reloads, and c
       await roster.getByText("Agent (retired)", { exact: true }).waitFor();
       assert.equal(await roster.getByRole("row").count(), 6);
       assert.equal(await roster.getByRole("columnheader").allTextContents().then(v => v.join(",")), "Identity,Your alias,Owner,Role,Folders,Key");
-      assert.equal(await roster.getByText("Unknown", { exact: true }).count(), 1);
+      // The blank row has no resolution, as from an older Runtime plugin.
+      assert.equal(await roster.getByText("Identity details are unavailable.", { exact: true }).count(), 1);
       const ownerCells = await roster.locator("tbody tr td:nth-child(3)").allTextContents();
       assert.deepEqual(ownerCells, ["owner@example.test", "", "", "", ""]);
     }
