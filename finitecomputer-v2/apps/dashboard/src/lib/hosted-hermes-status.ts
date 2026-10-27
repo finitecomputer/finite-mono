@@ -123,6 +123,37 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
   });
 }
 
+export type HostedHermesChange = { method: "POST" | "DELETE"; body?: Record<string, string> };
+export type HostedHermesChangeResult = { status: number; body: unknown };
+
+/** One owner-requested change: one grant, one request, never retried, even
+ * on 401. The caller maps every status, because a change that reached the
+ * agent may have happened. Bodies are bounded; nothing else is forwarded. */
+export async function sendHostedHermesChange(
+  runtimeId: string, path: string, change: HostedHermesChange, signal: AbortSignal,
+): Promise<HostedHermesChangeResult> {
+  if (!/^api\/plugins\/[a-z0-9-]+\/[a-zA-Z0-9_/-]+$/.test(path) || path.includes("//")) {
+    throw new HostedHermesStatusError("Invalid agent API path.");
+  }
+  return bounded(signal, async (requestSignal) => {
+    const grant = parseHostedHermesSession(await controlRequest(runtimeId, {
+      method: "POST", signal: requestSignal,
+    }));
+    requestSignal.throwIfAborted();
+    const headers: Record<string, string> = { authorization: `Bearer ${grant.accessToken}` };
+    if (change.body) headers["content-type"] = "application/json";
+    const response = await fetch(new URL(path, grant.baseUrl), {
+      method: change.method, credentials: "omit", cache: "no-store", redirect: "error",
+      referrerPolicy: "no-referrer", signal: requestSignal, headers,
+      body: change.body ? JSON.stringify(change.body) : undefined,
+    });
+    let body: unknown = null;
+    try { body = await boundedJson(response); } catch { body = null; }
+    requestSignal.throwIfAborted();
+    return { status: response.status, body };
+  });
+}
+
 export async function readHostedHermesStatus(runtimeId: string, signal: AbortSignal): Promise<HostedHermesStatus> {
   return parseHostedHermesStatus(await readHostedHermesJson(runtimeId, "api/status", signal));
 }

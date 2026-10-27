@@ -449,13 +449,14 @@ jobs:
         working-directory: ${{ github.workspace }}
         env:
           FBRAIN_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/fbrain
+          FBRAIN_SERVER_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/finite-brain
           FSITE_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/fsite
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
           HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
         run: |
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
-          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p fsite-cli --bins
+          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p finite-brain-app -p fsite-cli --bins
           "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_product_inventory.py'
 
       - name: Legacy Hermes migration safety tests
