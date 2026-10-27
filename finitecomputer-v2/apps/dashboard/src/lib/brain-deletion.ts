@@ -155,7 +155,17 @@ export function hostedBrainDeletionTransport(
 /// What the dashboard tells the account after a refused request.
 export function brainDeletionFailure(error: unknown): { status: number; message: string } {
   if (error instanceof BrainHostedClientError) {
-    if ([403, 404, 409, 410].includes(error.status)) {
+    if (error.status === 409) {
+      const message = error.message.includes("changed after its deletion preview")
+        ? "This Brain changed after its deletion preview. Nothing was deleted. Review a fresh preview and confirm again."
+        : error.message.includes("confirmation expired")
+          ? "This deletion confirmation expired. Nothing was deleted. Review a fresh preview and confirm again."
+          : error.message.includes("active cross-Brain Mount")
+            ? error.message
+            : "This Brain can't be deleted in its current state. Nothing was deleted. Review a fresh preview before trying again.";
+      return { status: 409, message };
+    }
+    if ([403, 404, 410].includes(error.status)) {
       return { status: error.status, message: error.message };
     }
     if (error.status === 400) return { status: 400, message: error.message };

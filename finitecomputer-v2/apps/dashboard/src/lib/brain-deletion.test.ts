@@ -179,7 +179,7 @@ test("deletion signs the confirmed digest and retries only a lost transport once
 });
 
 test("refusals keep the Brain server's status and message", () => {
-  for (const status of [403, 404, 409, 410, 400]) {
+  for (const status of [403, 404, 410, 400]) {
     assert.deepEqual(brainDeletionFailure(new BrainHostedClientError(`server says ${status}`, status)), {
       status,
       message: `server says ${status}`,
@@ -187,4 +187,15 @@ test("refusals keep the Brain server's status and message", () => {
   }
   assert.equal(brainDeletionFailure(new BrainHostedClientError("boom", 500)).status, 502);
   assert.equal(brainDeletionFailure(new TypeError("fetch failed")).status, 502);
+});
+
+test("deletion conflicts explain the next step without exposing revision internals", () => {
+  for (const reason of ["Brain changed after its deletion preview", "Brain deletion confirmation expired", "other conflict"]) {
+    const result = brainDeletionFailure(new BrainHostedClientError(`sync conflict: ${reason}; current revision: None`, 409));
+    assert.equal(result.status, 409);
+    assert.match(result.message, /Nothing was deleted\. Review a fresh preview/u);
+    assert.doesNotMatch(result.message, /sync conflict|current revision|None/u);
+  }
+  const mounts = "Brain has 1 active cross-Brain Mount(s) (connection-1); revoke them before deleting the Brain. Nothing was deleted";
+  assert.deepEqual(brainDeletionFailure(new BrainHostedClientError(mounts, 409)), { status: 409, message: mounts });
 });
