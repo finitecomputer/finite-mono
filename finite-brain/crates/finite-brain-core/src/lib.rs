@@ -1686,6 +1686,9 @@ pub enum AdminAccessAction {
     SetFolderAccessMode,
     /// Permanently delete a Folder subtree.
     DeleteFolder,
+    /// Permanently delete an Organization Brain. The signed note carries the
+    /// server's deletion preview state digest the admin confirmed.
+    DeleteBrain,
 }
 
 impl AdminAccessAction {
@@ -1702,6 +1705,7 @@ impl AdminAccessAction {
             Self::RotateFolderKey => "rotate-folder-key",
             Self::SetFolderAccessMode => "set-folder-access-mode",
             Self::DeleteFolder => "delete-folder",
+            Self::DeleteBrain => "delete-brain",
         }
     }
 }
@@ -1721,6 +1725,7 @@ impl TryFrom<&str> for AdminAccessAction {
             "rotate-folder-key" => Ok(Self::RotateFolderKey),
             "set-folder-access-mode" => Ok(Self::SetFolderAccessMode),
             "delete-folder" => Ok(Self::DeleteFolder),
+            "delete-brain" => Ok(Self::DeleteBrain),
             _ => Err(CryptoRecordError::BadOperation {
                 operation: value.to_owned(),
             }),

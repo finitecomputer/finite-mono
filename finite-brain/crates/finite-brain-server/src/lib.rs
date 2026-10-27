@@ -94,6 +94,8 @@ pub struct HealthStatus {
 pub enum BrainUpdateReason {
     ContentUpdated,
     AccessUpdated,
+    /// The Brain was permanently deleted; sent only to its former readers.
+    BrainDeleted,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -254,6 +256,15 @@ impl ServerState {
             latest_sequence,
             reason,
             notify_npubs: Vec::new(),
+        });
+    }
+
+    fn publish_brain_deleted(&self, brain_id: &BrainId, audience: &[UserId]) {
+        let _ = self.brain_updates.send(BrainUpdateNotification {
+            brain_id: brain_id.to_string(),
+            latest_sequence: 0,
+            reason: BrainUpdateReason::BrainDeleted,
+            notify_npubs: audience.iter().map(ToString::to_string).collect(),
         });
     }
 
@@ -535,11 +546,16 @@ pub fn router_with_state(state: ServerState) -> Router {
     let normal_routes = normal_signed_api_router(&state);
     let low_level_routes = low_level_signed_api_router(&state);
     let signed_routes = Router::new().nest("/v1", normal_routes.nest("/admin", low_level_routes));
+    let deletion_state = state.clone();
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .merge(signed_routes)
         .fallback(api_route_not_found_handler)
+        .layer(middleware::from_fn_with_state(
+            deletion_state,
+            deleted_brain_notice_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             cors_state,
             cors_allowlist_middleware,
@@ -564,6 +580,14 @@ fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
         )
         .route("/identities/resolve", post(resolve_identity_handler))
         .route("/my-invitations", get(list_my_invitations_handler))
+        .route(
+            "/brains/{brain_id}",
+            axum::routing::delete(delete_brain_handler),
+        )
+        .route(
+            "/brains/{brain_id}/deletion-preview",
+            get(brain_deletion_preview_handler),
+        )
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/rename", post(rename_brain_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
@@ -10535,6 +10559,7 @@ mod tests {
 
     mod access_report_tests;
     mod admin_demotion_tests;
+    mod brain_deletion_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
 }

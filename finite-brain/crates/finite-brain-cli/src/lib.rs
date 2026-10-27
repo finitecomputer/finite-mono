@@ -4,6 +4,7 @@ mod access_report;
 mod admin;
 mod admin_demotion;
 mod args;
+mod brain_deletion;
 mod clock;
 mod embedding_provider;
 mod environment;
@@ -36,6 +37,7 @@ pub use models::{ActivityEntry, ConflictEntry, ConflictState};
 pub(crate) use admin::*;
 pub(crate) use admin_demotion::*;
 pub(crate) use args::*;
+pub(crate) use brain_deletion::*;
 pub(crate) use clock::*;
 pub(crate) use folder_key_rotation::*;
 pub(crate) use http::*;
@@ -164,7 +166,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export|delete <brain-id> [--confirm <stateDigest>]\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -1320,8 +1322,12 @@ fn run_brain_sync_worker(
     tree_env.cwd = path;
     run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, |notification| {
         let result = retry_transient_notification_work(&cancelled, || {
-            let paused_for_access = read_agent_state(&tree_env.cwd)?.sync.status
-                == AgentSyncStatus::PausedAccessRevoked;
+            let state = read_agent_state(&tree_env.cwd)?;
+            // A deleted Brain is terminal; its Working Tree is never synced.
+            if state.brain_deleted.is_some() {
+                return Ok(());
+            }
+            let paused_for_access = state.sync.status == AgentSyncStatus::PausedAccessRevoked;
             if paused_for_access && notification.reason == "local_updated" {
                 return Ok(());
             }
@@ -1621,6 +1627,7 @@ fn daemon_watch<W: Write>(
                     retry_backoff_millis = 0;
                 }
                 Err(error) => {
+                    let brain_deleted = matches!(error, CliError::BrainDeleted { .. });
                     if local_changes_due && env.embedding_provider.is_some() {
                         semantic_refresh_pending = true;
                         mutate_agent_state(env, |state, _| {
@@ -1642,6 +1649,9 @@ fn daemon_watch<W: Write>(
                         );
                         Ok(())
                     })?;
+                    if brain_deleted {
+                        break;
+                    }
                 }
             }
         } else {
@@ -2814,6 +2824,7 @@ fn brain<W: Write>(
             let response = brain_inventory_read(env, args, &path)?;
             write_command_response(output, json, &response)
         }
+        "delete" => brain_delete(args, env, json, output),
         "export" => {
             let explicit_brain_id =
                 option_value(args, "--brain").or_else(|| positional_values(args).get(1).cloned());
@@ -4794,6 +4805,7 @@ mod tests {
 
     mod access_report_tests;
     mod admin_demotion_tests;
+    mod brain_deletion_tests;
     mod folder_delete_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;

@@ -122,3 +122,32 @@ The dashboard's **Set up Personal Brain** needs a Runtime whose Brain plugin
 and `fbrain` 0.7.1 provide `brain personal-agent-consent`; an older Runtime
 reports that the Agent needs an update. `fbrain open personal` selects only a
 Brain where the key is owner or Personal Agent from 0.7.1 on.
+
+### fbrain 0.9.0 and Organization Brain deletion
+
+Deploy the Brain server and Hosted Web Device built with the new Brain core
+before exposing the dashboard Delete Brain action or publishing the CLI.
+The rollout's `lat2-app-source` must include both services and the dashboard
+image digest; a host revision alone does not advance them. Use the
+[application release procedure](runbooks/deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
+Older Hosted Devices refuse to sign `delete-brain`, and older servers refuse
+the new deletion routes without mutation. Existing Agents receive the CLI only
+through a separately qualified Runtime upgrade; this dashboard action requires
+no new Runtime capability. Managed skills update through `finite skills sync`.
+
+Brain SCHEMA_V31 adds durable deletion receipts and the prior-access audience,
+plus a trigger preventing reuse of a deleted Brain ID. The previous server can
+reopen the database and still blocks ID reuse, but loses the deletion API and
+private `410 Gone` notices. A server rollback does not restore deleted content;
+preserve the current database and subsequent accepted writes. Restoring a
+pre-deletion backup is an operator-run, isolated-empty-target operation per the
+[Brain restore drill](../finite-brain/docs/runbooks/brain-restore-drill.md).
+Its automated proof covers a Brain database and admin identity key, not the
+complete hosted Recovery Set.
+
+Older clients cannot recreate a deleted Brain or upload its stale content.
+Updated clients additionally stop sync and keep local files and unsynced paths.
+The dashboard continues to discover Brains through the selected Agent's access,
+while the account's own key must be a current Brain admin to delete. The CLI
+supports an admin whose Agent cannot see the Brain. Personal Brains remain
+excluded; active cross-Brain mounts must be disconnected before deletion.
