@@ -51,7 +51,7 @@ export function BrainIdentityRoster({ runtimeId, brain, agentName }: { runtimeId
     </div>
     {admin && data && changes === null && <p className="text-sm text-muted-foreground">Update {agentName} to invite or remove people here.</p>}
     {/* A refused change can leave the roster unreadable (the Agent lost admin, or the Brain was deleted); keep its outcome visible. */}
-    {(changes && changes.actions.length > 0 || runner.notice) && <ChangeNotices progress={runner.progress} notice={runner.notice} />}
+    {((changes && changes.actions.length > 0) || runner.notice) && <ChangeNotices progress={runner.progress} notice={runner.notice} />}
     {identities && identities.length > 0 && <div className={`brain-table-scroll ${tableStyles.surface}`} role="region" aria-label={`Identities in ${brain.name}`} tabIndex={0}>
       <table className="brain-table brain-identity-table">
         <thead><tr><th scope="col">Identity</th><th scope="col" className="w-24"><span className="sr-only">Your alias</span></th><th scope="col" className="w-48">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th>
@@ -74,7 +74,7 @@ export function BrainIdentityRoster({ runtimeId, brain, agentName }: { runtimeId
             <td>{row.folders.map(folder => `${folderNames.get(folder.id) ?? folder.id}${folderStates[folder.state] ? ` (${folderStates[folder.state]})` : ""}`).join(", ")}</td>
             <td><span className="font-mono text-xs" title={row.npub}>{shortNpub(row.npub)}</span></td>
             {canRemove && <td>{removable(row) && <Button type="button" variant="outline" size="sm" disabled={runner.busy}
-              aria-label={`Remove ${personLabel(row)}`} onClick={() => setRemoving(row)}>Remove</Button>}</td>}
+              aria-label={`Remove ${personLabel(row)} (${shortNpub(row.npub)})`} onClick={() => setRemoving(row)}>Remove</Button>}</td>}
           </tr>;
         })}</tbody>
       </table>
