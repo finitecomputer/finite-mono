@@ -1,4 +1,5 @@
-"""Bounded CLI reads for bundled, product-owned Hermes dashboard APIs.
+"""Bounded CLI reads and owner-requested changes for bundled, product-owned
+Hermes dashboard APIs.
 
 This module is sealed into Hermes' Python package. Product routers choose the
 commands; no request can supply argv, cwd, environment, identity or an upstream.
@@ -14,6 +15,9 @@ from fastapi.responses import JSONResponse
 
 # Leave room inside the dashboard's 15-second owner-grant/read budget. These
 # bounds apply across both products, including simultaneous browser tabs.
+# Reads share `_REQUESTS`. Change routes admit one change at a time through
+# their product's own change slot and share only `_PROCESSES`, so a long
+# removal never holds a read slot.
 READ_SECONDS = 10
 MAX_OUTPUT_BYTES = 512 * 1024
 _PROCESSES = asyncio.Semaphore(4)
@@ -85,6 +89,62 @@ async def read_json(*argv: str):
         finally:
             # Native CLIs do not spawn child processes. Reap on output limits,
             # deadlines and cancellation; abandoning a request must not leak CLI work.
+            if process.returncode is None:
+                with suppress(ProcessLookupError):
+                    process.kill()
+            stdout.cancel()
+            stderr.cancel()
+            await asyncio.gather(stdout, stderr, return_exceptions=True)
+            await process.wait()
+
+
+class ChangeFailed(Exception):
+    """A change command exited nonzero. Its diagnostics are never returned."""
+
+
+async def _drain_pipe(stream, limit):
+    """Keep at most `limit` bytes, then keep draining so the CLI never blocks."""
+    output = bytearray()
+    overflow = False
+    while chunk := await stream.read(64 * 1024):
+        if overflow or len(output) + len(chunk) > limit:
+            overflow = True
+            continue
+        output.extend(chunk)
+    return None if overflow else output
+
+
+async def run_change(*argv: str):
+    """Run one owner-requested change command once.
+
+    Never retried here; callers must not retry either. The exit status is the
+    only success signal. Output never kills a change that is already running:
+    a receipt that is too large or not JSON is returned as None. Deadlines and
+    cancellation still reap the process, and the caller reports that outcome
+    as unknown.
+    """
+    async with _PROCESSES:
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd="/",
+            limit=64 * 1024,
+        )
+        stdout = asyncio.create_task(_drain_pipe(process.stdout, MAX_OUTPUT_BYTES))
+        stderr = asyncio.create_task(_drain_pipe(process.stderr, 8192))
+        try:
+            output, _diagnostics = await asyncio.gather(stdout, stderr)
+            if await process.wait() != 0:
+                raise ChangeFailed()
+            if output is None:
+                return None
+            try:
+                return json.loads(output)
+            except (ValueError, UnicodeDecodeError, RecursionError):
+                return None
+        finally:
             if process.returncode is None:
                 with suppress(ProcessLookupError):
                     process.kill()

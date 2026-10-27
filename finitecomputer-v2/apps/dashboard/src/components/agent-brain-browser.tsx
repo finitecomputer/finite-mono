@@ -36,7 +36,7 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
     <AgentInventoryRefresh {...inventory} label="brains" />
     {brains && brains.length > 0 && <p className="text-xs text-muted-foreground">Shows folder information this agent can access. Linked folders aren’t included.</p>}
     {selected && (["Admin", "Owner", "Personal agent"].includes(selected.role)
-      ? <BrainIdentityRoster key={`${selected.id}:${inventory.revision}`} runtimeId={runtimeId} brain={selected} />
+      ? <BrainIdentityRoster key={`${selected.id}:${inventory.revision}`} runtimeId={runtimeId} brain={selected} agentName={agentName} />
       : <p className="mt-8 text-sm text-muted-foreground">Only Brain admins can see who has access to {selected.name}.</p>)}
     {selected && <BrainDeletionPanel key={selected.id} brain={selected} onDeleted={refresh} />}
   </>;

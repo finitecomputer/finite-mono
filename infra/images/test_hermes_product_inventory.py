@@ -6,6 +6,7 @@ not packaging evidence. Every CLI and HOME in these tests is disposable.
 
 import asyncio
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -14,7 +15,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
@@ -22,6 +25,10 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 OWNER_NPUB = "npub1" + "q" * 58
 AGENT_NPUB = "npub1" + "p" * 58
+MEMBER_NPUB = "npub1" + "m" * 58
+ADMIN_NPUB = "npub1" + "d" * 58
+GUEST_NPUB = "npub1" + "g" * 58
+INVITATION = "invitation-" + "0" * 32
 
 
 if os.environ.get("FINITE_INVENTORY_SOURCE_TEST") == "1":
@@ -103,6 +110,27 @@ if sys.argv[1:3] == ["access", "list"]:
 if sys.argv[1:3] == ["brain", "personal-agent-consent"]:
     # Signs as the Agent and never mints an identity; no flag required.
     print((home / "consent.json").read_text())
+    sys.exit(0)
+if sys.argv[1:4] == ["invite", "brain", "list"]:
+    print((home / "invitations.json").read_text())
+    sys.exit(0)
+if sys.argv[1] in ("invite", "admin"):
+    step = " ".join(sys.argv[1:4])
+    if (home / "hold").exists():
+        (home / "held").write_text(step)
+        while (home / "hold").exists():
+            time.sleep(0.02)
+    failing = (home / "fail").read_text().split(",") if (home / "fail").exists() else []
+    if step in failing:
+        print("private CLI diagnostics", file=sys.stderr)
+        sys.exit(1)
+    if (home / "slow-change").exists():
+        (home / "pid").write_text(str(os.getpid()))
+        time.sleep(60)
+    if sys.argv[1:4] == ["invite", "brain", "create"]:
+        print((home / "receipt.json").read_text())
+    else:
+        print(json.dumps({"state": "complete", "private": "receipt"}))
     sys.exit(0)
 if "--existing-identity" not in sys.argv:
     sys.exit(2)
@@ -722,6 +750,835 @@ print(json.dumps(payload))
         response = self.read_consent()
         self.assertEqual(response.status_code, 403)
         self.assertNotIn("private CLI", response.text)
+
+    # Admin roster changes: invite, revoke invitation, remove.
+
+    def admin_fixture(self, role="admin", kind="organization"):
+        self.brains["brains"][0].update(role=role, kind=kind)
+        self.write_data()
+
+        def row(npub, brain_role):
+            return {"npub": npub, "brainRole": brain_role, "description": {}, "folders": []}
+
+        report = {
+            "version": "finite-brain-access-report-v1",
+            "brainId": "agent-brain",
+            "brainKind": kind,
+            "actingKey": {"npub": AGENT_NPUB, "brainRole": role},
+            "identities": [
+                row(AGENT_NPUB, role),
+                row(MEMBER_NPUB, "member"),
+                row(ADMIN_NPUB, "admin"),
+                row(GUEST_NPUB, "guest"),
+                row(OWNER_NPUB, "noCurrentRole"),
+            ],
+        }
+        (self.agent / "access.json").write_text(json.dumps(report))
+
+        def invitation(suffix, status="pending", **extra):
+            return {
+                "id": "invitation-" + suffix * 32,
+                "brainId": "agent-brain",
+                "folderOnly": False,
+                "status": status,
+                "userId": MEMBER_NPUB,
+                "inviteCode": "invite-private",
+                "acceptPath": "/v1/private",
+                "identities": [{"npub": MEMBER_NPUB, "nip05": "Mia@finite.vip"}],
+                "expiresAt": "2026-11-02T00:00:00Z",
+                "expired": False,
+                **extra,
+            }
+
+        self.invitations = {
+            "invitations": [
+                invitation("0"),
+                invitation("1", "accepted"),
+                invitation("2", "revoked"),
+                invitation("3", expired=True, userId=None, identities=[]),
+            ]
+        }
+        (self.agent / "invitations.json").write_text(json.dumps(self.invitations))
+        (self.agent / "receipt.json").write_text(
+            json.dumps(invitation("4", deliveryStatus="in_app"))
+        )
+        return report
+
+    def calls(self):
+        path = self.agent / "calls"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def change_client(self):
+        """One event loop for the client's life, as under uvicorn, so a
+        removal job keeps running between requests."""
+        from starlette.testclient import TestClient
+
+        server = self.server
+
+        async def app(scope, receive, send):
+            if scope["type"] == "lifespan":
+                while True:
+                    message = await receive()
+                    kind = message["type"].rsplit(".", 1)[-1]
+                    await send({"type": f"lifespan.{kind}.complete"})
+                    if kind == "shutdown":
+                        return
+            await server.app(scope, receive, send)
+
+        client = TestClient(app, raise_server_exceptions=False)
+        client.headers[server._SESSION_HEADER_NAME] = server._SESSION_TOKEN
+        return client
+
+    def wait_for_job(self, client, job_id, brain="agent-brain"):
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            state = client.get(f"/api/plugins/finite-brain/removals/{brain}/{job_id}").json()
+            if state["job"]["state"] != "running":
+                return state["job"]["state"]
+            time.sleep(0.02)
+        self.fail("removal job did not finish within 60 s")
+
+    def test_identities_advertise_changes_only_to_organization_admins(self):
+        for role, kind, actions in (
+            ("admin", "organization", ["invite", "revokeInvitation", "remove"]),
+            ("member", "organization", []),
+            ("owner", "organization", []),
+            ("personal_agent", "personal", []),
+            ("admin", "personal", []),
+        ):
+            with self.subTest(role=role, kind=kind):
+                report = self.admin_fixture(role, kind)
+                if role == "personal_agent":
+                    report["actingKey"]["brainRole"] = "personalAgent"
+                    (self.agent / "access.json").write_text(json.dumps(report))
+                response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(
+                    response.json()["changes"], {"actingNpub": AGENT_NPUB, "actions": actions}
+                )
+        # The fresh report must agree with the Brain list that this key is an Admin.
+        for acting, kind in (("member", "organization"), ("admin", "personal")):
+            report = self.admin_fixture()
+            report["actingKey"]["brainRole"] = acting
+            report["brainKind"] = kind
+            (self.agent / "access.json").write_text(json.dumps(report))
+            response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+            self.assertEqual(response.json()["changes"]["actions"], [], (acting, kind))
+        report = self.admin_fixture()
+        report["actingKey"] = {"npub": "npub1short", "brainRole": "admin"}
+        (self.agent / "access.json").write_text(json.dumps(report))
+        response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+        self.assertEqual(response.json()["changes"], {"actingNpub": None, "actions": []})
+
+    def test_invite_by_npub_or_public_name_signs_one_member_invitation(self):
+        self.admin_fixture()
+        for target in (MEMBER_NPUB, "mia@finite.vip", "_@example.finite.vip"):
+            with self.subTest(target=target):
+                (self.agent / "calls").unlink(missing_ok=True)
+                response = self.client.post(
+                    "/api/plugins/finite-brain/invitations/agent-brain", json={"target": target}
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                self.assertEqual(response.headers["cache-control"], "no-store")
+                self.assertEqual(
+                    response.json(),
+                    {
+                        "version": 1,
+                        "invitation": {
+                            "id": "invitation-" + "4" * 32,
+                            "targetNpub": MEMBER_NPUB,
+                            "targetName": "mia@finite.vip",
+                            "expiresAt": "2026-11-02T00:00:00Z",
+                            "expired": False,
+                        },
+                    },
+                )
+                self.assertNotIn("private", response.text)
+                self.assertEqual(
+                    self.calls(),
+                    [
+                        ["brain", "list", "--json", "--existing-identity"],
+                        [
+                            "invite",
+                            "brain",
+                            "create",
+                            "--brain",
+                            "agent-brain",
+                            "--target",
+                            target,
+                            "--json",
+                        ],
+                    ],
+                )
+        # A receipt the plugin cannot read still reports the created invitation.
+        (self.agent / "receipt.json").write_text("not json")
+        response = self.client.post(
+            "/api/plugins/finite-brain/invitations/agent-brain", json={"target": MEMBER_NPUB}
+        )
+        self.assertEqual(response.json(), {"version": 1, "invitation": None})
+
+    def test_change_inputs_are_refused_before_any_command(self):
+        self.admin_fixture()
+        url = "/api/plugins/finite-brain/invitations/agent-brain"
+        for target in (
+            "--server",
+            "-x@finite.vip",
+            "mia@finite.vip --json",
+            "Mia@finite.vip",
+            "mia@localhost",
+            "mia@finite.vip\n",
+            "a" * 65 + "@finite.vip",
+            "b" * 64,
+            MEMBER_NPUB + "q",
+            "npub1" + "b" * 58,
+            "nsec1" + "q" * 58,
+            "",
+            7,
+            None,
+            ["mia@finite.vip"],
+        ):
+            with self.subTest(target=target):
+                self.assertEqual(self.client.post(url, json={"target": target}).status_code, 400)
+        for body, headers in (
+            ({"target": MEMBER_NPUB, "role": "admin"}, {}),
+            ({"target": MEMBER_NPUB, "folder": "x"}, {}),
+            ({}, {}),
+            ([MEMBER_NPUB], {}),
+        ):
+            self.assertEqual(self.client.post(url, json=body, headers=headers).status_code, 400)
+        self.assertEqual(
+            self.client.post(
+                url,
+                content=json.dumps({"target": MEMBER_NPUB}),
+                headers={"content-type": "text/plain"},
+            ).status_code,
+            400,
+        )
+        self.assertEqual(self.client.post(url, content=b"{" + b" " * 2048 + b"}").status_code, 400)
+        self.assertEqual(
+            self.client.post(url + "?server=x", json={"target": MEMBER_NPUB}).status_code, 400
+        )
+        for npub in ("--target", MEMBER_NPUB.upper(), "mia@finite.vip", 1):
+            response = self.client.post(
+                "/api/plugins/finite-brain/removals/agent-brain", json={"npub": npub}
+            )
+            self.assertEqual(response.status_code, 400, npub)
+        for invitation in ("--id", "invitation-" + "0" * 31, "invitation-" + "A" * 32, "x"):
+            response = self.client.delete(
+                f"/api/plugins/finite-brain/invitations/agent-brain/{invitation}"
+            )
+            self.assertEqual(response.status_code, 400, invitation)
+        response = self.client.request(
+            "DELETE",
+            f"/api/plugins/finite-brain/invitations/agent-brain/{INVITATION}",
+            content=b"{}",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(self.calls(), [])
+        for brain in ("--server", "-x", "a" * 129):
+            for response in (
+                self.client.post(
+                    f"/api/plugins/finite-brain/invitations/{brain}", json={"target": MEMBER_NPUB}
+                ),
+                self.client.delete(f"/api/plugins/finite-brain/invitations/{brain}/{INVITATION}"),
+                self.client.post(
+                    f"/api/plugins/finite-brain/removals/{brain}", json={"npub": MEMBER_NPUB}
+                ),
+            ):
+                self.assertEqual(response.status_code, 400, brain)
+                self.assertEqual(response.json(), {"error": "invalidInput"})
+        self.assertEqual(self.calls(), [])
+
+    def test_native_auth_precedes_every_change(self):
+        self.admin_fixture()
+        bad = {self.server._SESSION_HEADER_NAME: "invalid"}
+        for method, path, body in (
+            ("POST", "invitations/agent-brain", {"target": MEMBER_NPUB}),
+            ("DELETE", f"invitations/agent-brain/{INVITATION}", None),
+            ("POST", "removals/agent-brain", {"npub": MEMBER_NPUB}),
+            ("GET", "invitations/agent-brain", None),
+            ("GET", "removals/agent-brain/" + "0" * 32, None),
+        ):
+            response = self.client.request(
+                method, f"/api/plugins/finite-brain/{path}", json=body, headers=bad
+            )
+            self.assertEqual(response.status_code, 401, path)
+        self.assertEqual(self.calls(), [])
+
+    def test_changes_refuse_agents_that_are_not_organization_admins(self):
+        for role, kind in (
+            ("member", "organization"),
+            ("owner", "organization"),
+            ("invited", "organization"),
+            ("personal_agent", "personal"),
+            ("admin", "personal"),
+        ):
+            with self.subTest(role=role, kind=kind):
+                self.admin_fixture(role, kind)
+                (self.agent / "calls").unlink(missing_ok=True)
+                for method, path, body in (
+                    ("POST", "invitations/agent-brain", {"target": MEMBER_NPUB}),
+                    ("DELETE", f"invitations/agent-brain/{INVITATION}", None),
+                    ("POST", "removals/agent-brain", {"npub": MEMBER_NPUB}),
+                ):
+                    response = self.client.request(
+                        method, f"/api/plugins/finite-brain/{path}", json=body
+                    )
+                    self.assertEqual(response.status_code, 403, path)
+                    self.assertEqual(response.json(), {"error": "notAdmin"})
+                self.assertEqual(
+                    self.client.get(
+                        "/api/plugins/finite-brain/invitations/agent-brain"
+                    ).status_code,
+                    403,
+                )
+                # Only the no-mint membership proof ran; nothing could mint or change.
+                self.assertEqual(
+                    {tuple(call) for call in self.calls()},
+                    {("brain", "list", "--json", "--existing-identity")},
+                )
+        self.admin_fixture()
+        self.brains["brains"][0]["brainId"] = "other-brain"
+        self.write_data()
+        response = self.client.post(
+            "/api/plugins/finite-brain/invitations/agent-brain", json={"target": MEMBER_NPUB}
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_pending_invitations_project_only_this_brains_pending_rows(self):
+        self.admin_fixture()
+        response = self.client.get("/api/plugins/finite-brain/invitations/agent-brain")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(
+            response.json(),
+            {
+                "version": 1,
+                "brainId": "agent-brain",
+                "invitations": [
+                    {
+                        "id": INVITATION,
+                        "targetNpub": MEMBER_NPUB,
+                        "targetName": "mia@finite.vip",
+                        "expiresAt": "2026-11-02T00:00:00Z",
+                        "expired": False,
+                    },
+                    {
+                        "id": "invitation-" + "3" * 32,
+                        "targetNpub": None,
+                        "targetName": None,
+                        "expiresAt": "2026-11-02T00:00:00Z",
+                        "expired": True,
+                    },
+                ],
+            },
+        )
+        self.assertNotIn("private", response.text)
+        self.assertIn(["invite", "brain", "list", "--brain", "agent-brain", "--json"], self.calls())
+        pending = self.invitations["invitations"][0]
+        for name, change in (
+            # The Agent's own inbox has no folderOnly field; never show it as this list.
+            ("inbox shape", lambda row: row.pop("folderOnly")),
+            ("other brain", lambda row: row.update(brainId="other")),
+            ("folder invitation", lambda row: row.update(folderOnly=True)),
+            ("flag id", lambda row: row.update(id="--id")),
+            ("bad npub", lambda row: row.update(userId="npub1x")),
+            ("bad time", lambda row: row.update(expiresAt="soon")),
+        ):
+            with self.subTest(name):
+                broken = json.loads(json.dumps(self.invitations))
+                change(broken["invitations"][0])
+                (self.agent / "invitations.json").write_text(json.dumps(broken))
+                response = self.client.get("/api/plugins/finite-brain/invitations/agent-brain")
+                self.assertEqual(response.status_code, 503)
+        # The name is optional: an unexpected identity list hides only the name.
+        for name, identities in (
+            ("too many", [pending["identities"][0]] * 33),
+            ("not a list", "x"),
+        ):
+            with self.subTest(name):
+                odd = json.loads(json.dumps(self.invitations))
+                odd["invitations"][0]["identities"] = identities
+                (self.agent / "invitations.json").write_text(json.dumps(odd))
+                response = self.client.get("/api/plugins/finite-brain/invitations/agent-brain")
+                self.assertEqual(response.status_code, 200, response.text)
+                first = response.json()["invitations"][0]
+                self.assertEqual(
+                    (first["id"], first["targetNpub"], first["targetName"]),
+                    (INVITATION, MEMBER_NPUB, None),
+                )
+        self.assertEqual(pending["id"], INVITATION)
+
+    def test_revoke_only_this_brains_pending_invitation(self):
+        self.admin_fixture()
+        url = f"/api/plugins/finite-brain/invitations/agent-brain/{INVITATION}"
+        response = self.client.delete(url)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"version": 1})
+        self.assertEqual(
+            self.calls()[-1], ["invite", "brain", "revoke", "--id", INVITATION, "--json"]
+        )
+        for invitation in ("1" * 32, "2" * 32, "9" * 32):
+            (self.agent / "calls").unlink()
+            response = self.client.delete(
+                f"/api/plugins/finite-brain/invitations/agent-brain/invitation-{invitation}"
+            )
+            self.assertEqual(response.status_code, 422)
+            self.assertEqual(response.json(), {"error": "notPending"})
+            self.assertNotIn("revoke", json.dumps(self.calls()))
+
+    def test_remove_member_runs_one_background_removal(self):
+        self.admin_fixture()
+        with self.change_client() as client:
+            response = client.post(
+                "/api/plugins/finite-brain/removals/agent-brain", json={"npub": MEMBER_NPUB}
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.headers["cache-control"], "no-store")
+            job = response.json()["job"]
+            self.assertEqual(job["state"], "running")
+            self.assertEqual(self.wait_for_job(client, job["id"]), "removed")
+            # A job ID only answers for its own Brain.
+            other = client.get(f"/api/plugins/finite-brain/removals/other/{job['id']}")
+            self.assertEqual(other.json()["job"]["state"], "unknown")
+        self.assertEqual(
+            self.calls(),
+            [
+                ["brain", "list", "--json", "--existing-identity"],
+                ["access", "list", "--brain", "agent-brain", "--json"],
+                [
+                    "admin",
+                    "member",
+                    "remove",
+                    "--brain",
+                    "agent-brain",
+                    "--target",
+                    MEMBER_NPUB,
+                    "--json",
+                ],
+            ],
+        )
+
+    def test_remove_admin_demotes_first_and_reports_a_partial_removal(self):
+        self.admin_fixture()
+        demote = [
+            "admin",
+            "role",
+            "revoke",
+            "admin",
+            "--brain",
+            "agent-brain",
+            "--target",
+            ADMIN_NPUB,
+            "--json",
+        ]
+        remove = [
+            "admin",
+            "member",
+            "remove",
+            "--brain",
+            "agent-brain",
+            "--target",
+            ADMIN_NPUB,
+            "--json",
+        ]
+        with self.change_client() as client:
+            for failing, state, steps in (
+                ("", "removed", [demote, remove]),
+                ("admin member remove", "demotedNotRemoved", [demote, remove]),
+                ("admin role revoke", "failed", [demote]),
+            ):
+                with self.subTest(failing=failing):
+                    (self.agent / "fail").write_text(failing)
+                    (self.agent / "calls").unlink(missing_ok=True)
+                    response = client.post(
+                        "/api/plugins/finite-brain/removals/agent-brain", json={"npub": ADMIN_NPUB}
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    job = response.json()["job"]["id"]
+                    self.assertEqual(self.wait_for_job(client, job), state)
+                    self.assertEqual(self.calls()[2:], steps)
+                    status = client.get(f"/api/plugins/finite-brain/removals/agent-brain/{job}")
+                    self.assertNotIn("private", status.text)
+
+    def test_removal_refuses_own_key_and_rows_without_a_member_role(self):
+        self.admin_fixture()
+        for npub, code in (
+            (AGENT_NPUB, "ownKey"),
+            (GUEST_NPUB, "notRemovable"),
+            (OWNER_NPUB, "notRemovable"),
+            ("npub1" + "z" * 58, "notRemovable"),
+        ):
+            with self.subTest(npub=npub):
+                response = self.client.post(
+                    "/api/plugins/finite-brain/removals/agent-brain", json={"npub": npub}
+                )
+                self.assertEqual(response.status_code, 422)
+                self.assertEqual(response.json(), {"error": code})
+        self.assertNotIn("remove", json.dumps(self.calls()))
+        self.assertNotIn("revoke", json.dumps(self.calls()))
+        # Without a valid acting key the own-key rule cannot be checked.
+        for acting in ({"npub": "npub1short", "brainRole": "admin"}, None):
+            with self.subTest(acting=acting):
+                report = self.admin_fixture()
+                report["actingKey"] = acting
+                (self.agent / "access.json").write_text(json.dumps(report))
+                (self.agent / "calls").unlink(missing_ok=True)
+                response = self.client.post(
+                    "/api/plugins/finite-brain/removals/agent-brain", json={"npub": MEMBER_NPUB}
+                )
+                self.assertEqual(response.status_code, 503)
+                self.assertEqual(response.json(), {"error": "unavailable"})
+                self.assertNotIn("admin", json.dumps(self.calls()))
+
+    def test_one_change_at_a_time_and_lost_jobs_read_as_unknown(self):
+        self.admin_fixture()
+        (self.agent / "hold").touch()
+        with self.change_client() as client:
+            response = client.post(
+                "/api/plugins/finite-brain/removals/agent-brain", json={"npub": MEMBER_NPUB}
+            )
+            job = response.json()["job"]["id"]
+            for _ in range(500):
+                if (self.agent / "held").exists():
+                    break
+                time.sleep(0.02)
+            before = len(self.calls())
+            for method, path, body in (
+                ("POST", "invitations/agent-brain", {"target": MEMBER_NPUB}),
+                ("DELETE", f"invitations/agent-brain/{INVITATION}", None),
+                ("POST", "removals/agent-brain", {"npub": ADMIN_NPUB}),
+            ):
+                response = client.request(method, f"/api/plugins/finite-brain/{path}", json=body)
+                self.assertEqual(response.status_code, 409, path)
+                self.assertEqual(response.json(), {"error": "busy"})
+            self.assertEqual(len(self.calls()), before)
+            # Reads stay available while a change runs.
+            self.assertEqual(
+                client.get("/api/plugins/finite-brain/identities/agent-brain").status_code, 200
+            )
+            (self.agent / "hold").unlink()
+            self.assertEqual(self.wait_for_job(client, job), "removed")
+            response = client.post(
+                "/api/plugins/finite-brain/invitations/agent-brain", json={"target": MEMBER_NPUB}
+            )
+            self.assertEqual(response.status_code, 200)
+        # A restarted Hermes has no record of the job: unknown, never a guess.
+        response = self.client.get(f"/api/plugins/finite-brain/removals/agent-brain/{'f' * 32}")
+        self.assertEqual(
+            response.json(), {"version": 1, "job": {"id": "f" * 32, "state": "unknown"}}
+        )
+        response = self.client.get("/api/plugins/finite-brain/removals/agent-brain/--x")
+        self.assertEqual(response.json()["job"], {"id": None, "state": "unknown"})
+
+    def test_failed_and_timed_out_changes_report_without_diagnostics(self):
+        self.admin_fixture()
+        (self.agent / "fail").write_text("invite brain create,invite brain revoke")
+        for method, path, body in (
+            ("POST", "invitations/agent-brain", {"target": MEMBER_NPUB}),
+            ("DELETE", f"invitations/agent-brain/{INVITATION}", None),
+        ):
+            response = self.client.request(method, f"/api/plugins/finite-brain/{path}", json=body)
+            self.assertEqual(response.status_code, 502, path)
+            self.assertEqual(response.json(), {"error": "failed"})
+        (self.agent / "fail").unlink()
+        (self.agent / "slow-change").touch()
+        plugin = sys.modules["hermes_dashboard_plugin_finite-brain"]
+        with patch.object(plugin, "READ_SECONDS", 2):
+            response = self.client.post(
+                "/api/plugins/finite-brain/invitations/agent-brain", json={"target": MEMBER_NPUB}
+            )
+        # The command started, so the server may have created it.
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json(), {"error": "unknown"})
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.agent / "pid").read_text()), 0)
+        (self.agent / "mode").write_text("failure")
+        (self.agent / "slow-change").unlink()
+        response = self.client.post(
+            "/api/plugins/finite-brain/invitations/agent-brain", json={"target": MEMBER_NPUB}
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("private", response.text)
+
+    @unittest.skipUnless(
+        os.environ.get("FBRAIN_TEST_BINARY") and os.environ.get("FBRAIN_SERVER_TEST_BINARY"),
+        "real fbrain and Brain server binaries supplied by the caller",
+    )
+    def test_real_brain_server_roster_changes_are_signed_by_the_agent(self):
+        """Native router and auth, the real fbrain and a real local Brain server."""
+        import socket
+
+        lab = self.home / "roster-lab"
+        binaries = lab / "bin"
+        binaries.mkdir(parents=True)
+        real = Path(os.environ["FBRAIN_TEST_BINARY"]).resolve()
+        # A pass-through shim that can pause one removal step, to hold the
+        # Agent's change slot open while the real command waits.
+        (binaries / "fbrain").write_text(
+            f"#!{sys.executable}\n"
+            "import os, pathlib, sys, time\n"
+            "hold = pathlib.Path(os.environ['ROSTER_LAB']) / 'hold'\n"
+            "while sys.argv[1:4] == ['admin', 'member', 'remove'] and hold.exists():\n"
+            "    time.sleep(0.02)\n"
+            f"os.execv({str(real)!r}, [{str(real)!r}, *sys.argv[1:]])\n"
+        )
+        (binaries / "fbrain").chmod(0o700)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        url = f"http://127.0.0.1:{port}"
+        log = (lab / "server.log").open("w")
+        server = subprocess.Popen(
+            [os.environ["FBRAIN_SERVER_TEST_BINARY"]],
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": str(lab),
+                "FINITE_BRAIN_ADDR": f"127.0.0.1:{port}",
+                "FINITE_BRAIN_PUBLIC_BASE_URL": url,
+                "FINITE_BRAIN_DB": str(lab / "brain.sqlite3"),
+                "FINITE_BRAIN_PROTECTED_RATE_LIMIT": "100000:60",
+            },
+            stdout=log,
+            stderr=subprocess.STDOUT,
+        )
+        self.addCleanup(log.close)
+        self.addCleanup(server.wait)
+        self.addCleanup(server.terminate)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", port), timeout=0.1):
+                    break
+            except OSError:
+                if server.poll() is not None or time.monotonic() > deadline:
+                    log.flush()
+                    self.fail(
+                        "Brain server did not start:\n"
+                        + (lab / "server.log").read_text(errors="replace")[-4000:]
+                    )
+                time.sleep(0.05)
+
+        def agent_env(label):
+            return {
+                "FINITE_HOME": str(lab / label),
+                "FBRAIN_CONFIG_DIR": str(lab / label / "brain-config"),
+                "FINITE_BRAIN_SERVER_URL": url,
+                "ROSTER_LAB": str(lab),
+                "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
+            }
+
+        def cli(label, *args, cwd=None, check=True):
+            result = subprocess.run(
+                [str(real), *args],
+                env={**os.environ, **agent_env(label), "HOME": str(lab / label)},
+                cwd=cwd or lab,
+                input=os.urandom(32).hex() if args[:2] == ("auth", "import") else None,
+                capture_output=True,
+                text=True,
+            )
+            if check:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return json.loads(result.stdout) if "--json" in args else result.stdout
+            return result
+
+        npub = {}
+        for label in ("alice", "bob", "carol", "dave"):
+            cli(label, "auth", "import", "--json")
+            npub[label] = cli(label, "auth", "status", "--json")["npub"]
+        brain = cli("alice", "brain", "create", "organization", "Roster Lab", "--json")["brainId"]
+        trees = {label: lab / f"{label}-tree" for label in ("alice", "bob")}
+        cli("alice", "open", brain, str(trees["alice"]), "--json")
+        cli(
+            "alice",
+            "folder",
+            "create",
+            "Shared Notes",
+            "--access",
+            "all_members",
+            "--json",
+            cwd=trees["alice"],
+        )
+        cli("alice", "sync", "now", "--json", cwd=trees["alice"])
+        folder = trees["alice"] / "Shared Notes"
+        (folder / "before.md").write_text("# Before\n\nWritten before the removal.\n")
+        cli("alice", "sync", "now", "--json", cwd=trees["alice"])
+
+        def key_version():
+            metadata = cli("alice", "brain", "metadata", "--brain", brain, "--json")
+            return {item["id"]: item["currentKeyVersion"] for item in metadata["folders"]}
+
+        def roster(label="alice"):
+            with patch.dict(os.environ, agent_env(label)):
+                response = self.client.get(f"/api/plugins/finite-brain/identities/{brain}")
+            self.assertEqual(response.status_code, 200, response.text)
+            return response.json()
+
+        def change(label, method, path, body=None):
+            with patch.dict(os.environ, agent_env(label)):
+                return self.client.request(method, f"/api/plugins/finite-brain/{path}", json=body)
+
+        def invite_and_accept(label):
+            response = change("alice", "POST", f"invitations/{brain}", {"target": npub[label]})
+            self.assertEqual(response.status_code, 200, response.text)
+            invitation = response.json()["invitation"]
+            self.assertEqual(invitation["targetNpub"], npub[label])
+            inbox = cli(label, "invite", "brain", "list", "--json")["invitations"]
+            self.assertEqual([item["id"] for item in inbox], [invitation["id"]])
+            cli(label, "invite", "brain", "accept", invitation["id"], "--json")
+            # An admin's ordinary sync wraps existing Folder Keys for the new Member.
+            cli("alice", "sync", "now", "--json", cwd=trees["alice"])
+
+        timings = {}
+
+        def remove(label, client):
+            with patch.dict(os.environ, agent_env("alice")):
+                started = time.monotonic()
+                response = client.post(
+                    f"/api/plugins/finite-brain/removals/{brain}", json={"npub": npub[label]}
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                state = self.wait_for_job(client, response.json()["job"]["id"], brain)
+                timings[label] = round(time.monotonic() - started, 3)
+            return state
+
+        changes = roster()["changes"]
+        self.assertEqual(changes["actingNpub"], npub["alice"])
+        self.assertEqual(changes["actions"], ["invite", "revokeInvitation", "remove"])
+
+        # Invite through the route; the invitee accepts with its own CLI.
+        invite_and_accept("bob")
+        cli("bob", "open", brain, str(trees["bob"]), "--json")
+        self.assertIn("Written before", (trees["bob"] / "Shared Notes/before.md").read_text())
+        rows = {row["npub"]: row for row in roster()["identities"]}
+        self.assertEqual(rows[npub["bob"]]["role"], "member")
+        invite_and_accept("carol")
+        cli(
+            "alice",
+            "admin",
+            "role",
+            "grant",
+            "admin",
+            "--brain",
+            brain,
+            "--target",
+            npub["carol"],
+            "--json",
+        )
+
+        # Revoke through the route: the invitee no longer sees it.
+        response = change("alice", "POST", f"invitations/{brain}", {"target": npub["dave"]})
+        invitation = response.json()["invitation"]["id"]
+        listed = change("alice", "GET", f"invitations/{brain}").json()["invitations"]
+        self.assertEqual([item["id"] for item in listed], [invitation])
+        response = change("alice", "DELETE", f"invitations/{brain}/{invitation}")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(change("alice", "GET", f"invitations/{brain}").json()["invitations"], [])
+        self.assertEqual(cli("dave", "invite", "brain", "list", "--json")["invitations"], [])
+        self.assertNotEqual(
+            cli("dave", "invite", "brain", "accept", invitation, check=False).returncode, 0
+        )
+
+        # Refusals change nothing.
+        before = key_version()
+        for label, method, path, body, status in (
+            ("alice", "POST", f"removals/{brain}", {"npub": npub["alice"]}, 422),
+            ("alice", "POST", f"removals/{brain}", {"npub": npub["dave"]}, 422),
+            ("bob", "POST", f"invitations/{brain}", {"target": npub["dave"]}, 403),
+            ("bob", "POST", f"removals/{brain}", {"npub": npub["carol"]}, 403),
+            ("dave", "POST", f"invitations/{brain}", {"target": npub["dave"]}, 403),
+            ("alice", "POST", f"invitations/{brain}", {"target": "--server"}, 400),
+            ("alice", "POST", f"invitations/{brain}", {"target": f"{npub['dave']} --json"}, 400),
+            ("alice", "POST", "invitations/--server", {"target": npub["dave"]}, 400),
+        ):
+            response = change(label, method, path, body)
+            self.assertEqual(response.status_code, status, (label, path, body, response.text))
+        self.assertEqual(change("alice", "GET", f"invitations/{brain}").json()["invitations"], [])
+        self.assertEqual(cli("dave", "invite", "brain", "list", "--json")["invitations"], [])
+        # A real Personal Brain, created the way the dashboard does: the owner
+        # signs the creation and the Agent signs its consent.
+        cli("owner", "auth", "import", "--json")
+        owner = cli("owner", "auth", "status", "--json")["npub"]
+        consent = cli("alice", "brain", "personal-agent-consent", "--owner", owner, "--json")
+        body = json.dumps(
+            {
+                "brainId": consent["brainId"],
+                "kind": "personal",
+                "name": "Personal Brain",
+                "personalAgentNpub": npub["alice"],
+                "personalAgentConsent": consent["consent"],
+            }
+        ).encode()
+        signed = cli(
+            "owner", "signer", "sign", "--kind", "http-auth", "--content", "",
+            "--tag", f"u,{url}/v1/brains", "--tag", "method,POST",
+            "--tag", f"nonce,{os.urandom(16).hex()}",
+            "--tag", f"payload,{hashlib.sha256(body).hexdigest()}", "--json",
+        )  # fmt: skip
+        created = urllib.request.urlopen(
+            urllib.request.Request(
+                f"{url}/v1/brains",
+                data=body,
+                method="POST",
+                headers={
+                    "content-type": "application/json",
+                    "authorization": "Nostr "
+                    + base64.b64encode(signed["eventJson"].encode()).decode(),
+                },
+            ),
+            timeout=10,
+        )
+        self.assertEqual(created.status, 200)
+        personal = consent["brainId"]
+        self.assertEqual(roster()["changes"]["actions"], ["invite", "revokeInvitation", "remove"])
+        response = change("alice", "POST", f"invitations/{personal}", {"target": npub["dave"]})
+        self.assertEqual(response.status_code, 403)
+        with patch.dict(os.environ, agent_env("alice")):
+            self.assertEqual(
+                self.client.get(f"/api/plugins/finite-brain/identities/{personal}").json()[
+                    "changes"
+                ]["actions"],
+                [],
+            )
+        self.assertEqual(key_version(), before)
+        self.assertEqual({row["role"] for row in roster()["identities"]}, {"admin", "member"})
+
+        with self.change_client() as client:
+            # Remove a Member: the Folder is re-keyed and later writes stay unreadable.
+            self.assertEqual(remove("bob", client), "removed")
+            after = key_version()
+            self.assertEqual(after["shared-notes"], before["shared-notes"] + 1)
+            self.assertNotIn(npub["bob"], {row["npub"] for row in roster()["identities"]})
+            (folder / "after.md").write_text("# After\n\nSecret written after the removal.\n")
+            cli("alice", "sync", "now", "--json", cwd=trees["alice"])
+            cli("bob", "sync", "now", "--json", cwd=trees["bob"], check=False)
+            leaked = [
+                path
+                for path in trees["bob"].rglob("*")
+                if path.is_file() and b"Secret written after" in path.read_bytes()
+            ]
+            self.assertEqual(leaked, [])
+
+            # Remove an Admin: demoted first, then removed.
+            self.assertEqual(remove("carol", client), "removed")
+            self.assertNotIn(npub["carol"], {row["npub"] for row in roster()["identities"]})
+
+            # One change at a time, with the real command paused mid-removal.
+            invite_and_accept("dave")
+            (lab / "hold").touch()
+            with patch.dict(os.environ, agent_env("alice")):
+                response = client.post(
+                    f"/api/plugins/finite-brain/removals/{brain}", json={"npub": npub["dave"]}
+                )
+                job = response.json()["job"]["id"]
+                busy = client.post(
+                    f"/api/plugins/finite-brain/invitations/{brain}", json={"target": npub["bob"]}
+                )
+                self.assertEqual(busy.status_code, 409)
+                (lab / "hold").unlink()
+                self.assertEqual(self.wait_for_job(client, job, brain), "removed")
+        self.assertEqual({row["npub"] for row in roster()["identities"]}, {npub["alice"]})
+        print(f"\nreal Brain removal timings (seconds): {json.dumps(timings)}")
 
 
 class ProcessCancellationTests(unittest.IsolatedAsyncioTestCase):
