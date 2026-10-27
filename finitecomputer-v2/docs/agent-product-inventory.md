@@ -40,7 +40,7 @@ The plugin adds `invitations/{brain_id}` (list, create, revoke) and
 
 Invitations are key-addressed Member invitations with the default expiry: the
 target is an npub or a public NIP-05 name, resolved once by Brain, and the
-invitee accepts from their own Agent. Email bearer links, roles, Folders and
+invitee accepts with the invited key. Email bearer links, roles, Folders and
 expiry are not offered here.
 
 Before any command that could mint an identity, the plugin proves with
