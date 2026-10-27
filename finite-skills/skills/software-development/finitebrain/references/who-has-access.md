@@ -83,7 +83,7 @@ cannot recall plaintext it already read.
 
 ## Dashboard Roster
 
-Brain admins see a read-only roster on the dashboard Brain page. It shows
+Brain admins see a roster on the dashboard Brain page. It shows
 each key's name or email only when the report resolved it, otherwise its
 `storedNip05` name marked "Public name", otherwise "Unknown", always with the
 npub. Its roles map from `brainRole`: `personalAgent` is
@@ -94,6 +94,14 @@ npub. Its roles map from `brainRole`: `personalAgent` is
 not an admin of that Brain, its Runtime predates the roster, the Brain server
 lacks the report, or the roster is too large. Run `access list` yourself to
 see which.
+
+When you are an Admin of an Organization Brain, the person can also use the
+roster to have you sign a Member invitation (by npub or public name), revoke a
+pending one, or remove a Member or Admin (an Admin is demoted first). These run
+your own `invite brain` and `admin` commands, so they show in your access
+history as yours. If the page says "Ask <you> in Chat for details", run the
+same command yourself to see the reason. If it says the person "is now a Member
+and was not removed", the demotion happened and the removal did not.
 
 ## Removing Or Demoting Someone
 

@@ -1,4 +1,5 @@
 import { HostedHermesStatusError, readHostedHermesJson } from "./hosted-hermes-status";
+import { parseRosterChanges, type RosterChanges } from "./brain-roster-changes";
 
 export type BrainOperatorAnnotation = {
   kind: "historical_identity" | "invitation_key"; label: string; observedAt: string;
@@ -86,8 +87,10 @@ export function parseBrainIdentities(value: unknown, brainId: string): BrainIden
   return identities;
 }
 
-export async function readBrainIdentities(runtimeId: string, brainId: string, signal: AbortSignal) {
+export type BrainRoster = { identities: BrainIdentity[]; changes: RosterChanges | null };
+
+export async function readBrainIdentities(runtimeId: string, brainId: string, signal: AbortSignal): Promise<BrainRoster> {
   if (!/^[A-Za-z0-9_][A-Za-z0-9_-]{0,127}$/.test(brainId)) return invalid();
-  return parseBrainIdentities(await readHostedHermesJson(runtimeId,
-    `api/plugins/finite-brain/identities/${brainId}`, signal), brainId);
+  const report = await readHostedHermesJson(runtimeId, `api/plugins/finite-brain/identities/${brainId}`, signal);
+  return { identities: parseBrainIdentities(report, brainId), changes: parseRosterChanges(report) };
 }
