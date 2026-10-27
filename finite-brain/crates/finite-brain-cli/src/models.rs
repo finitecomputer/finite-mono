@@ -23,6 +23,24 @@ pub(crate) struct AgentState {
     pub(crate) activity: Vec<ActivityEntry>,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+    /// Set once the server reports this Brain permanently deleted. Sync
+    /// stops for good; older fbrain versions ignore the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) brain_deleted: Option<BrainDeletedState>,
+}
+
+/// Terminal state of a Working Tree whose Brain was deleted on the server.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BrainDeletedState {
+    pub(crate) deleted_at: String,
+    pub(crate) detected_at: String,
+    /// Local changes never uploaded before deletion; kept in place.
+    pub(crate) unsynced_paths: Vec<String>,
+    /// A failed scan means the paths above are incomplete, not that the tree
+    /// has no unsynced work. It never prevents recording terminal deletion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) unsynced_paths_error: Option<String>,
 }
 
 impl AgentState {
@@ -53,6 +71,7 @@ impl AgentState {
             activity: Vec::new(),
             created_at: now.to_owned(),
             updated_at: now.to_owned(),
+            brain_deleted: None,
         }
     }
 
@@ -397,6 +416,9 @@ pub(crate) struct StatusReport {
     /// when the server reports the admin-only field for this identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pending_wraps: Option<usize>,
+    /// Present once the server reported this Brain permanently deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) brain_deleted: Option<BrainDeletedState>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]

@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { BrainIdentityRoster } from "@/components/brain-identity-roster";
 import { BrainChatState } from "@/components/brain-chat-state";
+import { BrainDeletionPanel } from "@/components/brain-deletion-panel";
 import { BrainTable } from "@/components/brain-membership-table";
 import { AgentInventoryRefresh } from "@/components/agent-inventory-refresh";
 import { PersonalBrainSetupRow } from "@/components/personal-brain-setup";
@@ -37,5 +38,6 @@ export function AgentBrainBrowser({ runtimeId, agentName }: { runtimeId: string;
     {selected && (["Admin", "Owner", "Personal agent"].includes(selected.role)
       ? <BrainIdentityRoster key={`${selected.id}:${inventory.revision}`} runtimeId={runtimeId} brain={selected} />
       : <p className="mt-8 text-sm text-muted-foreground">Only Brain admins can see who has access to {selected.name}.</p>)}
+    {selected && <BrainDeletionPanel key={selected.id} brain={selected} onDeleted={refresh} />}
   </>;
 }

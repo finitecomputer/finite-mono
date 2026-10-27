@@ -74,7 +74,7 @@ Read the matching reference before acting:
 | the user asks to create or bootstrap a Brain | [brain-creation.md](references/brain-creation.md) |
 | the user asks to invite someone, find or accept an invitation, share an Org Brain with another Agent, or unlock a member's Folders | [sharing.md](references/sharing.md) |
 | the user asks who has access, who a key belongs to, what the dashboard roster shows, to remove or demote someone, or to clear removal pending (`revocationIncomplete`) by rotating a Folder Key | [who-has-access.md](references/who-has-access.md) |
-| the user asks to delete a Folder | [destructive-operations.md](references/destructive-operations.md) |
+| the user asks to delete a Folder or an Organization Brain | [destructive-operations.md](references/destructive-operations.md) |
 | the user asks about backup, restore, migration or whether Brain data is durable | [recovery.md](references/recovery.md) |
 | you run brain, daemon, search-index, folder, admin or mount commands, run `fbrain` from the Rust repo, or a command fails | [fbrain-cli.md](references/fbrain-cli.md) |
 | the installed CLI, a server response or a user-owned skill disagrees with this skill | [skill-freshness.md](references/skill-freshness.md) |
@@ -166,8 +166,9 @@ outside the wiki; `datasets/` describes it.
   when useful. Earlier entries stay as written.
 - Prefer updating a topic to deleting it. Before deleting a Page,
   double-check once in ordinary language, then delete it on a clear yes rather
-  than archiving it. Folder deletion removes a whole
-  subtree: read [destructive-operations.md](references/destructive-operations.md).
+  than archiving it. Folder deletion removes a whole subtree and Brain deletion
+  removes a whole Organization Brain: read
+  [destructive-operations.md](references/destructive-operations.md).
 
 ### Querying
 

@@ -11,6 +11,11 @@ const DEVICE_TOKEN = "web-design-hosted-device-token";
 const WORKOS_USER_ID = "user_web_design";
 const FIXTURE_EMAIL = "fixture-user@example.test";
 const DEFAULT_PORT = 13002;
+// Opt-in real Brain signing for browser proofs: Brain identity-provider calls
+// go to a real hosted device (started with DEVICE_TOKEN) and the dashboard
+// talks to a real Brain server. Everything else stays synthetic.
+const BRAIN_IDENTITY_PROVIDER_URL = process.env.FC_WEB_DESIGN_BRAIN_IDENTITY_PROVIDER_URL?.trim();
+const BRAIN_URL = process.env.FC_WEB_DESIGN_BRAIN_URL?.trim();
 const VALID_SCENARIOS = new Set(["healthy", "unavailable", "recovering"]);
 
 type Scenario = "healthy" | "unavailable" | "recovering";
@@ -251,6 +256,7 @@ async function serve() {
         NEXT_DIST_DIR: ".next-web-design",
         NEXT_PUBLIC_FC_DESIGN_PREVIEWS: process.env.FC_WEB_DESIGN_PREVIEWS === "0" ? "0" : "1",
         NEXT_TELEMETRY_DISABLED: "1",
+        ...(BRAIN_URL ? { FC_BRAIN_UPSTREAM_URL: BRAIN_URL, FC_BRAIN_PUBLIC_ORIGIN: BRAIN_URL } : {}),
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",
       },
@@ -282,6 +288,23 @@ async function serve() {
 
 async function handleHostedRequest(request: IncomingMessage, response: ServerResponse) {
   const requestPath = new URL(request.url ?? "/", "http://fixture").pathname;
+  if (BRAIN_IDENTITY_PROVIDER_URL && request.method === "POST" && requestPath === "/v1/brain/identity-provider") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk as Buffer);
+    const headers = new Headers();
+    for (const name of ["authorization", "content-type", "x-finite-workos-user-id", "x-finite-brain-public-origin"]) {
+      const value = request.headers[name];
+      if (typeof value === "string") headers.set(name, value);
+    }
+    const forwarded = await fetch(`${BRAIN_IDENTITY_PROVIDER_URL}${requestPath}`, {
+      method: "POST",
+      headers,
+      body: Buffer.concat(chunks),
+    });
+    response.writeHead(forwarded.status, { "content-type": forwarded.headers.get("content-type") ?? "application/json" });
+    response.end(Buffer.from(await forwarded.arrayBuffer()));
+    return;
+  }
   if (request.method === "GET" && requestPath === "/runtime-status") {
     writeJson(response, 200, { agent_npub: "npub1webdesignfixture" });
     return;

@@ -136,6 +136,24 @@ pub(crate) fn authenticate_request_header_at(
     signer.to_npub().map_err(auth_error)
 }
 
+/// The signer of an already-answered request, for deciding what its error
+/// response may reveal: signature, method, URL and time are checked, but the
+/// replay cache and rate limit are not touched again, since the handler
+/// already ran full validation (or refused the request) exactly once.
+pub(crate) fn answered_request_signer(
+    state: &ServerState,
+    headers: &HeaderMap,
+    method: &Method,
+    uri: &Uri,
+) -> Option<String> {
+    let (event, expected) =
+        signed_request_header(state, headers, method, uri, state.auth_now_unix_seconds()).ok()?;
+    finite_nostr::validate_http_auth_event_before_body(&event, &expected)
+        .ok()?
+        .to_npub()
+        .ok()
+}
+
 fn signed_request_header(
     state: &ServerState,
     headers: &HeaderMap,
