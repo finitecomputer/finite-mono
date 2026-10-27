@@ -21,6 +21,8 @@ type Fake = {
   changes: { method: string; path: string; body: unknown }[];
   inviteAnswer: (target: string) => { status: number; json: unknown } | null;
   removalFinal: (npub: string) => string;
+  /** The Agent is no longer an admin, or the Brain is gone. */
+  gone: boolean;
 };
 
 function fake(): Fake {
@@ -37,6 +39,7 @@ function fake(): Fake {
     jobs: new Map(), changes: [],
     inviteAnswer: () => null,
     removalFinal: () => "removed",
+    gone: false,
   };
 }
 
@@ -63,6 +66,7 @@ async function serveAgent(page: Page, base: string, state: Fake) {
       { id: "old", name: "Old Brain", kind: "organization", role: "admin", folders: [] },
       { id: "home", name: "Moss Personal", kind: "personal", role: "personal_agent", folders: [] },
     ] });
+    if (state.gone && ["identities", "invitations", "removals"].includes(parts[0])) return reply(403, { error: "notAdmin" });
     if (parts[0] === "identities") {
       const report = { version: 1, brainId: parts[1], identities: state.identities };
       if (parts[1] === "old") return reply(200, report);
@@ -331,6 +335,16 @@ test("same names and private aliases never change which key a removal targets", 
       assert.equal(await page.getByLabel("Invite someone").count(), 0);
       assert.equal(await page.getByText("Update Moss to invite or remove people here.").count(), update ? 1 : 0);
     }
+
+    // The Agent loses admin (or the Brain is deleted) while this roster is open: the refusal stays visible.
+    await page.getByRole("button", { name: "Acme Brain", exact: true }).click();
+    await page.getByLabel("Invite someone").waitFor();
+    state.gone = true;
+    await page.getByLabel("Invite someone").fill(new1);
+    await page.getByLabel("Invite someone").press("Enter");
+    await page.getByRole("alert").filter({ hasText: "Moss could not confirm it is an admin of this Brain." }).waitFor();
+    await page.getByText("Identities unavailable", { exact: true }).waitFor();
+    assert.equal(await page.getByLabel("Invite someone").count(), 0);
     assert.deepEqual(errors, []);
   } finally {
     await browser?.close();
