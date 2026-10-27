@@ -99,9 +99,11 @@ When you are an Admin of an Organization Brain, the person can also use the
 roster to have you sign a Member invitation (by npub or public name), revoke a
 pending one, or remove a Member or Admin (an Admin is demoted first). These run
 your own `invite brain` and `admin` commands, so they show in your access
-history as yours. If the page says "Ask <you> in Chat for details", run the
-same command yourself to see the reason. If it says the person "is now a Member
-and was not removed", the demotion happened and the removal did not.
+history as yours. An unconfirmed result can mean the server changed access but
+the CLI lost its response or failed afterward. Read `access list` or
+`invite brain list --brain <brain-id> --json` to establish the current state
+before deciding whether another change is needed; do not repeat the mutation
+just to recover its diagnostics.
 
 ## Removing Or Demoting Someone
 

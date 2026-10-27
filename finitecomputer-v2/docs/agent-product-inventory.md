@@ -56,8 +56,11 @@ Changes are never retried by the browser or the plugin, and one change runs at
 a time per Agent (others answer `409 busy`). Invite and revoke finish within the
 read deadline. Removal re-encrypts the removed key's Folders (up to 64 MiB per
 request), so it runs as a background job the browser polls; a job lost to a
-Hermes restart reads as `unknown`, and the refreshed roster is the truth. If
-demotion succeeds and removal fails, the job says the person is now a Member.
+Hermes restart reads as `unknown`, and the refreshed roster is the truth.
+A nonzero CLI exit or lost response also leaves the outcome `unknown`, even
+after a confirmed Admin demotion: removal may have committed before a later
+read failed. Invite and revoke use the same rule. Refresh before deciding
+whether another change is needed.
 Answers carry only a fixed error code, never CLI output or receipts.
 
 The CLI signer remains in the Runtime's existing Finite Home. The optional

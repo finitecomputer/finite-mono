@@ -99,6 +99,10 @@ async function serveAgent(page: Page, base: string, state: Fake) {
       if (++entry.polls < 2) return reply(200, { version: 1, job: { id: parts[2], state: "running" } });
       // "lost" models a Hermes restart: the agent no longer knows the job.
       if (entry.final === "lost") return reply(200, { version: 1, job: { id: parts[2], state: "unknown" } });
+      if (entry.final === "committedUnknown") {
+        state.identities = state.identities.filter(row => row.npub !== entry.npub);
+        return reply(200, { version: 1, job: { id: parts[2], state: "unknown" } });
+      }
       if (entry.final === "removed") state.identities = state.identities.filter(row => row.npub !== entry.npub);
       if (entry.final === "demotedNotRemoved") state.identities = state.identities.map(row => row.npub === entry.npub ? { ...row, role: "member" } : row);
       return reply(200, { version: 1, job: { id: parts[2], state: entry.final } });
@@ -184,18 +188,18 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await pending.getByText("jo@finite.vip").waitFor({ state: "detached" });
     assert.equal(state.changes.at(-1)?.method, "DELETE");
 
-    // Busy and failed invitations show one plain line and are sent once.
+    // Busy and unconfirmed invitations show one plain line and are sent once.
     state.inviteAnswer = target => target === "busy@finite.vip" ? { status: 409, json: { error: "busy" } }
-      : target === "fail@finite.vip" ? { status: 502, json: { error: "failed" } } : null;
+      : target === "fail@finite.vip" ? { status: 502, json: { error: "unknown" } } : null;
     for (const [target, message] of [["busy@finite.vip", "Moss is already making a Brain change. Try again when it finishes."],
-      ["fail@finite.vip", "Could not invite fail@finite.vip. Ask Moss in Chat for details."]]) {
+      ["fail@finite.vip", "Moss did not confirm the result. Refresh to check."]]) {
       const sent = state.changes.length;
       await field.fill(target);
       await field.press("Enter");
       await page.getByRole("alert").filter({ hasText: message }).waitFor();
       assert.equal(state.changes.length, sent + 1);
     }
-    await shot(page, "invite-failed");
+    await shot(page, "invite-unconfirmed");
 
     // Remove a Member with the keyboard: the dialog names them and explains re-keying.
     await roster.getByRole("button", { name: `Remove mia@example.test (${short(mia)})` }).focus();
@@ -219,15 +223,18 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await roster.getByText("mia@example.test").waitFor({ state: "detached" });
     await shot(page, "removed");
 
-    // Remove an Admin whose demotion succeeds but removal fails.
-    state.removalFinal = target => target === dan ? "demotedNotRemoved" : target === una ? "lost" : "removed";
+    // Removal committed, but its CLI failed after the Admin demotion. The
+    // refreshed roster loses the row while the notice honestly stays uncertain.
+    state.removalFinal = target => target === dan ? "committedUnknown" : target === una ? "lost" : "removed";
     await roster.getByRole("button", { name: `Remove Dan Agent (${short(dan)})` }).click();
     const adminDialog = page.getByRole("dialog", { name: "Remove Dan Agent?" });
     await adminDialog.getByText("Dan Agent is an Admin. Moss removes the Admin role first, then removes them.").waitFor();
     await adminDialog.getByRole("button", { name: "Remove", exact: true }).click();
-    await page.getByRole("alert").filter({ hasText: `Dan Agent (${short(dan)}) is now a Member and was not removed. Ask Moss in Chat for details.` })
+    await page.getByRole("alert").filter({ hasText: `Could not confirm whether Dan Agent (${short(dan)}) was removed. Refresh to check.` })
       .waitFor({ timeout: 20_000 });
-    await shot(page, "admin-partial");
+    await roster.getByRole("button", { name: `Remove Dan Agent (${short(dan)})` }).waitFor({ state: "detached" });
+    assert.equal(await page.getByText(/is now a Member and was not removed/).count(), 0);
+    await shot(page, "admin-committed-unconfirmed");
 
     // A job the agent no longer knows (a restart) reads as unknown.
     await roster.getByRole("button", { name: `Remove una@finite.vip (${short(una)})` }).click();
