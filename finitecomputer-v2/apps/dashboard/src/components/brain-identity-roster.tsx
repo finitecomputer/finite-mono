@@ -50,7 +50,8 @@ export function BrainIdentityRoster({ runtimeId, brain, agentName }: { runtimeId
       {identities && identities.length > 0 && aliases.status === "unavailable" && <p className="text-xs text-muted-foreground">Your private aliases are unavailable right now.</p>}
     </div>
     {admin && data && changes === null && <p className="text-sm text-muted-foreground">Update {agentName} to invite or remove people here.</p>}
-    {changes && changes.actions.length > 0 && <ChangeNotices progress={runner.progress} notice={runner.notice} />}
+    {/* A refused change can leave the roster unreadable (the Agent lost admin, or the Brain was deleted); keep its outcome visible. */}
+    {(changes && changes.actions.length > 0 || runner.notice) && <ChangeNotices progress={runner.progress} notice={runner.notice} />}
     {identities && identities.length > 0 && <div className={`brain-table-scroll ${tableStyles.surface}`} role="region" aria-label={`Identities in ${brain.name}`} tabIndex={0}>
       <table className="brain-table brain-identity-table">
         <thead><tr><th scope="col">Identity</th><th scope="col" className="w-24"><span className="sr-only">Your alias</span></th><th scope="col" className="w-48">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th>
