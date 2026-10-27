@@ -15,6 +15,7 @@ an admin role, Folder entitlement or a Folder Key Grant.
 | Fact | Authoritative source | Meaning |
 | --- | --- | --- |
 | Account contact | Core `users.normalized_email`, linked through verified WorkOS identity | Current account email, in any domain; not perpetual mailbox verification |
+| Account name | Core `users.workos_display_name`, from the verified WorkOS user record | Optional account label, disclosed under the same gate as its email; not key ownership evidence |
 | Agent name | Core `projects.display_name` | Hosted project's name |
 | Agent key | Authenticated `agent_runtimes.health_reporting_npub`, consistent active project/runtime link | Exact recorded runtime principal; not inferred from a slug |
 | Responsible account | Current `projects.owner_user_id` | Account responsible for the hosted agent; not proof of legal ownership or decryption |
@@ -25,9 +26,11 @@ Do not use `agent_creation_requests.owner_chat_account_id` as a current reverse
 registry. It is launch-time input. Do not query the operator runtime inventory
 as the product API, scan sealed Chat bindings, or derive account IDs from email.
 
-Human names are optional: use an existing exact-key profile only with its stated
-source. Without a supported human display name, render the shared account email
-as the readable fallback. Never manufacture a person's name from an email slug.
+The optional human name is the linked account's WorkOS name, released with its
+email under the same gate. `source` describes the key association, not the name.
+Without a usable name, render the shared account email as the readable fallback.
+Never manufacture a person's name from an email slug. See "Account names and
+private aliases" for normalization and freshness.
 
 ## Trusted hosted observation
 
@@ -264,8 +267,9 @@ Core (`finite-saas-core`):
 - Descriptions: header `x-finite-brain-description-credential` only. One
   REPEATABLE READ, read-only transaction with a 2-second SQL statement
   timeout. Source fields are length-checked in SQL (email 254 bytes, display
-  name 200 bytes); oversized or control-character values make the row
-  `unknown` and are never truncated. Responses over 256 KiB fail with 503.
+  name 200 bytes). An unusable email or agent name makes the row `unknown`;
+  an unusable optional human name is omitted while its eligible email remains
+  resolved. Values are never truncated. Responses over 256 KiB fail with 503.
   Logs carry the Brain id, the requesting admin key and counts, never contact.
 - Disclosure: `resolved` needs a linked responsible account (the current
   project owner for agents) and, under v1 only, an active scope for it.
@@ -297,3 +301,63 @@ upstream origin), which must equal `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER`.
 Not in v1: scope revocation has no product writer (an operator can set
 `revoked_at`), there is no owner-transfer writer, and existing hosted humans
 are described only after their next qualifying action.
+
+## Account names and private aliases
+
+Core migration `0043_account_names_and_key_aliases.sql` adds nullable
+`users.workos_display_name` (with its change time) and `account_key_aliases`.
+Nothing is backfilled. Startup reapplies the additive DDL, including a brief
+exclusive lock on `users`; schedule release startup accordingly.
+
+Name writer: the verified-account link on `GET /api/core/v1/me`,
+`/me/dashboard-summary` and `/me/runtime-routes/{id}`. It reads `first_name`
+and `last_name` from the WorkOS user record that request already fetched; no
+extra WorkOS call. Each part is trimmed and inner whitespace collapsed; a
+missing, null or blank part is skipped. A part that is not a string, exceeds 100
+characters, or has control or bidirectional-override characters makes the name
+unusable, as does a joined name over 200 bytes. Present parts are joined with
+one space. An unusable or absent name clears the stored name, so Core never
+shows a name WorkOS no longer gives. An unusable name does not block sign-in,
+enrollment or Chat, and names are never derived from email. Name persistence is
+part of the existing account-link transaction, so database failures still fail
+that transaction. The name column changes only when the value changes; the
+existing account-link behavior of `users.updated_at` is unchanged.
+
+Name reader: a `resolved` human row adds `displayName` under the same gates that
+release its `accountEmail`. Wire shape, versions and `source` are unchanged:
+`source` still describes the key association, and the name is the linked
+account's WorkOS name as of its latest verified dashboard request. This also
+applies to v3 scoped account-chat-key records under their existing exact-scope
+and account-binding checks; names never change the mapping or its provenance.
+Agent rows keep the project name. `responsibleAccount` carries no name because current
+Brain servers parse it strictly.
+
+Private aliases: `POST /api/core/v1/me/key-aliases/lookup` (`publicKeys`, 1-100
+`npub` or hex keys) and `PUT`/`DELETE /api/core/v1/me/key-aliases/{npub-or-hex}`
+(`alias`) on the account router. The viewer is the verified WorkOS account; no
+route accepts an account, owner or email. An unlinked account's lookup returns
+an empty list; PUT and DELETE return 403 `account_not_linked` without enrollment.
+Keys must be valid x-only secp256k1
+keys and are stored as lowercase hex. Aliases are 1-64 characters after the
+same trim and collapse, with no control or bidirectional-override characters,
+at most 1,000 per account (409 `alias_limit_reached`). An alias is visible only
+to its writer. It is never identity evidence and is not read by descriptions,
+Brain access, ownership, membership, roles or grants. The dashboard roster shows
+an alias first, marked "Your alias", with the existing identity label beneath
+it. WorkOS name/email, dated scoped annotation, stored public name, lifecycle
+qualifiers and the final "Unknown" fallback keep their existing precedence.
+When alias lookup fails or Core lacks these routes, the roster shows without
+aliases.
+
+Deploy Core before the dashboard to avoid the older-Core unavailable notice.
+Rollback: older Core ignores the new column and table. Names stop refreshing
+and aliases stop showing until the new Core returns; both are kept.
+
+Local browser proof: build the dashboard with `just web-check`, then run
+`scripts/with-dev-env cargo run --locked -p devfinity -- run -- cargo test
+--locked -p finite-saas-core key_alias_browser_composition -- --ignored
+--nocapture`. It uses real Core/Postgres, dashboard routes and Chromium for
+name display, alias save/reload/edit/clear, viewer isolation, origin rejection
+and unavailable fallback. WorkOS is a signed local fixture; the unchanged
+Agent/Brain roster transport is synthetic. This is not live OAuth or runtime
+qualification. `FC_BROWSER_ARTIFACT_DIR` optionally records UI screenshots.

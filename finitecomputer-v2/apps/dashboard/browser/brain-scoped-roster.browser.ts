@@ -68,9 +68,9 @@ test("admin roster renders dated scoped labels in existing cells, reloads, and c
       await roster.getByText("Invitation key · Evidence 2026-10-02", { exact: true }).waitFor();
       await roster.getByText("Agent (retired)", { exact: true }).waitFor();
       assert.equal(await roster.getByRole("row").count(), 6);
-      assert.equal(await roster.getByRole("columnheader").allTextContents().then(v => v.join(",")), "Identity,Owner,Role,Folders,Key");
+      assert.equal(await roster.getByRole("columnheader").allTextContents().then(v => v.join(",")), "Identity,Your alias,Owner,Role,Folders,Key");
       assert.equal(await roster.getByText("Unknown", { exact: true }).count(), 1);
-      const ownerCells = await roster.locator("tbody tr td:nth-child(2)").allTextContents();
+      const ownerCells = await roster.locator("tbody tr td:nth-child(3)").allTextContents();
       assert.deepEqual(ownerCells, ["owner@example.test", "", "", "", ""]);
     }
     const artifacts = process.env.FC_BROWSER_ARTIFACT_DIR;

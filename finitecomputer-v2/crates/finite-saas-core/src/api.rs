@@ -76,6 +76,7 @@ mod authorization;
 use authorization::*;
 mod brain_identity;
 pub use brain_identity::brain_identity_router;
+mod key_aliases;
 #[cfg(test)]
 mod tests;
 
@@ -352,6 +353,20 @@ fn router_from_state(state: CoreApiState) -> Router {
         .route(
             "/api/core/v1/admin/finite-private/grants/{grant_id}/limit-profile",
             post(admin_assign_finite_private_limit_profile),
+        )
+        .route(
+            key_aliases::LOOKUP_PATH,
+            post(key_aliases::lookup).layer(axum::extract::DefaultBodyLimit::max(
+                crate::account_labels::MAX_ALIAS_LOOKUP_BODY_BYTES,
+            )),
+        )
+        .route(
+            key_aliases::ALIAS_PATH,
+            axum::routing::put(key_aliases::set)
+                .delete(key_aliases::clear)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::account_labels::MAX_ALIAS_WRITE_BODY_BYTES,
+                )),
         )
         .route("/api/core/v1/me", get(me))
         .route("/api/core/v1/me/dashboard-summary", get(dashboard_summary))

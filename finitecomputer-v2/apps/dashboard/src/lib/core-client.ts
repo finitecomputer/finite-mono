@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
 import { parseHostedHermesAccess, parseHostedHermesSession } from "@/lib/hosted-hermes-status";
+import { parseKeyAlias, parseKeyAliases, type KeyAlias } from "@/lib/brain-key-aliases";
 import {
   invalidateServerSwrCache,
   readThroughServerSwr,
@@ -1121,6 +1122,38 @@ export async function createCoreHostedHermesSession(runtimeId: string, signal?: 
     { method: "POST", signal }
   );
   return parseHostedHermesSession(grant);
+}
+
+// --- Private key aliases ---
+//
+// Core derives the viewer from the signed-in account's WorkOS token. No
+// request names an owner, account or email.
+
+const CORE_ALIAS_LOOKUP_KEYS = 100;
+
+export async function lookupCoreKeyAliases(npubs: string[], signal?: AbortSignal): Promise<KeyAlias[]> {
+  const aliases: KeyAlias[] = [];
+  for (let start = 0; start < npubs.length; start += CORE_ALIAS_LOOKUP_KEYS) {
+    const page = await coreAdminFetch<unknown>("/api/core/v1/me/key-aliases/lookup", {
+      method: "POST", signal,
+      body: JSON.stringify({ publicKeys: npubs.slice(start, start + CORE_ALIAS_LOOKUP_KEYS) }),
+    });
+    aliases.push(...parseKeyAliases(page));
+  }
+  return aliases;
+}
+
+export async function setCoreKeyAlias(npub: string, alias: string, signal?: AbortSignal) {
+  return parseKeyAlias(await coreAdminFetch<unknown>(
+    `/api/core/v1/me/key-aliases/${encodeURIComponent(npub)}`,
+    { method: "PUT", body: JSON.stringify({ alias }), signal }
+  ));
+}
+
+export async function clearCoreKeyAlias(npub: string, signal?: AbortSignal) {
+  await coreAdminFetch<unknown>(`/api/core/v1/me/key-aliases/${encodeURIComponent(npub)}`, {
+    method: "DELETE", signal,
+  });
 }
 
 export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> {
