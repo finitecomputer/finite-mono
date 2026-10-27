@@ -242,9 +242,36 @@ pub(crate) fn access_token_with_subject(
                 id: subject.to_string(),
                 email: email.to_string(),
                 email_verified,
+                first_name: None,
+                last_name: None,
             },
         );
     encode_claims(TestClaims::valid(subject, organization_id), key())
+}
+
+/// A verified test user whose WorkOS record carries the given raw name
+/// fields, which may be any JSON value (including malformed ones).
+pub(crate) fn access_token_with_profile(
+    subject: &str,
+    email: &str,
+    first_name: Option<serde_json::Value>,
+    last_name: Option<serde_json::Value>,
+) -> String {
+    source()
+        .users
+        .write()
+        .expect("test WorkOS user registry should not be poisoned")
+        .insert(
+            subject.to_string(),
+            WorkosUser {
+                id: subject.to_string(),
+                email: email.to_string(),
+                email_verified: true,
+                first_name,
+                last_name,
+            },
+        );
+    encode_claims(TestClaims::valid(subject, None), key())
 }
 
 fn test_subject(email: &str, verified: bool) -> String {
@@ -323,6 +350,8 @@ pub(crate) fn register_user_record(
                 id: record_id.to_string(),
                 email: email.to_string(),
                 email_verified,
+                first_name: None,
+                last_name: None,
             },
         );
 }

@@ -88,9 +88,11 @@ impl IdentitySnapshot {
                 "SELECT id,
                         CASE WHEN octet_length(normalized_email) <= $2 THEN normalized_email END
                           AS normalized_email,
+                        CASE WHEN octet_length(workos_display_name) <= $3
+                          THEN workos_display_name END AS display_name,
                         link_status, workos_user_id, core_rfc3339(updated_at) AS updated_at
                  FROM users WHERE id = ANY($1)",
-                &[&releasable_ids, &(MAX_CONTACT_BYTES as i32)],
+                &[&releasable_ids, &(MAX_CONTACT_BYTES as i32), &(MAX_DISPLAY_NAME_BYTES as i32)],
             )
             .await
             .map_err(store_error)?
@@ -100,6 +102,7 @@ impl IdentitySnapshot {
                     row.get::<_, String>("id"),
                     AccountRow {
                         email: row.get("normalized_email"),
+                        display_name: row.get("display_name"),
                         linked: row.get::<_, String>("link_status") == "linked",
                         workos_subject: row.get("workos_user_id"),
                         updated_at: row.get("updated_at"),

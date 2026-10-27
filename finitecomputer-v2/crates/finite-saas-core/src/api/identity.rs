@@ -55,11 +55,14 @@ pub(super) async fn link_verified_identity(
 ) -> Result<(), ApiError> {
     state
         .store
-        .link_verified_user(LinkVerifiedUserInput {
-            verified_email: identity.email.clone(),
-            workos_user_id: identity.workos_user_id.clone(),
-            now: None,
-        })
+        .link_verified_user_with_name(
+            LinkVerifiedUserInput {
+                verified_email: identity.email.clone(),
+                workos_user_id: identity.workos_user_id.clone(),
+                now: None,
+            },
+            identity.display_name.as_deref(),
+        )
         .await?;
     Ok(())
 }
@@ -104,6 +107,8 @@ pub(super) async fn projects(
 pub(super) struct VerifiedIdentity {
     pub(super) email: String,
     pub(super) workos_user_id: String,
+    /// WorkOS name from the user record this request already fetched.
+    pub(super) display_name: Option<String>,
     workos_organization_id: Option<String>,
 }
 
@@ -143,6 +148,7 @@ pub(super) async fn require_verified_identity(
     Ok(VerifiedIdentity {
         email,
         workos_user_id: session.subject,
+        display_name: user.display_name,
         workos_organization_id: session.organization_id,
     })
 }
