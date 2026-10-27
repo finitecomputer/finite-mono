@@ -6,8 +6,22 @@ import { HostedHermesStatusError } from "./hosted-hermes-status";
 const key = "npub1ccz8l9zpa47k6vz9gphftsrumpw80rjt3nhnefat4symjhrsnmjs38mnyd";
 const human = { npub: key, role: "admin", kind: "human", name: null, email: "maya@example.test", ownerEmail: null, folders: [{ id: "f1", state: "ready" }] };
 const report = { version: 1, brainId: "demo", identities: [human] };
-const extensions = { lifecycle: null, operatorAnnotation: null };
+const extensions = { resolution: null, lifecycle: null, operatorAnnotation: null };
 const unnamed = { publicName: null, publicNameStoredAt: null, ...extensions };
+
+test("resolution survives the Runtime boundary and accepts older plugins without inventing a reason", () => {
+  const bare = { ...human, kind: null, email: null };
+  const resolution = { state: "notShared", reason: "noParticipation" };
+  const parsed = parseBrainIdentities({ ...report, identities: [{ ...bare, resolution: { ...resolution, private: "dropped" } }] }, "demo")[0];
+  assert.deepEqual(parsed.resolution, resolution);
+  assert.equal(parsed.npub, key); assert.equal(parsed.role, "admin");
+  assert.deepEqual(parsed.folders, human.folders);
+  assert.equal(parseBrainIdentities({ ...report, identities: [bare] }, "demo")[0].resolution, null);
+  for (const resolution of [{ state: "invented" }, { state: "unavailable", reason: "private-reason" },
+    { state: "resolved", reason: "noParticipation" }, { state: "unknown", reason: "noParticipation" }]) {
+    assert.throws(() => parseBrainIdentities({ ...report, identities: [{ ...bare, resolution }] }, "demo"), HostedHermesStatusError);
+  }
+});
 
 test("resolved humans, agents and unknown keys keep only the roster fields", () => {
   const agent = { ...human, npub: key.replace("ccz8", "ddz8"), role: "member", kind: "agent", name: "Ada", email: null, ownerEmail: "maya@example.test" };

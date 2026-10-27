@@ -320,6 +320,53 @@ print(json.dumps(payload))
             fetch({**row, "operatorRecord": {"state": "conflict"}})["operatorAnnotation"]
         )
 
+    def test_brain_resolution_is_safe_and_keeps_access_fields(self):
+        (self.agent / "brains.json").write_text(
+            json.dumps({"brains": [{"brainId": "agent-brain", "role": "admin"}]})
+        )
+        for state, reason, expected in [
+            ("notShared", "noParticipation", "noParticipation"),
+            ("notShared", "private-reason", None),
+            ("unavailable", "private-reason", None),
+            ("ambiguous", None, None),
+            ("unknown", None, None),
+            (None, "private-reason", None),
+            ("futureState", "private-reason", None),
+            ({}, "private-reason", None),
+            ([], "private-reason", None),
+        ]:
+            with self.subTest(state=state, reason=reason):
+                report = {
+                    "version": "finite-brain-access-report-v1",
+                    "brainId": "agent-brain",
+                    "identities": [
+                        {
+                            "npub": "npub1unknown",
+                            "brainRole": "admin",
+                            "description": {
+                                "state": state,
+                                "reason": reason,
+                                "accountEmail": "private@example.test",
+                            },
+                            "folders": [{"folderId": "folder", "state": "ready"}],
+                        }
+                    ],
+                }
+                (self.agent / "access.json").write_text(json.dumps(report))
+                response = self.client.get("/api/plugins/finite-brain/identities/agent-brain")
+                self.assertEqual(response.status_code, 200, response.text)
+                row = response.json()["identities"][0]
+                self.assertEqual(
+                    row["resolution"],
+                    {"state": state, "reason": expected}
+                    if isinstance(state, str) and state != "futureState"
+                    else None,
+                )
+                self.assertEqual(row["npub"], "npub1unknown")
+                self.assertEqual(row["role"], "admin")
+                self.assertEqual(row["folders"], [{"id": "folder", "state": "ready"}])
+                self.assertNotIn("private", response.text)
+
     def test_brain_identities_project_roster_fields_and_stored_public_name(self):
         agent = {
             "state": "resolved",
@@ -385,14 +432,23 @@ print(json.dumps(payload))
                     "ownerEmail": "sam@example.test",
                     "lifecycle": "active",
                     "operatorAnnotation": None,
+                    "resolution": {"state": "resolved", "reason": None},
                     **unnamed,
                     "folders": [{"id": "folder", "state": "ready"}],
                 },
-                {"npub": "npub1b", "role": "admin", **empty, **unnamed, "folders": []},
+                {
+                    "npub": "npub1b",
+                    "role": "admin",
+                    **empty,
+                    **unnamed,
+                    "resolution": {"state": "notShared", "reason": None},
+                    "folders": [],
+                },
                 {
                     "npub": "npub1c",
                     "role": "member",
                     **empty,
+                    "resolution": {"state": "unavailable", "reason": None},
                     "publicName": "cara@finite.vip",
                     "publicNameStoredAt": "2026-09-17T20:39:30Z",
                     "folders": [],
@@ -401,6 +457,7 @@ print(json.dumps(payload))
                     "npub": "npub1d",
                     "role": "member",
                     **empty,
+                    "resolution": {"state": "unknown", "reason": None},
                     "publicName": "dev@finite.vip",
                     "publicNameStoredAt": None,
                     "folders": [],
