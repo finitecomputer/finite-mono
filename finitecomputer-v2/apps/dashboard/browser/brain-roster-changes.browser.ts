@@ -274,3 +274,67 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     if (server.exitCode === null) await once(server, "exit");
   }
 });
+
+test("same names and private aliases never change which key a removal targets", { timeout: 240_000 }, async () => {
+  const { base, server } = await startFixture();
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const state = fake();
+    // Two accounts chose the same name, and this viewer gave both keys the same private alias.
+    const sam = { role: "member", kind: "human", name: "Sam Lee", ownerEmail: null, folders: [] };
+    state.identities = [state.identities[0], { ...sam, npub: mia, email: "sam@one.test" }, { ...sam, npub: una, email: "sam@two.test" }];
+    await serveAgent(page, base, state);
+    // Stub of the dashboard alias lookup only; Core alias storage is proven by the Core proofs.
+    const lookups: string[][] = [];
+    await page.route("**/api/brain/key-aliases", route => {
+      assert.equal(route.request().method(), "POST");
+      const { npubs } = route.request().postDataJSON() as { npubs: string[] };
+      lookups.push(npubs);
+      return route.fulfill({ json: { aliases: npubs.filter(value => value !== acting).map(value => ({ npub: value, alias: "Research lead" })) } });
+    });
+    await page.goto(`${base}/dashboard/machines/runtime_web_design/brain`);
+    await page.getByRole("button", { name: "Acme Brain", exact: true }).click();
+    const roster = page.getByRole("region", { name: "Identities in Acme Brain", exact: true });
+    const first = roster.getByRole("row").filter({ hasText: "sam@one.test" });
+    const second = roster.getByRole("row").filter({ hasText: "sam@two.test" });
+    await second.getByText("Research lead", { exact: true }).waitFor();
+    await first.getByText("Research lead", { exact: true }).waitFor();
+    assert.equal(await roster.locator("tbody").getByText("Your alias", { exact: true }).count(), 2);
+
+    // The Remove button and dialog name the key from Finite's records; the alias sits apart, beside the full key.
+    await second.getByRole("button", { name: "Remove Sam Lee", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Remove Sam Lee?" });
+    await dialog.getByText("Sam Lee, sam@two.test", { exact: false }).waitFor();
+    await dialog.getByText(una, { exact: true }).waitFor();
+    assert.equal(await dialog.getByText(mia, { exact: true }).count(), 0);
+    assert.deepEqual(await dialog.locator("dl dt").allTextContents(), ["Your alias", "Key"]);
+    assert.equal(await dialog.locator("dl dd").first().textContent(), "Research lead");
+    await shot(page, "alias-remove-dialog");
+    await dialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await page.getByRole("status").getByText(`Sam Lee (${short(una)}) was removed. Their Folders were re-keyed.`).waitFor({ timeout: 20_000 });
+    assert.deepEqual(state.changes.filter(item => item.path.endsWith("/removals/acme")).map(item => item.body), [{ npub: una }]);
+    await second.waitFor({ state: "detached" });
+    // The refreshed key set is looked up again and the other Sam Lee keeps the alias.
+    await first.getByText("Research lead", { exact: true }).waitFor();
+    assert(lookups.some(npubs => npubs.join() === [acting, mia].join()), JSON.stringify(lookups));
+
+    // An older Agent plugin and a Personal Brain still show names and aliases, with no change buttons.
+    for (const [brainName, update] of [["Old Brain", true], ["Moss Personal", false]] as const) {
+      await page.getByRole("button", { name: brainName, exact: true }).click();
+      const view = page.getByRole("region", { name: `Identities in ${brainName}`, exact: true });
+      await view.getByRole("row").filter({ hasText: "sam@one.test" }).getByText("Research lead", { exact: true }).waitFor();
+      assert.equal(await view.getByRole("button", { name: /^Remove / }).count(), 0);
+      assert.equal(await page.getByLabel("Invite someone").count(), 0);
+      assert.equal(await page.getByText("Update Moss to invite or remove people here.").count(), update ? 1 : 0);
+    }
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser?.close();
+    server.kill("SIGTERM");
+    if (server.exitCode === null) await once(server, "exit");
+  }
+});

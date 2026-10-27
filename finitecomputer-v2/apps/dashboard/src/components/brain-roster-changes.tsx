@@ -134,8 +134,11 @@ export function BrainInvitePanel({ runtimeId, brainId, brainName, agentName, run
   </div>;
 }
 
-export function RemoveIdentityDialog({ row, brainName, agentName, onCancel, onConfirm }: {
-  row: BrainIdentity | null; brainName: string; agentName: string; onCancel: () => void; onConfirm: (row: BrainIdentity) => void;
+/** The title and description name the key from Finite's records. Your
+ * private alias is shown apart from them, beside the full key that is removed. */
+export function RemoveIdentityDialog({ row, alias, brainName, agentName, onCancel, onConfirm }: {
+  row: BrainIdentity | null; alias?: string | null; brainName: string; agentName: string;
+  onCancel: () => void; onConfirm: (row: BrainIdentity) => void;
 }) {
   const label = row ? personLabel(row) : "";
   const contact = !row ? null : row.kind !== "agent" && row.name && row.email ? row.email
@@ -148,6 +151,10 @@ export function RemoveIdentityDialog({ row, brainName, agentName, onCancel, onCo
           {label}{contact ? `, ${contact}` : ""} (<span className="font-mono" title={row.npub}>{shortNpub(row.npub)}</span>) will lose access to {brainName}.
         </DialogDescription>
       </DialogHeader>
+      <dl className="grid gap-2 rounded-lg bg-muted/50 p-3 text-sm">
+        {alias && <div><dt className="text-xs text-muted-foreground">Your alias</dt><dd className="break-words">{alias}</dd></div>}
+        <div><dt className="text-xs text-muted-foreground">Key</dt><dd className="font-mono text-xs break-all">{row.npub}</dd></div>
+      </dl>
       <ul className="list-disc space-y-1 pl-5 text-sm">
         {row.role === "admin" && <li>{label} is an Admin. {agentName} removes the Admin role first, then removes them.</li>}
         <li>{agentName} re-keys the Folders they could read, so they cannot read anything added after this.</li>
