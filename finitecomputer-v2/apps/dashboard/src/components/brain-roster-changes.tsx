@@ -88,7 +88,7 @@ export function BrainInvitePanel({ runtimeId, brainId, brainName, agentName, run
       const created = await inviteToBrain(runtimeId, brainId, target, signal);
       const who = created?.targetNpub && created.targetNpub !== target ? `${target} (${shortNpub(created.targetNpub)})`
         : target.startsWith("npub1") ? shortNpub(target) : target;
-      return { tone: "status", text: `Invited ${who} to ${brainName} as a Member. They accept it from their Agent.` };
+      return { tone: "status", text: `Invited ${who} to ${brainName} as a Member. They must accept with the invited key.` };
     });
     if (sent) setValue("");
   }
@@ -112,7 +112,7 @@ export function BrainInvitePanel({ runtimeId, brainId, brainName, agentName, run
       </div>
       <p id={`invite-${brainId}-hint`} aria-live="polite" className="text-xs text-muted-foreground">
         {invalid ? "Enter an npub or a public name such as name@finite.vip."
-          : `${agentName} signs a Member invitation. They join after they accept it from their Agent. No email is sent.`}
+          : `${agentName} signs a Member invitation. They join after accepting with the invited key. No email is sent.`}
       </p>
     </form>
     <section aria-label={`Pending invitations for ${brainName}`} aria-busy={invitations.busy} className="space-y-2">

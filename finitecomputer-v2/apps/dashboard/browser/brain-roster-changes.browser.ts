@@ -155,7 +155,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await roster.getByText("mia@example.test").waitFor();
     // Buttons only on Members and Admins, never on the acting agent's own key or a Guest.
     assert.deepEqual(await roster.getByRole("button").evaluateAll(buttons => buttons.map(button => button.getAttribute("aria-label"))),
-      ["Remove mia@example.test", "Remove Dan Agent", "Remove una@finite.vip"]);
+      [`Remove mia@example.test (${short(mia)})`, `Remove Dan Agent (${short(dan)})`, `Remove una@finite.vip (${short(una)})`]);
     const pending = page.getByRole("region", { name: "Pending invitations for Acme Brain" });
     await pending.getByText("jo@finite.vip").waitFor();
     await shot(page, "admin-roster");
@@ -165,7 +165,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await field.fill("  New1@Finite.VIP ");
     await field.press("Enter");
     const status = page.getByRole("status").filter({ hasText: "Invited" });
-    await status.getByText(`Invited new1@finite.vip (${short(new1)}) to Acme Brain as a Member. They accept it from their Agent.`).waitFor();
+    await status.getByText(`Invited new1@finite.vip (${short(new1)}) to Acme Brain as a Member. They must accept with the invited key.`).waitFor();
     await pending.getByText("new1@finite.vip").waitFor();
     assert.deepEqual(state.changes.at(-1), { method: "POST", path: "/api/plugins/finite-brain/invitations/acme", body: { target: "new1@finite.vip" } });
     assert.equal(await field.inputValue(), "");
@@ -198,7 +198,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await shot(page, "invite-failed");
 
     // Remove a Member with the keyboard: the dialog names them and explains re-keying.
-    await roster.getByRole("button", { name: "Remove mia@example.test" }).focus();
+    await roster.getByRole("button", { name: `Remove mia@example.test (${short(mia)})` }).focus();
     await page.keyboard.press("Enter");
     const dialog = page.getByRole("dialog", { name: "Remove mia@example.test?" });
     await dialog.getByText("will lose access to Acme Brain.", { exact: false }).waitFor();
@@ -209,11 +209,11 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached" });
     assert.equal(state.changes.filter(item => item.path.includes("removals")).length, 0, "cancel sends nothing");
-    await roster.getByRole("button", { name: "Remove mia@example.test" }).click();
+    await roster.getByRole("button", { name: `Remove mia@example.test (${short(mia)})` }).click();
     await dialog.getByRole("button", { name: "Remove", exact: true }).click();
     await page.getByRole("status").getByText(`Removing mia@example.test (${short(mia)}). This can take a few minutes.`).waitFor();
     // Every change button waits while one change runs.
-    assert.equal(await page.getByRole("button", { name: "Remove Dan Agent" }).isDisabled(), true);
+    assert.equal(await page.getByRole("button", { name: `Remove Dan Agent (${short(dan)})` }).isDisabled(), true);
     await shot(page, "removing");
     await page.getByRole("status").getByText(`mia@example.test (${short(mia)}) was removed. Their Folders were re-keyed.`).waitFor({ timeout: 20_000 });
     await roster.getByText("mia@example.test").waitFor({ state: "detached" });
@@ -221,7 +221,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
 
     // Remove an Admin whose demotion succeeds but removal fails.
     state.removalFinal = target => target === dan ? "demotedNotRemoved" : target === una ? "lost" : "removed";
-    await roster.getByRole("button", { name: "Remove Dan Agent" }).click();
+    await roster.getByRole("button", { name: `Remove Dan Agent (${short(dan)})` }).click();
     const adminDialog = page.getByRole("dialog", { name: "Remove Dan Agent?" });
     await adminDialog.getByText("Dan Agent is an Admin. Moss removes the Admin role first, then removes them.").waitFor();
     await adminDialog.getByRole("button", { name: "Remove", exact: true }).click();
@@ -230,7 +230,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
     await shot(page, "admin-partial");
 
     // A job the agent no longer knows (a restart) reads as unknown.
-    await roster.getByRole("button", { name: "Remove una@finite.vip" }).click();
+    await roster.getByRole("button", { name: `Remove una@finite.vip (${short(una)})` }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
     await page.getByRole("alert").filter({ hasText: `Could not confirm whether una@finite.vip (${short(una)}) was removed. Refresh to check.` })
       .waitFor({ timeout: 20_000 });
@@ -264,7 +264,7 @@ test("an Organization Brain admin invites, revokes and removes through the agent
         && document.documentElement.scrollWidth <= innerWidth;
     });
     await shot(page, "mobile");
-    await page.getByRole("region", { name: "Identities in Acme Brain", exact: true }).getByRole("button", { name: "Remove una@finite.vip" }).click();
+    await page.getByRole("region", { name: "Identities in Acme Brain", exact: true }).getByRole("button", { name: `Remove una@finite.vip (${short(una)})` }).click();
     const mobileDialog = page.getByRole("dialog");
     await mobileDialog.waitFor();
     const box = await mobileDialog.boundingBox();
@@ -310,7 +310,7 @@ test("same names and private aliases never change which key a removal targets", 
     assert.equal(await roster.locator("tbody").getByText("Your alias", { exact: true }).count(), 2);
 
     // The Remove button and dialog name the key from Finite's records; the alias sits apart, beside the full key.
-    await second.getByRole("button", { name: "Remove Sam Lee", exact: true }).click();
+    await second.getByRole("button", { name: `Remove Sam Lee (${short(una)})`, exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Remove Sam Lee?" });
     await dialog.getByText("Sam Lee, sam@two.test", { exact: false }).waitFor();
     await dialog.getByText(una, { exact: true }).waitFor();

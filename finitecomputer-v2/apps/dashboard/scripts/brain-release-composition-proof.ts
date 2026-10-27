@@ -389,7 +389,7 @@ async function main() {
 
     // Same name, same alias: the removal confirmation shows the exact key and only that key is removed.
     let version = keyVersion();
-    await otherRow.getByRole("button", { name: "Remove Ada Lovelace", exact: true }).click();
+    await otherRow.getByRole("button", { name: `Remove Ada Lovelace (${short(otherNpub)})`, exact: true }).click();
     const dialog = page.getByRole("dialog", { name: "Remove Ada Lovelace?" });
     await dialog.getByText(`Ada Lovelace, ${OTHER.email}`, { exact: false }).waitFor();
     await dialog.getByText(otherNpub, { exact: true }).waitFor();
@@ -508,9 +508,8 @@ async function main() {
     await assert.rejects(owner.signedRequest("GET", `/v1/brains/${brainId}/deletion-preview`), (error: { status?: number }) => error.status === 410);
 
     // Stale roster actions from the old tab are refused, each with one plain line.
-    const refusal = async (staleTab: Page, action: string) => {
-      const notice = staleTab.getByRole("alert").filter({ hasText: new RegExp(
-        `could not confirm it is an admin|could not check this Brain|Could not ${action}|did not confirm the result`, "u") });
+    const refusal = async (staleTab: Page) => {
+      const notice = staleTab.getByRole("alert").filter({ hasText: "could not confirm it is an admin of this Brain." });
       await notice.waitFor({ timeout: 60_000 }).catch(async () => {
         throw new Error(`no refusal shown; notices: ${JSON.stringify(await staleTab.locator("[role=alert],[role=status]").allInnerTexts())}`);
       });
@@ -518,11 +517,11 @@ async function main() {
     };
     await staleInviteTab.getByLabel("Invite someone").fill(npub.carol);
     await staleInviteTab.getByLabel("Invite someone").press("Enter");
-    const staleInvite = await refusal(staleInviteTab, "invite");
+    const staleInvite = await refusal(staleInviteTab);
     await shot("stale-invite-refused", staleInviteTab);
     await rosterOf(staleRemoveTab).getByRole("row").filter({ hasText: short(ownerNpub) }).getByRole("button", { name: /^Remove / }).click();
     await staleRemoveTab.getByRole("dialog").getByRole("button", { name: "Remove", exact: true }).click();
-    const staleRemove = await refusal(staleRemoveTab, "remove");
+    const staleRemove = await refusal(staleRemoveTab);
     await shot("stale-remove-refused", staleRemoveTab);
     note(`stale tabs: invite -> "${staleInvite}"; remove -> "${staleRemove}"`);
     assert.deepEqual((cli("carol", ["invite", "brain", "list", "--json"]) as Json).invitations, []);
