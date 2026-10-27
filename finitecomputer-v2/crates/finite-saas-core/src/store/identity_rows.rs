@@ -9,8 +9,8 @@ impl CoreStore {
     /// Link a verified account and record the WorkOS name from the same
     /// verified user record. `None` clears a stored name: WorkOS is the only
     /// source, so Core never keeps showing a name WorkOS no longer gives.
-    /// The name is written only when it changed and never moves
-    /// `users.updated_at`, which dates the account contact.
+    /// The name is written only when it changed. The existing account-link
+    /// behavior of `users.updated_at` is unchanged.
     pub async fn link_verified_user_with_name(
         &self,
         input: LinkVerifiedUserInput,
@@ -19,6 +19,7 @@ impl CoreStore {
         self.link_user(input, Some(display_name)).await
     }
 
+    #[tracing::instrument(skip_all, fields(operation = "link_verified_user", workos_user_id = %input.workos_user_id))]
     async fn link_user(
         &self,
         input: LinkVerifiedUserInput,

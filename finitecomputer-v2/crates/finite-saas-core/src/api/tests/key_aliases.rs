@@ -51,7 +51,7 @@ async fn aliases_are_private_to_the_verified_viewer() {
         let maya_npub = npub_for_hex(&maya).unwrap();
 
         // No linked account: nothing to read, and writes enroll nobody.
-        let (status, empty) = lookup(&app, "ana@example.org", &[maya.clone()]).await;
+        let (status, empty) = lookup(&app, "ana@example.org", std::slice::from_ref(&maya)).await;
         assert_eq!(
             (status, empty),
             (StatusCode::OK, serde_json::json!({"aliases": []}))
@@ -79,7 +79,7 @@ async fn aliases_are_private_to_the_verified_viewer() {
         assert_eq!(rows.len(), 1);
 
         // Ben sees nothing of Ana's, and his own alias is separate.
-        let (_, bens) = lookup(&app, "ben@example.org", &[maya_npub.clone()]).await;
+        let (_, bens) = lookup(&app, "ben@example.org", std::slice::from_ref(&maya_npub)).await;
         assert_eq!(bens, serde_json::json!({"aliases": []}));
         let (status, _) = put(&app, "ben@example.org", &maya, "Designer").await;
         assert_eq!(status, StatusCode::OK);
@@ -93,8 +93,11 @@ async fn aliases_are_private_to_the_verified_viewer() {
         .await;
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        // Ana's survives Ben's clear and a fresh router (a Core restart).
-        let restarted = router(db.store.clone(), test_auth());
+        // Ana's survives Ben's clear, a fresh connection pool and reapplying
+        // startup migrations, including the new alias schema.
+        let reopened = CoreStore::connect(&db.url).await.unwrap();
+        reopened.migrate().await.unwrap();
+        let restarted = router(reopened, test_auth());
         let other = valid_key(2);
         let (status, anas) =
             lookup(&restarted, "ana@example.org", &[other, maya_npub.clone()]).await;

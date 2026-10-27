@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { KeyAliasDialog, type AliasTarget } from "@/components/brain-key-alias-dialog";
 import { Button } from "@/components/ui/button";
 import { useAgentInventory } from "@/hooks/use-agent-inventory";
@@ -44,6 +44,7 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
   const npubs = useMemo(() => data?.map(row => row.npub) ?? null, [data]);
   const aliases = useKeyAliases(npubs);
   const [editing, setEditing] = useState<AliasTarget | null>(null);
+  const aliasTrigger = useRef<HTMLButtonElement | null>(null);
   const folderNames = new Map(brain.folders?.map(folder => [folder.id, folder.name]));
   return <section aria-busy={busy} className="mt-8 space-y-3">
     <div><h2 className="text-lg font-semibold">{brain.name}</h2>
@@ -51,8 +52,8 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
       {data && data.length > 0 && aliases.status === "unavailable" && <p className="text-xs text-muted-foreground">Your private aliases are unavailable right now.</p>}
     </div>
     {data && data.length > 0 && <div className={`brain-table-scroll ${tableStyles.surface}`} role="region" aria-label={`Identities in ${brain.name}`} tabIndex={0}>
-      <table className="brain-table">
-        <thead><tr><th scope="col">Identity</th><th scope="col" className="w-24"><span className="sr-only">Your alias</span></th><th scope="col">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th></tr></thead>
+      <table className="brain-table brain-identity-table">
+        <thead><tr><th scope="col">Identity</th><th scope="col" className="w-24"><span className="sr-only">Your alias</span></th><th scope="col" className="w-48">Owner</th><th scope="col">Role</th><th scope="col">Folders</th><th scope="col">Key</th></tr></thead>
         <tbody>{data.map(row => {
           const alias = aliases.aliasFor(row.npub);
           const name = alias ?? (row.kind === "agent" ? row.name : row.name ?? row.email) ?? `unknown key ${shortKey(row.npub)}`;
@@ -60,7 +61,10 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
             <th scope="row"><Identity row={row} alias={alias} /></th>
             <td>{aliases.status === "ready" && <Button type="button" variant="ghost" size="xs"
               aria-label={`${alias ? "Edit" : "Add"} alias for ${name}`}
-              onClick={() => setEditing({ npub: row.npub, alias, actual: actualLabel(row) })}>
+              onClick={event => {
+                aliasTrigger.current = event.currentTarget;
+                setEditing({ npub: row.npub, alias, actual: actualLabel(row) });
+              }}>
               {alias ? "Edit alias" : "Add alias"}
             </Button>}</td>
             <td>{row.ownerEmail}</td>
@@ -73,6 +77,7 @@ export function BrainIdentityRoster({ runtimeId, brain }: { runtimeId: string; b
     </div>}
     {editing && <KeyAliasDialog key={editing.npub} target={editing}
       otherAliases={(data ?? []).filter(row => row.npub !== editing.npub).flatMap(row => aliases.aliasFor(row.npub) ?? [])}
-      onSave={aliases.save} onClear={aliases.clear} onClose={() => setEditing(null)} />}
+      onSave={aliases.save} onClear={aliases.clear} onClose={() => setEditing(null)}
+      onRestoreFocus={() => aliasTrigger.current?.focus()} />}
   </section>;
 }

@@ -13,7 +13,6 @@ const MAX_ALIAS_BYTES = 256;
 export const MAX_ALIAS_LOOKUP_KEYS = 1024;
 const NPUB = /^npub1[023456789acdefghjklmnpqrstuvwxyz]{58}$/;
 // Control characters and bidirectional overrides can hide or reorder text.
-// eslint-disable-next-line no-control-regex
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
 
 export class KeyAliasError extends Error {

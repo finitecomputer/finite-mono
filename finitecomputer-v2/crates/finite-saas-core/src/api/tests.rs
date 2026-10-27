@@ -20,6 +20,7 @@ mod finite_private_keys;
 mod finite_private_usage;
 mod hosted_access;
 mod identity_authorization;
+mod key_alias_browser;
 mod key_aliases;
 mod launch_code_tiers;
 mod public_contracts;

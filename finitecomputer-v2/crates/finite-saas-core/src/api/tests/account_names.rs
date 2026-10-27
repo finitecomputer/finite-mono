@@ -33,7 +33,7 @@ async fn me(app: &Router, bearer: &str) -> StatusCode {
 
 async fn stored_name(db: &crate::test_support::TestDb) -> Value {
     db.query_json(
-        "SELECT to_jsonb(workos_display_name) FROM users WHERE normalized_email = $1",
+        "SELECT COALESCE(to_jsonb(workos_display_name), 'null'::jsonb) FROM users WHERE normalized_email = $1",
         &[&EMAIL],
     )
     .await

@@ -57,6 +57,7 @@ impl CoreStore {
 
     /// Create or replace the viewer's alias for one canonical key. Inputs are
     /// already normalized by `account_labels`.
+    #[tracing::instrument(skip(self, alias, now), fields(operation = "set_key_alias"))]
     pub async fn set_key_alias(
         &self,
         workos_user_id: &str,
@@ -117,6 +118,7 @@ impl CoreStore {
     }
 
     /// Remove the viewer's alias for one key. Returns whether one existed.
+    #[tracing::instrument(skip(self), fields(operation = "clear_key_alias"))]
     pub async fn clear_key_alias(
         &self,
         workos_user_id: &str,
