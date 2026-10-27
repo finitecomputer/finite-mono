@@ -34,6 +34,40 @@ private aliases" for normalization and freshness.
 
 ## Trusted hosted observation
 
+### Registration after Hosted Chat bootstrap
+
+After a successful Hosted Chat bootstrap, the dashboard schedules a separate,
+best-effort observation through `after()`. Transcript reads and roster reads do
+not register keys. Hosted Device `identifyMember` loads the verified Account's
+existing identity and matching Chat state without minting a key. Browser input,
+Brain membership, invitation issuers and private aliases supply no association.
+
+`POST /api/core/internal/v1/hosted-account-observations` is on the existing private
+identity listener. It requires the same observation credential plus the current
+verified WorkOS bearer. Its strict `finite-core-hosted-account-observation-v1`
+body contains only `operationId`, `observedAt`, `publicKeyHex` and `version`.
+It reuses the existing account-key association and observation receipt tables,
+freshness window, conflict rules and account-scoped idempotency. The versioned
+payload hash prevents replaying an operation as a Brain action. No migration,
+sharing scope, scoped operator record, Brain participation, membership or grant
+is created. Conflicting Accounts or Agent keys fail closed.
+
+Registration makes the Account connection available to normal description
+readers. V1 still requires sharing, and v3 still requires participation or a
+valid scoped record. An admin-added human key can therefore remain withheld
+with `noParticipation` after registration. Existing scoped records and their
+binding checks remain in force. The normal participating description retains
+precedence over an operator annotation.
+
+The hook uses the existing dashboard identity configuration and public Brain
+origin. A missing configuration, older Core (404), missing identity, conflict,
+timeout or failed scheduling does not delay or fail Chat. A lost POST response
+is retried once with the same operation ID. No backfill runs on deployment;
+existing Accounts register on their next successful Chat bootstrap. Associations
+and receipts survive binary rollback in the existing Core Recovery Set.
+
+### Brain action and sharing observations
+
 The dashboard backend already verifies an account and can call Hosted Device
 `identifyMember`. That operation loads the existing identity and Chat store;
 missing or inconsistent state fails without creating either.
@@ -300,7 +334,8 @@ upstream origin), which must equal `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER`.
 
 Not in v1: scope revocation has no product writer (an operator can set
 `revoked_at`), there is no owner-transfer writer, and existing hosted humans
-are described only after their next qualifying action.
+still need qualifying participation (or valid scoped operator evidence) before
+their registered Account details can be described to a Brain.
 
 ## Account names and private aliases
 

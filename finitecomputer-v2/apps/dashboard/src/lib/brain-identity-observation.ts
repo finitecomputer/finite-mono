@@ -58,7 +58,7 @@ export type ObservationResult =
   | { outcome: "recorded" | "unchanged" }
   | { skipped: string };
 
-type Dependencies = {
+export type ObservationDependencies = {
   identifyMember: () => Promise<unknown>;
   fetch: typeof fetch;
   now: () => Date;
@@ -98,7 +98,7 @@ export function observeHostedBrainInvitationAcceptance(
   account: AccountAuthContext,
   brainServer: string,
   acceptance: unknown,
-  dependencies: Dependencies
+  dependencies: ObservationDependencies
 ): Promise<ObservationResult> {
   return observeHostedHumanBrainAction(
     config,
@@ -116,7 +116,7 @@ export async function observeHostedHumanBrainAction(
   account: AccountAuthContext,
   brainServer: string,
   qualify: (hostedNpub: string) => { brainId: string } | null,
-  dependencies: Dependencies
+  dependencies: ObservationDependencies
 ): Promise<ObservationResult> {
   if (!config) return { skipped: "not configured" };
   if (!account.accessToken) return { skipped: "no account session" };
@@ -140,7 +140,7 @@ export async function observeHostedHumanBrainAction(
   if (!accepted) return { skipped: "action not proven" };
 
   const operationId = `obs_${randomBytes(16).toString("hex")}`;
-  const body = JSON.stringify({
+  const body = {
     version: OBSERVATION_VERSION,
     operationId,
     brainServer,
@@ -149,13 +149,21 @@ export async function observeHostedHumanBrainAction(
     actionKind: "humanHostedAction",
     observedHumanPublicKeyHex: publicKeyHex,
     participatingPublicKeyHex: publicKeyHex,
-  });
+  };
+  return postAccountObservation(config, account, OBSERVATION_PATH, body, dependencies.fetch);
+}
+
+/** One bounded, idempotent POST. Caller supplies server-derived evidence only. */
+export async function postAccountObservation(
+  config: BrainObservationConfig, account: AccountAuthContext, path: string,
+  body: { version: string; operationId: string }, fetcher: typeof fetch
+): Promise<ObservationResult> {
   // A lost response is retried with the same operation id; Core returns
   // the stored outcome instead of applying it twice.
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     let response: Response;
     try {
-      response = await dependencies.fetch(`${config.coreUrl}${OBSERVATION_PATH}`, {
+      response = await fetcher(`${config.coreUrl}${path}`, {
         method: "POST",
         cache: "no-store",
         headers: {
@@ -163,7 +171,7 @@ export async function observeHostedHumanBrainAction(
           [OBSERVATION_CREDENTIAL_HEADER]: config.credential,
           "content-type": "application/json",
         },
-        body,
+        body: JSON.stringify(body),
         signal: AbortSignal.timeout(ATTEMPT_TIMEOUT_MS),
       });
     } catch {
@@ -178,8 +186,8 @@ export async function observeHostedHumanBrainAction(
         outcome?: unknown;
       };
       if (
-        parsed.version === OBSERVATION_VERSION &&
-        parsed.operationId === operationId &&
+        parsed.version === body.version &&
+        parsed.operationId === body.operationId &&
         (parsed.outcome === "recorded" || parsed.outcome === "unchanged")
       ) {
         return { outcome: parsed.outcome };
@@ -197,7 +205,7 @@ export function hostedObservationDependencies(
   device: HostedDeviceConfig,
   account: AccountAuthContext,
   brainPublicOrigin: string
-): Dependencies {
+): ObservationDependencies {
   return {
     identifyMember: () =>
       hostedDeviceBrainIdentityProvider(

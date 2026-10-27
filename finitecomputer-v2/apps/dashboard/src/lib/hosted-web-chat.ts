@@ -34,6 +34,7 @@ import {
   type HostedRuntimeCommandResponse,
 } from "@/lib/hosted-web-device";
 import { sitesUpstreamOrigin } from "@/lib/site-preview";
+import { scheduleHostedAccountObservation } from "@/lib/hosted-account-observation";
 
 const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
@@ -109,7 +110,16 @@ export async function bootstrapHostedWebChat(machineId: string, viewQuery = "") 
   return bootstrapHostedWebChatWithContext(context);
 }
 
-async function bootstrapHostedWebChatWithContext(
+export async function bootstrapHostedWebChatWithContext(
+  context: Awaited<ReturnType<typeof hostedWebChatContext>>,
+  scheduleObservation = scheduleHostedAccountObservation
+) {
+  const state = await openHostedWebChatWithContext(context);
+  scheduleObservation(context.account, context.config);
+  return state;
+}
+
+async function openHostedWebChatWithContext(
   context: Awaited<ReturnType<typeof hostedWebChatContext>>
 ) {
   try {

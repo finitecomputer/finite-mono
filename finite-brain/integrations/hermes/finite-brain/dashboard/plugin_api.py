@@ -256,6 +256,24 @@ async def read_identities(brain_id):
     for row in records(report.get("identities"), MAX_IDENTITIES):
         # Name, email and owner exist only when Core resolved this key.
         description = record(row.get("description"))
+        state = description.get("state")
+        resolution = None
+        if isinstance(state, str) and state in {
+            "resolved",
+            "notShared",
+            "unknown",
+            "ambiguous",
+            "unavailable",
+        }:
+            # Preserve only this public reason code. Core/transport diagnostics
+            # may contain private details and never belong in the browser.
+            resolution = {
+                "state": state,
+                "reason": "noParticipation"
+                if state == "notShared"
+                and description.get("reason") == "noParticipation"
+                else None,
+            }
         annotation = operator_annotation(row, description)
         if description.get("state") != "resolved":
             description = {}
@@ -285,6 +303,7 @@ async def read_identities(brain_id):
                 "kind": optional_text(description.get("kind")),
                 "lifecycle": lifecycle,
                 "operatorAnnotation": annotation,
+                "resolution": resolution,
                 "name": optional_text(description.get("displayName")),
                 "email": optional_text(description.get("accountEmail")),
                 "ownerEmail": None

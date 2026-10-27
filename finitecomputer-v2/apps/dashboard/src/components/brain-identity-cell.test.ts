@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { IdentityCell } from "./brain-identity-cell";
+import { IdentityCell, identityLabel } from "./brain-identity-cell";
 import type { BrainIdentity } from "@/lib/brain-identity-roster";
 
 const base: BrainIdentity = {
@@ -14,6 +14,25 @@ const cell = (row: Partial<BrainIdentity>, alias?: string) => renderToStaticMark
 const secondary = (text: string) => `<span class="block text-xs text-muted-foreground">${text}</span>`;
 const stored = { publicName: "cara@finite.vip", publicNameStoredAt: "2026-09-17T20:39:30Z" };
 
+test("unresolved rows explain the server state without turning the reason or a private alias into an identity", () => {
+  const cases: [NonNullable<BrainIdentity["resolution"]>, string][] = [
+    [{ state: "notShared", reason: "noParticipation" }, "This key has not acted in this Brain yet."],
+    [{ state: "notShared", reason: null }, "Identity details are not available to this Brain."],
+    [{ state: "unknown", reason: null }, "No supported identity details are available."],
+    [{ state: "ambiguous", reason: null }, "Identity records conflict."],
+    [{ state: "unavailable", reason: null }, "Identity lookup is unavailable. Try again later."],
+  ];
+  for (const [resolution, message] of cases) {
+    assert(cell({ resolution }).includes(message));
+    const aliased = cell({ resolution }, "My colleague");
+    assert(aliased.includes("My colleague") && aliased.includes("Your alias") && aliased.includes(message));
+    // Confirmation callers still have no identity name and must use the key.
+    assert.equal(identityLabel({ ...base, resolution }).primary, null);
+    assert.equal(identityLabel({ ...base, resolution }).detail, null);
+    assert(!cell({ ...stored, resolution }).includes(message));
+  }
+});
+
 test("an unresolved key with a stored public name shows it in place of Unknown", () => {
   const html = cell(stored);
   assert.match(html, new RegExp(`<th scope="row" title="Stored 2026-09-17T20:39:30Z">cara@finite.vip${secondary("Public name")}</th>`));
@@ -21,11 +40,11 @@ test("an unresolved key with a stored public name shows it in place of Unknown",
   assert.match(cell({ ...stored, publicNameStoredAt: null }), new RegExp(`<th scope="row">cara@finite.vip${secondary("Public name")}</th>`));
 });
 
-test("resolved rows ignore the public name and rows with neither stay Unknown", () => {
+test("resolved rows ignore the public name and older rows with neither explain that details are unavailable", () => {
   assert.match(cell({ ...stored, kind: "agent", name: "Ada" }), new RegExp(`<th scope="row">Ada${secondary("Agent")}</th>`));
   assert.match(cell({ ...stored, kind: "human", email: "maya@example.test" }), /<th scope="row">maya@example.test<\/th>/);
   assert.match(cell({ kind: "human", name: "Maya", email: "maya@example.test" }), new RegExp(`<th scope="row">Maya${secondary("maya@example.test")}</th>`));
-  assert.match(cell({}), /<th scope="row"><span class="text-muted-foreground">Unknown<\/span><\/th>/);
+  assert.match(cell({}), /<th scope="row"><span class="text-muted-foreground">Identity details are unavailable.<\/span><\/th>/);
   assert.doesNotMatch(cell({ ...stored, kind: "agent", name: "Ada" }), /cara@finite\.vip|Public name|title=/);
 });
 
@@ -48,7 +67,7 @@ test("private aliases preserve authoritative identity and every scoped fallback"
     [{ kind: "agent", name: "Example", lifecycle: "retired" }, ["Example", "Agent (retired)"]],
     [{ operatorAnnotation: { kind: "invitation_key", label: "Invitation", observedAt: "2026-01-01T00:00:00Z" } }, ["Invitation", "Invitation key · Evidence 2026-01-01"]],
     [stored, [stored.publicName, "Public name"]],
-    [{}, ["Unknown"]],
+    [{}, ["Identity details are unavailable."]],
   ];
   for (const [row, labels] of cases) {
     const html = cell(row, "My colleague");

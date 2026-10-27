@@ -21,6 +21,16 @@ Folders, and, only when Core resolved it, kind, name, email and responsible
 account email. Otherwise it shows the key's stored public name when the report
 carries one.
 
+The Runtime plugin also carries `resolution.state` and the allowlisted
+`noParticipation` reason. When no current, scoped or public name is available,
+the Identity cell explains missing participation, withheld details, unsupported
+identity evidence, conflicting records or an unavailable lookup. It never
+forwards arbitrary backend reasons. `notShared` does not distinguish an unknown
+key from withheld Account information, so the UI must not claim it proves a
+missing Account connection. Older plugins omit resolution; the dashboard then
+says details are unavailable without guessing a reason. Private aliases remain
+viewer-local labels, and mutation confirmations retain the authoritative key.
+
 The full report, including shared account contact, is admin-only in v1. Ordinary
 metadata visibility does not confer access to every Folder or private contact.
 A later scoped member/Guest view must filter through existing Folder visibility

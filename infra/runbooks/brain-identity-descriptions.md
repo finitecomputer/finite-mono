@@ -261,6 +261,17 @@ Brain SQLite Recovery Set; restoring them restores descriptions, not keys.
 
 ## Known limits
 
+- Hosted Chat bootstrap registration needs the new Core and dashboard. It uses
+  the existing private listener and observation credential; no extra setting,
+  migration or operator backfill is required. Deploy Core before the dashboard
+  when possible; an older Core returns 404 and Chat continues. Existing Accounts
+  register on their next successful bootstrap. Registration changes neither
+  sharing nor participation. Binary rollback retains accepted associations and
+  receipts; their existing Core backup coverage is unchanged.
+- Per-row resolution messages need the new Runtime plugin and dashboard. Older
+  plugins remain readable with a generic unavailable-details label. Preserve
+  the public-name, scoped annotation, lifecycle and private-alias fallbacks.
+
 - Hosted Agents keep the `fbrain` in their pinned Runtime until that Runtime
   is upgraded separately. Their `access list` is the older summary; the
   managed FiniteBrain skill tells them to check the report `version` and say
