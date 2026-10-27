@@ -80,7 +80,8 @@ export function BrainIdentityRoster({ runtimeId, brain, agentName }: { runtimeId
     </div>}
     {changes?.actions.includes("invite") && <BrainInvitePanel runtimeId={runtimeId} brainId={brain.id} brainName={brain.name}
       agentName={agentName} runner={runner} revision={revision} />}
-    <RemoveIdentityDialog row={removing} brainName={brain.name} agentName={agentName} onCancel={() => setRemoving(null)}
+    <RemoveIdentityDialog row={removing} alias={removing && aliases.aliasFor(removing.npub)} brainName={brain.name}
+      agentName={agentName} onCancel={() => setRemoving(null)}
       onConfirm={row => { setRemoving(null); void runRemoval(runner, runtimeId, brain.id, agentName, row); }} />
     {editing && <KeyAliasDialog key={editing.npub} target={editing}
       otherAliases={(identities ?? []).filter(row => row.npub !== editing.npub).flatMap(row => aliases.aliasFor(row.npub) ?? [])}
