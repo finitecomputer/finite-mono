@@ -433,6 +433,8 @@ impl BrainStore {
         grants: &[(FolderKeyGrantMetadata, SyncRecordInput)],
         access_change_record: &SyncRecordInput,
     ) -> Result<OpenFolderToAllMembersOutcome, StoreError> {
+        // Read the roster under the write lock so it cannot change before commit.
+        let tx = begin_authoritative_write(&self.conn)?;
         let stored = self.load_brain(brain_id)?;
         if stored.brain.kind != BrainKind::Organization {
             return Err(StoreError::BrokenInvariant {
@@ -542,7 +544,6 @@ impl BrainStore {
             });
         }
 
-        let tx = self.conn.transaction()?;
         let changed = tx.execute(
             "UPDATE folders SET access = 'all_members'
              WHERE brain_id = ?1 AND id = ?2 AND access = 'restricted' AND current_key_version = ?3",
