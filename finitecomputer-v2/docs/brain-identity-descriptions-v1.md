@@ -55,7 +55,10 @@ is created. Conflicting Accounts or Agent keys fail closed.
 Registration makes the Account connection available to normal description
 readers. V1 still requires sharing, and v3 still requires participation or a
 valid scoped record. An admin-added human key can therefore remain withheld
-with `noParticipation` after registration. Existing scoped records and their
+with `noParticipation` after registration. V2 applies no Core-side disclosure
+gate: registered keys are describable to a caller with the description
+credential, so the Brain server's participation filter remains the only v2 gate.
+Existing scoped records and their
 binding checks remain in force. The normal participating description retains
 precedence over an operator annotation.
 
