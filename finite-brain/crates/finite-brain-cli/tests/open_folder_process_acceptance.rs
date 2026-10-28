@@ -1,13 +1,15 @@
 //! Built `fbrain` processes against a real Brain server: an Organization
 //! admin opens a Restricted Folder to every Member. Existing and later
 //! Members decrypt its existing pages, its explicit Guest keeps access, and
-//! its restricted child stays closed.
+//! its restricted child stays closed. An ignored test runs the same change
+//! against a baseline Member client and a baseline server.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use finite_brain_core::{
     BrainId, EncryptedFolderObjectEnvelope, FolderId, FolderKey, FolderObjectAad, ObjectId,
@@ -27,6 +29,7 @@ struct Harness {
     database: PathBuf,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<thread::JoinHandle<()>>,
+    child: Option<Child>,
 }
 
 impl Drop for Harness {
@@ -37,7 +40,15 @@ impl Drop for Harness {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
+}
+
+fn candidate() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fbrain"))
 }
 
 impl Harness {
@@ -77,11 +88,48 @@ impl Harness {
             database,
             shutdown: Some(shutdown_tx),
             thread: Some(thread),
+            child: None,
         }
     }
 
+    /// A separately built Brain server binary on an empty database.
+    fn start_binary(scratch: &Path, server: &Path) -> Self {
+        let database = scratch.join("brain.sqlite3");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let server_url = format!("http://{address}");
+        let child = Command::new(server)
+            .env_clear()
+            .env("FINITE_BRAIN_ADDR", address.to_string())
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .env("FINITE_BRAIN_DB", &database)
+            .env("FINITE_BRAIN_PROTECTED_RATE_LIMIT", "10000:60")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let harness = Self {
+            server_url,
+            database,
+            shutdown: None,
+            thread: None,
+            child: Some(child),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while std::net::TcpStream::connect(address).is_err() {
+            assert!(Instant::now() < deadline, "baseline server did not start");
+            thread::sleep(Duration::from_millis(25));
+        }
+        harness
+    }
+
     fn fbrain(&self, home: &Path, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(PathBuf::from(env!("CARGO_BIN_EXE_fbrain")))
+        self.fbrain_with(&candidate(), home, cwd, args)
+    }
+
+    fn fbrain_with(&self, binary: &Path, home: &Path, cwd: &Path, args: &[&str]) -> Output {
+        Command::new(binary)
             .current_dir(cwd)
             .env_clear()
             .env("HOME", home)
@@ -100,7 +148,11 @@ impl Harness {
     }
 
     fn json(&self, home: &Path, cwd: &Path, args: &[&str]) -> Value {
-        let output = self.fbrain(home, cwd, args);
+        self.json_with(&candidate(), home, cwd, args)
+    }
+
+    fn json_with(&self, binary: &Path, home: &Path, cwd: &Path, args: &[&str]) -> Value {
+        let output = self.fbrain_with(binary, home, cwd, args);
         assert!(
             output.status.success(),
             "{args:?}: {}{}",
@@ -111,12 +163,17 @@ impl Harness {
     }
 
     fn identity(&self, scratch: &Path, name: &str) -> (PathBuf, Keys, String) {
+        self.identity_with(&candidate(), scratch, name)
+    }
+
+    fn identity_with(&self, binary: &Path, scratch: &Path, name: &str) -> (PathBuf, Keys, String) {
         let home = scratch.join(name);
         fs::create_dir_all(&home).unwrap();
         let keys = Keys::generate();
         let secret = home.join("import-key");
         fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
-        self.json(
+        self.json_with(
+            binary,
             &home,
             &home,
             &["auth", "import", "--file", secret.to_str().unwrap()],
@@ -129,9 +186,13 @@ impl Harness {
     }
 
     fn open_tree(&self, home: &Path) -> PathBuf {
+        self.open_tree_with(&candidate(), home, BRAIN)
+    }
+
+    fn open_tree_with(&self, binary: &Path, home: &Path, brain: &str) -> PathBuf {
         let tree = home.join("tree");
-        self.json(home, home, &["open", BRAIN, tree.to_str().unwrap()]);
-        self.json(home, &tree, &["sync", "now"]);
+        self.json_with(binary, home, home, &["open", brain, tree.to_str().unwrap()]);
+        self.json_with(binary, home, &tree, &["sync", "now"]);
         tree
     }
 
@@ -412,4 +473,144 @@ fn built_fbrain_admin_opens_a_restricted_folder_to_current_and_future_members() 
         harness.decrypt_folder_as(&later_keys, "research"),
         vec!["# Plan\n"]
     );
+}
+
+fn baseline_binary(variable: &str) -> PathBuf {
+    let path = PathBuf::from(
+        std::env::var_os(variable).unwrap_or_else(|| panic!("set {variable} to a baseline build")),
+    );
+    assert!(path.is_file(), "{variable} is not a file");
+    path
+}
+
+#[test]
+#[ignore = "requires baseline builds via FBRAIN_COMPAT_BINARY and FBRAIN_COMPAT_SERVER_BINARY"]
+fn baseline_member_reads_an_opened_folder_and_baseline_server_refuses_to_open() {
+    let old_cli = baseline_binary("FBRAIN_COMPAT_BINARY");
+    let old_server = baseline_binary("FBRAIN_COMPAT_SERVER_BINARY");
+
+    // A baseline Member client against this server converges through sync.
+    let scratch = TempDir::new().unwrap();
+    let admin_keys = Keys::generate();
+    let admin_npub = NostrPublicKey::from_protocol(admin_keys.public_key())
+        .to_npub()
+        .unwrap();
+    let harness = Harness::start(scratch.path(), &admin_npub);
+    let admin_home = scratch.path().join("admin");
+    fs::create_dir_all(&admin_home).unwrap();
+    let secret = admin_home.join("import-key");
+    fs::write(&secret, admin_keys.secret_key().to_secret_hex()).unwrap();
+    harness.json(
+        &admin_home,
+        &admin_home,
+        &["auth", "import", "--file", secret.to_str().unwrap()],
+    );
+    fs::remove_file(secret).unwrap();
+    let (member_home, _, member) = harness.identity_with(&old_cli, scratch.path(), "member");
+    let admin_tree = harness.open_tree(&admin_home);
+    harness.json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin", "member", "add", "--target", &member, "--brain", BRAIN,
+        ],
+    );
+    let member_tree = harness.open_tree_with(&old_cli, &member_home, BRAIN);
+    harness.json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "folder",
+            "create",
+            "research",
+            "--access",
+            "restricted",
+            "--name",
+            "Research",
+            "--path",
+            "Research",
+        ],
+    );
+    harness.json(&admin_home, &admin_tree, &["sync", "now"]);
+    fs::write(admin_tree.join("Research/plan.md"), "# Plan\n").unwrap();
+    harness.json(&admin_home, &admin_tree, &["sync", "now"]);
+    harness.json_with(&old_cli, &member_home, &member_tree, &["sync", "now"]);
+    assert!(!member_tree.join("Research/plan.md").exists());
+
+    harness.json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "open",
+            "--folder",
+            "research",
+            "--brain",
+            BRAIN,
+        ],
+    );
+    harness.json_with(&old_cli, &member_home, &member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Research/plan.md")).unwrap(),
+        "# Plan\n"
+    );
+    drop(harness);
+
+    // This CLI against a baseline server: refused before anything changes.
+    let scratch = TempDir::new().unwrap();
+    let old = Harness::start_binary(scratch.path(), &old_server);
+    let (home, _, _) = old.identity(scratch.path(), "admin");
+    old.json(
+        &home,
+        &home,
+        &[
+            "brain",
+            "create",
+            "compat-org",
+            "--kind",
+            "organization",
+            "--name",
+            "Compat Org",
+        ],
+    );
+    let tree = old.open_tree_with(&candidate(), &home, "compat-org");
+    old.json(
+        &home,
+        &tree,
+        &[
+            "folder",
+            "create",
+            "research",
+            "--access",
+            "restricted",
+            "--name",
+            "Research",
+            "--path",
+            "Research",
+        ],
+    );
+    let refused = old.fbrain(
+        &home,
+        &tree,
+        &[
+            "admin",
+            "folder-access",
+            "open",
+            "--folder",
+            "research",
+            "--brain",
+            "compat-org",
+        ],
+    );
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(!refused.status.success(), "{error}");
+    assert!(error.contains("Upgrade the Brain server"), "{error}");
+    assert!(error.contains("nothing was changed"), "{error}");
+    let metadata = old.json(
+        &home,
+        &tree,
+        &["brain", "metadata", "--brain", "compat-org"],
+    );
+    assert_eq!(folder(&metadata, "research")["access"], "restricted");
 }
