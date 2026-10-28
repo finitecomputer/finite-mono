@@ -415,6 +415,160 @@ impl BrainStore {
         Ok(GrantFolderAccessOutcome::Granted)
     }
 
+    /// Open a Restricted Organization Folder to every Member. One way only.
+    ///
+    /// New readers receive the current Folder Key, so no content is
+    /// re-encrypted. `grants` pairs each client-wrapped grant with its sync
+    /// record and must cover every recipient of the opened Folder that lacks a
+    /// current grant. Grants for current holders are skipped, so a client may
+    /// wrap for every recipient. Explicit Folder access and child Folders are
+    /// unchanged. The mode change, new grants and signed audit record commit
+    /// together; a roster or key change since the client prepared the request
+    /// is a conflict that writes nothing.
+    pub fn open_folder_to_all_members_with_control_records(
+        &mut self,
+        brain_id: &BrainId,
+        folder_id: &FolderId,
+        expected_key_version: u32,
+        grants: &[(FolderKeyGrantMetadata, SyncRecordInput)],
+        access_change_record: &SyncRecordInput,
+    ) -> Result<OpenFolderToAllMembersOutcome, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        if stored.brain.kind != BrainKind::Organization {
+            return Err(StoreError::BrokenInvariant {
+                reason: "only an Organization Brain Folder can be opened to all Members".to_owned(),
+            });
+        }
+        let folder = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id == *folder_id)
+            .ok_or_else(|| StoreError::MissingFolder {
+                folder_id: folder_id.to_string(),
+            })?;
+        match folder.access {
+            FolderAccessMode::AllMembers => return Ok(OpenFolderToAllMembersOutcome::AlreadyOpen),
+            FolderAccessMode::Restricted => {}
+            FolderAccessMode::Owner | FolderAccessMode::AdminOnly => {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "only a Restricted Folder can be opened to all Members".to_owned(),
+                });
+            }
+        }
+        if stored.setup_incomplete_folder_ids.contains(folder_id) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "finish Folder setup before opening it to all Members".to_owned(),
+            });
+        }
+        if folder.current_key_version != expected_key_version {
+            return Err(StoreError::Conflict {
+                reason: "the Folder Key changed while the request was prepared; refresh and retry"
+                    .to_owned(),
+                current_revision: None,
+            });
+        }
+        let opened = Folder {
+            access: FolderAccessMode::AllMembers,
+            ..folder.clone()
+        };
+        let access_user_ids = stored
+            .folder_access
+            .get(folder_id)
+            .cloned()
+            .unwrap_or_default();
+        let required = required_recipients(&stored.brain, &opened, &access_user_ids, None)?;
+        let holders = stored
+            .grants
+            .iter()
+            .filter(|grant| {
+                grant.folder_id == *folder_id && grant.key_version == folder.current_key_version
+            })
+            .map(|grant| grant.recipient_npub.clone())
+            .collect::<BTreeSet<_>>();
+
+        let mut supplied = BTreeSet::new();
+        let mut new_grants = Vec::new();
+        let mut new_records = Vec::new();
+        for (grant, record) in grants {
+            validate_grant_metadata(grant)?;
+            validate_grant_issuer(&stored.brain, grant, None)?;
+            if grant.folder_id != *folder_id || grant.key_version != folder.current_key_version {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "grant must carry this Folder's current key version".to_owned(),
+                });
+            }
+            if !required.contains(&grant.recipient_npub) {
+                return Err(StoreError::Conflict {
+                    reason: format!(
+                        "{} is no longer a reader of the opened Folder; refresh and retry",
+                        grant.recipient_npub
+                    ),
+                    current_revision: None,
+                });
+            }
+            if !supplied.insert(grant.recipient_npub.clone()) {
+                return Err(StoreError::BrokenInvariant {
+                    reason: "each recipient may receive only one grant".to_owned(),
+                });
+            }
+            if !holders.contains(&grant.recipient_npub) {
+                new_grants.push(grant.clone());
+                new_records.push(record.clone());
+            }
+        }
+        if let Some(missing) = required
+            .iter()
+            .find(|recipient| !holders.contains(*recipient) && !supplied.contains(*recipient))
+        {
+            return Err(StoreError::Conflict {
+                reason: format!(
+                    "{missing} needs a grant for the opened Folder; the roster changed, refresh and retry"
+                ),
+                current_revision: None,
+            });
+        }
+        validate_folder_key_grant_control_records(&new_grants, &new_records)?;
+        let SyncRecordInput::Control(audit) = access_change_record else {
+            return Err(StoreError::BrokenInvariant {
+                reason: "opening a Folder requires a signed admin access-change record".to_owned(),
+            });
+        };
+        if audit.record_type != SyncRecordType::BrainAdminAccessChange
+            || audit.folder_id.as_ref() != Some(folder_id)
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "the access-change record must name the opened Folder".to_owned(),
+            });
+        }
+
+        let tx = self.conn.transaction()?;
+        let changed = tx.execute(
+            "UPDATE folders SET access = 'all_members'
+             WHERE brain_id = ?1 AND id = ?2 AND access = 'restricted' AND current_key_version = ?3",
+            params![brain_id.as_str(), folder_id.as_str(), expected_key_version],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::Conflict {
+                reason: "the Folder changed while it was being opened; refresh and retry"
+                    .to_owned(),
+                current_revision: None,
+            });
+        }
+        for grant in &new_grants {
+            insert_grant(&tx, brain_id, grant)?;
+        }
+        new_records.push(access_change_record.clone());
+        sync_records::append_sync_records(&tx, brain_id, &new_records)?;
+        tx.commit()?;
+        Ok(OpenFolderToAllMembersOutcome::Opened {
+            granted_recipients: new_grants
+                .into_iter()
+                .map(|grant| grant.recipient_npub)
+                .collect(),
+        })
+    }
+
     /// Remove a Member and every Folder Key relationship in one transaction.
     ///
     /// `rotations` must cover exactly [`member_removal_folder_rotations`]: the

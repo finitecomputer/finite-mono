@@ -369,6 +369,97 @@ pub(crate) async fn grant_folder_access_handler(
     Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
+/// Signed note binding a `set-folder-access-mode` event to this transition.
+const OPEN_TO_ALL_MEMBERS_NOTE: &str = "all_members";
+
+/// Open one Restricted Folder to every Member of its Organization Brain.
+pub(crate) async fn open_folder_to_all_members_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<OpenFolderToAllMembersResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: OpenFolderToAllMembersRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    if request.grants.len() > finite_brain_core::MAX_FOLDER_ROTATION_GRANTS {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too many Folder Key Grants in one request",
+        ));
+    }
+    let (event, payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &brain_id,
+        &actor,
+        AdminAccessAction::SetFolderAccessMode,
+        Some(&folder_id),
+        None,
+        Some(request.key_version),
+    )?;
+    if payload.note.as_deref() != Some(OPEN_TO_ALL_MEMBERS_NOTE) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "opening a Folder requires a signed set-folder-access-mode note of all_members",
+        ));
+    }
+    let grant_created_at = server_timestamp(&state);
+    let grants = grant_requests_to_metadata(
+        &request.grants,
+        &folder_id,
+        &actor,
+        Some(event.as_json()),
+        &grant_created_at,
+    )?
+    .into_iter()
+    .map(|grant| folder_key_grant_sync_record(&grant).map(|record| (grant, record)))
+    .collect::<Result<Vec<_>, _>>()?;
+    let audit_record = admin_access_change_sync_record(&actor, &event, &payload)?;
+
+    let (metadata, outcome) = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let outcome = store.open_folder_to_all_members_with_control_records(
+            &brain_id,
+            &folder_id,
+            request.key_version,
+            &grants,
+            &audit_record,
+        )?;
+        let stored = store.load_brain(&brain_id)?;
+        let mut metadata = metadata_response(stored);
+        enrich_metadata_identities(&store, &mut metadata)?;
+        (metadata, outcome)
+    };
+    let (outcome, granted_recipients) = match outcome {
+        OpenFolderToAllMembersOutcome::Opened { granted_recipients } => {
+            // Every Member's authoritative view changed.
+            state.publish_access_update(&brain_id);
+            (
+                OpenFolderToAllMembersResponseOutcome::Opened,
+                granted_recipients
+                    .into_iter()
+                    .map(|recipient| recipient.to_string())
+                    .collect(),
+            )
+        }
+        OpenFolderToAllMembersOutcome::AlreadyOpen => (
+            OpenFolderToAllMembersResponseOutcome::AlreadyOpen,
+            Vec::new(),
+        ),
+    };
+    Ok(Json(OpenFolderToAllMembersResponse {
+        metadata,
+        outcome,
+        granted_recipients,
+    }))
+}
+
 pub(crate) async fn complete_pending_wraps_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,

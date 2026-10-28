@@ -33,10 +33,11 @@ use finite_brain_store::{
     BrainInvitationTargetKind, BrainInviteTokenRole, BrainStore, ControlSyncRecord,
     EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
     FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PendingGrantWrap, SharedFolderConnectionStatus,
-    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredBrainInviteToken,
-    StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord,
-    SyncRecordInput, SyncRecordType, VisibleBrain, VisibleBrainRole, timestamp_expired,
+    MountedFolderProjection, MountedFolderState, OpenFolderToAllMembersOutcome, PendingGrantWrap,
+    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
+    StoredBrainInvitation, StoredBrainInviteToken, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
+    VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -772,6 +773,10 @@ fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
             axum::routing::post(complete_pending_wraps_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/open-to-all-members",
+            axum::routing::post(open_folder_to_all_members_handler),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/key-rotations",
@@ -10562,4 +10567,5 @@ mod tests {
     mod brain_deletion_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
+    mod open_folder_tests;
 }
