@@ -596,6 +596,15 @@ pub enum GrantFolderAccessOutcome {
     AlreadyHasAccess,
 }
 
+/// Result of opening a Restricted Folder to every Organization Brain Member.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum OpenFolderToAllMembersOutcome {
+    /// The Folder is now All-Members; these recipients received a new grant.
+    Opened { granted_recipients: Vec<UserId> },
+    /// The Folder was already All-Members; nothing was written.
+    AlreadyOpen,
+}
+
 /// Why a Principal gained Folder entitlement without a wrapped Folder Key.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum PendingGrantWrapReason {
@@ -3471,6 +3480,7 @@ mod tests {
     mod brain_deletion_tests;
     mod folder_key_rotation_tests;
     mod member_removal_tests;
+    mod open_folder_tests;
 
     #[test]
     fn exposes_store_crate_name() {
