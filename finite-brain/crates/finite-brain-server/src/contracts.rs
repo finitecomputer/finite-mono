@@ -248,6 +248,97 @@ pub struct FolderDeleteResponse {
     pub deleted_folder_ids: Vec<String>,
 }
 
+/// Server-computed scope of permanently deleting an Organization Brain. The
+/// confirming admin signs `stateDigest` into the `delete-brain` event note;
+/// the deletion transaction recomputes it and refuses any change, including
+/// one that leaves every count the same.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeletionPreviewResponse {
+    /// This Brain server's public identity.
+    pub server: String,
+    pub brain_id: String,
+    pub name: String,
+    pub kind: String,
+    pub folder_count: usize,
+    /// Live Folder objects: pages, plus any legacy assets.
+    pub page_count: usize,
+    pub member_count: usize,
+    pub admin_count: usize,
+    pub guest_count: usize,
+    /// Pending Brain and Folder invitations that deletion revokes.
+    pub pending_invitation_count: usize,
+    /// Invite Tokens neither redeemed nor revoked that deletion invalidates.
+    pub open_invite_token_count: usize,
+    /// Active cross-Brain Mounts to revoke first; deletion refuses while any remain.
+    pub blocking_mounts: Vec<BlockingMountResponse>,
+    /// Pending Mount Offers and revoked Mount records naming this Brain in
+    /// either direction, removed with it.
+    pub retired_mount_record_count: usize,
+    pub deletable: bool,
+    pub state_digest: String,
+    /// How long a signed confirmation of this preview stays acceptable.
+    pub confirmation_max_age_seconds: u64,
+}
+
+/// One active cross-Brain Mount that blocks deletion.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockingMountResponse {
+    pub connection_id: String,
+    /// `outgoing` when this Brain shares the Folder, `incoming` when it mounts one.
+    pub direction: String,
+    pub source_brain_id: String,
+    pub source_folder_id: String,
+    pub destination_brain_id: String,
+}
+
+/// Request body for `DELETE /v1/brains/{brain_id}`: a signed `delete-brain`
+/// admin access-change event whose note is the confirmed preview `stateDigest`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeleteRequest {
+    pub deletion_event: serde_json::Value,
+}
+
+/// Permanent receipt of an accepted Brain deletion. An exact retry of the
+/// same signed deletion answers the same receipt with `duplicate: true`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeleteResponse {
+    pub receipt: BrainDeletionReceiptResponse,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeletionReceiptResponse {
+    pub brain_id: String,
+    pub deletion_event_id: String,
+    pub actor_npub: String,
+    pub deleted_at: String,
+    pub state_digest: String,
+    pub folder_count: usize,
+    pub page_count: usize,
+}
+
+/// `410 Gone` body for a principal that held access to a deleted Brain.
+/// Anyone else gets the unknown-Brain answer.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedBrainResponse {
+    pub error: String,
+    pub code: String,
+    pub brain_deleted: DeletedBrainNoticeResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedBrainNoticeResponse {
+    pub brain_id: String,
+    pub deleted_at: String,
+}
+
 /// Object write response.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

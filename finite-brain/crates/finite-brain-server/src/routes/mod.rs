@@ -1,5 +1,6 @@
 pub(crate) mod admin_demotion;
 pub(crate) mod approvals;
+pub(crate) mod brain_deletion;
 pub(crate) mod brains;
 pub(crate) mod collaboration;
 pub(crate) mod folder_keys;
@@ -13,6 +14,7 @@ pub(crate) mod sharing;
 
 pub(crate) use admin_demotion::*;
 pub(crate) use approvals::*;
+pub(crate) use brain_deletion::*;
 pub(crate) use brains::*;
 pub(crate) use collaboration::*;
 pub(crate) use folder_keys::*;
