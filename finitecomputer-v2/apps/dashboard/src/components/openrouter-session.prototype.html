@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Finite · OpenRouter session prototype</title>
+  <style>
+    :root { color-scheme: light dark; --foreground: light-dark(#232832,#e9edf3); --muted-foreground: light-dark(#606b7a,#a1adbd); --card: light-dark(#fff,#161c26); --secondary: light-dark(#f2f5f9,#202938); --border: light-dark(#dce2ea,#334054); --primary: light-dark(#245dc6,#9ebfff); --primary-foreground: light-dark(#fff,#102346); --warning: light-dark(#81510c,#f3c277); --warning-surface: light-dark(#fff6e7,#31291d); --success: light-dark(#247357,#90d8bb); --radius: 12px; --font-sans: -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; --font-mono: ui-monospace,monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; color: var(--foreground); font: 14px/1.55 var(--font-sans); }
+    main { max-width: 860px; margin: 24px auto; }
+    h1,h2,h3,p { margin: 0; }
+    h1 { font-size: clamp(26px,5vw,36px); line-height: 1.16; letter-spacing: -.045em; margin: 8px 0 12px; }
+    h2 { font-size: 17px; letter-spacing: -.02em; }
+    h3 { font-size: 14px; }
+    button,select { font: inherit; }
+    button { cursor: pointer; border: 1px solid var(--border); background: var(--card); color: var(--foreground); padding: 9px 13px; border-radius: 8px; min-height: 42px; text-align: center; }
+    button:hover { border-color: var(--primary); }
+    button:focus-visible,summary:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+    button:disabled { cursor: default; opacity: .5; }
+    button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
+    button[aria-pressed="true"] { border-color: var(--primary); background: var(--secondary); }
+    .eyebrow { font: 11px/1.4 var(--font-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--muted-foreground); }
+    .muted { color: var(--muted-foreground); }
+    .intro { max-width: 680px; margin-bottom: 22px; }
+    .card { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; background: var(--card); margin-top: 14px; }
+    .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    .wrap { flex-wrap: wrap; }
+    .badge { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 4px 8px; border-radius: 99px; border: 1px solid var(--border); white-space: nowrap; }
+    .good { color: var(--success); }
+    .section-label { color: var(--muted-foreground); font-size: 12px; margin-bottom: 10px; }
+    .divider { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
+    .button-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    .small { font-size: 12px; }
+    .session-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .session-tabs button { flex: 1; text-align: left; }
+    .session-tabs small { display: block; color: var(--muted-foreground); margin-top: 3px; }
+    .session-top { align-items: flex-start; }
+    .model-name { font-size: 20px; font-weight: 600; letter-spacing: -.025em; margin-top: 2px; }
+    .note { margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: var(--secondary); }
+    .warning { background: var(--warning-surface); color: var(--warning); }
+    .picker { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; }
+    .choices { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+    .choice { text-align: left; padding: 13px; }
+    .choice strong,.choice span { display: block; }
+    .choice span { font-size: 12px; color: var(--muted-foreground); margin-top: 4px; }
+    code { font: 12px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+    .state-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-top: 12px; }
+    .state-grid dt { font-size: 11px; color: var(--muted-foreground); }
+    .state-grid dd { margin: 3px 0 0; font-size: 12px; }
+    .scenario-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0; }
+    .scenario-tabs button { font-size: 12px; min-height: 36px; padding: 6px 10px; }
+    .steps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }
+    .steps button { text-align: left; font-size: 12px; }
+    details { margin-top: 16px; }
+    summary { cursor: pointer; color: var(--muted-foreground); }
+    ul { margin: 10px 0; padding-left: 20px; }
+    footer { margin-top: 18px; color: var(--muted-foreground); font-size: 12px; }
+    [hidden] { display: none !important; }
+    @media (max-width: 480px) { main { margin-top: 16px; } .choices,.steps { grid-template-columns: 1fr; } .state-grid { grid-template-columns: 1fr 1fr; } .session-top { flex-wrap: wrap; } .model-name { font-size: 18px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header class="intro">
+    <div class="eyebrow">Finite / Interaction prototype</div>
+    <h1>Private by default.<br>More models when you choose.</h1>
+    <p class="muted">Can you connect OpenRouter once, use it in one session, and keep Finite Private everywhere else? Try the proposed flow below.</p>
+    <p class="small muted" style="margin-top:8px">Throwaway demo · fake credentials and responses · nothing is saved or sent.</p>
+  </header>
+
+  <section class="card" aria-labelledby="connections-title">
+    <p class="section-label">Dashboard / Connections</p>
+    <div class="row wrap">
+      <div><h2 id="connections-title">Default for new sessions</h2><p id="default-label" class="muted"></p></div>
+      <span class="badge" id="default-badge"></span>
+    </div>
+    <div class="divider row wrap">
+      <div><h3>OpenRouter</h3><p id="credential-label" class="small muted"></p></div>
+      <button id="save-key" class="primary" data-action="save">Connect demo key</button>
+    </div>
+    <p class="small muted" style="margin-top:10px">Connect or replace a key without changing your default or current sessions.</p>
+    <div id="connection-notice" class="note small" role="status" hidden></div>
+  </section>
+
+  <section class="card" aria-labelledby="chat-title">
+    <p class="section-label" id="chat-title">Chat / Session model</p>
+    <div class="session-tabs" aria-label="Choose a demo session">
+      <button data-session="a" aria-pressed="true"><strong>Research</strong><small id="session-a-model"></small></button>
+      <button data-session="b" aria-pressed="false"><strong>Writing</strong><small id="session-b-model"></small></button>
+    </div>
+    <div class="row session-top">
+      <div><span id="scope-label" class="eyebrow"></span><p id="current-model" class="model-name"></p><p id="route-label" class="small muted"></p></div>
+      <button id="picker-toggle" data-action="picker" aria-expanded="false" aria-controls="picker"><code>/model</code> · Change model</button>
+    </div>
+    <div id="picker" class="picker" hidden>
+      <div class="row"><h3>Choose for this session</h3><button data-action="picker" aria-label="Close model picker">Close</button></div>
+      <div class="choices">
+        <button class="choice" data-action="private"><strong>Finite Private</strong><span>Use private inference for this session.</span></button>
+        <button class="choice" data-action="choose-openrouter"><strong>Claude Sonnet 4.6</strong><span>Via your OpenRouter key.</span></button>
+      </div>
+      <p class="small muted" style="margin-top:10px">Your default and other sessions stay as they are.</p>
+    </div>
+    <div id="confirm" class="note warning" hidden>
+      <strong>Use OpenRouter in this session?</strong>
+      <p class="small">Future requests, including conversation context, will go to OpenRouter and its model provider using your key. OpenRouter usage is billed to your account.</p>
+      <div class="button-row"><button class="primary" data-action="confirm-openrouter">Use for this session</button><button data-action="cancel">Keep current model</button></div>
+    </div>
+    <div id="session-notice" class="note" role="status" hidden></div>
+    <div class="button-row">
+      <button data-action="turn">Try a demo message</button>
+      <button data-action="new"><code>/new</code> · New session</button>
+    </div>
+    <p class="small muted" style="margin-top:12px" id="history-label"></p>
+    <details>
+      <summary>Equivalent command and scope</summary>
+      <p style="margin-top:8px"><code>/model anthropic/claude-sonnet-4.6 --provider openrouter --session</code></p>
+      <p class="small muted" style="margin-top:8px">Session switching already exists in the pinned runtime. This picker, its confirmation, and the independent connection card are proposed UX. “Finite Private” must resolve the private route and key explicitly. This demo does not prove the live integration.</p>
+    </details>
+  </section>
+
+  <section class="card" aria-labelledby="walkthrough-title">
+    <div class="row wrap"><h2 id="walkthrough-title">Explore the behavior</h2><button data-action="reset">Reset demo</button></div>
+    <div class="scenario-tabs" aria-label="Guided walkthroughs">
+      <button data-scenario="everyday" aria-pressed="true">Everyday use</button>
+      <button data-scenario="missing" aria-pressed="false">Missing key</button>
+      <button data-scenario="rejected" aria-pressed="false">Key stops working</button>
+      <button data-scenario="existing" aria-pressed="false">Existing default</button>
+    </div>
+    <p id="scenario-description" class="small muted"></p>
+    <div id="steps" class="steps"></div>
+    <details>
+      <summary>More demo controls</summary>
+      <div class="button-row"><button data-action="reject">Simulate key rejection</button><button data-action="restart">Simulate runtime restart</button></div>
+      <p class="small muted" style="margin-top:8px">Restart is an in-memory simulation of the intended persisted state, not a real restart. Reloading this page resets everything.</p>
+    </details>
+    <dl id="state" class="state-grid"></dl>
+  </section>
+  <footer>Prototype question: connection ≠ default ≠ session choice. Proposed behavior for review; no production settings change.</footer>
+</main>
+<script>
+  // Throwaway, portable state model. No DOM, storage, credentials, or network.
+  const PRIVATE = 'private';
+  const OPENROUTER = 'openrouter';
+  const modelName = route => route === PRIVATE ? 'Finite Private' : 'Claude Sonnet 4.6';
+  const freshSession = () => ({ override: null, turns: 0, archivedTurns: 0, notice: '' });
+  const initialState = (defaultRoute = PRIVATE, credential = 'missing') => ({
+    defaultRoute, credential, active: 'a', sessions: { a: freshSession(), b: freshSession() },
+    picker: false, confirmation: false, connectionNotice: '',
+  });
+  const effectiveRoute = (state, id = state.active) => state.sessions[id].override ?? state.defaultRoute;
+  function transition(previous, action) {
+    const state = structuredClone(previous);
+    const session = state.sessions[state.active];
+    switch (action.type) {
+      case 'save':
+        state.credential = 'saved';
+        state.connectionNotice = 'Demo key saved. Your default and session choices are unchanged.';
+        break;
+      case 'session':
+        state.active = action.id;
+        state.picker = false;
+        state.confirmation = false;
+        break;
+      case 'picker': state.picker = !state.picker; state.confirmation = false; break;
+      case 'choose-openrouter':
+        if (state.credential !== 'saved') {
+          session.notice = state.credential === 'missing'
+            ? 'Connect an OpenRouter key in Connections first. This session has not changed.'
+            : 'Replace the rejected OpenRouter key in Connections first. This session has not changed.';
+        } else {
+          state.confirmation = true;
+          state.picker = false;
+        }
+        break;
+      case 'confirm-openrouter':
+        if (!state.confirmation || state.credential !== 'saved') break;
+        session.override = OPENROUTER;
+        session.notice = 'Using Claude via OpenRouter for this session. Your default and other sessions are unchanged.';
+        state.confirmation = false;
+        break;
+      case 'cancel': state.confirmation = false; break;
+      case 'private':
+        session.override = state.defaultRoute === PRIVATE ? null : PRIVATE;
+        session.notice = 'This session is using Finite Private. Existing conversation history is retained; earlier requests cannot be recalled from another provider.';
+        state.picker = false;
+        state.confirmation = false;
+        break;
+      case 'turn':
+        if (effectiveRoute(state) === OPENROUTER && state.credential !== 'saved') {
+          session.notice = 'OpenRouter could not authenticate. No demo message was sent. Replace your key or choose Finite Private for this session.';
+        } else {
+          session.turns += 1;
+          session.notice = 'Demo reply from ' + modelName(effectiveRoute(state)) + '. No real request was sent.';
+        }
+        break;
+      case 'new':
+        session.archivedTurns += session.turns;
+        session.turns = 0;
+        session.override = null;
+        session.notice = 'New session started with ' + modelName(state.defaultRoute) + '. Previous demo messages remain in the archive.';
+        state.picker = false;
+        state.confirmation = false;
+        break;
+      case 'reject':
+        if (state.credential === 'missing') { state.connectionNotice = 'There is no saved demo key to reject.'; break; }
+        state.credential = 'rejected';
+        state.confirmation = false;
+        state.connectionNotice = 'Simulated: OpenRouter rejected the saved key. Session choices and the default are unchanged.';
+        break;
+      case 'restart':
+        state.picker = false;
+        state.confirmation = false;
+        state.connectionNotice = 'Simulated restart: saved connection, default, session choices, and history are retained.';
+        break;
+    }
+    return state;
+  }
+</script>
+<script>
+  // Thin, disposable presentation over the state model.
+  const scenarios = {
+    everyday: { description: 'Connect once, switch Research, then check Writing. A new Research session returns to Finite Private.', steps: [['Connect demo key','save'],['Choose OpenRouter','choose-openrouter'],['Confirm this session','confirm-openrouter'],['Check Writing','session','b'],['Return to Research','session','a'],['Start a new session','new']] },
+    missing: { description: 'Without a key, selecting OpenRouter leaves the working private session alone.', steps: [['Try OpenRouter','choose-openrouter'],['Send privately','turn'],['Connect demo key','save'],['Try OpenRouter again','choose-openrouter'],['Confirm this session','confirm-openrouter']] },
+    rejected: { description: 'Research starts on OpenRouter. If the key stops working, it stays on that route and asks for a fix. Writing remains private.', steps: [['Reject the demo key','reject'],['Try an OpenRouter message','turn'],['Check Writing','session','b'],['Send privately','turn'],['Return to Research','session','a'],['Use Finite Private here','private']] },
+    existing: { description: 'An existing user deliberately chose OpenRouter as their default. Replacing their key must preserve that choice. Finite Private can still be used for one session.', steps: [['Replace demo key','save'],['Use Finite Private here','private'],['Check Writing','session','b'],['Simulate restart','restart']] },
+  };
+  let state = initialState();
+  let scenario = 'everyday';
+  let step = 0;
+  const byId = id => document.getElementById(id);
+  const setText = (id, value) => { byId(id).textContent = value; };
+  function resetScenario(name) {
+    scenario = name;
+    step = 0;
+    state = name === 'existing' ? initialState(OPENROUTER, 'saved') : initialState();
+    if (name === 'rejected') { state.credential = 'saved'; state.sessions.a.override = OPENROUTER; state.sessions.a.turns = 2; }
+    render();
+  }
+  function render() {
+    const session = state.sessions[state.active];
+    const route = effectiveRoute(state);
+    setText('default-label', modelName(state.defaultRoute));
+    setText('default-badge', state.defaultRoute === PRIVATE ? 'Private by default' : 'Existing preference');
+    setText('credential-label', { missing: 'Not connected · optional', saved: 'Key saved · available for session choices', rejected: 'Key rejected · replace to use OpenRouter' }[state.credential]);
+    setText('save-key', state.credential === 'missing' ? 'Connect demo key' : 'Replace demo key');
+    setText('connection-notice', state.connectionNotice);
+    byId('connection-notice').hidden = !state.connectionNotice;
+    for (const id of ['a','b']) setText('session-' + id + '-model', modelName(effectiveRoute(state, id)));
+    document.querySelectorAll('[data-session]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.session === state.active)));
+    setText('scope-label', session.override === null ? 'Using your default' : 'This session only');
+    setText('current-model', modelName(route));
+    setText('route-label', route === PRIVATE ? 'Inference through Finite Private' : 'OpenRouter · billed to your account');
+    byId('picker').hidden = !state.picker;
+    byId('picker-toggle').setAttribute('aria-expanded', String(state.picker));
+    byId('confirm').hidden = !state.confirmation;
+    setText('session-notice', session.notice);
+    byId('session-notice').hidden = !session.notice;
+    setText('history-label', session.turns + ' demo messages in this session · ' + session.archivedTurns + ' archived. Switching models keeps the current conversation.');
+    document.querySelectorAll('[data-scenario]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.scenario === scenario)));
+    setText('scenario-description', scenarios[scenario].description);
+    byId('steps').replaceChildren(...scenarios[scenario].steps.map(([label], index) => {
+      const button = document.createElement('button');
+      button.textContent = (index < step ? '✓ ' : (index + 1) + '. ') + label;
+      button.disabled = index !== step;
+      button.dataset.step = String(index);
+      if (index === step) button.className = 'primary';
+      return button;
+    }));
+    const facts = [ ['OpenRouter key', state.credential], ['Default for new sessions', modelName(state.defaultRoute)], ['Active session', state.active === 'a' ? 'Research' : 'Writing'], ['Research', modelName(effectiveRoute(state,'a'))], ['Writing', modelName(effectiveRoute(state,'b'))], ['Storage', 'Demo memory only'] ];
+    byId('state').replaceChildren(...facts.map(([label, value]) => {
+      const item = document.createElement('div');
+      const term = document.createElement('dt'); term.textContent = label;
+      const description = document.createElement('dd'); description.textContent = value;
+      item.append(term, description); return item;
+    }));
+  }
+  document.addEventListener('click', event => {
+    const button = event.target.closest('button');
+    if (!button || button.disabled) return;
+    if (button.dataset.scenario) { resetScenario(button.dataset.scenario); return; }
+    if (button.dataset.action === 'reset') { resetScenario('everyday'); return; }
+    let action;
+    if (button.dataset.step !== undefined) {
+      const [,type,id] = scenarios[scenario].steps[Number(button.dataset.step)];
+      action = { type, id }; step += 1;
+    } else if (button.dataset.session) action = { type: 'session', id: button.dataset.session };
+    else action = { type: button.dataset.action };
+    state = transition(state, action);
+    render();
+    if (action.type === 'picker') {
+      if (state.picker) byId('picker').querySelector('button').focus();
+      else byId('picker-toggle').focus();
+    }
+    if (state.confirmation) byId('confirm').querySelector('button').focus();
+    if (action.type === 'cancel' || action.type === 'private' || action.type === 'confirm-openrouter') byId('picker-toggle').focus();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && (state.picker || state.confirmation)) {
+      state.picker = false; state.confirmation = false; render(); byId('picker-toggle').focus();
+    }
+  });
+  render();
+</script>
+</body>
+</html>
