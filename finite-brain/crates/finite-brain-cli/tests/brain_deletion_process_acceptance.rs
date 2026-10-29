@@ -665,6 +665,265 @@ fn built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact() {
     evidence.pass("restoreDrillToEmptyTarget", json!({"limits": "one Brain database and one admin identity key; not the hosted five-part Recovery Set"}));
 }
 
+/// Opening a Folder to all Members after a deletion preview changes no
+/// Folder or page count but still invalidates the preview, and the refused
+/// deletion writes nothing. Removals before and after the opening keep the
+/// Folder Key from anyone who left. A fresh deletion is terminal: neither
+/// opening nor an older client brings the Brain back.
+#[test]
+fn opening_a_folder_invalidates_a_deletion_preview_and_deletion_stays_terminal() {
+    const FORMER_SECRET: &str = "00000000000000000000000000000000000000000000000000000000000000b1";
+    const LEAVER_SECRET: &str = "00000000000000000000000000000000000000000000000000000000000000b2";
+    let scratch = TempDir::new().unwrap();
+    let root = scratch.path();
+    let admin = home(root, "admin", ADMIN_SECRET);
+    let member = home(root, "member", MEMBER_SECRET);
+    let former = home(root, "former", FORMER_SECRET);
+    let leaver = home(root, "leaver", LEAVER_SECRET);
+    let database = root.join("state/brain.sqlite3");
+    fs::create_dir_all(database.parent().unwrap()).unwrap();
+    let server = Server::start(&database, None);
+    let url = server.url.as_str();
+    let query = |sql: &str| -> Vec<String> {
+        let conn = rusqlite::Connection::open(&database).unwrap();
+        let mut stmt = conn.prepare(sql).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let grants = |key_version: u32| {
+        query(&format!(
+            "SELECT recipient_npub FROM folder_key_grants WHERE brain_id = 'v1'
+             AND folder_id = 'strategy' AND key_version = {key_version} ORDER BY 1"
+        ))
+    };
+    let deletion_records =
+        || query("SELECT brain_id FROM deleted_brains WHERE brain_id = 'v1'").len();
+    let sorted = |mut npubs: Vec<String>| {
+        npubs.sort();
+        npubs
+    };
+
+    ok(
+        &admin,
+        &admin.dir,
+        url,
+        &[
+            "brain",
+            "create",
+            "v1",
+            "--kind",
+            "organization",
+            "--name",
+            "V1",
+        ],
+    );
+    let admin_tree = admin.dir.join("v1");
+    ok(
+        &admin,
+        &admin.dir,
+        url,
+        &["open", "v1", admin_tree.to_str().unwrap()],
+    );
+    ok(
+        &admin,
+        &admin_tree,
+        url,
+        &[
+            "folder",
+            "create",
+            "strategy",
+            "--access",
+            "restricted",
+            "--name",
+            "Strategy",
+            "--path",
+            "Strategy",
+        ],
+    );
+    for person in [&member, &former, &leaver] {
+        ok(
+            &admin,
+            &admin_tree,
+            url,
+            &["admin", "member", "add", "--target", &person.npub],
+        );
+    }
+    // Removed before the opening: it must never receive the Folder Key.
+    ok(
+        &admin,
+        &admin_tree,
+        url,
+        &["admin", "member", "remove", "--target", &former.npub],
+    );
+    ok(&admin, &admin_tree, url, &["sync", "now"]);
+    fs::write(admin_tree.join("Strategy/plan.md"), "# Plan\n").unwrap();
+    ok(&admin, &admin_tree, url, &["sync", "now"]);
+    let member_tree = member.dir.join("v1");
+    ok(
+        &member,
+        &member.dir,
+        url,
+        &["open", "v1", member_tree.to_str().unwrap()],
+    );
+    ok(&member, &member_tree, url, &["sync", "now"]);
+    assert!(!member_tree.join("Strategy/plan.md").exists());
+
+    let preview = ok(&admin, &admin.dir, url, &["brain", "delete", "v1"]);
+    assert_eq!(preview["state"], "confirmation-required", "{preview}");
+    let stale_digest = preview["preview"]["stateDigest"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let opened = ok(
+        &admin,
+        &admin_tree,
+        url,
+        &["admin", "folder-access", "open", "--folder", "strategy"],
+    );
+    assert_eq!(opened["outcome"], "opened", "{opened}");
+    let granted = opened["grantedRecipients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|npub| npub.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sorted(granted),
+        sorted(vec![member.npub.clone(), leaver.npub.clone()])
+    );
+
+    // The preview confirmed before the opening no longer deletes, and the
+    // refusal changes no row.
+    let opened_rows = brain_rows(&database, "v1");
+    let error = refused(
+        &admin,
+        &admin.dir,
+        url,
+        &["brain", "delete", "v1", "--confirm", &stale_digest],
+    );
+    assert!(
+        error.contains("changed since the preview you confirmed"),
+        "{error}"
+    );
+    assert_eq!(brain_rows(&database, "v1"), opened_rows);
+    assert_eq!(deletion_records(), 0);
+    // The already-open Member's routine sync reads the opened Folder.
+    ok(&member, &member_tree, url, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Strategy/plan.md")).unwrap(),
+        "# Plan\n"
+    );
+
+    // Removed after the opening: its new grant is cut off by re-keying.
+    let removed = ok(
+        &admin,
+        &admin_tree,
+        url,
+        &["admin", "member", "remove", "--target", &leaver.npub],
+    );
+    let rotated = removed["rotatedFolders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|folder| folder["folderId"] == "strategy")
+        .unwrap_or_else(|| panic!("strategy not re-keyed: {removed}"))
+        .clone();
+    assert_eq!(rotated["reason"], "readable", "{rotated}");
+    assert_eq!(rotated["newKeyVersion"], 2, "{rotated}");
+    assert_eq!(
+        grants(2),
+        sorted(vec![admin.npub.clone(), member.npub.clone()])
+    );
+    assert!(
+        query(&format!(
+            "SELECT folder_id FROM folder_key_grants WHERE brain_id = 'v1'
+             AND recipient_npub = '{}'",
+            former.npub
+        ))
+        .is_empty()
+    );
+
+    // Optional older client: a pre-opening fbrain reads the opened Folder.
+    let compat = std::env::var_os("FBRAIN_COMPAT_BINARY").map(PathBuf::from);
+    let compat_tree = member.dir.join("v1-older-client");
+    if let Some(binary) = &compat {
+        let opened = command_with(binary, &member.dir, &member.dir, url)
+            .args(["open", "v1", compat_tree.to_str().unwrap(), "--json"])
+            .output()
+            .unwrap();
+        assert!(opened.status.success(), "{}", stderr(&opened));
+        assert_eq!(
+            fs::read_to_string(compat_tree.join("Strategy/plan.md")).unwrap(),
+            "# Plan\n"
+        );
+    }
+
+    // Same Folder and page counts, a new digest, and a deletion that holds.
+    let fresh = ok(&admin, &admin.dir, url, &["brain", "delete", "v1"]);
+    for count in ["folderCount", "pageCount"] {
+        assert_eq!(
+            fresh["preview"][count], preview["preview"][count],
+            "{count}"
+        );
+    }
+    let digest = fresh["preview"]["stateDigest"].as_str().unwrap().to_owned();
+    assert_ne!(digest, stale_digest);
+    let deleted = ok(
+        &admin,
+        &admin.dir,
+        url,
+        &["brain", "delete", "v1", "--confirm", &digest],
+    );
+    assert_eq!(deleted["state"], "deleted", "{deleted}");
+    assert!(brain_rows(&database, "v1").is_empty());
+    assert_eq!(deletion_records(), 1);
+
+    let error = refused(
+        &admin,
+        &admin.dir,
+        url,
+        &[
+            "admin",
+            "folder-access",
+            "open",
+            "--folder",
+            "strategy",
+            "--brain",
+            "v1",
+        ],
+    );
+    assert!(error.contains("permanently deleted"), "{error}");
+    let error = refused(&member, &member_tree, url, &["sync", "now"]);
+    assert!(error.contains("permanently deleted"), "{error}");
+    if let Some(binary) = &compat {
+        let synced = command_with(binary, &member.dir, &compat_tree, url)
+            .args(["sync", "now", "--json"])
+            .output()
+            .unwrap();
+        assert!(!synced.status.success(), "older client sync must fail");
+        let created = command_with(binary, &member.dir, &member.dir, url)
+            .args([
+                "brain",
+                "create",
+                "v1",
+                "--kind",
+                "organization",
+                "--name",
+                "V1",
+                "--json",
+            ])
+            .output()
+            .unwrap();
+        assert!(!created.status.success(), "older client recreated V1");
+        assert!(compat_tree.join("Strategy/plan.md").is_file());
+    }
+    assert!(brain_rows(&database, "v1").is_empty());
+    assert_eq!(deletion_records(), 1);
+}
+
 #[test]
 fn deletion_on_an_overridden_server_does_not_stop_the_saved_working_tree() {
     let scratch = TempDir::new().unwrap();

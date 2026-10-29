@@ -56,7 +56,7 @@ fbrain mount accept|list|inspect|revoke
 fbrain mount participant add|remove
 fbrain admin member add|remove
 fbrain admin role grant|revoke admin
-fbrain admin folder-access grant|revoke|rotate
+fbrain admin folder-access grant|revoke|rotate|open
 fbrain admin ensure-access
 ```
 
@@ -322,6 +322,7 @@ fbrain admin role revoke admin --target <npub|hex|NIP-05>
 fbrain admin folder-access grant --target <npub|hex|NIP-05>
 fbrain admin folder-access revoke --target <npub|hex|NIP-05>
 fbrain admin folder-access rotate --folder <folder-id> [--brain <brain-id>]
+fbrain admin folder-access open --folder <folder-id> [--brain <brain-id>]
 
 # Normal, convergent Organization Brain collaboration from its Working Tree
 fbrain collaborator ensure-admin \
@@ -358,6 +359,16 @@ the CLI refuses a larger one before sending and names the Folder and size (see
 Clearing Removal Pending for what to do next, and for the 408 and 503
 answers). Clearing Removal Pending in
 [who-has-access.md](who-has-access.md) says when to use each.
+
+`admin folder-access open` opens one restricted Organization Brain Folder to
+every Member. It is one way: no command makes the Folder restricted again, and
+Members can keep copies of what they read. Run it only when a Brain admin asks
+to open that Folder. It wraps the current Folder Key for the new readers, so no
+page is re-encrypted, and returns `state: complete` with `outcome` (`opened` or
+`alreadyOpen`) and `grantedRecipients`. Explicit Folder access stays, and child
+Folders keep their own access. Members who join later receive the key through
+the normal pending-wrap delivery. A 409 means the roster or Folder Key changed
+while it ran; re-run it.
 
 `admin member remove` returns the Brain metadata after removal plus
 `rotatedFolders`: one entry per rotated Folder with `folderId`, `reason`

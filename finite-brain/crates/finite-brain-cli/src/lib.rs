@@ -166,7 +166,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export|delete <brain-id> [--confirm <stateDigest>]\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export|delete <brain-id> [--confirm <stateDigest>]\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin folder-access open --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -3686,6 +3686,9 @@ fn admin<W: Write>(
         ("folder-access", "rotate") => {
             return access_rotate(&args[1..], env, json, output);
         }
+        ("folder-access", "open") => {
+            return admin_folder_open(&args[1..], env, json, output);
+        }
         ("role", "grant") | ("role", "revoke") => {
             let positional_role = args.get(2).filter(|value| !value.starts_with('-')).cloned();
             let role = option_value(args, "--role")
@@ -3713,6 +3716,30 @@ fn admin<W: Write>(
         }
     };
     admin_operation(namespace, action, operation_args, env, json, output)
+}
+
+fn admin_folder_open<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let brain_id = command_brain_id(args, env)?;
+    let folder_id = option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
+    let receipt = open_folder_to_all_members(env, args, &brain_id, &folder_id)?;
+    if json {
+        return write_json(output, &receipt);
+    }
+    let granted = receipt["grantedRecipients"].as_array().map_or(0, Vec::len);
+    if receipt["outcome"] == "alreadyOpen" {
+        writeln!(output, "Folder {folder_id} is already open to all Members.")?;
+    } else {
+        writeln!(
+            output,
+            "Folder {folder_id} is now open to all Members of {brain_id}; {granted} new key grant(s)."
+        )?;
+    }
+    Ok(())
 }
 
 fn admin_ensure_access<W: Write>(

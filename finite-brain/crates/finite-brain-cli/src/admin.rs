@@ -13,9 +13,10 @@ use nostr::{Keys, Kind, Tag};
 use crate::{
     APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, FolderDeletionPreviewView,
     LocalSigner, SessionFolderKeyring, deterministic_id, find_agent_state, load_signer,
-    mutate_agent_state, normalize_folder_access, open_brain_session_folder_keys_for_collaboration,
-    read_agent_state, read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp,
-    unix_timestamp, unsupported_on_older_server, write_working_tree_state,
+    mutate_agent_state, normalize_folder_access, open_brain_session_folder_keys,
+    open_brain_session_folder_keys_for_collaboration, read_agent_state, read_working_tree_state,
+    sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
+    unsupported_on_older_server, write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -295,6 +296,123 @@ pub(crate) fn ensure_brain_access(
         "grantsMissing"
     });
     Ok(receipt)
+}
+
+/// Open one Restricted Folder to every Member of an Organization Brain.
+///
+/// Wraps the current Folder Key for every reader of the opened Folder; the
+/// server keeps only the grants its holders lack and commits them with the
+/// access change and its signed audit record. One way: nothing here makes a
+/// Folder restricted again.
+pub(crate) fn open_folder_to_all_members(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+) -> Result<serde_json::Value, CliError> {
+    let receipt = |outcome: &str, key_version: u32, granted: serde_json::Value| {
+        serde_json::json!({
+            "state": "complete",
+            "operation": "admin-folder-access-open",
+            "brainId": brain_id,
+            "folderId": folder_id,
+            "outcome": outcome,
+            "keyVersion": key_version,
+            "grantedRecipients": granted,
+        })
+    };
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    if metadata.kind != "organization" {
+        return Err(CliError::InvalidInput(
+            "only an Organization Brain Folder can be opened to all Members".to_owned(),
+        ));
+    }
+    let folder = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+    match folder.access.as_str() {
+        "all_members" => {
+            return Ok(receipt(
+                "alreadyOpen",
+                folder.current_key_version,
+                serde_json::json!([]),
+            ));
+        }
+        "restricted" => {}
+        other => {
+            return Err(CliError::InvalidInput(format!(
+                "Folder {folder_id} is {other}; only a restricted Folder can be opened to all Members. Nothing was changed"
+            )));
+        }
+    }
+    let key_version = folder.current_key_version;
+    let recipients = folder_required_recipients(&metadata, "all_members", &folder.access_user_ids)?;
+    let keyring = open_brain_session_folder_keys(env, args, brain_id)?;
+    let folder_key = opened_folder_key(&keyring, brain_id, folder_id, key_version)?;
+    let auth = load_signer(env)?;
+    let grants = recipients
+        .iter()
+        .map(|recipient| {
+            folder_key_grant_request(
+                &auth,
+                brain_id,
+                folder_id,
+                key_version,
+                recipient,
+                &folder_key,
+                env,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let event = admin_access_change_event_with_note(
+        env,
+        brain_id,
+        AdminAccessAction::SetFolderAccessMode,
+        Some(folder_id),
+        None,
+        Some(key_version),
+        Some("all_members"),
+    )?;
+    let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/open-to-all-members");
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &route,
+        Some(serde_json::json!({
+            "keyVersion": key_version,
+            "grants": grants,
+            "accessChangeEvent": event,
+        })),
+    )
+    .map_err(|error| {
+        unsupported_on_older_server(error, || {
+            CliError::Unsupported(format!(
+                "this Brain server cannot open a Folder to all Members (POST {route}). Upgrade the Brain server; nothing was changed"
+            ))
+        })
+    })?;
+    let authoritative: BrainMetadataView = serde_json::from_value(response.clone())?;
+    if !authoritative
+        .folders
+        .iter()
+        .any(|folder| folder.id == folder_id && folder.access == "all_members")
+    {
+        return Err(CliError::InvalidInput(format!(
+            "the server did not report Folder {folder_id} as open to all Members"
+        )));
+    }
+    let outcome = response["outcome"].as_str().unwrap_or("opened").to_owned();
+    let granted = response["grantedRecipients"].clone();
+    let summary = format!("Folder opened to all Members brain={brain_id} folder={folder_id}");
+    // Best effort: the local activity log exists only inside a Working Tree.
+    let _ = mutate_agent_state(env, |state, now| {
+        state.add_activity(now, "admin.folder_access.opened", summary.clone());
+        Ok(())
+    });
+    Ok(receipt(&outcome, key_version, granted))
 }
 
 pub(crate) fn resolve_identity_npub(

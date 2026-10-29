@@ -633,6 +633,37 @@ pub struct GrantFolderAccessResponse {
     pub outcome: GrantFolderAccessResponseOutcome,
 }
 
+/// Open one Restricted Folder to every Organization Brain Member.
+///
+/// `grants` wrap the current Folder Key at `keyVersion` for the opened
+/// Folder's readers; the signed `set-folder-access-mode` event carries the
+/// same key version and the note `all_members`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFolderToAllMembersRequest {
+    pub key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Result of opening a Folder to all Members.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFolderToAllMembersResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub outcome: OpenFolderToAllMembersResponseOutcome,
+    pub granted_recipients: Vec<String>,
+}
+
+/// Stable machine-readable outcome for opening a Folder to all Members.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OpenFolderToAllMembersResponseOutcome {
+    Opened,
+    AlreadyOpen,
+}
+
 /// One Folder/key-version entry in an Organization Brain collaboration snapshot.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
