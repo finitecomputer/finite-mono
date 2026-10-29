@@ -3,6 +3,8 @@
 //! router nor the runtime router mounts them.
 
 use super::*;
+mod hosted;
+use crate::brain_identity::hosted::HOSTED_OBSERVATION_PATH;
 use crate::brain_identity::scoped::{
     DESCRIPTIONS_VERSION_V3, ScopedDescriptionsRequest, ScopedDescriptionsResponse,
 };
@@ -42,6 +44,11 @@ pub fn brain_identity_router(
     };
     Router::new()
         .route(
+            HOSTED_OBSERVATION_PATH,
+            post(hosted::record_hosted_observation)
+                .layer(DefaultBodyLimit::max(MAX_OBSERVATION_BODY_BYTES)),
+        )
+        .route(
             OBSERVATION_PATH,
             post(record_observation).layer(DefaultBodyLimit::max(MAX_OBSERVATION_BODY_BYTES)),
         )
@@ -80,19 +87,7 @@ async fn record_observation(
             time::OffsetDateTime::now_utc(),
         )
         .await
-        .map_err(|error| match error {
-            BrainObservationError::Stale => ApiError::bad_request("observation_expired"),
-            BrainObservationError::OperationReused => ApiError::conflict("operation_id_reused"),
-            BrainObservationError::KeyAssociatedElsewhere => {
-                ApiError::conflict("key_associated_elsewhere")
-            }
-            BrainObservationError::KeyIsAgentRecord => {
-                ApiError::conflict("key_conflicts_with_agent_record")
-            }
-            BrainObservationError::AgentNotOwned => ApiError::forbidden("agent_not_owned"),
-            BrainObservationError::AccountNotLinked => ApiError::forbidden("account_not_linked"),
-            BrainObservationError::Store(error) => error.into(),
-        })?;
+        .map_err(observation_error)?;
     tracing::info!(
         brain_id = %request.brain_id,
         action = ?request.action_kind,
@@ -210,4 +205,20 @@ async fn describe_identities(
         "brain identity descriptions"
     );
     Ok(Json(response))
+}
+
+fn observation_error(error: BrainObservationError) -> ApiError {
+    match error {
+        BrainObservationError::Stale => ApiError::bad_request("observation_expired"),
+        BrainObservationError::OperationReused => ApiError::conflict("operation_id_reused"),
+        BrainObservationError::KeyAssociatedElsewhere => {
+            ApiError::conflict("key_associated_elsewhere")
+        }
+        BrainObservationError::KeyIsAgentRecord => {
+            ApiError::conflict("key_conflicts_with_agent_record")
+        }
+        BrainObservationError::AgentNotOwned => ApiError::forbidden("agent_not_owned"),
+        BrainObservationError::AccountNotLinked => ApiError::forbidden("account_not_linked"),
+        BrainObservationError::Store(error) => error.into(),
+    }
 }

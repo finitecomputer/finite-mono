@@ -1,6 +1,7 @@
 //! Brain identity descriptions v1 against real Postgres: hosted observations,
 //! scoped disclosure, lifecycle and conflict rules.
 
+mod hosted;
 mod scoped;
 use super::*;
 use crate::brain_identity::{

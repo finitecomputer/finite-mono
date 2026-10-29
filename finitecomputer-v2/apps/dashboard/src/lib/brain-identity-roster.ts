@@ -1,5 +1,6 @@
 import { HostedHermesStatusError, readHostedHermesJson } from "./hosted-hermes-status";
 import { parseRosterChanges, type RosterChanges } from "./brain-roster-changes";
+import type { BrainIdentityResolution } from "./brain-identity-resolution";
 
 export type BrainOperatorAnnotation = {
   kind: "historical_identity" | "invitation_key"; label: string; observedAt: string;
@@ -11,6 +12,8 @@ export type BrainIdentity = {
   publicName: string | null; publicNameStoredAt: string | null;
   lifecycle: "active" | "offboarding" | "retired" | null;
   operatorAnnotation: BrainOperatorAnnotation | null;
+  /** Older Runtime plugins omit the resolution rather than proving a cause. */
+  resolution?: BrainIdentityResolution | null;
   folders: { id: string; state: string }[];
 };
 
@@ -47,6 +50,15 @@ function list(value: unknown, max: number) {
   return value.map(record);
 }
 
+function resolution(value: unknown): BrainIdentityResolution | null {
+  if (value == null) return null;
+  const item = record(value);
+  const state = item.state;
+  if (state !== "resolved" && state !== "notShared" && state !== "unknown" && state !== "ambiguous" && state !== "unavailable") return invalid();
+  const reason = item.reason ?? null;
+  if (reason !== null && (reason !== "noParticipation" || state !== "notShared")) return invalid();
+  return { state, reason };
+}
 
 /** Optional attribution is withheld on malformed input; it never becomes a name or contact. */
 function annotation(value: unknown): BrainOperatorAnnotation | null {
@@ -80,7 +92,7 @@ export function parseBrainIdentities(value: unknown, brainId: string): BrainIden
       ? annotation(row.operatorAnnotation) : null;
     return { npub, role: text(row.role, 64), kind, name: optional(row.name), email: optional(row.email),
       ownerEmail: kind === "agent" ? optional(row.ownerEmail) : null, publicName, publicNameStoredAt,
-      lifecycle, operatorAnnotation,
+      lifecycle, operatorAnnotation, resolution: resolution(row.resolution),
       folders: list(row.folders, 500).map(folder => ({ id: text(folder.id, 256), state: text(folder.state, 64) })) };
   });
   if (new Set(identities.map(row => row.npub)).size !== identities.length) return invalid();

@@ -7,6 +7,13 @@
  * Hermes with the sealed finite-brain plugin; fbrain.
  * Fixtures: WorkOS (Core's test signer), the Agent key pin, the Core
  * Hermes-access grant (answered with a real native Hermes token) and Chat.
+ * Identity registration: the dashboards reach the real Hosted Device and
+ * Core identity listener through pass-throughs. Fixtures there: the Device's
+ * agent-binding open (no Chat server; a synthetic Chat state), an identity
+ * read redirected to a synthetic account with no or an unreadable key, and
+ * Core's hosted-observation path answered 404 (older Core) or 503 (outage).
+ * Set FC_BRAIN_COMPOSITION_LEGACY_PLUGIN=1 when FC_BRAIN_COMPOSITION_HERMES
+ * carries an older plugin that sends no identity resolution.
  * Env: FC_BRAIN_COMPOSITION_BIN_DIR (finite-brain, fbrain,
  * finitechat-hosted-device, finite-saas-runner), FC_BRAIN_COMPOSITION_HERMES,
  * FC_BRAIN_COMPOSITION_CADDY; optional FC_BRAIN_COMPOSITION_OLD_FBRAIN (a
@@ -45,9 +52,31 @@ const CADDY = required("FC_BRAIN_COMPOSITION_CADDY");
 const OLD_FBRAIN = process.env.FC_BRAIN_COMPOSITION_OLD_FBRAIN?.trim();
 const ARTIFACTS = process.env.FC_BROWSER_ARTIFACT_DIR?.trim();
 const DEVICE_TOKEN = "composition-hosted-device-token";
+// The current plugin forwards Core's resolution; an older Runtime plugin sends none.
+const LEGACY_PLUGIN = process.env.FC_BRAIN_COMPOSITION_LEGACY_PLUGIN?.trim() === "1";
+const NOT_ACTED = LEGACY_PLUGIN ? "Identity details are unavailable." : "This key has not acted in this Brain yet.";
+const NOT_SHARED = LEGACY_PLUGIN ? "Identity details are unavailable." : "Identity details are not available to this Brain.";
+const HOSTED_OBSERVATION_PATH = "/api/core/internal/v1/hosted-account-observations";
+const DESCRIPTION_VERSIONS = {
+  v1: "finite-core-brain-identity-descriptions-v1",
+  v2: "finite-core-brain-identity-descriptions-v2",
+  v3: "finite-core-brain-descriptions-v3",
+} as const;
 const OWNER = { workosUserId: "runtime-auth-user", email: "runtime-auth@finite.test" };
 const OTHER = { workosUserId: "composition-other", email: "other@finite.test" };
 const short = (npub: string) => `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+/** bech32 npub to its 32-byte hex key (checksum already verified by its issuer). */
+function npubHex(npub: string) {
+  const charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+  const bytes: number[] = [];
+  let acc = 0, bits = 0;
+  for (const char of npub.slice(5, -6)) {
+    acc = ((acc << 5) | charset.indexOf(char)) & 0xffff;
+    bits += 5;
+    while (bits >= 8) { bits -= 8; bytes.push((acc >> bits) & 0xff); }
+  }
+  return Buffer.from(bytes.slice(0, 32)).toString("hex");
+}
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 const children: ChildProcess[] = [];
 const log: string[] = [];
@@ -86,6 +115,41 @@ async function waitFor(what: string, check: () => Promise<boolean>, child?: Chil
     assert(Date.now() < deadline, `${what} was not ready in time`);
     await delay(200);
   }
+}
+
+type Relayed = { status: number; type: string; body: Buffer };
+const reply = (status: number, json?: unknown): Relayed =>
+  ({ status, type: "application/json", body: Buffer.from(json === undefined ? "" : JSON.stringify(json)) });
+const relays: http.Server[] = [];
+
+/** A loopback pass-through to a real service; `handle` may answer instead. */
+async function passThrough(upstream: string, handle: (request: http.IncomingMessage, body: Buffer, forward: () => Promise<Relayed>) => Promise<Relayed>) {
+  const server = http.createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk as Buffer);
+    const body = Buffer.concat(chunks);
+    const forward = async (): Promise<Relayed> => {
+      const headers = Object.fromEntries(Object.entries(request.headers).filter((entry): entry is [string, string] =>
+        typeof entry[1] === "string" && !["host", "connection", "content-length", "transfer-encoding", "accept-encoding"].includes(entry[0])));
+      const upstreamResponse = await fetch(`${upstream}${request.url}`, { method: request.method, headers,
+        body: request.method === "GET" || request.method === "HEAD" ? undefined : body });
+      return { status: upstreamResponse.status, type: upstreamResponse.headers.get("content-type") ?? "application/octet-stream",
+        body: Buffer.from(await upstreamResponse.arrayBuffer()) };
+    };
+    try {
+      const out = await handle(request, body, forward);
+      response.writeHead(out.status, { "content-type": out.type });
+      response.end(out.body);
+    } catch {
+      response.writeHead(502);
+      response.end();
+    }
+  }).listen(0, "127.0.0.1");
+  await once(server, "listening");
+  relays.push(server);
+  const address = server.address();
+  assert(address && typeof address === "object");
+  return `http://127.0.0.1:${address.port}`;
 }
 
 async function main() {
@@ -131,6 +195,59 @@ async function main() {
     const other = hosted(OTHER);
     const ownerNpub = (await owner.identify()).npub;
     const otherNpub = (await other.identify()).npub;
+    const identifyHex = async (user: string) => {
+      const response = await fetch(`${deviceUrl}/v1/brain/identity-provider`, { method: "POST", headers: {
+        authorization: `Bearer ${DEVICE_TOKEN}`, "x-finite-workos-user-id": user, "x-finite-brain-public-origin": brainUrl,
+        "content-type": "application/json" }, body: JSON.stringify({ version: "finite-brain-identity-provider-v1", operation: "identifyMember", input: {} }) });
+      assert.equal(response.status, 200);
+      return String(((await response.json()) as Json).publicKeyHex);
+    };
+    const ownerHex = await identifyHex(OWNER.workosUserId);
+    // Core's own description reads (the Brain server's private interface).
+    const describeMany = async (version: keyof typeof DESCRIPTION_VERSIONS, brain: string, keys: string[], participating: string[] = []) => {
+      const request: Json = { version: DESCRIPTION_VERSIONS[version], brainServer: brainUrl, brainId: brain,
+        requestedByPublicKeyHex: keys[0], publicKeysHex: keys, ...(version === "v3" ? { participatingPublicKeysHex: participating } : {}) };
+      const response = await fetch(`${config.identityUrl}/api/core/internal/v1/brain-identity-descriptions`, { method: "POST",
+        headers: { "content-type": "application/json", "x-finite-brain-description-credential": config.descriptionToken }, body: JSON.stringify(request) });
+      assert.equal(response.status, 200, `describe ${version}: HTTP ${response.status}`);
+      return ((await response.json()) as { results: Json[] }).results;
+    };
+    const describe = async (version: keyof typeof DESCRIPTION_VERSIONS, brain: string, key: string) => (await describeMany(version, brain, [key]))[0];
+    assert.equal(npubHex(ownerNpub), ownerHex);
+
+    // FIXTURE (Chat transport): no Chat server runs, so the Device's
+    // agent-binding open answers a synthetic Chat state. Every other Device
+    // request from the dashboards reaches the real Device unchanged, except an
+    // identity read redirected to a synthetic account for the refusal cases.
+    const chatState = { identity: { account_id: "c".repeat(64), device_id: "hosted-web" }, rev: 1, rooms: [] };
+    const deviceTap = { openFails: false, identifyAs: null as string | null, identify: [] as Array<{ status: number }>, operations: [] as string[] };
+    const deviceRelay = await passThrough(deviceUrl, async (request, body, forward) => {
+      if (request.method === "POST" && request.url === "/v1/app/agent-bindings/open") {
+        return deviceTap.openFails ? reply(503, { error: "synthetic Chat outage" }) : reply(200, chatState);
+      }
+      if (request.url !== "/v1/brain/identity-provider") return forward();
+      const operation = String((JSON.parse(body.toString()) as Json).operation);
+      deviceTap.operations.push(operation);
+      if (operation === "identifyMember" && deviceTap.identifyAs) request.headers["x-finite-workos-user-id"] = deviceTap.identifyAs;
+      const response = await forward();
+      if (operation === "identifyMember") deviceTap.identify.push({ status: response.status });
+      return response;
+    });
+    // FIXTURE (Core version/outage): the hosted-observation path can answer
+    // like an older Core without the route (404) or an outage (503).
+    const coreTap = { hosted: "forward" as "forward" | 404 | 503, posts: [] as Array<{ status: number; body: Json; outcome?: unknown }> };
+    const coreRelay = await passThrough(config.identityUrl, async (request, body, forward) => {
+      if (request.url !== HOSTED_OBSERVATION_PATH) return forward();
+      const posted = JSON.parse(body.toString()) as Json;
+      if (coreTap.hosted !== "forward") {
+        coreTap.posts.push({ status: coreTap.hosted, body: posted });
+        return reply(coreTap.hosted);
+      }
+      const response = await forward();
+      coreTap.posts.push({ status: response.status, body: posted,
+        outcome: response.status === 200 ? (JSON.parse(response.body.toString()) as Json).outcome : undefined });
+      return response;
+    });
 
     // Agent and CLI identities. The Agent's key is the one Core pinned for its runtime.
     const agentEnv = (label: string) => ({ FINITE_HOME: path.join(lab, label), FBRAIN_CONFIG_DIR: path.join(lab, label, "brain-config"),
@@ -199,9 +316,9 @@ async function main() {
           ...env, NEXT_TELEMETRY_DISABLED: "1", FC_CORE_BASE_URL: config.coreUrl, FC_DASHBOARD_BASE_URL: base,
           FC_WORKOS_AUTH_ENABLED: "0", FC_DASHBOARD_ALLOW_DEV_ACCOUNT_AUTH: "1", FC_DASHBOARD_DEV_EMAIL: account.email,
           FC_DASHBOARD_DEV_WORKOS_USER_ID: account.workosUserId, FC_DASHBOARD_DEV_WORKOS_ACCESS_TOKEN: token,
-          FC_HOSTED_WEB_DEVICE_URL: deviceUrl, FINITECHAT_HOSTED_API_TOKEN: DEVICE_TOKEN,
+          FC_HOSTED_WEB_DEVICE_URL: deviceRelay, FINITECHAT_HOSTED_API_TOKEN: DEVICE_TOKEN,
           FC_BRAIN_UPSTREAM_URL: brainUrl, FC_BRAIN_PUBLIC_ORIGIN: brainUrl,
-          FC_CORE_BRAIN_IDENTITY_URL: config.identityUrl, FC_CORE_BRAIN_OBSERVATION_TOKEN: config.observationToken,
+          FC_CORE_BRAIN_IDENTITY_URL: coreRelay, FC_CORE_BRAIN_OBSERVATION_TOKEN: config.observationToken,
         });
       await waitFor(`dashboard ${account.email}`, async () => (await fetch(`${base}/healthz`)).ok, server);
       return base;
@@ -324,6 +441,82 @@ async function main() {
     await row(short(npub.moss)).getByText(OWNER.email, { exact: true }).waitFor({ timeout: 30_000 });
     await shot("roster-agent-named-by-core");
 
+    // Identity: after a successful Hosted Chat bootstrap the dashboard loads
+    // the owner's existing hosted key and registers it with Core, after the
+    // response. The page is parked so only these requests reach the Device.
+    await page.goto("about:blank");
+    const states = async (key: string, brain = brainId) =>
+      [(await describe("v1", brain, key)).state, (await describe("v2", brain, key)).state, (await describe("v3", brain, key)).state];
+    assert.deepEqual(await states(ownerHex), ["notShared", "notShared", "notShared"]);
+    const chatUrl = `${ownerBase}/api/chat/machines/${config.runtimeId}/hosted-device/state`;
+    async function openChat(expect: { identify: boolean; posts: number }) {
+      const before = { identify: deviceTap.identify.length, operations: deviceTap.operations.length, posts: coreTap.posts.length };
+      const response = await fetch(chatUrl, { cache: "no-store" });
+      const delivered = await response.json() as Json;
+      if (expect.identify) await waitFor("deferred identity read", async () => deviceTap.identify.length > before.identify, undefined, 15_000);
+      if (expect.posts) await waitFor("deferred Core observation", async () => coreTap.posts.length >= before.posts + expect.posts, undefined, 15_000);
+      await delay(1_500);
+      assert.equal(deviceTap.identify.length, before.identify + (expect.identify ? 1 : 0));
+      assert.equal(coreTap.posts.length, before.posts + expect.posts);
+      assert(deviceTap.operations.slice(before.operations).every(operation => operation === "identifyMember"), "registration signed something");
+      return { status: response.status, delivered, identify: deviceTap.identify.slice(before.identify), posts: coreTap.posts.slice(before.posts) };
+    }
+    const outcomes: string[] = [];
+    const delivered = async (expect: { identify: boolean; posts: number }) => {
+      const opened = await openChat(expect);
+      assert.equal(opened.status, 200);
+      assert.deepEqual(opened.delivered, chatState);
+      return opened;
+    };
+    // No key on the Device for the account read: the Device refuses; nothing reaches Core.
+    deviceTap.identifyAs = "composition-no-hosted-key";
+    let opened = await delivered({ identify: true, posts: 0 });
+    outcomes.push(`missing key: Device ${opened.identify[0].status}`);
+    assert.equal(opened.identify[0].status, 428);
+    // An unreadable key file: the Device refuses; nothing reaches Core.
+    const unreadable = path.join(lab, "hosted", "users", createHash("sha256").update("composition-unreadable-key").digest("hex"));
+    await mkdir(path.join(unreadable, "finite-home", "identity"), { recursive: true, mode: 0o700 });
+    await mkdir(path.join(unreadable, "chat"), { recursive: true, mode: 0o700 });
+    await writeFile(path.join(unreadable, "finite-home", "identity", "identity.json"), "not an identity", { mode: 0o600 });
+    await writeFile(path.join(unreadable, "chat", "client.sqlite3"), "", { mode: 0o600 });
+    deviceTap.identifyAs = "composition-unreadable-key";
+    opened = await delivered({ identify: true, posts: 0 });
+    outcomes.push(`unreadable key: Device ${opened.identify[0].status}`);
+    assert(opened.identify[0].status >= 400);
+    deviceTap.identifyAs = null;
+    // An older Core (no route) and a Core outage leave Chat untouched; the outage retries the same operation once.
+    coreTap.hosted = 404;
+    opened = await delivered({ identify: true, posts: 1 });
+    coreTap.hosted = 503;
+    opened = await delivered({ identify: true, posts: 2 });
+    assert.equal(opened.posts[0].body.operationId, opened.posts[1].body.operationId);
+    assert.deepEqual(await states(ownerHex), ["notShared", "notShared", "notShared"]);
+    outcomes.push("older Core 404 and outage 503: Chat 200, nothing stored");
+    // A failed Chat bootstrap schedules nothing.
+    coreTap.hosted = "forward";
+    deviceTap.openFails = true;
+    opened = await openChat({ identify: false, posts: 0 });
+    deviceTap.openFails = false;
+    assert.notEqual(opened.status, 200);
+    outcomes.push(`failed Chat bootstrap: HTTP ${opened.status}, no identity read`);
+    // Success: the verified Account and the Device-loaded key, nothing else.
+    opened = await delivered({ identify: true, posts: 1 });
+    assert.deepEqual(opened.identify, [{ status: 200 }]);
+    assert.deepEqual(Object.keys(opened.posts[0].body).sort(), ["observedAt", "operationId", "publicKeyHex", "version"]);
+    assert.equal(opened.posts[0].body.publicKeyHex, ownerHex);
+    assert.deepEqual([opened.posts[0].status, opened.posts[0].outcome], [200, "recorded"]);
+    const registered = await describe("v2", brainId, ownerHex);
+    assert.deepEqual([registered.state, registered.kind, registered.accountEmail, registered.displayName, (registered.source as Json).kind],
+      ["resolved", "human", OWNER.email, "Ada Lovelace", "hostedDeviceObservation"]);
+    // Registration is not disclosure: no sharing scope (v1), no participation (v3), no membership.
+    assert.deepEqual(await states(ownerHex), ["notShared", "resolved", "notShared"]);
+    assert(!accessNpubs().includes(ownerNpub));
+    opened = await delivered({ identify: true, posts: 1 });
+    assert.deepEqual([opened.posts[0].status, opened.posts[0].outcome], [200, "unchanged"]);
+    outcomes.push("success: recorded, then unchanged; v1/v2/v3 = notShared/resolved/notShared");
+    note(`hosted registration: ${outcomes.join("; ")}`);
+    await openRoster(page);
+
     // People: every invitation is sent from the roster and signed by the Agent.
     await invite(ownerNpub);
     await status(`Invited ${short(ownerNpub)} to Field Lab as a Member.`).waitFor();
@@ -364,7 +557,8 @@ async function main() {
     for (const [target, email, role] of [[ownerRow, OWNER.email, "Admin"], [otherRow, OTHER.email, "Member"]] as const) {
       assert.match(await target.innerText(), new RegExp(`Ada Lovelace[\\s\\S]*${email}[\\s\\S]*${role}`, "u"));
     }
-    await bobRow.getByText("Unknown", { exact: true }).waitFor();
+    // Bob participates but no Account is shared for his key; the copy never names a cause.
+    await bobRow.getByText(NOT_SHARED, { exact: true }).waitFor();
     await shot("roster-same-name-humans");
 
     // Private aliases through real Core: the same alias on two different keys.
@@ -554,10 +748,63 @@ async function main() {
       note("SKIPPED older client: FC_BRAIN_COMPOSITION_OLD_FBRAIN not set");
     }
     assert.deepEqual(((await owner.signedRequest("GET", "/v1/brains")) as { brains: Array<{ brainId: string }> }).brains.map(item => item.brainId).sort(), others);
+
+    // Identity Lab: the registered owner key, added by the Agent without acting,
+    // stays noParticipation; Bob acts with no shared Account. Each row explains
+    // itself without a name, and mutations still confirm the exact key.
+    const identityLab = String((cli("moss", ["brain", "create", "organization", "Identity Lab", "--json"]) as Json).brainId);
+    cli("moss", ["admin", "member", "add", "--brain", identityLab, "--target", ownerNpub, "--json"]);
+    cli("moss", ["invite", "brain", "create", "--brain", identityLab, "--target", npub.bob, "--json"]);
+    const bobInbox = (cli("bob", ["invite", "brain", "list", "--json"]) as { invitations: Json[] }).invitations
+      .filter(item => JSON.stringify(item).includes(identityLab));
+    assert.equal(bobInbox.length, 1);
+    cli("bob", ["invite", "brain", "accept", String(bobInbox[0].id), "--json"]);
+    const labAccess = () => ((cli("moss", ["access", "list", "--brain", identityLab, "--json"]) as { identities: Array<{ npub: string }> })
+      .identities.map(item => item.npub).sort());
+    assert.deepEqual(labAccess(), [ownerNpub, npub.moss, npub.bob].sort());
+    // Core knows the owner's Account; Brain alone withholds it for want of participation.
+    assert.equal((await describe("v2", identityLab, ownerHex)).state, "resolved");
+    // The owner's participating Agent is described, but its owner hints never
+    // include the owner's registered, non-participating key.
+    const [agentRow, ownerKeyRow] = await describeMany("v3", identityLab, [npubHex(npub.moss), ownerHex], [npubHex(npub.moss)]);
+    assert.deepEqual([agentRow.state, agentRow.kind, ownerKeyRow.state], ["resolved", "agent", "notShared"]);
+    assert.equal((agentRow.responsibleAccount as Json).email, OWNER.email);
+    assert(!JSON.stringify(agentRow).includes(ownerHex), JSON.stringify(agentRow));
+    await page.goto(`${ownerBase}/dashboard/machines/${config.runtimeId}/brain`);
+    await page.getByRole("button", { name: "Identity Lab", exact: true }).click({ timeout: 120_000 });
+    const labRoster = page.getByRole("region", { name: "Identities in Identity Lab", exact: true });
+    await labRoster.waitFor({ timeout: 60_000 });
+    const labRow = (key: string) => labRoster.getByRole("row").filter({ hasText: short(key) });
+    await labRow(ownerNpub).getByText(NOT_ACTED, { exact: true }).waitFor({ timeout: 30_000 });
+    await labRow(npub.bob).getByText(NOT_SHARED, { exact: true }).waitFor();
+    await labRow(npub.moss).getByText(OWNER.email, { exact: true }).waitFor();
+    for (const key of [ownerNpub, npub.bob]) {
+      const text = await labRow(key).innerText();
+      assert(!text.includes(OWNER.email) && !text.includes("Ada Lovelace") && !text.includes("Unknown"), text);
+    }
+    // A private alias leads; the safe explanation stays beside it.
+    await labRow(ownerNpub).getByRole("button", { name: /^Add alias for / }).click();
+    await page.getByRole("textbox", { name: "Alias", exact: true }).fill("Chat owner");
+    await page.getByRole("button", { name: "Save alias", exact: true }).click();
+    await page.getByRole("dialog").waitFor({ state: "hidden" });
+    await labRow(ownerNpub).getByText("Chat owner", { exact: true }).waitFor();
+    assert.match(await labRow(ownerNpub).innerText(), new RegExp(`Chat owner[\\s\\S]*Your alias[\\s\\S]*${NOT_ACTED.replace(".", "\\.")}`, "u"));
+    await shot("identity-lab-roster");
+    // Removal confirms the full key and the alias, never the explanation.
+    await labRow(ownerNpub).getByRole("button", { name: /^Remove / }).click();
+    const labDialog = page.getByRole("dialog", { name: "Remove Unknown key?" });
+    await labDialog.getByText(ownerNpub, { exact: true }).waitFor();
+    assert.equal(await labDialog.locator("dl dd").first().textContent(), "Chat owner");
+    assert.equal(await labDialog.getByText(NOT_ACTED, { exact: false }).count(), 0);
+    await shot("identity-lab-remove-dialog");
+    await labDialog.getByRole("button", { name: "Remove", exact: true }).click();
+    await status(`Unknown key (${short(ownerNpub)}) was removed.`).waitFor({ timeout: 120_000 });
+    assert.deepEqual(labAccess(), [npub.moss, npub.bob].sort());
+    note(`identity lab: owner "${NOT_ACTED}", Bob "${NOT_SHARED}"; alias + exact-key removal${LEGACY_PLUGIN ? " (older plugin)" : ""}`);
     assert.deepEqual(errors, []);
     note(`agent=${agentName} native-token-minted=${nativeToken !== null}`);
-    console.log("PASS: names via Core->Brain->fbrain->plugin; invite/accept/revoke/remove signed by the Agent with re-keying; same-name and same-alias removal of the exact key; alias privacy and digest independence; stale deletion previews after invite+revoke and after removal; Hosted Device deletion; stale roster actions refused; invites stopped; other Brains unchanged; no resurrection");
-    console.log("BOUNDARY: WorkOS provider, Agent key pin, Core Hermes-access grant and Chat are fixtures; humans accept through retained dashboard routes without a UI caller; production rollout is not claimed.");
+    console.log("PASS: hosted key registration after a successful Chat bootstrap (missing/unreadable key, older Core, outage and failed bootstrap leave Chat unchanged; no scope, participation or membership); names via Core->Brain->fbrain->plugin; invite/accept/revoke/remove signed by the Agent with re-keying; same-name and same-alias removal of the exact key; alias privacy and digest independence; stale deletion previews after invite+revoke and after removal; Hosted Device deletion; stale roster actions refused; invites stopped; other Brains unchanged; no resurrection");
+    console.log("BOUNDARY: WorkOS provider, Agent key pin, Core Hermes-access grant, Chat (incl. the Device's agent-binding open), the refusal accounts' identity reads and Core 404/503 answers are fixtures; humans accept through retained dashboard routes without a UI caller; production rollout is not claimed.");
   } catch (error) {
     note(`FAIL ${error instanceof Error ? error.stack : String(error)}`);
     if (hermes) await writeFile(path.join(lab, "hermes-tail.log"), hermes.logs().replaceAll(credentials.password, "[redacted]")).catch(() => undefined);
@@ -567,6 +814,7 @@ async function main() {
   } finally {
     await writeFile(path.join(lab, "run.log"), `${log.join("\n")}\n`).catch(() => undefined);
     await browser?.close();
+    for (const relay of relays) { relay.closeAllConnections(); relay.close(); }
     for (const child of children.reverse()) await stop(child);
   }
 }

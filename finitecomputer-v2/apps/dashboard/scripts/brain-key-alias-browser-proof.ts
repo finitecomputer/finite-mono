@@ -154,7 +154,7 @@ async function main() {
     await page.unroute("**/api/brain/key-aliases");
     await page.getByRole("button", { name: "Save alias", exact: true }).click();
     await humanRow.getByText("Research lead", { exact: true }).waitFor();
-    for (const label of ["Moss", "Unknown", "Stored person", "Earlier person", "other@finite.test"]) {
+    for (const label of ["Moss", "Identity details are unavailable.", "Stored person", "Earlier person", "other@finite.test"]) {
       const row = roster.getByRole("row").filter({ hasText: label });
       await row.getByRole("button", { name: /Add alias/ }).click();
       await page.getByRole("textbox", { name: "Alias", exact: true }).fill("Research lead");

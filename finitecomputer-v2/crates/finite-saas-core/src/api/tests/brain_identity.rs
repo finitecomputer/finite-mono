@@ -2,6 +2,8 @@
 //! and the account-authenticated observation → scoped description path.
 
 use super::*;
+mod hosted;
+use crate::brain_identity::hosted::HOSTED_OBSERVATION_PATH;
 use crate::brain_identity::{
     BrainIdentityConfig, BrainIdentityConfigError, DESCRIPTION_CREDENTIAL_HEADER,
     DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION, DESCRIPTIONS_VERSION_V2,
@@ -146,7 +148,7 @@ async fn routes_exist_only_on_the_private_identity_router() {
         let runtime = runtime_router(db.store.clone(), Default::default());
         let description = serde_json::to_vec(&description_body(&[key(1)])).unwrap();
         for app in [&account_router, &runtime] {
-            for path in [OBSERVATION_PATH, DESCRIPTIONS_PATH] {
+            for path in [OBSERVATION_PATH, HOSTED_OBSERVATION_PATH, DESCRIPTIONS_PATH] {
                 let (status, _) = post(
                     app,
                     path,
