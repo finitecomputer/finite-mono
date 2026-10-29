@@ -54,7 +54,8 @@ test("Connections initial render keeps truthful disabled controls inspectable", 
   );
   assert.match(html, /Checking live connection status/u);
   assert.match(html, /Status unavailable/u);
-  assert.match(html, /Use Finite Private/u);
+  assert.match(html, /Make Finite Private the default/u);
+  assert.match(html, /Connect OpenRouter/u);
   assert.match(html, /Telegram/u);
   assert.match(html, /Google Workspace/u);
   const links = [...html.matchAll(/<a\b[^>]*href="([^"]*)"/gu)].map(match => match[1]);

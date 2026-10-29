@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import { SimplexConnection } from "@/components/simplex-connection";
+import { OpenRouterConnection } from "@/components/openrouter-connection";
 import { ConnectionCard } from "@/components/connection-card";
 import { useOptionalHostedChat } from "@/components/hosted-chat-provider";
 import { Button } from "@/components/ui/button";
@@ -72,7 +73,7 @@ export function ConnectionsPanel({
     return () => window.clearInterval(timer);
   }, [status?.simplex?.enabled, busy, refresh]);
 
-  async function mutate(label: string, action: AgentConnectionAction) {
+  async function mutate(label: string, action: AgentConnectionAction, onSuccess?: () => void) {
     setBusy(label);
     setError(null);
     try {
@@ -87,6 +88,7 @@ export function ConnectionsPanel({
           CONNECTIONS_MUTATION_TIMEOUT_MS
         )
       );
+      onSuccess?.();
     } catch (requestError) {
       setError(connectionErrorMessage(requestError));
     } finally {
@@ -112,14 +114,16 @@ export function ConnectionsPanel({
       ) : null}
 
       <ConnectionCard
-        name="Inference"
+        name="Default model"
         state={status ? "connected" : "unavailable"}
         account={status ? inferenceLabel(status) : null}
-        description="Choose the service your agent uses to think."
+        description="Used when a session has no model choice of its own. Connecting a provider does not change this default."
         icon={<CpuIcon className="size-5" />}
       >
         <InferenceControls status={status} busy={busy} mutate={mutate} />
       </ConnectionCard>
+
+      <OpenRouterConnection status={status} busy={busy} mutate={mutate} />
 
       <SimplexConnection status={status?.simplex} loaded={Boolean(status)} busy={Boolean(busy)} mutate={mutate} refresh={refresh} />
 
@@ -229,19 +233,20 @@ function InferenceControls({
   busy: string | null;
   mutate: (label: string, action: AgentConnectionAction) => Promise<void>;
 }) {
-  const [showOpenRouter, setShowOpenRouter] = useState(false);
   return (
-    <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+    <details className="min-w-0">
+      <summary className="cursor-pointer text-sm">Change default</summary>
+      <div className="mt-3 flex min-w-0 flex-wrap items-center justify-end gap-2">
       {status?.inference.profile !== "finite_private" ? (
         <Button
           variant="outline"
           disabled={Boolean(busy) || !status}
           onClick={() => void mutate("inference", { action: "inference", profile: "finite_private" })}
         >
-          {busy === "inference" ? "Switching…" : "Use Finite Private"}
+          {busy === "inference" ? "Switching…" : "Make Finite Private the default"}
         </Button>
       ) : null}
-      {showOpenRouter ? (
+      {status?.openrouter?.key_saved || status?.inference.profile === "openrouter" ? (
         <form
           className="flex min-w-0 flex-wrap justify-end gap-2"
           onSubmit={(event) => {
@@ -250,19 +255,10 @@ function InferenceControls({
             void mutate("inference", {
               action: "inference",
               profile: "openrouter",
-              apiKey: String(form.get("apiKey") ?? ""),
               model: String(form.get("model") ?? ""),
             });
           }}
         >
-          <Input
-            name="apiKey"
-            type="password"
-            autoComplete="off"
-            placeholder={status?.inference.profile === "openrouter" ? "New key (optional)" : "Your key (optional)"}
-            aria-label="OpenRouter key"
-            className="w-52"
-          />
           <Input
             name="model"
             defaultValue={
@@ -270,19 +266,19 @@ function InferenceControls({
                 ? status.inference.model
                 : "anthropic/claude-sonnet-4.6"
             }
-            aria-label="OpenRouter model"
+            aria-label="OpenRouter default model"
+            required
             className="w-60"
           />
           <Button type="submit" disabled={Boolean(busy)}>
-            {busy === "inference" ? "Saving…" : "Save"}
+            {busy === "inference" ? "Saving…" : "Make OpenRouter the default"}
           </Button>
         </form>
       ) : (
-        <Button variant="outline" disabled={!status} onClick={() => setShowOpenRouter(true)}>
-          Use OpenRouter
-        </Button>
+        <p className="text-sm text-muted-foreground">Save an OpenRouter key below to make it available.</p>
       )}
-    </div>
+      </div>
+    </details>
   );
 }
 
