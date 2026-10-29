@@ -219,6 +219,7 @@ type HostedDeviceState = {
 };
 
 type AgentConnectionsStatus = {
+  openrouter?: { key_saved: boolean };
   inference: {
     profile: "finite_private" | "openrouter";
     provider: string;
@@ -1298,17 +1299,46 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         connectionsStatusIndex > ownerClaimIndex,
         "Connections status was requested before the owner claim succeeded"
       );
-      await page.getByRole("button", { name: "Use OpenRouter" }).click();
+      const originalInference = { ...hostedDevice.state.connections.inference };
+      await page.getByRole("button", { name: "Connect OpenRouter" }).click();
       await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
-      await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
-      await page.getByRole("button", { name: "Save" }).click();
-      await expectVisibleText(page, "OpenRouter · openai/gpt-5-mini");
+      await page.getByRole("button", { name: "Save key", exact: true }).click();
+      await expectVisibleText(page, "Key saved. Your default and session choices are unchanged.");
+      assert.deepEqual(hostedDevice.state.connections.inference, originalInference);
+      assert.equal(await page.getByLabel("OpenRouter key").count(), 0);
+      await page.getByLabel("OpenRouter session model").fill("openai/gpt-5-mini");
+      await expectVisibleText(page, "/model openai/gpt-5-mini --provider openrouter --session");
       assert(
         hostedDevice.state.runtimeCommands.some(
-          (command) => command.command === "agent.inference.apply"
+          (command) => command.command === "agent.openrouter.save"
         ),
-        "inference change did not use the runtime command channel"
+        "credential save did not use the runtime command channel"
       );
+      assert(!hostedDevice.state.runtimeCommands.some((command) => command.command === "agent.inference.apply"));
+      await page.getByRole("button", { name: "Replace key" }).click();
+      await page.getByLabel("OpenRouter key").fill("replacement-test-only-key");
+      await page.getByRole("button", { name: "Save key", exact: true }).click();
+      await page.getByRole("button", { name: "Replace key" }).waitFor();
+      assert.deepEqual(hostedDevice.state.connections.inference, originalInference);
+      await page.screenshot({ path: "/tmp/finite-openrouter-connections-desktop.png", fullPage: true });
+      const mobileConnections = await page.context().newPage();
+      try {
+        await mobileConnections.setViewportSize({ width: 390, height: 844 });
+        await mobileConnections.goto(page.url());
+        await mobileConnections.getByRole("button", { name: "Replace key" }).waitFor();
+        await mobileConnections.screenshot({ path: "/tmp/finite-openrouter-connections-mobile.png", fullPage: true });
+      } finally {
+        await mobileConnections.close();
+      }
+
+      // An old runtime must never trigger the old default-changing operation.
+      delete hostedDevice.state.connections.openrouter;
+      await page.reload();
+      await expectVisibleText(page, "Runtime update needed");
+      assert(await page.getByRole("button", { name: "Connect OpenRouter" }).isDisabled());
+      hostedDevice.state.connections.openrouter = { key_saved: true };
+      await page.reload();
+      await page.getByRole("button", { name: "Replace key" }).waitFor();
       const connectionsPath =
         "/dashboard/machines/runtime_completed-oslo-bot/connections";
       const connectionsSidebar = page.getByRole("navigation", {
@@ -2471,6 +2501,7 @@ async function startFakeHostedDevice() {
     bindingAuthorizationFailuresRemaining: 0,
     agentBindings: new Map(),
     connections: {
+      openrouter: { key_saved: false },
       inference: {
         profile: "finite_private",
         provider: "finite_private",
@@ -2803,7 +2834,9 @@ function applyRuntimeCommand(
   const body = request.body && typeof request.body === "object"
     ? request.body as Record<string, unknown>
     : {};
-  if (command === "agent.inference.apply") {
+  if (command === "agent.openrouter.save") {
+    state.connections.openrouter = { key_saved: true };
+  } else if (command === "agent.inference.apply") {
     const profile = String(body.profile ?? "");
     if (profile === "finite_private") {
       state.connections.inference = {

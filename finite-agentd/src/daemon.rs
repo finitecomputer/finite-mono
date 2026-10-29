@@ -21,8 +21,8 @@ use tokio::sync::mpsc;
 use crate::AgentdError;
 use crate::config::{ConfigManager, HermesConfigOfferV1, HermesConfigRollbackV1};
 use crate::connections::{
-    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, PairingApproveRequest,
-    TelegramConnectRequest, TelegramHomeRequest,
+    ConnectionManager, GoogleApplyRequest, InferenceApplyRequest, OpenRouterSaveRequest,
+    PairingApproveRequest, TelegramConnectRequest, TelegramHomeRequest,
 };
 use crate::ledger::{CommandDecision, Ledger};
 use crate::output_pipe::{ContainerOutputStatus, OutputObserver};
@@ -477,6 +477,17 @@ impl CommandExecutor {
                     .connection_manager
                     .inference_plan(&request.request_id, body)?;
                 self.apply_inference_plan(plan).await
+            }
+            "agent.openrouter.save" => {
+                let body = parse_body::<OpenRouterSaveRequest>(
+                    request,
+                    "finite.agent.openrouter.save.v1",
+                )?;
+                let manager = self.connection_manager.clone();
+                let status = tokio::task::spawn_blocking(move || manager.save_openrouter_key(body))
+                    .await
+                    .map_err(|error| AgentdError::Config(error.to_string()))??;
+                Ok(serde_json::to_value(status)?)
             }
             "agent.simplex.connect" => {
                 parse_body::<EmptyRequest>(request, EMPTY_REQUEST_SCHEMA)?;
