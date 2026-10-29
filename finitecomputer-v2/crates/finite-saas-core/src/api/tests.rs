@@ -16,6 +16,7 @@ mod admin_authorization;
 mod agent_creation;
 mod agent_creation_control;
 mod brain_identity;
+mod brain_release_composition;
 mod finite_private_keys;
 mod finite_private_usage;
 mod hosted_access;
