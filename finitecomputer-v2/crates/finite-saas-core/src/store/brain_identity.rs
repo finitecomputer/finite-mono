@@ -223,6 +223,8 @@ fn agent_evidence<'a>(rows: &[&'a AgentPinRow]) -> AgentEvidence<'a> {
 struct AccountRow {
     /// `None` when the stored email is over the wire bound.
     email: Option<String>,
+    /// WorkOS name; `None` when absent or over the wire bound.
+    display_name: Option<String>,
     linked: bool,
     workos_subject: Option<String>,
     updated_at: String,
@@ -475,12 +477,15 @@ fn describe_key(
             if !disclosable(&human.user_id) {
                 return not_shared();
             }
-            let Some(email) = bounded(accounts[&human.user_id].email.as_deref(), MAX_CONTACT_BYTES)
-            else {
+            let account = &accounts[&human.user_id];
+            let Some(email) = bounded(account.email.as_deref(), MAX_CONTACT_BYTES) else {
                 return IdentityDescription::bare(key, DescriptionState::Unknown);
             };
             IdentityDescription {
                 kind: Some(DescribedKind::Human),
+                // The account's WorkOS name, released with the email under
+                // the same gate. Optional: an unusable name is omitted.
+                display_name: bounded(account.display_name.as_deref(), MAX_DISPLAY_NAME_BYTES),
                 account_email: Some(email),
                 source: Some(DescriptionSource {
                     kind: "hostedDeviceObservation".to_string(),

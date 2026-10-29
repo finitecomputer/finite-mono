@@ -9,8 +9,8 @@ const base: BrainIdentity = {
   npub: "npub1ccz8l9zpa47k6vz9gphftsrumpw80rjt3nhnefat4symjhrsnmjs38mnyd", role: "member", kind: null,
   name: null, email: null, ownerEmail: null, publicName: null, publicNameStoredAt: null, lifecycle: null, operatorAnnotation: null, folders: [],
 };
-const cell = (row: Partial<BrainIdentity>) => renderToStaticMarkup(createElement("table", null,
-  createElement("tbody", null, createElement("tr", null, createElement(IdentityCell, { row: { ...base, ...row } })))));
+const cell = (row: Partial<BrainIdentity>, alias?: string) => renderToStaticMarkup(createElement("table", null,
+  createElement("tbody", null, createElement("tr", null, createElement(IdentityCell, { row: { ...base, ...row }, alias })))));
 const secondary = (text: string) => `<span class="block text-xs text-muted-foreground">${text}</span>`;
 const stored = { publicName: "cara@finite.vip", publicNameStoredAt: "2026-09-17T20:39:30Z" };
 
@@ -38,4 +38,22 @@ test("annotations render as dated text and lifecycle qualifiers stay in the exis
   assert.match(cell({ kind: "agent", name: "Example", lifecycle: "retired" }), /Agent \(retired\)/);
   assert.match(cell({ kind: "agent", name: "Example", lifecycle: "offboarding" }), /Agent \(offboarding\)/);
   assert.doesNotMatch(cell({ kind: "human", email: "example@example.test", operatorAnnotation: annotation }), /Previous/);
+});
+
+
+test("private aliases preserve authoritative identity and every scoped fallback", () => {
+  const cases: [Partial<BrainIdentity>, string[]][] = [
+    [{ kind: "human", name: "Maya", email: "maya@example.test" }, ["Maya", "maya@example.test"]],
+    [{ kind: "human", email: "maya@example.test" }, ["maya@example.test"]],
+    [{ kind: "agent", name: "Example", lifecycle: "retired" }, ["Example", "Agent (retired)"]],
+    [{ operatorAnnotation: { kind: "invitation_key", label: "Invitation", observedAt: "2026-01-01T00:00:00Z" } }, ["Invitation", "Invitation key · Evidence 2026-01-01"]],
+    [stored, [stored.publicName, "Public name"]],
+    [{}, ["Unknown"]],
+  ];
+  for (const [row, labels] of cases) {
+    const html = cell(row, "My colleague");
+    assert(html.includes("My colleague"));
+    assert(html.includes("Your alias"));
+    for (const label of labels) assert(html.includes(label), `${label} missing from ${html}`);
+  }
 });

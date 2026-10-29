@@ -1,6 +1,7 @@
 //! Synthetic exact-scope operations and disclosure against ephemeral PostgreSQL.
 use super::*;
 use crate::brain_identity::scoped::*;
+mod account_names;
 mod guards;
 
 fn record(

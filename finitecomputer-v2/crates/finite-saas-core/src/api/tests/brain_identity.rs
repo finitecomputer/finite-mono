@@ -8,9 +8,9 @@ use crate::brain_identity::{
     OBSERVATION_CREDENTIAL_HEADER, OBSERVATION_PATH, OBSERVATION_VERSION,
 };
 
-const SERVER: &str = "https://brain.test";
-const OBSERVATION_TOKEN: &str = "brain-observation-test-token";
-const DESCRIPTION_TOKEN: &str = "brain-description-test-token";
+pub(super) const SERVER: &str = "https://brain.test";
+pub(super) const OBSERVATION_TOKEN: &str = "brain-observation-test-token";
+pub(super) const DESCRIPTION_TOKEN: &str = "brain-description-test-token";
 
 fn config(auth: &CoreAuth) -> BrainIdentityConfig {
     BrainIdentityConfig::from_values(
@@ -24,17 +24,17 @@ fn config(auth: &CoreAuth) -> BrainIdentityConfig {
     .unwrap()
 }
 
-fn identity_app(store: CoreStore) -> Router {
+pub(super) fn identity_app(store: CoreStore) -> Router {
     let auth = scoped_test_auth();
     let config = config(&auth);
     brain_identity_router(store, auth, config)
 }
 
-fn key(n: u8) -> String {
+pub(super) fn key(n: u8) -> String {
     format!("{n:02x}").repeat(32)
 }
 
-fn observation_body(operation: &str, human: &str) -> serde_json::Value {
+pub(super) fn observation_body(operation: &str, human: &str) -> serde_json::Value {
     serde_json::json!({
         "version": OBSERVATION_VERSION,
         "operationId": format!("operation_{operation}_0000"),
@@ -47,7 +47,7 @@ fn observation_body(operation: &str, human: &str) -> serde_json::Value {
     })
 }
 
-fn description_body(keys: &[String]) -> serde_json::Value {
+pub(super) fn description_body(keys: &[String]) -> serde_json::Value {
     serde_json::json!({
         "version": DESCRIPTIONS_VERSION,
         "brainServer": SERVER,
@@ -57,7 +57,7 @@ fn description_body(keys: &[String]) -> serde_json::Value {
     })
 }
 
-async fn post(
+pub(super) async fn post(
     app: &Router,
     path: &str,
     headers: &[(&str, String)],
