@@ -1404,6 +1404,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await chatSidebar
         .getByRole("button", { name: "Sidebar QA", exact: true })
         .waitFor({ state: "visible" });
+      // Row actions appear on hover, so point at the row first, as a person does.
+      await chatSidebar
+        .getByRole("button", { name: "Sidebar QA", exact: true })
+        .hover();
       await chatSidebar
         .getByRole("button", { name: "Archive Sidebar QA", exact: true })
         .click();
