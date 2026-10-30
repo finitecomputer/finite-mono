@@ -16,6 +16,9 @@ const DEFAULT_PORT = 13002;
 // talks to a real Brain server. Everything else stays synthetic.
 const BRAIN_IDENTITY_PROVIDER_URL = process.env.FC_WEB_DESIGN_BRAIN_IDENTITY_PROVIDER_URL?.trim();
 const BRAIN_URL = process.env.FC_WEB_DESIGN_BRAIN_URL?.trim();
+// A test's stand-in for the agents' native Hermes origin (ending in "/"), for
+// requests the dashboard server makes with a Core-issued grant.
+const HOSTED_HERMES_URL = process.env.FC_WEB_DESIGN_HOSTED_HERMES_URL?.trim();
 const VALID_SCENARIOS = new Set(["healthy", "unavailable", "recovering"]);
 
 type Scenario = "healthy" | "unavailable" | "recovering";
@@ -67,6 +70,7 @@ function localChildEnvironment(): NodeJS.ProcessEnv {
     "TZ",
     "SSL_CERT_FILE",
     "NIX_SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
     "NIX_PATH",
     "NIX_PROFILES",
     "IN_NIX_SHELL",
@@ -183,6 +187,18 @@ async function serve() {
         agent_creation_entitlement: null,
         can_create_agent: false,
         requires_billing: false,
+      });
+      return;
+    }
+
+    const hostedHermesSession = request.url?.match(
+      /^\/api\/core\/v1\/me\/runtimes\/([^/]+)\/hosted-hermes-session$/u
+    );
+    if (request.method === "POST" && hostedHermesSession?.[1] && HOSTED_HERMES_URL) {
+      writeJson(response, 200, {
+        baseUrl: `${HOSTED_HERMES_URL}${hostedHermesSession[1]}/`,
+        accessToken: "synthetic-test",
+        expiresAt: Math.floor(Date.now() / 1000) + 60,
       });
       return;
     }

@@ -123,7 +123,7 @@ export async function readHostedHermesJson(runtimeId: string, path: string, sign
   });
 }
 
-export type HostedHermesChange = { method: "POST" | "DELETE"; body?: Record<string, string> };
+export type HostedHermesChange = { method: "POST" | "DELETE"; body?: Record<string, string | string[]> };
 export type HostedHermesChangeResult = { status: number; body: unknown };
 
 /** One owner-requested change: one grant, one request, never retried, even
