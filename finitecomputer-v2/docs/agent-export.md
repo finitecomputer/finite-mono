@@ -33,22 +33,32 @@ one as running. Staging happens there too, not in `/tmp`.
 
 - One survey or export runs at a time; a new one replaces the last.
 - A finished export is deleted seven days after it ends.
-- An export starts only when the disk would keep 20 GiB free after its staging
-  copy and its zip. That disk is shared with the host's other Agents, so a
-  running export also stops, and frees its staging copy, if free space falls
-  below 10 GiB: the survey cannot size sites or brains not yet on the Agent.
+- The disk is shared with the host's other Agents. A survey starts only with
+  room for a copy of the chat store plus 20 GiB; an export only when 20 GiB
+  would stay free after its staging copy and its zip. A running survey or
+  export stops, and frees its staging copy, if free space falls below 10 GiB,
+  since sites and brains not yet on the Agent can't be sized in advance.
+- A job whose record can't be written is stopped at once, so nothing runs
+  untracked.
 
 ## What the zip holds
 
 `finite-agent-export/1`, the format move.finite.place uses, with nothing left
 out for size: chats, memories, personality, skills, scheduled jobs, the sites
 the Agent owns or the person picks, the brains they pick, and every workspace
-file including media. Passwords, keys and tokens never go in: files are left
-out by name, and every text file, whatever its size, is read for anything
-shaped like a credential. Archives stay out because their contents can't be
-checked; dependencies, build output and earlier exports stay out too.
-`manifest.json` lists every file with its SHA-256, and everything left out and
-why.
+file including media. Credentials are handled the same way in every section:
+
+- Files named like credentials (`.env`, keys, tokens) never go in.
+- Memories and scheduled jobs go in with anything shaped like a credential,
+  whole private keys included, replaced by `[REDACTED]`.
+- Every other file is read: text in UTF-8, or UTF-16 with a byte order mark,
+  at any size, and SQLite databases value by value. One that looks like it
+  holds a credential, or can't be checked, stays out, as do all archives.
+- Chats, and media and other binary files, go as they are. Anything pasted
+  into a chat is in the export; the page and the zip's README say so.
+
+Dependencies, build output and earlier exports stay out too. `manifest.json`
+lists every file with its SHA-256, and everything left out and why.
 
 `export.py` is the move guide's exporter, vendored once. Serve this copy from
 move.finite.place rather than changing two.

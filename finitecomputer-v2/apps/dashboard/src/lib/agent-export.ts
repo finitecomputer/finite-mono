@@ -217,7 +217,7 @@ export function exportErrorMessage(code: ExportErrorCode, agentName: string) {
     case "busy": return `${agentName} is already working on an export. Wait for it to finish.`;
     case "surveyFirst":
     case "notOffered": return `What ${agentName} has changed. Check again, then choose what to include.`;
-    case "notEnoughSpace": return `There isn’t enough free space on ${agentName}’s computer for this export right now. Leave out a brain, or try again later.`;
+    case "notEnoughSpace": return `There isn’t enough free space on ${agentName}’s computer to export right now. Try again later, or leave out a brain.`;
     case "unavailable": return `${agentName} needs an update before it can export. Try again after it updates.`;
     case "access": return "Access to this agent is no longer available.";
     case "unknown": return `${agentName} didn’t confirm the request. Refresh to check.`;

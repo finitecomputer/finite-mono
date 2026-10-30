@@ -10,6 +10,7 @@ neither loses a finished export nor reports a dead job as running.
 """
 
 import asyncio
+import errno
 import json
 import os
 import re
@@ -32,8 +33,8 @@ KEEP_SECONDS = 7 * 24 * 60 * 60
 # Free space an export must leave on the disk it shares with other agents,
 # after its staging copy and its zip (each about the size of the data).
 RESERVE_BYTES = 20 * 1024**3
-# Sizes the survey can't know (sites, brains not on this computer yet) are
-# covered by stopping a running export below this much free space.
+# A running survey or export stops below this much free space: nothing can
+# size in advance the sites and brains that aren't on this computer yet.
 FLOOR_BYTES = RESERVE_BYTES // 2
 WATCH_SECONDS = 15
 MAX_BODY_BYTES = 64 * 1024
@@ -169,9 +170,17 @@ def start(kind, argv, **extra):
         "startedAt": time.time(),
         **extra,
     }
-    part = folder / "job.json.part"
-    part.write_text(json.dumps(record), encoding="utf-8")
-    part.replace(folder / "job.json")
+    try:
+        part = folder / "job.json.part"
+        part.write_text(json.dumps(record), encoding="utf-8")
+        part.replace(folder / "job.json")
+    except OSError:
+        # Untracked, it would escape busy(), DELETE and the disk guard.
+        with suppress(ProcessLookupError):
+            os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
     return job(folder)
 
 
@@ -195,18 +204,19 @@ def sweep(now=None):
 
 
 def guard():
-    """Stop a running export before the disk it shares runs low."""
-    current = job(exports_root() / "export")
-    if current is None or current["state"] != "running":
-        return
-    if shutil.disk_usage(exports_root()).free < FLOOR_BYTES:
-        with suppress(ProcessLookupError):
-            os.killpg(current["record"]["pid"], signal.SIGKILL)
-        for part in ("tmp", "out"):
-            shutil.rmtree(current["folder"] / part, ignore_errors=True)
-        # Best effort on a full disk: without it the job reads as interrupted.
-        with suppress(OSError):
-            (current["folder"] / "stopped").write_text("notEnoughSpace", encoding="utf-8")
+    """Stop a running survey or export before the disk it shares runs low."""
+    for kind in ("survey", "export"):
+        current = job(exports_root() / kind)
+        if current is None or current["state"] != "running":
+            continue
+        if shutil.disk_usage(exports_root()).free < FLOOR_BYTES:
+            with suppress(ProcessLookupError):
+                os.killpg(current["record"]["pid"], signal.SIGKILL)
+            for part in ("tmp", "out"):
+                shutil.rmtree(current["folder"] / part, ignore_errors=True)
+            # Best effort on a full disk: without it the job reads as interrupted.
+            with suppress(OSError):
+                (current["folder"] / "stopped").write_text("notEnoughSpace", encoding="utf-8")
 
 
 def _watch():
@@ -336,25 +346,44 @@ def _status():
         )
 
 
+def chat_store_bytes():
+    """The chat store a survey or export copies, with its write-ahead log."""
+    store = Path(os.environ.get("HERMES_HOME", "")) / "state.db"
+    total = 0
+    for suffix in ("", "-wal"):
+        with suppress(OSError):
+            total += Path(f"{store}{suffix}").stat().st_size
+    return total
+
+
+def started(kind, argv, view, **extra):
+    """Start a job; a disk too full to set it up answers like the space check."""
+    try:
+        current = start(kind, argv, **extra)
+    except OSError as failure:
+        if failure.errno == errno.ENOSPC:
+            return error(507, "notEnoughSpace")
+        raise
+    return JSONResponse({"version": 1, kind: view(current)}, 202, HEADERS)
+
+
 def _start_survey():
     with _lock:
         reap()
         sweep()
         if busy():
             return error(409, "busy")
-        current = start("survey", ["survey", "--everything", "--no-report"])
-        return JSONResponse({"version": 1, "survey": survey_view(current)}, 202, HEADERS)
+        # The Finite Home holds the exports folder, which may not exist yet.
+        if shutil.disk_usage(exports_root().parent).free < chat_store_bytes() + RESERVE_BYTES:
+            return error(507, "notEnoughSpace")
+        return started("survey", ["survey", "--everything", "--no-report"], survey_view)
 
 
 def estimate(found, brains):
     """About how much the export copies, from the survey."""
     workspace = found.get("workspace") if isinstance(found.get("workspace"), dict) else {}
     chosen = sum(brain["bytes"] or 0 for brain in offered(found)[0] if brain["id"] in brains)
-    try:
-        chats = (Path(os.environ.get("HERMES_HOME", "")) / "state.db").stat().st_size
-    except OSError:
-        chats = 0
-    return count(workspace.get("bytes")) + chosen + chats
+    return count(workspace.get("bytes")) + chosen + chat_store_bytes()
 
 
 def _start_export(brains, sites):
@@ -383,8 +412,7 @@ def _start_export(brains, sites):
                 argv += ["--site", site["slug"]]
             if site["owned"] and site["slug"] not in sites:
                 argv += ["--leave-out-site", site["slug"]]
-        current = start("export", argv, choices={"brains": brains, "sites": sites})
-        return JSONResponse({"version": 1, "export": export_view(current)}, 202, HEADERS)
+        return started("export", argv, export_view, choices={"brains": brains, "sites": sites})
 
 
 def _delete_export():

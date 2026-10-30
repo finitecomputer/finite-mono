@@ -13,8 +13,10 @@ import json
 import os
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -36,6 +38,51 @@ NOTE_TOKEN = "ghp_" + "Z9" * 18
 LOG_TOKEN = "xoxb-" + "4" * 40
 ARCHIVED_KEY = "sk-" + "q8" * 24
 LONG_JWT = "eyJ" + "h" * 40 + "." + "p" * 8000 + "." + "s" * 40
+CRON_TOKEN = "ghp_" + "C7" * 18
+STORE_TOKEN = "glpat-" + "m3" * 12
+UTF16_TOKEN = "hf_" + "u16" * 11
+DATABASE_KEY = "AKIA" + "QZ7D" * 4
+SKILL_TOKEN = "github_pat_" + "S5" * 12
+KEY_BODY = "MIIEpAIBAAKCAQEA" + "k" * 64
+DELETED_TOKEN = "sk_live_" + "d3" * 12
+WAL_TOKEN = "xoxp-" + "w4l" * 5
+LEDGER_TOKEN = "glpat-" + "L6" * 12
+VAULT_TOKEN = "rk_live_" + "V2" * 10
+PRIVATE_KEY = f"-----BEGIN RSA PRIVATE KEY-----\n{KEY_BODY}\n-----END RSA PRIVATE KEY-----"
+SECRETS = (
+    OPENROUTER_KEY, TELEGRAM_TOKEN, IDENTITY_SECRET, NOTE_TOKEN, LOG_TOKEN, ARCHIVED_KEY, LONG_JWT,
+    CRON_TOKEN, STORE_TOKEN, UTF16_TOKEN, DATABASE_KEY, SKILL_TOKEN, KEY_BODY, DELETED_TOKEN,
+    WAL_TOKEN, LEDGER_TOKEN, VAULT_TOKEN,
+)  # fmt: skip
+
+
+def readable(data):
+    """The bytes, plus what is inside: archive members, UTF-16 text and
+    every value in a SQLite database, recursively."""
+    yield data
+    if data.startswith((b"\xff\xfe", b"\xfe\xff")):
+        yield data.decode("utf-16", "ignore").encode()
+    if data.startswith(b"SQLite format 3\x00"):
+        with tempfile.NamedTemporaryFile() as copy:
+            copy.write(data)
+            copy.flush()
+            database = sqlite3.connect(copy.name)
+            names = database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            for (name,) in names.fetchall():
+                yield repr(database.execute(f'SELECT * FROM "{name}"').fetchall()).encode()
+            database.close()
+    if zipfile.is_zipfile(io.BytesIO(data)):
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            for member in archive.namelist():
+                yield from readable(archive.read(member))
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            for member in archive.getmembers():
+                if member.isfile():
+                    yield from readable(archive.extractfile(member).read())
+    except tarfile.TarError:
+        pass
+
 
 FAKE_FBRAIN = """
 import json, os, pathlib, sys, time
@@ -123,14 +170,42 @@ class AgentExportTests(unittest.TestCase):
         sessions.append_message("chat-1", "user", "Plan the garden for spring.")
         sessions.append_message("chat-1", "assistant", "Tomatoes along the south fence.")
         sessions.close()
+        (cls.hermes / "cron").mkdir(exist_ok=True)
+        job = {
+            "id": "water",
+            "name": "Water reminder",
+            # In JSON the token follows an escape (\r\n, \t): it must still be found.
+            "prompt": f"Read the sensor.\r\n{CRON_TOKEN}\tthen water.",
+        }
+        schedule = {"kind": "cron", "expr": "0 7 * * *", "display": "0 7 * * *"}
+        (cls.hermes / "cron/jobs.json").write_text(
+            json.dumps({"jobs": [{**job, "schedule": schedule, "enabled": True}]})
+        )
+        # Deleted, so not a live row, but its bytes stay in the file.
+        store = sqlite3.connect(cls.hermes / "memory_store.db")
+        store.execute("PRAGMA secure_delete = OFF")
+        store.execute("CREATE TABLE facts (content TEXT)")
+        store.execute("INSERT INTO facts VALUES (?)", (f"Deploy {STORE_TOKEN} {DELETED_TOKEN}",))
+        store.commit()
+        store.execute("DELETE FROM facts")
+        store.execute("INSERT INTO facts VALUES (?)", ("The garden faces south.",))
+        store.commit()
+        store.close()
         (cls.hermes / "SOUL.md").write_text("You are Moss, a careful gardener's agent.\n")
         (cls.hermes / "memories").mkdir(exist_ok=True)
-        (cls.hermes / "memories/MEMORY.md").write_text("The garden faces south.\n")
+        (cls.hermes / "memories/MEMORY.md").write_text(
+            f"The garden faces south.\n§\nThe deploy key:\n{PRIVATE_KEY}\n"
+        )
         skill = cls.hermes / "skills/garden/seed-planner"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text(
             "---\nname: seed-planner\ndescription: Plan seed starts.\n---\nCount weeks back.\n"
         )
+        with tarfile.open(skill / "assets.tar.gz", "w:gz") as bundle:
+            note = f"github {SKILL_TOKEN}\n".encode()
+            entry = tarfile.TarInfo("notes.txt")
+            entry.size = len(note)
+            bundle.addfile(entry, io.BytesIO(note))
         (cls.hermes / ".env").write_text(f"OPENROUTER_API_KEY={OPENROUTER_KEY}\n")
         (cls.hermes / "config.yaml").write_text(
             f"gateway:\n  platforms:\n    telegram:\n      token: {TELEGRAM_TOKEN}\n"
@@ -152,6 +227,34 @@ class AgentExportTests(unittest.TestCase):
         (workspace / "notes/session.log").write_text(log)
         (workspace / "data").mkdir()
         (workspace / "data/minified.json").write_text("0" * (17 * MiB))
+        (workspace / "notes/windows.txt").write_text(f"token {UTF16_TOKEN}\r\n", encoding="utf-16")
+        (workspace / "notes/seeds.txt").write_text("Tomato, basil\r\n", encoding="utf-16")
+        # Checkpointed into the main file, then replaced in a write-ahead log
+        # this test keeps open: the live row is clean, the main file isn't.
+        cls.journal = sqlite3.connect(workspace / "data/journal.db")
+        cls.journal.execute("PRAGMA journal_mode = WAL")
+        cls.journal.execute("PRAGMA wal_autocheckpoint = 0")
+        cls.journal.execute("CREATE TABLE notes (body TEXT)")
+        cls.journal.execute("INSERT INTO notes VALUES (?)", (f"slack {WAL_TOKEN}",))
+        cls.journal.commit()
+        cls.journal.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        cls.journal.execute("UPDATE notes SET body = 'compost'")
+        cls.journal.commit()
+        # `#` would start a fragment in an unescaped SQLite URI.
+        databases = (
+            ("plants.db", "basil"),
+            ("keys.db", f"aws {DATABASE_KEY}"),
+            ("ledger.db", f"gitlab {LEDGER_TOKEN}"),
+            ("ledger.db#notes", "rake leaves"),
+            ("project#garden.db", "plant garlic"),
+            ("vault#keys.db", f"stripe {VAULT_TOKEN}"),
+        )
+        for name, value in databases:
+            database = sqlite3.connect(workspace / "data" / name)
+            database.execute("CREATE TABLE notes (body TEXT)")
+            database.execute("INSERT INTO notes VALUES (?)", (value,))
+            database.commit()
+            database.close()
         (workspace / "backups").mkdir()
         with zipfile.ZipFile(workspace / "backups/old-laptop.zip", "w") as backup:
             backup.writestr(".env", f"OPENAI_API_KEY={ARCHIVED_KEY}\n")
@@ -164,6 +267,7 @@ class AgentExportTests(unittest.TestCase):
         (workspace / "app/node_modules/left-pad/index.js").write_text("module.exports = 1;\n")
         (workspace / "finite-export").mkdir()
         (workspace / "finite-export/earlier-export.zip").write_bytes(b"PK earlier export")
+        (workspace / "finite-export/last-build.json").write_text('{"zip": "earlier-export.zip"}')
         brain = workspace / "finitebrain" / PERSONAL
         brain.mkdir(parents=True)
         (brain / "garden.md").write_text("# Garden\nCompost every autumn.\n")
@@ -227,6 +331,7 @@ class AgentExportTests(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
+        cls.journal.close()
         cls.stop_jobs()
         cls.environment.stop()
         cls.scratch.cleanup()
@@ -311,7 +416,7 @@ class AgentExportTests(unittest.TestCase):
         )
         # Media and large files count; dependencies, archives and earlier exports
         # don't. The survey judges secrets by name; the copy reads every text file.
-        self.assertEqual(summary["files"], 8)
+        self.assertEqual(summary["files"], 19)
         self.assertGreater(summary["fileBytes"], 36 * MiB)
 
         response = self.start_export([PERSONAL], ["recipes"])
@@ -338,11 +443,10 @@ class AgentExportTests(unittest.TestCase):
         self.assertEqual(resumed.status_code, 206)
         self.assertEqual(resumed.content, download.content[100:200])
 
-        for secret in (
-            OPENROUTER_KEY, TELEGRAM_TOKEN, IDENTITY_SECRET, NOTE_TOKEN, LOG_TOKEN, ARCHIVED_KEY,
-            LONG_JWT,
-        ):  # fmt: skip
-            self.assertNotIn(secret.encode(), download.content)
+        # Compressed members, nested archives, UTF-16 and databases included.
+        contents = list(readable(download.content))
+        for secret in SECRETS:
+            self.assertFalse(any(secret.encode() in blob for blob in contents), secret[:12])
         with zipfile.ZipFile(io.BytesIO(download.content)) as archive:
             names = set(archive.namelist())
             manifest = json.loads(archive.read("manifest.json"))
@@ -362,8 +466,24 @@ class AgentExportTests(unittest.TestCase):
                 "chats/index.json",
                 "agent/SOUL.md",
                 "memories/MEMORY.md",
+                "workspace/notes/seeds.txt",
+                "workspace/data/plants.db",
+                "workspace/data/journal.db",
+                "memories/memory_store.db",
+                "cron/jobs.json",
             ):
                 self.assertIn(name, names)
+            # Credentials are removed from text the import reads, not the text itself.
+            memory = archive.read("memories/MEMORY.md").decode()
+            self.assertIn("The garden faces south.", memory)
+            self.assertIn("[REDACTED]", memory)
+            index = json.loads(archive.read("cron/index.json"))
+            self.assertEqual(index["jobs"][0]["name"], "Water reminder")
+            self.assertIn("[REDACTED]", index["jobs"][0]["prompt"])
+            self.assertIn(
+                "[REDACTED]", json.loads(archive.read("cron/jobs.json"))["jobs"][0]["prompt"]
+            )
+            self.assertIn("Chats are as they were", archive.read("README.md").decode())
             leaked = [
                 name
                 for name in names
@@ -379,7 +499,7 @@ class AgentExportTests(unittest.TestCase):
                     )
                 )
                 or "node_modules" in name
-                or "earlier-export" in name
+                or name.startswith("workspace/finite-export/")
                 or name.startswith(
                     ("brains/team-garden", "sites/team-site", "workspace/finitebrain")
                 )
@@ -388,8 +508,35 @@ class AgentExportTests(unittest.TestCase):
             skipped = {
                 entry.get("kind") or entry["path"]: entry["reason"] for entry in manifest["skipped"]
             }
-            for name in ("keys.txt", "service.log", "session.log"):
-                self.assertEqual(skipped[f"workspace/notes/{name}"], "looks like it holds a secret")
+            for name in (
+                "workspace/notes/keys.txt",
+                "workspace/notes/service.log",
+                "workspace/notes/session.log",
+                "workspace/notes/windows.txt",
+                "workspace/data/keys.db",
+                "workspace/data/ledger.db",
+                "workspace/data/vault#keys.db",
+            ):
+                self.assertEqual(skipped[name], "looks like it holds a secret", name)
+            # Each database exports its own rows, whatever its name holds.
+            for name, body in (
+                ("ledger.db#notes", "rake leaves"),
+                ("project#garden.db", "plant garlic"),
+            ):
+                copy = sqlite3.connect(":memory:")
+                copy.deserialize(archive.read(f"workspace/data/{name}"))
+                self.assertEqual(copy.execute("SELECT body FROM notes").fetchall(), [(body,)], name)
+            self.assertFalse((self.workspace / "data/project").exists())
+            stray = {"workspace/data/ledger.db", "workspace/data/project", "workspace/data/vault"}
+            self.assertEqual(stray & names, set())
+            for name in ("workspace/data/journal.db-wal", "workspace/data/journal.db-shm"):
+                self.assertIn("part of a database", skipped[name])
+            journal = sqlite3.connect(":memory:")
+            journal.deserialize(archive.read("workspace/data/journal.db"))
+            self.assertEqual(journal.execute("SELECT body FROM notes").fetchall(), [("compost",)])
+            [skill_archive] = [name for name in skipped if name.endswith("/assets.tar.gz")]
+            self.assertTrue(skill_archive.startswith("skills/"), skill_archive)
+            self.assertIn("an archive", skipped[skill_archive])
             self.assertEqual(
                 skipped["workspace/data/minified.json"], "a line too long to check for credentials"
             )
@@ -404,6 +551,12 @@ class AgentExportTests(unittest.TestCase):
 
     def test_choices_are_checked_before_anything_runs(self):
         self.assertEqual(self.start_export([], []).json(), {"error": "surveyFirst"})
+        with patch("shutil.disk_usage", return_value=SimpleNamespace(free=0)):
+            response = self.client.post(f"{BASE}/survey")
+        self.assertEqual(
+            (response.status_code, response.json()), (507, {"error": "notEnoughSpace"})
+        )
+        self.assertIsNone(self.status()["survey"])
         self.survey()
         bad = (
             {"brains": [PERSONAL]},
@@ -452,6 +605,43 @@ class AgentExportTests(unittest.TestCase):
             self.assertEqual(self.status()["export"]["state"], "failed")
         self.assertFalse((self.agent / "exports/export/tmp").exists())
         self.assert_stopped(record["pid"])
+
+    def test_a_running_survey_stops_before_the_shared_disk_runs_low(self):
+        (self.fixtures / "slow").touch()
+        self.assertEqual(self.client.post(f"{BASE}/survey").status_code, 202)
+        record = json.loads((self.agent / "exports/survey/job.json").read_text())
+        with patch("shutil.disk_usage", return_value=SimpleNamespace(free=0)):
+            self.assertEqual(self.status()["survey"]["state"], "failed")
+        self.assert_stopped(record["pid"])
+
+    def test_a_job_whose_record_cannot_be_kept_is_stopped(self):
+        for method in ("write_text", "replace"):
+            with self.subTest(method):
+                self.start_without_a_record(method)
+
+    def start_without_a_record(self, method):
+        spawned, real_popen, real = [], subprocess.Popen, getattr(Path, method)
+
+        def spy(*args, **kwargs):
+            spawned.append(real_popen(*args, **kwargs))
+            return spawned[-1]
+
+        def full(path, *args, **kwargs):
+            if path.name == "job.json.part":
+                raise OSError(errno.ENOSPC, "No space left on device")
+            return real(path, *args, **kwargs)
+
+        (self.fixtures / "slow").touch()
+        with patch("subprocess.Popen", side_effect=spy), patch.object(Path, method, full):
+            response = self.client.post(f"{BASE}/survey")
+        self.assertEqual(
+            (response.status_code, response.json()), (507, {"error": "notEnoughSpace"})
+        )
+        [child] = spawned
+        self.assertIsNotNone(child.returncode)  # killed and reaped
+        self.assert_stopped(child.pid)
+        self.assertFalse((self.agent / "exports/survey").exists())
+        self.assertIsNone(self.status()["survey"])
 
     def test_a_full_disk_still_stops_the_export(self):
         self.survey()

@@ -26,6 +26,7 @@ never copies a credential: the new agent signs in to everything again.
 from __future__ import annotations
 
 import argparse
+import codecs
 import datetime
 import hashlib
 import json
@@ -237,6 +238,10 @@ TOKEN_SHAPES = re.compile(
     r"|(?P<hook>discord(?:app)?\.com/api/webhooks/\d+/[\w-]+)"
     r"|(?P<url>https?://[^\s/:@]+:(?P<password>[^\s/@]+)@)"
 )
+# A whole private key, its body too, wherever text is redacted rather than left out.
+PRIVATE_KEY_BLOCK = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL
+)
 PLACEHOLDER = re.compile(
     r"x{4,}|\*{4,}|\.{3}|[<>${}]|your|example|placeholder|redacted|changeme", re.IGNORECASE
 )
@@ -398,25 +403,98 @@ def secret_in_string(text):
     return any(is_secret(match) for match in TOKEN_SHAPES.finditer(text))
 
 
-def secret_in_text(path):
-    """Why a text file of any size stays out for a credential, or None.
+def readonly_uri(path):
+    """A read-only SQLite URI for a path, escaped so `#` or `?` in a file
+    name can't turn into a fragment or query and open another file."""
+    return Path(path).resolve().as_uri() + "?mode=ro"
 
-    Read in chunks. No credential holds whitespace (only a private key's
-    header, which is short), so each chunk carries the unfinished word before
-    it and the last 4 KiB into the next: a match is never split. A word too
-    long to carry can't be checked, so it keeps the file out."""
+
+def secret_in_database(path):
+    """Why a SQLite database stays out for a credential, or None. Every value
+    in every table is read, the full-text index's included."""
+    try:
+        conn = sqlite3.connect(readonly_uri(path), uri=True)
+        try:
+            names = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            for (name,) in names:
+                quoted = '"' + name.replace('"', '""') + '"'
+                for row in conn.execute(f"SELECT * FROM {quoted}"):
+                    for value in row:
+                        if isinstance(value, bytes):
+                            value = value.decode("utf-8", "ignore")
+                        if isinstance(value, str) and secret_in_string(value):
+                            return "looks like it holds a secret"
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return "a database that can't be checked for credentials"
+    return None
+
+
+def is_database(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(16) == b"SQLite format 3\x00"
+    except OSError:
+        return False
+
+
+def compact_database(source, target):
+    """Rebuild a SQLite database from its live rows into `target`, then check
+    that copy, which is the one exported: deleted rows, free pages and a
+    write-ahead log never come along. Why it stays out, or None."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.unlink(missing_ok=True)
+    try:
+        conn = sqlite3.connect(readonly_uri(source), uri=True)
+        try:
+            conn.execute("VACUUM INTO ?", (str(target),))
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        target.unlink(missing_ok=True)
+        return "a database that can't be checked for credentials"
+    reason = secret_in_database(target)
+    if reason:
+        target.unlink(missing_ok=True)
+    return reason
+
+
+def sidecar_reason(path):
+    """A database's write-ahead log, shared memory or journal: the database
+    goes in rebuilt, so these never do."""
+    for suffix in ("-wal", "-shm", "-journal"):
+        if path.name.endswith(suffix) and path.with_name(path.name[: -len(suffix)]).is_file():
+            return "part of a database: its live rows are exported in it"
+    return None
+
+
+def secret_in_file(path):
+    """Why a file stays out for a credential, or None. Text in UTF-8, or in
+    UTF-16 with a byte order mark, is read whatever its size. A SQLite
+    database is checked when it is copied (compact_database); other binary
+    files are not read.
+
+    No credential holds whitespace (only a private key's header, which is
+    short), so each chunk carries the unfinished word before it and the last
+    4 KiB into the next: a match is never split. A word too long to carry
+    can't be checked, so it keeps the file out."""
     try:
         with open(path, "rb") as handle:
             chunk = handle.read(MiB)
-            if b"\x00" in chunk[:8192]:
+            if chunk.startswith((b"\xff\xfe", b"\xfe\xff")):
+                decoder = codecs.getincrementaldecoder("utf-16")("ignore")
+            elif b"\x00" in chunk[:8192]:
                 return None
-            carry = b""
+            else:
+                decoder = codecs.getincrementaldecoder("utf-8")("ignore")
+            carry = ""
             while chunk:
-                data = carry + chunk
-                if secret_in_string(data.decode("utf-8", "ignore")):
+                text = carry + decoder.decode(chunk)
+                if secret_in_string(text):
                     return "looks like it holds a secret"
-                space = max(data.rfind(byte) for byte in (b" ", b"\n", b"\r", b"\t", b"\f", b"\v"))
-                carry = data[min(space + 1, max(len(data) - 4096, 0)) :]
+                space = max(text.rfind(character) for character in " \n\r\t\f\v")
+                carry = text[min(space + 1, max(len(text) - 4096, 0)) :]
                 if len(carry) > SCAN_CARRY_MAX:
                     return "a line too long to check for credentials"
                 chunk = handle.read(MiB)
@@ -425,7 +503,25 @@ def secret_in_text(path):
     return None
 
 
+def archive_reason(path):
+    if path.suffix.lower() in ARCHIVES:
+        return "an archive: the files inside it can't be checked for credentials"
+    return None
+
+
+def redact_values(value):
+    """Decoded JSON with credentials replaced in every string, keys too."""
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, list):
+        return [redact_values(item) for item in value]
+    if isinstance(value, dict):
+        return {redact_values(key): redact_values(item) for key, item in value.items()}
+    return value
+
+
 def redact_text(text):
+    text = PRIVATE_KEY_BLOCK.sub("[REDACTED]", text)
     return TOKEN_SHAPES.sub(
         lambda match: "[REDACTED]" if is_secret(match) else match.group(0), text
     )
@@ -433,7 +529,13 @@ def redact_text(text):
 
 def leave_out_reason(path, max_bytes):
     """Why a file stays out of the zip, or None."""
-    return secret_reason(path.name) or too_large(path, max_bytes) or secret_in_text(path)
+    return (
+        secret_reason(path.name)
+        or archive_reason(path)
+        or sidecar_reason(path)
+        or too_large(path, max_bytes)
+        or secret_in_file(path)
+    )
 
 
 def sha256_file(path):
@@ -494,9 +596,14 @@ class Stage:
         self.write_text(relative, text + "\n")
 
     def copy(self, source, relative):
+        """Copy one file, or say why it stays out: a database is rebuilt
+        from its live rows and checked."""
         target = self.root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
+        if is_database(source):
+            return compact_database(source, target)
         shutil.copyfile(source, target)
+        return None
 
     def skip(self, relative, reason, size=None):
         entry = {"path": str(relative), "reason": reason}
@@ -529,11 +636,10 @@ class Stage:
             try:
                 if set_aside(path, target):
                     continue
-                reason = leave_out_reason(path, max_bytes)
+                reason = leave_out_reason(path, max_bytes) or self.copy(path, target)
                 if reason:
                     self.skip(target, reason, path.stat().st_size)
                     continue
-                self.copy(path, target)
             except OSError as error:
                 self.skip(target, f"could not be read: {error.strerror or error}")
                 continue
@@ -643,8 +749,11 @@ def export_memories(paths, stage, max_bytes):
         copied.append(path.name)
     store = paths.hermes_home / "memory_store.db"
     if store.is_file():
-        snapshot_sqlite(store, stage.root / "memories" / "memory_store.db")
-        copied.append("memory_store.db")
+        reason = compact_database(store, stage.root / "memories" / "memory_store.db")
+        if reason:
+            stage.skip("memories/memory_store.db", reason, store.stat().st_size)
+        else:
+            copied.append("memory_store.db")
     return {"files": copied}
 
 
@@ -1445,11 +1554,15 @@ def export_cron(paths, stage, max_bytes):
     jobs = [normalize_job(paths, job, zone) for job in load_jobs(paths)]
     raw = paths.hermes_home / "cron" / "jobs.json"
     if raw.is_file():
-        stage.copy(raw, "cron/jobs.json")
+        data = read_json(raw)
+        if data is None:
+            stage.skip("cron/jobs.json", "not valid JSON, so it can't be checked for credentials")
+        else:
+            stage.write_json("cron/jobs.json", redact_values(data))
     scripts = paths.hermes_home / "scripts"
     if scripts.is_dir():
         stage.copy_tree(scripts, "cron/scripts", skip_common, max_bytes)
-    stage.write_json("cron/index.json", {"jobs": jobs})
+    stage.write_json("cron/index.json", redact_values({"jobs": jobs}))
     return {"jobs": len(jobs)}
 
 
@@ -1544,7 +1657,13 @@ def asset_refusal(local, allowed, private, max_bytes):
         return "not on this computer"
     if local.is_symlink() or not within(local, allowed) or within(local, private):
         return "outside the workspace: left as a link"
-    return secret_reason(local.name) or too_large(local, max_bytes) or secret_in_text(local)
+    return (
+        secret_reason(local.name)
+        or archive_reason(local)
+        or ("a database: left as a link" if is_database(local) else None)
+        or too_large(local, max_bytes)
+        or secret_in_file(local)
+    )
 
 
 def copy_asset(note, resource, prefix, stage, limits):
@@ -2053,8 +2172,10 @@ def readme(profile, counts, choices):
         f"# {profile.get('name', 'Agent')}, exported from the old Finite",
         "",
         f"Made {now_iso()} by export.py ({FORMAT}). manifest.json lists every file and its SHA-256,",
-        "what was left out and why. No password, key or token is in this zip:",
-        "the new agent signs in to everything again.",
+        "what was left out and why. Credential files are not in it, credentials are",
+        "removed from memories and scheduled jobs, and other files that may hold one",
+        "were left out. Chats are as they were: anything pasted into a chat is here.",
+        "The new agent signs in to everything again.",
         "",
         f"- Conversations: {counts.get('chats', {}).get('conversations', 0)}",
         f"- Skills: {counts.get('skills', {}).get('skills', 0)}",
