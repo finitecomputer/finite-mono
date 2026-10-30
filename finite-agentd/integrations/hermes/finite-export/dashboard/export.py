@@ -410,11 +410,15 @@ def readonly_uri(path):
 
 
 def secret_in_database(path):
-    """Why a SQLite database stays out for a credential, or None. Every value
-    in every table is read, the full-text index's included."""
+    """Why a SQLite database stays out for a credential, or None. Its schema
+    SQL (column defaults, views, triggers) and every value in every table are
+    read, the full-text index's included."""
     try:
         conn = sqlite3.connect(readonly_uri(path), uri=True)
         try:
+            for (sql,) in conn.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"):
+                if secret_in_string(sql):
+                    return "looks like it holds a secret"
             names = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
             for (name,) in names:
                 quoted = '"' + name.replace('"', '""') + '"'
