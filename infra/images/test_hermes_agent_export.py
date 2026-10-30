@@ -48,11 +48,14 @@ DELETED_TOKEN = "sk_live_" + "d3" * 12
 WAL_TOKEN = "xoxp-" + "w4l" * 5
 LEDGER_TOKEN = "glpat-" + "L6" * 12
 VAULT_TOKEN = "rk_live_" + "V2" * 10
+DEFAULT_TOKEN = "ghp_" + "Df4" * 8
+VIEW_TOKEN = "hf_" + "Vw9" * 11
+TRIGGER_TOKEN = "github_pat_" + "Tr8" * 8
 PRIVATE_KEY = f"-----BEGIN RSA PRIVATE KEY-----\n{KEY_BODY}\n-----END RSA PRIVATE KEY-----"
 SECRETS = (
     OPENROUTER_KEY, TELEGRAM_TOKEN, IDENTITY_SECRET, NOTE_TOKEN, LOG_TOKEN, ARCHIVED_KEY, LONG_JWT,
     CRON_TOKEN, STORE_TOKEN, UTF16_TOKEN, DATABASE_KEY, SKILL_TOKEN, KEY_BODY, DELETED_TOKEN,
-    WAL_TOKEN, LEDGER_TOKEN, VAULT_TOKEN,
+    WAL_TOKEN, LEDGER_TOKEN, VAULT_TOKEN, DEFAULT_TOKEN, VIEW_TOKEN, TRIGGER_TOKEN,
 )  # fmt: skip
 
 
@@ -70,6 +73,7 @@ def readable(data):
             names = database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             for (name,) in names.fetchall():
                 yield repr(database.execute(f'SELECT * FROM "{name}"').fetchall()).encode()
+            yield repr(database.execute("SELECT sql FROM sqlite_master").fetchall()).encode()
             database.close()
     if zipfile.is_zipfile(io.BytesIO(data)):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -249,6 +253,17 @@ class AgentExportTests(unittest.TestCase):
             ("project#garden.db", "plant garlic"),
             ("vault#keys.db", f"stripe {VAULT_TOKEN}"),
         )
+        # No rows at all: the credential lives only in the schema SQL.
+        schemas = {
+            "defaults.db": f"CREATE TABLE settings (token TEXT DEFAULT '{DEFAULT_TOKEN}')",
+            "views.db": f"CREATE VIEW login AS SELECT '{VIEW_TOKEN}' AS token",
+            "triggers.db": "CREATE TABLE log (entry TEXT); CREATE TRIGGER stamp AFTER INSERT ON log"
+            f" BEGIN UPDATE log SET entry = '{TRIGGER_TOKEN}'; END",
+        }
+        for name, schema in schemas.items():
+            database = sqlite3.connect(workspace / "data" / name)
+            database.executescript(schema)
+            database.close()
         for name, value in databases:
             database = sqlite3.connect(workspace / "data" / name)
             database.execute("CREATE TABLE notes (body TEXT)")
@@ -416,7 +431,7 @@ class AgentExportTests(unittest.TestCase):
         )
         # Media and large files count; dependencies, archives and earlier exports
         # don't. The survey judges secrets by name; the copy reads every text file.
-        self.assertEqual(summary["files"], 19)
+        self.assertEqual(summary["files"], 22)
         self.assertGreater(summary["fileBytes"], 36 * MiB)
 
         response = self.start_export([PERSONAL], ["recipes"])
@@ -516,6 +531,9 @@ class AgentExportTests(unittest.TestCase):
                 "workspace/data/keys.db",
                 "workspace/data/ledger.db",
                 "workspace/data/vault#keys.db",
+                "workspace/data/defaults.db",
+                "workspace/data/views.db",
+                "workspace/data/triggers.db",
             ):
                 self.assertEqual(skipped[name], "looks like it holds a secret", name)
             # Each database exports its own rows, whatever its name holds.
