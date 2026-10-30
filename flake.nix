@@ -353,6 +353,7 @@
                 chmod -R u+w "$plugins"
                 cp -R ${./finite-brain/integrations/hermes/finite-brain} "$plugins/finite-brain"
                 cp -R ${./finite-sites/integrations/hermes/finite-sites} "$plugins/finite-sites"
+                cp -R ${./finite-agentd/integrations/hermes/finite-export} "$plugins/finite-export"
                 chmod -R u+w "$plugins"
               '';
             });

@@ -1,0 +1,8 @@
+{
+  "name": "finite-export",
+  "label": "Finite Export",
+  "description": "Owner-started export of the whole agent for the Finite dashboard",
+  "version": "1.0.0",
+  "tab": {"hidden": true},
+  "api": "plugin_api.py"
+}

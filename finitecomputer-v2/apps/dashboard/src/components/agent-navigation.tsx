@@ -7,6 +7,7 @@ import {
   BrainIcon,
   Building2Icon,
   CreditCardIcon,
+  DownloadIcon,
   Globe2Icon,
   LogOutIcon,
   MoreHorizontalIcon,
@@ -65,6 +66,12 @@ export function AgentNavigation({
       href: `/dashboard/skills?machine=${encodeURIComponent(machineId)}`,
       icon: WrenchIcon,
       active: pathname === "/dashboard/skills",
+    },
+    {
+      label: "Export",
+      href: `${root}/export`,
+      icon: DownloadIcon,
+      active: pathname === `${root}/export`,
     },
   ];
 
