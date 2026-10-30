@@ -25,10 +25,17 @@ iptables -t raw -L PREROUTING -nvx --line-numbers
 ```
 
 The TCP probe requires the exact barrier to be the first raw PREROUTING rule,
-MPTCP disabled, the guard service active, and its attachment to the boot target.
+MPTCP disabled, the guard service active, and a persistent unit plus matching
+boot dependency on disk. A loaded `WantedBy` property alone is insufficient:
+runtime-enabled units and dependencies under `/run` disappear on reboot.
 Green means the mitigation is present, not that the kernel is patched. Compare
 `uname -r` after reboot against the reviewed fixed kernel artifact. No reboot
 or product-service restart is needed to install the filter itself.
+
+Reapplying the guard repairs ordering by inserting a new first rule whenever
+the existing barrier is absent or below another rule. It keeps older copies
+instead of deleting by rule number, preserving protection and unrelated rules
+throughout the repair. Repeated application with the barrier first adds nothing.
 
 ## Emergency service and declarative handoff
 
@@ -83,8 +90,11 @@ unit and exact rule, and restore the recorded pre-change MPTCP value:
 ```sh
 systemctl stop finite-cve-2026-98432.service
 # Remove its boot symlink/unit using the operator or declarative owner above.
-iptables -w 10 -t raw -D PREROUTING -p tcp -m u32 --u32 '0>>24&0xF=6:15' \
-  -m comment --comment finite-cve-2026-98432 -j DROP
+while iptables -w 10 -t raw -C PREROUTING -p tcp -m u32 --u32 '0>>24&0xF=6:15' \
+  -m comment --comment finite-cve-2026-98432 -j DROP; do
+  iptables -w 10 -t raw -D PREROUTING -p tcp -m u32 --u32 '0>>24&0xF=6:15' \
+    -m comment --comment finite-cve-2026-98432 -j DROP
+done
 sysctl -w net.mptcp.enabled="$(cat /run/finite-cve-2026-98432/mptcp-before)"
 ```
 
