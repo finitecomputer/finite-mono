@@ -3,12 +3,17 @@
 
     python3 export.py survey
     python3 export.py build [--brain ID]... [--site SLUG]... [--leave-out-site SLUG]...
-                            [--no-workspace] [--max-file-mb N] [--out DIR]
+                            [--no-workspace] [--max-file-mb N] [--out DIR] [--everything]
 
 `survey` changes nothing: it prints, as JSON, what there is to export and
 what to ask the person. `build` writes the zip and prints, as JSON, where
 it is and whether it fits in one chat attachment. export.md, served
 beside this file, is the format and the rules.
+
+`--everything` is the dashboard's export, which is downloaded rather than
+attached: the workspace keeps its media and binaries, and no file is too
+large. Credentials, build output and dependencies stay out either way, and
+so do archives, whose contents can't be checked for credentials.
 
 Each command tells the move site it ran (`report`, below): the agent's
 ids and name, its owners' account ids and counts, never contents.
@@ -177,6 +182,12 @@ MEDIA_AND_BINARIES = {
     ".wasm",
     ".map",
 }
+# Of those, the ones that hold other files the export can't check for
+# credentials: left out of the workspace even with --everything.
+ARCHIVES = {
+    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar", ".dmg", ".iso",
+    ".img", ".pkg", ".deb", ".rpm", ".apk", ".ipa", ".msi", ".jar", ".war", ".whl",
+}  # fmt: skip
 # How many of a kind's files (its largest) or folders the manifest names.
 KIND_EXAMPLES = 10
 # A workspace bigger than this, after what is left out by kind, can't
@@ -230,6 +241,8 @@ PLACEHOLDER = re.compile(
     r"x{4,}|\*{4,}|\.{3}|[<>${}]|your|example|placeholder|redacted|changeme", re.IGNORECASE
 )
 SCAN_MAX_BYTES = 2 * MiB
+# The longest unbroken run of text the credential scan carries between chunks.
+SCAN_CARRY_MAX = 16 * MiB
 
 
 @dataclass(frozen=True)
@@ -386,16 +399,30 @@ def secret_in_string(text):
 
 
 def secret_in_text(path):
-    """Whether a text file holds something shaped like a credential."""
+    """Why a text file of any size stays out for a credential, or None.
+
+    Read in chunks. No credential holds whitespace (only a private key's
+    header, which is short), so each chunk carries the unfinished word before
+    it and the last 4 KiB into the next: a match is never split. A word too
+    long to carry can't be checked, so it keeps the file out."""
     try:
-        if path.stat().st_size > SCAN_MAX_BYTES:
-            return False
-        data = path.read_bytes()
+        with open(path, "rb") as handle:
+            chunk = handle.read(MiB)
+            if b"\x00" in chunk[:8192]:
+                return None
+            carry = b""
+            while chunk:
+                data = carry + chunk
+                if secret_in_string(data.decode("utf-8", "ignore")):
+                    return "looks like it holds a secret"
+                space = max(data.rfind(byte) for byte in (b" ", b"\n", b"\r", b"\t", b"\f", b"\v"))
+                carry = data[min(space + 1, max(len(data) - 4096, 0)) :]
+                if len(carry) > SCAN_CARRY_MAX:
+                    return "a line too long to check for credentials"
+                chunk = handle.read(MiB)
     except OSError:
-        return False
-    if b"\x00" in data[:8192]:
-        return False
-    return secret_in_string(data.decode("utf-8", "ignore"))
+        return None
+    return None
 
 
 def redact_text(text):
@@ -406,11 +433,7 @@ def redact_text(text):
 
 def leave_out_reason(path, max_bytes):
     """Why a file stays out of the zip, or None."""
-    return (
-        secret_reason(path.name)
-        or too_large(path, max_bytes)
-        or ("looks like it holds a secret" if secret_in_text(path) else None)
-    )
+    return secret_reason(path.name) or too_large(path, max_bytes) or secret_in_text(path)
 
 
 def sha256_file(path):
@@ -1521,11 +1544,7 @@ def asset_refusal(local, allowed, private, max_bytes):
         return "not on this computer"
     if local.is_symlink() or not within(local, allowed) or within(local, private):
         return "outside the workspace: left as a link"
-    return (
-        secret_reason(local.name)
-        or too_large(local, max_bytes)
-        or ("looks like it holds a secret" if secret_in_text(local) else None)
-    )
+    return secret_reason(local.name) or too_large(local, max_bytes) or secret_in_text(local)
 
 
 def copy_asset(note, resource, prefix, stage, limits):
@@ -1883,8 +1902,14 @@ def is_media_or_binary(path):
     return path.suffix.lower() in MEDIA_AND_BINARIES
 
 
+def is_archive(path):
+    return path.suffix.lower() in ARCHIVES
+
+
 def workspace_skipper(paths, out_dir, on_build_output=lambda relative: None):
-    left_out = {Path(p).resolve() for p in (paths.brain_root, out_dir)}
+    # The default output folder holds earlier exports, wherever this one goes.
+    earlier = paths.workspace / "finite-export"
+    left_out = {Path(p).resolve() for p in (paths.brain_root, out_dir, earlier)}
 
     def skip(relative, absolute):
         if is_build_output(relative, absolute):
@@ -1901,15 +1926,16 @@ def workspace_skipper(paths, out_dir, on_build_output=lambda relative: None):
     return skip
 
 
-def survey_workspace(paths, out_dir, max_bytes):
+def survey_workspace(paths, out_dir, max_bytes, keep_media=False):
     """What of the workspace would go in, and what is left out by kind
     without asking: build output, media and binaries, files too large."""
     build_output = []
     skip = workspace_skipper(paths, out_dir, build_output.append)
     found = list(walk_files(paths.workspace, skip)) if paths.workspace.is_dir() else []
     files = [(p, {"path": rel.as_posix(), "bytes": p.stat().st_size}) for p, rel in found]
-    media = [f for p, f in files if is_media_or_binary(p)]
-    rest = [f for p, f in files if not is_media_or_binary(p) and not secret_reason(p.name)]
+    set_aside = is_archive if keep_media else is_media_or_binary
+    media = [f for p, f in files if set_aside(p)]
+    rest = [f for p, f in files if not set_aside(p) and not secret_reason(p.name)]
     large = sorted((f for f in rest if f["bytes"] > max_bytes), key=lambda f: -f["bytes"])
     going = [f["bytes"] for f in rest if f["bytes"] <= max_bytes]
     return {
@@ -1925,13 +1951,15 @@ def survey_workspace(paths, out_dir, max_bytes):
     }
 
 
-def export_workspace(paths, stage, out_dir, max_bytes):
+def export_workspace(paths, stage, out_dir, max_bytes, keep_media=False):
     if not paths.workspace.is_dir():
         return {"files": 0, "bytes": 0}
     build_output, media = [], []
 
+    left_out = is_archive if keep_media else is_media_or_binary
+
     def set_aside(path, target):
-        if not is_media_or_binary(path):
+        if not left_out(path):
             return False
         media.append({"path": target, "bytes": path.stat().st_size})
         return True
@@ -1947,7 +1975,14 @@ def export_workspace(paths, stage, out_dir, max_bytes):
             "build output and dependencies: made again from their projects' source",
             folder_summary(build_output),
         )
-    if media:
+    if media and keep_media:
+        stage.skip_kind(
+            "workspace",
+            "archives",
+            "archives and installers: the files inside them can't be checked for credentials",
+            kind_summary(media),
+        )
+    elif media:
         stage.skip_kind(
             "workspace",
             "media_and_binaries",
@@ -1969,7 +2004,7 @@ def guarded(stage, name, step, default):
         return default
 
 
-def survey(paths, env, out_dir, max_bytes):
+def survey(paths, env, out_dir, max_bytes, keep_media=False):
     notes = Stage(tempfile.mkdtemp(prefix="finite-survey-"))
     try:
         brains, brain_error = guarded(notes, "brains", lambda: survey_brains(paths), ([], ""))
@@ -1987,7 +2022,10 @@ def survey(paths, env, out_dir, max_bytes):
             "brains": brains,
             "sites": sites,
             "workspace": guarded(
-                notes, "workspace", lambda: survey_workspace(paths, out_dir, max_bytes), {}
+                notes,
+                "workspace",
+                lambda: survey_workspace(paths, out_dir, max_bytes, keep_media),
+                {},
             ),
             "integrations": guarded(notes, "integrations", lambda: integrations(paths), {}),
         }
@@ -2058,7 +2096,9 @@ def make_zip(stage, target):
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(p for p in stage.root.rglob("*") if p.is_file()):
-            archive.write(path, path.relative_to(stage.root).as_posix())
+            # Media, archives and binaries are compressed already, or don't shrink.
+            kind = zipfile.ZIP_STORED if is_media_or_binary(path) else None
+            archive.write(path, path.relative_to(stage.root).as_posix(), compress_type=kind)
     return target
 
 
@@ -2072,8 +2112,13 @@ def largest_parts(target, limit=8):
     return [{"part": part, "bytes": size} for part, size in ranked]
 
 
+def file_limit(options):
+    """The largest file an export keeps: no limit with --everything."""
+    return float("inf") if options.everything else options.max_file_mb * MiB
+
+
 def build(paths, env, options):
-    max_bytes = options.max_file_mb * MiB
+    max_bytes = file_limit(options)
     out_dir = Path(options.out) if options.out else paths.workspace / "finite-export"
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "last-build.json").unlink(missing_ok=True)
@@ -2108,7 +2153,7 @@ def build(paths, env, options):
                 "workspace": guarded(
                     stage,
                     "workspace",
-                    lambda: export_workspace(paths, stage, out_dir, max_bytes),
+                    lambda: export_workspace(paths, stage, out_dir, max_bytes, options.everything),
                     {},
                 ),
             }
@@ -2120,7 +2165,8 @@ def build(paths, env, options):
             "sites": sites,
             "sites_left_out": sorted(set(options.leave_out_site)),
             "workspace": not options.no_workspace,
-            "max_file_mb": options.max_file_mb,
+            "max_file_mb": None if options.everything else options.max_file_mb,
+            "everything": options.everything,
         }
         stage.write_text("README.md", readme(profile, counts, choices))
         write_manifest(stage, profile, counts, choices)
@@ -2296,6 +2342,9 @@ def wrong_platform(where):
     return {"error": "wrong_platform", "platform": where, "message": message}
 
 
+EVERYTHING_HELP = "for a download: keep media and binaries, though not archives, at any size"
+
+
 def parse(argv):
     parser = argparse.ArgumentParser(
         description="Export this agent for the new Finite (see export.md)."
@@ -2303,6 +2352,7 @@ def parse(argv):
     commands = parser.add_subparsers(dest="command", required=True)
     survey_cmd = commands.add_parser("survey", help="what there is to export; changes nothing")
     survey_cmd.add_argument("--max-file-mb", type=int, default=DEFAULT_MAX_FILE_MB)
+    survey_cmd.add_argument("--everything", action="store_true", help=EVERYTHING_HELP)
     survey_cmd.add_argument(
         "--no-report", action="store_true", help="don't tell the move site this ran"
     )
@@ -2334,6 +2384,7 @@ def parse(argv):
     build_cmd.add_argument(
         "--out", help="the folder for the zip (default: <workspace>/finite-export)"
     )
+    build_cmd.add_argument("--everything", action="store_true", help=EVERYTHING_HELP)
     build_cmd.add_argument(
         "--no-report", action="store_true", help="don't tell the move site this ran"
     )
@@ -2353,7 +2404,7 @@ def main(argv=None):
         return WRONG_PLATFORM_EXIT
     if options.command == "survey":
         out_dir = paths.workspace / "finite-export"
-        found = survey(paths, os.environ, out_dir, options.max_file_mb * MiB)
+        found = survey(paths, os.environ, out_dir, file_limit(options), options.everything)
         result = reported(found, "survey", paths, os.environ, not options.no_report)
     else:
         result = reported(
