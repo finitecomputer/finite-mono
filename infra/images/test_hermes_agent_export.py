@@ -244,7 +244,7 @@ class AgentExportTests(unittest.TestCase):
         cls.journal.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         cls.journal.execute("UPDATE notes SET body = 'compost'")
         cls.journal.commit()
-        # `#` would start a fragment in an unescaped SQLite URI.
+        # `#` or `?` would start a fragment or query in an unescaped SQLite URI.
         databases = (
             ("plants.db", "basil"),
             ("keys.db", f"aws {DATABASE_KEY}"),
@@ -252,6 +252,8 @@ class AgentExportTests(unittest.TestCase):
             ("ledger.db#notes", "rake leaves"),
             ("project#garden.db", "plant garlic"),
             ("vault#keys.db", f"stripe {VAULT_TOKEN}"),
+            ("keys.db?draft", "rake beds"),
+            ("plants.db?keys", f"aws {DATABASE_KEY}"),
         )
         # No rows at all: the credential lives only in the schema SQL.
         schemas = {
@@ -431,7 +433,7 @@ class AgentExportTests(unittest.TestCase):
         )
         # Media and large files count; dependencies, archives and earlier exports
         # don't. The survey judges secrets by name; the copy reads every text file.
-        self.assertEqual(summary["files"], 22)
+        self.assertEqual(summary["files"], 24)
         self.assertGreater(summary["fileBytes"], 36 * MiB)
 
         response = self.start_export([PERSONAL], ["recipes"])
@@ -531,6 +533,7 @@ class AgentExportTests(unittest.TestCase):
                 "workspace/data/keys.db",
                 "workspace/data/ledger.db",
                 "workspace/data/vault#keys.db",
+                "workspace/data/plants.db?keys",
                 "workspace/data/defaults.db",
                 "workspace/data/views.db",
                 "workspace/data/triggers.db",
@@ -540,6 +543,7 @@ class AgentExportTests(unittest.TestCase):
             for name, body in (
                 ("ledger.db#notes", "rake leaves"),
                 ("project#garden.db", "plant garlic"),
+                ("keys.db?draft", "rake beds"),
             ):
                 copy = sqlite3.connect(":memory:")
                 copy.deserialize(archive.read(f"workspace/data/{name}"))
