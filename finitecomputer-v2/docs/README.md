@@ -8,6 +8,7 @@ Code and tests define implemented behavior. Plans and outstanding work live in
   and [health telemetry](runtime-management-contract-v1.md)
 - [SimpleX connections](simplex-platform.md)
 - [Hosted Hermes ingress](hosted-hermes-ingress.md)
+- [Agent export](agent-export.md)
 - [Admin operations](admin-ops-v0.md)
 - [Service ownership](service-dependencies.md)
 - [Runtime test matrix](hermes-runtime-test-matrix.md)
