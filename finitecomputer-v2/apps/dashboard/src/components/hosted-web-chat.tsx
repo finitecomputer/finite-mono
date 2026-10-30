@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import remarkGfm from "remark-gfm";
@@ -71,6 +72,7 @@ import type {
   HostedChatSummary,
   HostedChatTopic,
 } from "@/lib/hosted-web-device";
+import { exportPagePath, isExportCommand } from "@/lib/agent-export";
 import { formatLocalMessageTime } from "@/lib/date-time";
 import { chatPreviewUrls } from "@/lib/chat-preview-urls";
 import { directHostedImageUrl } from "@/lib/hosted-chat-attachment-url";
@@ -177,6 +179,7 @@ export function HostedWebChat({
     uploadAttachments,
     attachmentUrl,
   } = useHostedChat();
+  const router = useRouter();
   // One composer error slot, as before. A send's own result is tagged with
   // the chat it went to, so it alone can take the alert over connection and
   // claim errors, and only while that chat is selected.
@@ -604,6 +607,12 @@ export function HostedWebChat({
   async function send(event: FormEvent) {
     event.preventDefault();
     const text = draft.trim();
+    // The dashboard answers `/export` itself: the agent never packages itself.
+    if (isExportCommand(text) && attachments.length === 0) {
+      setDraft("");
+      router.push(exportPagePath(machineId));
+      return;
+    }
     if (
       (!text && attachments.length === 0)
       || !selectedRoom
