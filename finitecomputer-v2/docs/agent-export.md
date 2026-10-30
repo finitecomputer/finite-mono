@@ -65,8 +65,8 @@ move.finite.place rather than changing two.
 
 ## Compatibility and recovery
 
-An Agent Runtime without the plugin answers 404, and the page asks for an
-update; the feature reaches an Agent only with a Runtime rollout. Dashboard and
-Runtime can ship in either order. An export is the person's copy, not a backup
-or part of the Recovery Set (ADR 0001), and exporting never stops, retires or
-deletes the Agent.
+An Agent Runtime without the plugin answers 404, and the page shows "This agent
+does not support this page yet." The feature reaches an Agent with a Runtime
+rollout. Dashboard and Runtime can ship in either order. An export is the
+person's copy, not a backup or part of the Recovery Set (ADR 0001), and exporting
+never stops, retires or deletes the Agent.
