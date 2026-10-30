@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[2]
 ROLLOUT = ROOT / "scripts" / "rollout-lat1-runtime-artifact"
 TARGET_IMAGE = "ghcr.io/finitecomputer/agent-runtime:v2@sha256:" + "b" * 64
 OLD_IMAGE = "ghcr.io/finitecomputer/agent-runtime:v1@sha256:" + "a" * 64
+LAT7_CLOSURE = "/nix/store/" + "7" * 32 + "-nixos-system-finite-lat-7-test"
+LAT7_SCOPE = ("--host", "lat7", "--roll-project-id", "project-a")
+RUNNER_MARKERS = (
+    "provider-snapshot-v1",
+    "provider-contact-v1",
+    "provider-lifecycle-probe-v1",
+)
 
 
 def plan_entry(
@@ -320,6 +327,7 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             "LAT3": "root@test-lat3",
             "LAT4": "root@test-lat4",
             "LAT5": "root@test-lat5",
+            "LAT7": "root@test-lat7",
             "ROLLOUT_STATE_ROOT": str(state_root),
             "FAKE_SSH_LOG": str(log),
             "FAKE_STATE_DIR": str(state_dir),
@@ -1904,7 +1912,11 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             self.assertEqual(execute_events[-1]["status"], "success")
 
     def test_mixed_host_plan_is_refused(self) -> None:
-        for host, source_host in (("lat3", "finite-lat-3"), ("lat5", "finite-lat-5")):
+        for host, source_host in (
+            ("lat3", "finite-lat-3"),
+            ("lat5", "finite-lat-5"),
+            ("lat7", "finite-lat-7"),
+        ):
             with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
                 temp = Path(directory)
                 entries = [
@@ -2105,6 +2117,373 @@ class RuntimeRolloutScriptTests(unittest.TestCase):
             "project-a",
         )
         self.assertEqual(result.returncode, 64)
+
+    def lat7_environment(self, temp: Path) -> tuple[dict[str, str], Path, Path]:
+        entry = plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-7")
+        fact = provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-7")
+        env, log, state_root = self.fake_ssh_environment(
+            temp, rollout_report([entry], host="finite-lat-7"), [fact]
+        )
+        env["FAKE_SOURCE_HOST_ID"] = "finite-lat-7"
+        env["FAKE_REMOTE_SYSTEM_CLOSURE"] = LAT7_CLOSURE
+        return env, log, state_root
+
+    def prepare_lat7(self, temp: Path) -> tuple[dict[str, str], Path, Path, str]:
+        env, log, state_root = self.lat7_environment(temp)
+        prepared, plan_hash = self.prepare(env, *LAT7_SCOPE)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr)
+        log.write_text("", encoding="utf-8")
+        return env, log, state_root, plan_hash
+
+    def logged_calls(self, log: Path) -> list[tuple[str, str]]:
+        # The fake ssh logs "<destination>\t<remote command>" per call.
+        lines = log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return [(line.split("\t", 1)[0], line.split("\t", 1)[1]) for line in lines]
+
+    def enqueues(self, log: Path) -> list[str]:
+        return [
+            command
+            for _, command in self.logged_calls(log)
+            if "--expected-agent-runtime-id" in command and "--plan-only" not in command
+        ]
+
+    def test_host_mapping_matches_owning_nixos_host_definitions(self) -> None:
+        # Resolve the wrapper's real mapping with its default destinations
+        # (no LAT* overrides) and compare it with each host's NixOS definition.
+        hosts_dir = ROOT / "infra" / "nixos" / "hosts"
+
+        def nixos_host(name: str) -> tuple[str | None, str | None, str]:
+            text = (hosts_dir / name / "default.nix").read_text(encoding="utf-8")
+            source_host_ids = re.findall(r'sourceHostId = "([^"]+)";', text)
+            work_roots = re.findall(r'workRoot = "([^"]+)";', text)
+            wan_addresses = re.findall(r'"(\d+\.\d+\.\d+\.\d+)/31"', text)
+            self.assertLessEqual(len(source_host_ids), 1, name)
+            self.assertLessEqual(len(work_roots), 1, name)
+            self.assertEqual(len(wan_addresses), 1, name)
+            return (
+                source_host_ids[0] if source_host_ids else None,
+                work_roots[0] if work_roots else None,
+                f"root@{wan_addresses[0]}",
+            )
+
+        core_destination = nixos_host("finite-lat-2")[2]
+        self.assertEqual(core_destination, "root@64.34.80.19")
+        expected = {
+            None: ("finite-lat-1", "root@64.34.82.77", "/var/lib/finite-saas-runner"),
+            "lat1": ("finite-lat-1", "root@64.34.82.77", "/var/lib/finite-saas-runner"),
+            "lat3": ("finite-lat-3", "root@207.188.7.157", "/data/finite-saas-runner"),
+            "lat4": ("finite-lat-4", "root@152.236.34.15", "/data/finite-saas-runner"),
+            "lat5": ("finite-lat-5", "root@64.34.93.213", "/data/finite-saas-runner"),
+            "lat7": ("finite-lat-7", "root@64.34.89.107", "/data/finite-saas-runner"),
+        }
+        resolve = (
+            'set -euo pipefail; source "$1"; shift; parse_args "$@"; '
+            'printf "%s\\t%s\\t%s\\t%s\\n" '
+            '"$SOURCE_HOST_ID" "$RUNNER_DEST" "$RUNNER_WORK_ROOT" "$LAT2"'
+        )
+        env = {k: v for k, v in os.environ.items() if not re.fullmatch(r"LAT\d+", k)}
+        with tempfile.TemporaryDirectory() as directory:
+            # Resolving the mapping must never reach a host.
+            ssh_marker = Path(directory) / "ssh-called"
+            fake_ssh = Path(directory) / "ssh"
+            fake_ssh.write_text(f'#!/bin/sh\ntouch "{ssh_marker}"\nexit 99\n')
+            fake_ssh.chmod(0o755)
+            env["PATH"] = f"{directory}:{env['PATH']}"
+            for host, (source_host_id, destination, work_root) in expected.items():
+                with self.subTest(host=host):
+                    host_args = [] if host is None else ["--host", host]
+                    result = subprocess.run(
+                        [
+                            "bash", "-c", resolve, "resolve-mapping", str(ROLLOUT),
+                            "--validate-only", "--prepare", *host_args,
+                            *self.actor_args(), "--roll-project-id", "project-a",
+                        ],
+                        cwd=ROOT, env=env, text=True, capture_output=True, check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(
+                        result.stdout.splitlines(),
+                        [f"{source_host_id}\t{destination}\t{work_root}\t{core_destination}"],
+                    )
+                    self.assertEqual(
+                        nixos_host(source_host_id), (source_host_id, work_root, destination)
+                    )
+            self.assertFalse(ssh_marker.exists())
+
+    def test_lat7_near_miss_hosts_and_unsafe_destination_refuse_before_ssh(self) -> None:
+        for host in ("lat6", "lat70", "LAT7", "lat-7", "finite-lat-7", "lat7;id", " lat7"):
+            with self.subTest(host=host), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root = self.lat7_environment(Path(directory))
+                result, _ = self.prepare(env, "--host", host, "--roll-project-id", "project-a")
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertIn("unknown runtime rollout host", result.stderr)
+                self.assertFalse(log.exists())
+                self.assertFalse(state_root.exists())
+        for destination in (
+            "root@lat7;touch-pwned",
+            "-oProxyCommand=touch-pwned",
+            "root@lat7 extra",
+            "root@$(id)",
+        ):
+            with self.subTest(destination=destination), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root = self.lat7_environment(Path(directory))
+                env["LAT7"] = destination
+                result, _ = self.prepare(env, *LAT7_SCOPE)
+                self.assertEqual(result.returncode, 64, result.stderr)
+                self.assertIn("invalid LAT7 destination", result.stderr)
+                self.assertFalse(log.exists())
+                self.assertFalse(state_root.exists())
+
+    def test_lat7_route_binds_exact_runtime_machine_owner_and_closure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            env, log, state_root = self.lat7_environment(temp)
+            prepared, plan_hash = self.prepare(env, *LAT7_SCOPE)
+            self.assertEqual(prepared.returncode, 0, prepared.stderr)
+            self.assertIn(
+                f"--execute-plan-hash {plan_hash} --host lat7 ", prepared.stdout
+            )
+            self.assertNotIn("--roll-all", prepared.stdout)
+            self.assertNotIn("--probe-override", prepared.stdout)
+
+            saved = json.loads(
+                (state_root / plan_hash / "plan.json").read_text(encoding="utf-8")
+            )
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=ROOT, text=True, capture_output=True, check=True,
+            ).stdout.strip()
+            self.assertEqual(saved["repo_revision"], head)
+            self.assertEqual(saved["remote_system_closure"], LAT7_CLOSURE)
+            self.assertEqual(saved["source_host_id"], "finite-lat-7")
+            self.assertEqual(
+                saved["scope"], {"kind": "projects", "project_ids": ["project-a"]}
+            )
+            self.assertIsNone(saved["target_reference"])
+            self.assertEqual((saved["excluded"], saved["skipped"]), ([], []))
+            [planned] = saved["planned"]
+            self.assertEqual(
+                {key: value for key, value in planned.items() if key != "provider_facts"},
+                {
+                    "project_id": "project-a",
+                    "agent_runtime_id": "runtime-a",
+                    "source_host_id": "finite-lat-7",
+                    "source_machine_id": "kata-a",
+                    "target_artifact_id": "artifact-v2",
+                },
+            )
+            approved_facts = planned["provider_facts"]
+            self.assertEqual(
+                approved_facts["data_source"], "/data/finite-saas-runner/kata/runtime-a"
+            )
+            self.assertEqual(
+                approved_facts["ownership"],
+                {
+                    "runtime": "true",
+                    "source_host_id": "finite-lat-7",
+                    "source_machine_id": "kata-a",
+                    "project_id": "project-a",
+                },
+            )
+            self.assertRegex(approved_facts["agent_principal_sha256"], r"^[0-9a-f]{64}$")
+
+            log.write_text("", encoding="utf-8")
+            executed = self.run_rollout(
+                "--execute-plan-hash", plan_hash, *self.actor_args(), *LAT7_SCOPE, env=env
+            )
+            self.assertEqual(executed.returncode, 0, executed.stderr)
+            self.assertIn("approved plan unchanged", executed.stdout)
+
+            # Provider, contact and lifecycle probe calls reach only Lat7;
+            # every Core call stays on lat2 and is scoped to finite-lat-7.
+            calls = self.logged_calls(log)
+            self.assertTrue(calls)
+            for destination, command in calls:
+                if any(marker in command for marker in RUNNER_MARKERS):
+                    self.assertEqual(destination, "root@test-lat7", command)
+                else:
+                    self.assertEqual(destination, "root@test-lat2", command)
+                    self.assertIn("finite-saas-core", command)
+                    self.assertIn("--source-host-id finite-lat-7 ", command)
+            probes = [
+                command
+                for _, command in calls
+                if "provider-lifecycle-probe-v1" in command
+            ]
+            self.assertEqual(len(probes), 1, calls)
+            self.assertTrue(
+                probes[0].endswith(
+                    " provider-lifecycle-probe-v1 project-a runtime-a kata-a"
+                ),
+                probes[0],
+            )
+            [enqueue] = self.enqueues(log)
+            self.assertTrue(
+                enqueue.endswith(
+                    " runtime-artifact-rollout --artifact-id artifact-v2"
+                    " --source-host-id finite-lat-7 --admin-email admin@finite.vip"
+                    " --admin-workos-user-id workos-admin --wait-timeout-seconds 1200"
+                    " --project-id project-a --expected-agent-runtime-id runtime-a"
+                    " --expected-source-machine-id kata-a"
+                ),
+                enqueue,
+            )
+
+            events = [
+                event
+                for event in self.read_events(state_root, plan_hash)
+                if event["phase"] == "execute"
+            ]
+            by_event = {event["event"]: event for event in events}
+            self.assertEqual(by_event["entry_lifecycle_probe"]["verdict"], "operable")
+            self.assertEqual(
+                by_event["entry_preflight"]["provider_facts"],
+                {**approved_facts, "remote_system_closure": LAT7_CLOSURE},
+            )
+            self.assertEqual(by_event["core"]["status"], "succeeded")
+            postflight = by_event["entry_postflight"]
+            self.assertEqual(postflight["status"], "succeeded")
+            self.assertEqual(postflight["provider_facts"]["current_artifact_id"], "artifact-v2")
+            self.assertEqual(
+                postflight["provider_facts"]["ownership"], approved_facts["ownership"]
+            )
+            self.assertEqual(
+                postflight["provider_facts"]["agent_principal_sha256"],
+                approved_facts["agent_principal_sha256"],
+            )
+            self.assertEqual(events[-1]["event"], "final")
+            self.assertEqual(events[-1]["status"], "success")
+            self.assertEqual(events[-1]["passed_count"], 1)
+
+    def test_lat7_prepare_refuses_foreign_work_root_labels_and_core_host(self) -> None:
+        foreign_plan = rollout_report(
+            [plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-5")],
+            host="finite-lat-5",
+        )
+        lat1_root_fact = provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-7")
+        lat1_root_fact["data_source"] = "/var/lib/finite-saas-runner/kata/runtime-a"
+        for name, change, expected in (
+            (
+                "lat1 work root",
+                lambda env: env.update(FAKE_PROVIDER_FACTS=json.dumps([lat1_root_fact])),
+                "durable /data bind is not exact",
+            ),
+            (
+                "lat5 ownership labels",
+                lambda env: env.update(FAKE_SOURCE_HOST_ID="finite-lat-5"),
+                "ownership labels do not match",
+            ),
+            (
+                "lat5 Core plan",
+                lambda env: env.update(FAKE_ROLLOUT_PLAN=json.dumps(foreign_plan)),
+                "complete-shape validation",
+            ),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root = self.lat7_environment(Path(directory))
+                change(env)
+                result, plan_hash = self.prepare(env, *LAT7_SCOPE)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+                self.assertEqual(plan_hash, "")
+                self.assertFalse(state_root.exists())
+                self.assertEqual(self.enqueues(log), [])
+
+    def test_lat7_execute_refuses_drift_closure_and_other_host(self) -> None:
+        def drift_principal(env: dict[str, str]) -> tuple[str, ...]:
+            facts = json.loads(env["FAKE_PROVIDER_FACTS"])
+            facts[0]["test_agent_principal"] = "npub1changedprincipal"
+            env["FAKE_PROVIDER_FACTS"] = json.dumps(facts)
+            return LAT7_SCOPE
+
+        def change_closure(env: dict[str, str]) -> tuple[str, ...]:
+            env["FAKE_REMOTE_SYSTEM_CLOSURE"] = LAT7_CLOSURE.replace("7" * 32, "8" * 32)
+            return LAT7_SCOPE
+
+        def other_host(env: dict[str, str]) -> tuple[str, ...]:
+            env["FAKE_ROLLOUT_PLAN"] = json.dumps(rollout_report(
+                [plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-5")],
+                host="finite-lat-5",
+            ))
+            env["FAKE_PROVIDER_FACTS"] = json.dumps(
+                [provider_fact("project-a", "runtime-a", "kata-a", host="finite-lat-5")]
+            )
+            env["FAKE_SOURCE_HOST_ID"] = "finite-lat-5"
+            return ("--host", "lat5", "--roll-project-id", "project-a")
+
+        for change in (drift_principal, change_closure, other_host):
+            with self.subTest(change.__name__), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root, plan_hash = self.prepare_lat7(Path(directory))
+                approved = (state_root / plan_hash / "plan.json").read_bytes()
+                scope = change(env)
+                refused = self.run_rollout(
+                    "--execute-plan-hash", plan_hash, *self.actor_args(), *scope,
+                    "--probe-override", env=env,
+                )
+                self.assertEqual(refused.returncode, 65, refused.stderr)
+                self.assertIn("does not match approved hash", refused.stderr)
+                self.assertEqual(self.enqueues(log), [])
+                self.assertFalse(
+                    any("provider-lifecycle-probe-v1" in c for _, c in self.logged_calls(log))
+                )
+                self.assertEqual((state_root / plan_hash / "plan.json").read_bytes(), approved)
+                drift = [
+                    event
+                    for event in self.read_events(state_root, plan_hash)
+                    if event["event"] == "plan_drift"
+                ]
+                self.assertEqual(len(drift), 1)
+
+    def test_lat7_route_keeps_probe_gate_and_never_retries_core(self) -> None:
+        for name, probe_env, override in (
+            ("inoperable", {"FAKE_PROBE_VERDICT": "inoperable", "FAKE_PROBE_REASON": "orphaned_task"}, False),
+            ("unknown with override", {"FAKE_PROBE_VERDICT": "unknown", "FAKE_PROBE_REASON": "task_list_error"}, True),
+            ("unavailable with override", {"FAKE_PROBE_STATUS": "255"}, True),
+        ):
+            with self.subTest(name), tempfile.TemporaryDirectory() as directory:
+                env, log, state_root, plan_hash = self.prepare_lat7(Path(directory))
+                env.update(probe_env)
+                args = ["--execute-plan-hash", plan_hash, *self.actor_args(), *LAT7_SCOPE]
+                if override:
+                    args.append("--probe-override")
+                executed = self.run_rollout(*args, env=env)
+                self.assertEqual(executed.returncode, 0, executed.stderr)
+                self.assertIn("deliberately skipping", executed.stdout)
+                self.assertNotIn("overrode the lifecycle probe gate", executed.stderr)
+                self.assertEqual(self.enqueues(log), [])
+                probes = [
+                    destination
+                    for destination, command in self.logged_calls(log)
+                    if "provider-lifecycle-probe-v1" in command
+                ]
+                self.assertEqual(probes, ["root@test-lat7"])
+                events = [
+                    event
+                    for event in self.read_events(state_root, plan_hash)
+                    if event["phase"] == "execute"
+                ]
+                self.assertEqual(events[-1]["status"], "success")
+                self.assertEqual(events[-1]["probe_skipped"], 1)
+                self.assertEqual(events[-1]["passed_count"], 0)
+
+        with self.subTest("core failure"), tempfile.TemporaryDirectory() as directory:
+            env, log, state_root, plan_hash = self.prepare_lat7(Path(directory))
+            halted = rollout_report(
+                [plan_entry("project-a", "runtime-a", "kata-a", host="finite-lat-7")],
+                plan_only=False, halted=True, halted_reason="binding changed",
+                host="finite-lat-7",
+            )
+            env["FAKE_EXEC_RESULT"] = json.dumps(halted)
+            env["FAKE_EXEC_STATUS"] = "17"
+            executed = self.run_rollout(
+                "--execute-plan-hash", plan_hash, *self.actor_args(), *LAT7_SCOPE, env=env
+            )
+            self.assertEqual(executed.returncode, 17, executed.stderr)
+            self.assertEqual(len(self.enqueues(log)), 1)
+            events = self.read_events(state_root, plan_hash)
+            self.assertEqual(events[-1]["event"], "final")
+            self.assertEqual(events[-1]["status"], "failure")
+            self.assertEqual(events[-1]["exit_code"], 17)
 
 
 if __name__ == "__main__":

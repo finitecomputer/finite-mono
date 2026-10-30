@@ -389,7 +389,8 @@ plan may differ only by entries Core already records on the target artifact,
 and each entry is reconciled before acting — already on target is verified and
 skipped, an identical in-flight upgrade request is awaited (Core never
 enqueues a duplicate), and anything else executes normally. The same wrapper
-covers lat3, lat4, and lat5 with `--host lat3`, `--host lat4`, or `--host lat5` (default `lat1`
+covers lat3, lat4, lat5, and lat7 with `--host lat3`, `--host lat4`,
+`--host lat5`, or `--host lat7` (default `lat1`
 is leftover/inactive only). The plan is provably single-host and mixed-host
 plans are refused. Core CLI calls always run on lat2; only provider facts
 and Runner addressing follow `--host`.
