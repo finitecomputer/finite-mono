@@ -37,6 +37,7 @@ in
     ../../modules/kata-runner-host.nix
     ../../modules/metrics.nix
     ../../modules/ssh-flood-limits.nix
+    ../../modules/tcp-ip-options-guard.nix
   ];
 
   networking.hostName = "finite-lat-7";

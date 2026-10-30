@@ -102,12 +102,14 @@ FINITE_STATUS_PATHS = {
     "scripts/finite_status_hosted_identity.py",
     "scripts/finite_status_brain_scoped.py",
     "scripts/finite_status_brain_protocol.py",
+    "scripts/finite_status_tcp_security.py",
     "scripts/check_finite_status_contract.py",
     "scripts/tests/test_finite_status.py",
     "scripts/tests/test_finite_status_brain_roster.py",
     "scripts/tests/test_finite_status_hosted_identity.py",
     "scripts/tests/test_finite_status_brain_scoped.py",
     "scripts/tests/test_finite_status_brain_protocol.py",
+    "scripts/tests/test_finite_status_tcp_security.py",
     "scripts/tests/fixtures/finite_status_aug1.json",
 }
 
