@@ -161,7 +161,7 @@ function Choices({ summary, agentName, acting, replaces, onCheckAgain, onCreate 
           {!site.owned && <span className="block text-muted-foreground">Someone else owns this site. Include it only if it’s yours to move.</span>}</span>
       </label>)}
     </fieldset>
-    <p className="text-muted-foreground">Passwords, keys and tokens are never included. Neither are app dependencies or build output, which can be rebuilt, or zip files and other archives, which can’t be checked for them.</p>
+    <p className="text-muted-foreground">Credential files such as .env and keys are never included. Credentials are removed from memories and scheduled jobs, and other files that may hold one, archives included, are left out. Chats and media go as they are, so anything pasted into a chat comes with it. App dependencies and build output are left out too; they can be rebuilt.</p>
     {summary.problems > 0 && <p className="text-muted-foreground">{agentName} couldn’t read everything while checking. The export lists anything it misses.</p>}
     <p>About {formatBytes(estimatedBytes(summary, choices))} of files and brains.{replaces ? " This replaces your current export." : ""}</p>
     <div className="flex flex-wrap gap-2">
