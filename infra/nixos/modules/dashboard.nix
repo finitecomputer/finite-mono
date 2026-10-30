@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # Brain admin controls, identity explanations and OpenRouter connections
-    # on retained source 1eb24bce; excludes unrelated trial migrations.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/40978844639
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:bd1bd7f70a447da30e3a39a6695a74b2ffffd09f040d1d180b9678e5f2ea6b24";
+    # Brain admin controls, OpenRouter connections and Agent export
+    # on retained source 34b30e29; excludes unrelated trial migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/41081760827
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:854e25953fc16632b653e49c22ff4a74a20f20f29a3d092c8ec0c2f179e8c77e";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
