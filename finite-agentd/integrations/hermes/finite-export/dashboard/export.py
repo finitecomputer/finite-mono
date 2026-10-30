@@ -61,18 +61,47 @@ RUN_ID = uuid.uuid4().hex[:16]
 
 # Directories no export wants: version control, dependencies, caches.
 SKIP_DIRS = {
-    ".git", "node_modules", ".venv", "venv", "__pycache__", ".cache", ".next",
-    ".finitebrain", ".mypy_cache", ".pytest_cache", ".tox", ".gradle",
-    "bower_components", "site-packages", "Pods", "DerivedData", "elm-stuff",
+    ".git",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".cache",
+    ".next",
+    ".finitebrain",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".tox",
+    ".gradle",
+    "bower_components",
+    "site-packages",
+    "Pods",
+    "DerivedData",
+    "elm-stuff",
 }
 # What a tool builds beside a project file, made again from the source
 # around it. Left out of the workspace only beside such a file: a folder
 # of notes may be called "build" too.
 BUILD_DIRS = {"dist", "build", "out", "target", "_build", "obj", "deps", "vendor", "coverage"}
 PROJECT_FILES = {
-    "package.json", "deno.json", "Cargo.toml", "go.mod", "pyproject.toml", "setup.py",
-    "pom.xml", "build.gradle", "build.gradle.kts", "Makefile", "CMakeLists.txt", "mix.exs",
-    "Gemfile", "composer.json", "pubspec.yaml", "Package.swift", "build.zig", "stack.yaml",
+    "package.json",
+    "deno.json",
+    "Cargo.toml",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Makefile",
+    "CMakeLists.txt",
+    "mix.exs",
+    "Gemfile",
+    "composer.json",
+    "pubspec.yaml",
+    "Package.swift",
+    "build.zig",
+    "stack.yaml",
 }
 PROJECT_SUFFIXES = (".csproj", ".fsproj", ".sln", ".cabal")
 # Kinds of file the workspace leaves out at any size: video and audio,
@@ -80,13 +109,73 @@ PROJECT_SUFFIXES = (".csproj", ".fsproj", ".sln", ".cabal")
 # of a big workspace's bytes and can't ride in one attachment; they stay
 # on the old Finite, counted in the manifest by kind.
 MEDIA_AND_BINARIES = {
-    ".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm", ".wmv", ".flv", ".mpg", ".mpeg", ".3gp",
-    ".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".oga", ".opus", ".aif", ".aiff", ".wma",
-    ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".zst", ".7z", ".rar", ".dmg", ".iso", ".img",
-    ".pkg", ".deb", ".rpm", ".apk", ".ipa", ".msi", ".exe", ".jar", ".war", ".whl",
-    ".safetensors", ".ckpt", ".pt", ".pth", ".onnx", ".gguf", ".ggml", ".bin", ".h5", ".npy",
-    ".npz", ".pkl", ".tflite",
-    ".o", ".so", ".dylib", ".dll", ".a", ".lib", ".class", ".pyc", ".wasm", ".map",
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".avi",
+    ".mkv",
+    ".webm",
+    ".wmv",
+    ".flv",
+    ".mpg",
+    ".mpeg",
+    ".3gp",
+    ".mp3",
+    ".wav",
+    ".flac",
+    ".aac",
+    ".m4a",
+    ".ogg",
+    ".oga",
+    ".opus",
+    ".aif",
+    ".aiff",
+    ".wma",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".tgz",
+    ".bz2",
+    ".xz",
+    ".zst",
+    ".7z",
+    ".rar",
+    ".dmg",
+    ".iso",
+    ".img",
+    ".pkg",
+    ".deb",
+    ".rpm",
+    ".apk",
+    ".ipa",
+    ".msi",
+    ".exe",
+    ".jar",
+    ".war",
+    ".whl",
+    ".safetensors",
+    ".ckpt",
+    ".pt",
+    ".pth",
+    ".onnx",
+    ".gguf",
+    ".ggml",
+    ".bin",
+    ".h5",
+    ".npy",
+    ".npz",
+    ".pkl",
+    ".tflite",
+    ".o",
+    ".so",
+    ".dylib",
+    ".dll",
+    ".a",
+    ".lib",
+    ".class",
+    ".pyc",
+    ".wasm",
+    ".map",
 }
 # How many of a kind's files (its largest) or folders the manifest names.
 KIND_EXAMPLES = 10
@@ -95,11 +184,28 @@ KIND_EXAMPLES = 10
 WORKSPACE_ASK_BYTES = int(os.environ.get("FINITE_EXPORT_WORKSPACE_ASK_BYTES", str(20 * MiB)))
 # Files that hold, or may hold, a credential, by name. Never exported.
 SECRET_NAMES = {
-    ".env", ".envrc", "auth.json", "google_token.json", "google_client_secret.json",
-    "google_oauth_pending.json", "identity.json", "git-credentials",
-    ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".pgpass", "id_rsa",
-    "id_ed25519", "id_ecdsa", "credentials.json", "client_secret.json",
-    "token.json", "secrets.yaml", "secrets.yml", "secrets.json",
+    ".env",
+    ".envrc",
+    "auth.json",
+    "google_token.json",
+    "google_client_secret.json",
+    "google_oauth_pending.json",
+    "identity.json",
+    "git-credentials",
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".pgpass",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "credentials.json",
+    "client_secret.json",
+    "token.json",
+    "secrets.yaml",
+    "secrets.yml",
+    "secrets.json",
 }
 SECRET_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".keystore", ".env")
 SECRET_NAME_SHAPES = re.compile(r"^(service[-_]?account.*|client_secret.*)\.json$", re.IGNORECASE)
@@ -120,7 +226,9 @@ TOKEN_SHAPES = re.compile(
     r"|(?P<hook>discord(?:app)?\.com/api/webhooks/\d+/[\w-]+)"
     r"|(?P<url>https?://[^\s/:@]+:(?P<password>[^\s/@]+)@)"
 )
-PLACEHOLDER = re.compile(r"x{4,}|\*{4,}|\.{3}|[<>${}]|your|example|placeholder|redacted|changeme", re.IGNORECASE)
+PLACEHOLDER = re.compile(
+    r"x{4,}|\*{4,}|\.{3}|[<>${}]|your|example|placeholder|redacted|changeme", re.IGNORECASE
+)
 SCAN_MAX_BYTES = 2 * MiB
 
 
@@ -143,7 +251,11 @@ def paths_from_env(env) -> Paths:
         hermes_home=Path(env.get("HERMES_HOME", str(finite_home / "hermes-home"))),
         workspace=workspace,
         brain_root=Path(env.get("FBRAIN_WORKING_TREE_ROOT", str(workspace / "finitebrain"))),
-        managed_skills=Path(env.get("FINITE_EXPORT_MANAGED_SKILLS", str(finite_home / "managed-skills/finite/current"))),
+        managed_skills=Path(
+            env.get(
+                "FINITE_EXPORT_MANAGED_SKILLS", str(finite_home / "managed-skills/finite/current")
+            )
+        ),
         image_skills=Path(env.get("FINITE_EXPORT_IMAGE_SKILLS", "/runtime/finite-skills")),
         legacy=Path(env.get("FINITE_EXPORT_LEGACY", "/data/migration")),
     )
@@ -156,7 +268,9 @@ def run(args, cwd=None, timeout=600):
     """Run a command; (stdout, "") on success, (None, why) on failure."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     try:
-        done = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        done = subprocess.run(
+            args, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout
+        )
     except (OSError, subprocess.TimeoutExpired) as error:
         return None, f"{args[0]}: {error}"
     if done.returncode != 0:
@@ -179,13 +293,22 @@ def iso(seconds):
     if seconds is None:
         return None
     try:
-        return datetime.datetime.fromtimestamp(float(seconds), datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+        return (
+            datetime.datetime.fromtimestamp(float(seconds), datetime.UTC)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
     except (TypeError, ValueError, OverflowError, OSError):
         return None
 
 
 def now_iso():
-    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.datetime.now(datetime.UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def read_text(path, default=""):
@@ -223,12 +346,21 @@ def frontmatter(text):
     end = text.find("\n---", 3)
     if end < 0:
         return {}
-    pairs = (line.split(":", 1) for line in text[3:end].splitlines() if ":" in line and not line.startswith((" ", "\t")))
+    pairs = (
+        line.split(":", 1)
+        for line in text[3:end].splitlines()
+        if ":" in line and not line.startswith((" ", "\t"))
+    )
     return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
 
 
 def secret_reason(name):
-    if name in SECRET_NAMES or name.startswith(".env.") or name.endswith(SECRET_SUFFIXES) or SECRET_NAME_SHAPES.match(name):
+    if (
+        name in SECRET_NAMES
+        or name.startswith(".env.")
+        or name.endswith(SECRET_SUFFIXES)
+        or SECRET_NAME_SHAPES.match(name)
+    ):
         return "may hold a secret"
     return None
 
@@ -237,7 +369,11 @@ def is_secret(match):
     """A credential-shaped match that is no placeholder."""
     password = match.group("password")
     if password is not None:
-        return len(password) >= 6 and not PLACEHOLDER.search(password) and not re.fullmatch(r"[A-Z0-9_]+", password)
+        return (
+            len(password) >= 6
+            and not PLACEHOLDER.search(password)
+            and not re.fullmatch(r"[A-Z0-9_]+", password)
+        )
     token = match.group("token")
     if token is None:
         return True
@@ -263,7 +399,9 @@ def secret_in_text(path):
 
 
 def redact_text(text):
-    return TOKEN_SHAPES.sub(lambda match: "[REDACTED]" if is_secret(match) else match.group(0), text)
+    return TOKEN_SHAPES.sub(
+        lambda match: "[REDACTED]" if is_secret(match) else match.group(0), text
+    )
 
 
 def leave_out_reason(path, max_bytes):
@@ -289,7 +427,9 @@ def walk_files(base, skip_dir):
     base = Path(base)
     for dirpath, dirnames, filenames in os.walk(base):
         here = Path(dirpath)
-        dirnames[:] = sorted(d for d in dirnames if not skip_dir((here / d).relative_to(base), here / d))
+        dirnames[:] = sorted(
+            d for d in dirnames if not skip_dir((here / d).relative_to(base), here / d)
+        )
         for name in sorted(filenames):
             path = here / name
             if not path.is_symlink() and path.is_file():
@@ -325,7 +465,9 @@ class Stage:
 
     def write_json(self, relative, value, compact=False):
         separators = (",", ":") if compact else None
-        text = json.dumps(value, ensure_ascii=False, indent=None if compact else 2, separators=separators)
+        text = json.dumps(
+            value, ensure_ascii=False, indent=None if compact else 2, separators=separators
+        )
         self.write_text(relative, text + "\n")
 
     def copy(self, source, relative):
@@ -344,7 +486,15 @@ class Stage:
     def problem(self, text):
         self.problems.append(text)
 
-    def copy_tree(self, source, prefix, skip_dir, max_bytes, silent=lambda name: False, set_aside=lambda path, target: False):
+    def copy_tree(
+        self,
+        source,
+        prefix,
+        skip_dir,
+        max_bytes,
+        silent=lambda name: False,
+        set_aside=lambda path, target: False,
+    ):
         """Copy `source` under `prefix`, leaving out secrets, large files and
         unreadable ones (each noted), whatever `silent` names (not noted),
         and whatever `set_aside` takes (it notes them itself)."""
@@ -375,7 +525,9 @@ def agent_profile(paths, env):
     picture = env.get("FINITECHAT_HERMES_AGENT_PICTURE_URL") or ""
     version, _ = run(["hermes", "--version"], timeout=60)
     return {
-        "name": env.get("FINITE_AGENT_NAME") or env.get("FINITECHAT_HERMES_AGENT_NAME") or "Finite Agent",
+        "name": env.get("FINITE_AGENT_NAME")
+        or env.get("FINITECHAT_HERMES_AGENT_NAME")
+        or "Finite Agent",
         "picture_url": picture or None,
         "picture_is_default": picture in ("", DEFAULT_PICTURE),
         "hermes_version": version.strip().splitlines()[0] if version and version.strip() else None,
@@ -402,8 +554,15 @@ def config_settings(text):
                 found = {**found, section: scalar(value)}
             continue
         nested = re.match(r"^\s{2}([A-Za-z_][\w-]*):\s*(.*)$", line)
-        if nested and (section, nested.group(1)) in (("agent", "personality"), ("model", "default")) and scalar(nested.group(2)):
-            found = {**found, ("personality" if section == "agent" else "model"): scalar(nested.group(2))}
+        if (
+            nested
+            and (section, nested.group(1)) in (("agent", "personality"), ("model", "default"))
+            and scalar(nested.group(2))
+        ):
+            found = {
+                **found,
+                ("personality" if section == "agent" else "model"): scalar(nested.group(2)),
+            }
     return found
 
 
@@ -429,7 +588,9 @@ def export_agent(paths, env, stage):
     soul = paths.hermes_home / "SOUL.md"
     if soul.is_file():
         stage.write_text("agent/SOUL.md", redact_text(read_text(soul)))
-    stage.write_json("agent/settings.json", config_settings(read_text(paths.hermes_home / "config.yaml")))
+    stage.write_json(
+        "agent/settings.json", config_settings(read_text(paths.hermes_home / "config.yaml"))
+    )
     picture = None
     if profile["picture_url"] and not profile["picture_is_default"]:
         picture = fetch_picture(profile["picture_url"], stage)
@@ -443,8 +604,12 @@ def memory_files(paths, max_bytes):
     if not memories.is_dir():
         return []
     return [
-        path for path in sorted(memories.iterdir())
-        if path.is_file() and not path.name.startswith(".") and not path.name.endswith(".lock") and not too_large(path, max_bytes)
+        path
+        for path in sorted(memories.iterdir())
+        if path.is_file()
+        and not path.name.startswith(".")
+        and not path.name.endswith(".lock")
+        and not too_large(path, max_bytes)
     ]
 
 
@@ -466,7 +631,10 @@ def integrations(paths):
     email = google.get("email") if isinstance(google, dict) else None
     return {
         "telegram": bool(re.search(r"^\s+telegram:\s*$", config, re.MULTILINE)),
-        "google": {"connected": bool(email) or (paths.hermes_home / "google_token.json").is_file(), "email": email},
+        "google": {
+            "connected": bool(email) or (paths.hermes_home / "google_token.json").is_file(),
+            "email": email,
+        },
         "simplex": (paths.finite_home / "simplex").is_dir(),
     }
 
@@ -507,7 +675,14 @@ def load_sessions(conn):
 
 # Hermes' end reasons after which a child is a new conversation the person
 # sees (hermes_state_common.py `_RESET_END_REASONS`).
-RESET_END_REASONS = {"session_reset", "session_switch", "idle", "daily", "suspended", "resume_pending_expired"}
+RESET_END_REASONS = {
+    "session_reset",
+    "session_switch",
+    "idle",
+    "daily",
+    "suspended",
+    "resume_pending_expired",
+}
 
 
 def marker(session, key):
@@ -520,14 +695,17 @@ def marker(session, key):
 
 def is_branch(session, parent):
     return bool(marker(session, "_branched_from")) or (
-        parent.get("end_reason") == "branched" and (session.get("started_at") or 0) >= (parent.get("ended_at") or 0)
+        parent.get("end_reason") == "branched"
+        and (session.get("started_at") or 0) >= (parent.get("ended_at") or 0)
     )
 
 
 def is_reset(session, parent):
     key = session.get("session_key")
     return bool(marker(session, "_reset_from")) or (
-        parent.get("end_reason") in RESET_END_REASONS and bool(key) and key == parent.get("session_key")
+        parent.get("end_reason") in RESET_END_REASONS
+        and bool(key)
+        and key == parent.get("session_key")
     )
 
 
@@ -607,7 +785,11 @@ def message_text(content):
             parts = json.loads(content)
         except ValueError:
             return content
-        if isinstance(parts, list) and parts and all(isinstance(p, dict) and "type" in p for p in parts):
+        if (
+            isinstance(parts, list)
+            and parts
+            and all(isinstance(p, dict) and "type" in p for p in parts)
+        ):
             return "\n".join(t for t in (part_text(p) for p in parts) if t)
     return content
 
@@ -623,10 +805,15 @@ def tool_calls(raw):
     for call in calls:
         function = call.get("function", {}) if isinstance(call, dict) else {}
         arguments = function.get("arguments") if isinstance(function, dict) else None
-        named.append({
-            "name": (function.get("name") if isinstance(function, dict) else None) or "tool",
-            "arguments": clip(arguments if isinstance(arguments, str) else json.dumps(arguments), ARGUMENTS_MAX),
-        })
+        named.append(
+            {
+                "name": (function.get("name") if isinstance(function, dict) else None) or "tool",
+                "arguments": clip(
+                    arguments if isinstance(arguments, str) else json.dumps(arguments),
+                    ARGUMENTS_MAX,
+                ),
+            }
+        )
     return named
 
 
@@ -658,14 +845,21 @@ def superseded(row):
 
 def is_said(message):
     """A message a person wrote or the agent said to them."""
-    return message["role"] in ("user", "assistant") and message.get("text") and not message.get("summary") and not message.get("tool_calls")
+    return (
+        message["role"] in ("user", "assistant")
+        and message.get("text")
+        and not message.get("summary")
+        and not message.get("tool_calls")
+    )
 
 
 def conversation(chain, by_id, conn):
     messages = [
         normalize_message(dict(row))
         for session in chain
-        for row in conn.execute("SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp, id", (session["id"],))
+        for row in conn.execute(
+            "SELECT * FROM messages WHERE session_id = ? ORDER BY timestamp, id", (session["id"],)
+        )
         if not superseded(dict(row))
     ]
     said = [m for m in messages if is_said(m)]
@@ -683,7 +877,8 @@ def conversation(chain, by_id, conn):
         "with": root.get("display_name"),
         "model": last.get("model") or root.get("model"),
         "started_at": iso(root.get("started_at")),
-        "ended_at": iso(last.get("ended_at") or last.get("last_activity_at")) or (messages[-1]["at"] if messages else None),
+        "ended_at": iso(last.get("ended_at") or last.get("last_activity_at"))
+        or (messages[-1]["at"] if messages else None),
         "messages": len(said),
         "preview": first_user[:160],
         "sessions": [s["id"] for s in chain],
@@ -706,9 +901,13 @@ def write_conversations(stage, written):
     for file, entries in written.items():
         if file.startswith("chats/sessions/"):
             record, messages = entries[0]
-            stage.write_json(file, {"format": CHAT_FORMAT, **record, "messages": messages}, compact=True)
+            stage.write_json(
+                file, {"format": CHAT_FORMAT, **record, "messages": messages}, compact=True
+            )
         else:
-            bundle = {record["id"]: {**record, "messages": messages} for record, messages in entries}
+            bundle = {
+                record["id"]: {**record, "messages": messages} for record, messages in entries
+            }
             stage.write_json(file, {"format": CHAT_FORMAT, "conversations": bundle}, compact=True)
 
 
@@ -723,7 +922,11 @@ def survey_chats(paths, scratch):
         messages = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
     finally:
         conn.close()
-    return {"conversations": len(kinds), "by_kind": {k: kinds.count(k) for k in sorted(set(kinds))}, "messages": messages}
+    return {
+        "conversations": len(kinds),
+        "by_kind": {k: kinds.count(k) for k in sorted(set(kinds))},
+        "messages": messages,
+    }
 
 
 def export_chats(paths, stage, scratch, agent_name):
@@ -738,17 +941,32 @@ def export_chats(paths, stage, scratch, agent_name):
         # One file at a time, so only one file's messages are in memory.
         by_file = {}
         for chain in chains(sessions):
-            by_file.setdefault(conversation_file(chain[0], conversation_kind(chain, by_id)), []).append(chain)
+            by_file.setdefault(
+                conversation_file(chain[0], conversation_kind(chain, by_id)), []
+            ).append(chain)
         for file, file_chains in sorted(by_file.items()):
             entries = [conversation(chain, by_id, conn) for chain in file_chains]
             write_conversations(stage, {file: entries})
             records.extend(record for record, _ in entries)
     finally:
         conn.close()
-    newest_first = sorted(records, key=lambda r: r["ended_at"] or r["started_at"] or "", reverse=True)
-    stage.write_json("chats/index.json", {"format": CHAT_FORMAT, "agent": agent_name, "exported_at": now_iso(), "conversations": newest_first})
+    newest_first = sorted(
+        records, key=lambda r: r["ended_at"] or r["started_at"] or "", reverse=True
+    )
+    stage.write_json(
+        "chats/index.json",
+        {
+            "format": CHAT_FORMAT,
+            "agent": agent_name,
+            "exported_at": now_iso(),
+            "conversations": newest_first,
+        },
+    )
     kinds = [r["kind"] for r in records]
-    return {"conversations": len(records), "by_kind": {k: kinds.count(k) for k in sorted(set(kinds))}}
+    return {
+        "conversations": len(records),
+        "by_kind": {k: kinds.count(k) for k in sorted(set(kinds))},
+    }
 
 
 # --- Skills -----------------------------------------------------------------
@@ -802,13 +1020,20 @@ def agent_created(path):
     usage = read_json(path, {}) or {}
     if not isinstance(usage, dict):
         return set()
-    return {name for name, record in usage.items() if isinstance(record, dict) and (record.get("created_by") == "agent" or record.get("agent_created") is True)}
+    return {
+        name
+        for name, record in usage.items()
+        if isinstance(record, dict)
+        and (record.get("created_by") == "agent" or record.get("agent_created") is True)
+    }
 
 
 # Hermes' own skills name their authors so; one an older Hermes shipped,
 # and no longer does, is known by this alone (it is in no manifest). Its
 # community skills say just "community" (nano-pdf, on Clanky).
-UPSTREAM_AUTHORS = re.compile(r"Hermes Agent|Teknium|Nous Research|Orchestra Research|^\s*community\s*$", re.IGNORECASE)
+UPSTREAM_AUTHORS = re.compile(
+    r"Hermes Agent|Teknium|Nous Research|Orchestra Research|^\s*community\s*$", re.IGNORECASE
+)
 
 
 def upstream_skills(env):
@@ -914,7 +1139,8 @@ def edited_managed_skills(paths, managed):
         skill_entry(paths.managed_skills, relative, "modified-managed", f"managed-edits/{name}")
         for name, relative in sorted(managed.items())
         if name in shipped
-        and dir_hash(paths.managed_skills / relative, without_caches=True) != dir_hash(paths.image_skills / shipped[name], without_caches=True)
+        and dir_hash(paths.managed_skills / relative, without_caches=True)
+        != dir_hash(paths.image_skills / shipped[name], without_caches=True)
     ]
 
 
@@ -924,8 +1150,14 @@ def export_skills(paths, stage, max_bytes):
     index = []
     for skill in find_skills(paths):
         if skill["comes_over"]:
-            copied = stage.copy_tree(skill["source"], f"skills/files/{skill['path']}", skip_common, max_bytes)
-            facts = {**copied, "exported": True, "old_platform_refs": count_matches(skill["source"], OLD_PLATFORM)}
+            copied = stage.copy_tree(
+                skill["source"], f"skills/files/{skill['path']}", skip_common, max_bytes
+            )
+            facts = {
+                **copied,
+                "exported": True,
+                "old_platform_refs": count_matches(skill["source"], OLD_PLATFORM),
+            }
         else:
             facts = {"files": 0, "bytes": 0, "exported": False}
         index.append({k: v for k, v in {**skill, **facts}.items() if k != "source"})
@@ -1004,7 +1236,9 @@ def dow_field(days):
     for index, day in enumerate(ordered):
         start = day if start is None else start
         if index + 1 == len(ordered) or ordered[index + 1] != day + 1:
-            parts.extend([f"{start}-{day}"] if day - start >= 2 else [str(d) for d in range(start, day + 1)])
+            parts.extend(
+                [f"{start}-{day}"] if day - start >= 2 else [str(d) for d in range(start, day + 1)]
+            )
             start = None
     return ",".join(parts)
 
@@ -1034,7 +1268,11 @@ def cron_to_utc(expr, offset_minutes):
     if hour == "*":
         if offset_minutes % 60 == 0:
             return expr
-        return f"{(int(minute) - offset_minutes) % 60} * {dom} {month} {dow}" if minute.isdigit() else None
+        return (
+            f"{(int(minute) - offset_minutes) % 60} * {dom} {month} {dow}"
+            if minute.isdigit()
+            else None
+        )
     if not all(h.isdigit() for h in hour.split(",")):
         return None
     if not minute.isdigit() and offset_minutes % 60:
@@ -1061,7 +1299,7 @@ def zone_offsets(name):
         from zoneinfo import ZoneInfo
 
         zone = ZoneInfo(name)
-    except Exception:  # noqa: BLE001 - no zoneinfo or no such zone: say so
+    except Exception:
         return None, None
     now = datetime.datetime.now(zone)
     january, july = (datetime.datetime(now.year, m, 1, 12, tzinfo=zone).utcoffset() for m in (1, 7))
@@ -1073,9 +1311,13 @@ def once_rule(schedule):
         when = datetime.datetime.fromisoformat(str(schedule.get("run_at")))
     except ValueError:
         return "convert_by_hand", None, "its one time to run couldn't be read"
-    future = when.timestamp() > datetime.datetime.now(datetime.timezone.utc).timestamp()
+    future = when.timestamp() > datetime.datetime.now(datetime.UTC).timestamp()
     if future:
-        return "once_future", None, f"runs once, at {when.isoformat()}: ask your owner nearer the time"
+        return (
+            "once_future",
+            None,
+            f"runs once, at {when.isoformat()}: ask your owner nearer the time",
+        )
     return "once_past", None, "ran once, already"
 
 
@@ -1086,7 +1328,11 @@ def job_rule(job, offset):
     if job.get("enabled") is False or job.get("state") == "paused":
         return "paused", None, "it was paused"
     if job.get("no_agent"):
-        return "no_agent", None, "its script's output was the whole message, with no agent: an app's cron trigger fits it"
+        return (
+            "no_agent",
+            None,
+            "its script's output was the whole message, with no agent: an app's cron trigger fits it",
+        )
     if kind == "once":
         return once_rule(schedule)
     if kind == "interval":
@@ -1094,32 +1340,69 @@ def job_rule(job, offset):
         if minutes < 60:
             return "too_frequent", None, f"every {minutes} minutes: more than hourly"
         cron = interval_cron(minutes)
-        return ("routine", cron, f"every {minutes} minutes") if cron else ("convert_by_hand", None, f"every {minutes} minutes fits no cron")
+        return (
+            ("routine", cron, f"every {minutes} minutes")
+            if cron
+            else ("convert_by_hand", None, f"every {minutes} minutes fits no cron")
+        )
     if kind == "cron":
         expr = str(schedule.get("expr") or "")
         if fires_more_than_hourly(expr):
             return "too_frequent", None, f"{expr} fires more than hourly"
         utc = cron_to_utc(expr, offset) if offset is not None else None
-        return ("routine", utc, "converted to UTC") if utc else ("convert_by_hand", None, f"{expr} can't be moved to UTC simply")
+        return (
+            ("routine", utc, "converted to UTC")
+            if utc
+            else ("convert_by_hand", None, f"{expr} can't be moved to UTC simply")
+        )
     return "convert_by_hand", None, "an unknown kind of schedule"
 
 
 def normalize_job(paths, job, zone):
-    keys = ("id", "name", "prompt", "schedule", "enabled", "state", "deliver", "script", "no_agent",
-            "model", "workdir", "repeat", "last_run_at", "last_status", "context_from", "enabled_toolsets")
+    keys = (
+        "id",
+        "name",
+        "prompt",
+        "schedule",
+        "enabled",
+        "state",
+        "deliver",
+        "script",
+        "no_agent",
+        "model",
+        "workdir",
+        "repeat",
+        "last_run_at",
+        "last_status",
+        "context_from",
+        "enabled_toolsets",
+    )
     skills = job.get("skills") or ([job["skill"]] if job.get("skill") else [])
     offset, dst = zone_offsets(zone)
     suggestion, utc, why = job_rule(job, offset)
     facts = {
-        "timezone": zone or "UTC", "dst": dst, "schedule_utc": utc, "suggestion": suggestion, "why": why,
+        "timezone": zone or "UTC",
+        "dst": dst,
+        "schedule_utc": utc,
+        "suggestion": suggestion,
+        "why": why,
         "text_too_long": len(str(job.get("prompt") or "").encode("utf-8")) > ROUTINE_TEXT_MAX,
     }
-    return {**{key: job.get(key) for key in keys}, "skills": skills, **facts, "last_output": last_output(paths, job.get("id"))}
+    return {
+        **{key: job.get(key) for key in keys},
+        "skills": skills,
+        **facts,
+        "last_output": last_output(paths, job.get("id")),
+    }
 
 
 def survey_cron(paths):
     return [
-        {"name": job.get("name") or job.get("id"), "schedule": (job.get("schedule") or {}).get("display"), "enabled": job.get("enabled", True)}
+        {
+            "name": job.get("name") or job.get("id"),
+            "schedule": (job.get("schedule") or {}).get("display"),
+            "enabled": job.get("enabled", True),
+        }
         for job in load_jobs(paths)
     ]
 
@@ -1127,7 +1410,11 @@ def survey_cron(paths):
 def job_zone(paths, env):
     """The zone Hermes ran its jobs in: config.yaml's `timezone`, else
     `HERMES_TIMEZONE`, else UTC."""
-    return config_settings(read_text(paths.hermes_home / "config.yaml")).get("timezone") or env.get("HERMES_TIMEZONE") or None
+    return (
+        config_settings(read_text(paths.hermes_home / "config.yaml")).get("timezone")
+        or env.get("HERMES_TIMEZONE")
+        or None
+    )
 
 
 def export_cron(paths, stage, max_bytes):
@@ -1151,7 +1438,9 @@ def skip_brain_dir(relative, _absolute):
 
 
 def list_brains():
-    listed, error = run_json(["fbrain", "brain", "list", "--json", "--existing-identity"], timeout=120)
+    listed, error = run_json(
+        ["fbrain", "brain", "list", "--json", "--existing-identity"], timeout=120
+    )
     if listed is None:
         return [], error
     brains = listed.get("brains", []) if isinstance(listed, dict) else []
@@ -1170,11 +1459,18 @@ def survey_brains(paths):
         tree = paths.brain_root / brain["brainId"]
         local = tree.is_dir()
         invited = brain.get("role") == "invited"
-        rows.append({
-            "id": brain["brainId"], "name": brain.get("name"), "kind": brain.get("kind"), "role": brain.get("role"),
-            "can_export": not invited, **({"why_not": "an invitation this agent hasn't accepted"} if invited else {}),
-            "local_copy": local, **(brain_size(tree) if local else {"files": None, "bytes": None}),
-        })
+        rows.append(
+            {
+                "id": brain["brainId"],
+                "name": brain.get("name"),
+                "kind": brain.get("kind"),
+                "role": brain.get("role"),
+                "can_export": not invited,
+                **({"why_not": "an invitation this agent hasn't accepted"} if invited else {}),
+                "local_copy": local,
+                **(brain_size(tree) if local else {"files": None, "bytes": None}),
+            }
+        )
     return rows, error
 
 
@@ -1184,7 +1480,11 @@ def open_brain(paths, brain_id):
     opened, error = run_json(["fbrain", "open", brain_id, "--json"], timeout=600)
     if opened is None:
         return None, None, error, []
-    tree = Path(opened.get("nextCommandWorkingDirectory") or opened.get("path") or paths.brain_root / brain_id)
+    tree = Path(
+        opened.get("nextCommandWorkingDirectory")
+        or opened.get("path")
+        or paths.brain_root / brain_id
+    )
     synced, sync_error = run_json(["fbrain", "sync", "now", "--json"], cwd=str(tree), timeout=600)
     warnings = []
     status = str(opened.get("syncStatus") or "")
@@ -1207,7 +1507,9 @@ def asset_path(resource):
 
 def within(path, roots):
     real = os.path.realpath(path)
-    return any(real == os.path.realpath(r) or real.startswith(os.path.realpath(r) + os.sep) for r in roots)
+    return any(
+        real == os.path.realpath(r) or real.startswith(os.path.realpath(r) + os.sep) for r in roots
+    )
 
 
 def asset_refusal(local, allowed, private, max_bytes):
@@ -1219,7 +1521,11 @@ def asset_refusal(local, allowed, private, max_bytes):
         return "not on this computer"
     if local.is_symlink() or not within(local, allowed) or within(local, private):
         return "outside the workspace: left as a link"
-    return secret_reason(local.name) or too_large(local, max_bytes) or ("looks like it holds a secret" if secret_in_text(local) else None)
+    return (
+        secret_reason(local.name)
+        or too_large(local, max_bytes)
+        or ("looks like it holds a secret" if secret_in_text(local) else None)
+    )
 
 
 def copy_asset(note, resource, prefix, stage, limits):
@@ -1234,7 +1540,14 @@ def copy_asset(note, resource, prefix, stage, limits):
     name = f"assets/{digest[:12]}-{safe_name(local.name)}"
     stage.copy(local, f"{prefix}/{name}")
     content_type = mimetypes.guess_type(local.name)[0] or "application/octet-stream"
-    return {**base, "copied": True, "file": name, "bytes": local.stat().st_size, "sha256": digest, "content_type": content_type}
+    return {
+        **base,
+        "copied": True,
+        "file": name,
+        "bytes": local.stat().st_size,
+        "sha256": digest,
+        "content_type": content_type,
+    }
 
 
 def brain_assets(tree, prefix, stage, limits):
@@ -1258,16 +1571,32 @@ def export_brain(paths, brain, stage, max_bytes):
     if tree is None or not tree.is_dir():
         stage.problem(f"brain {label}: could not open its working copy: {error}")
         return None
-    copied = stage.copy_tree(tree, f"{prefix}/files", skip_brain_dir, max_bytes, silent=lambda name: name in BRAIN_GENERATED)
+    copied = stage.copy_tree(
+        tree,
+        f"{prefix}/files",
+        skip_brain_dir,
+        max_bytes,
+        silent=lambda name: name in BRAIN_GENERATED,
+    )
     if not copied["files"]:
         warnings.append("its working copy has no files")
     for warning in warnings:
         stage.problem(f"brain {label}: {warning}; run `fbrain doctor`")
     folders, _ = run_json(["fbrain", "folder", "list", "--brain", brain_id, "--json"], timeout=120)
-    limits = {"allowed": [paths.workspace], "private": [paths.finite_home, paths.hermes_home], "max_bytes": max_bytes}
+    limits = {
+        "allowed": [paths.workspace],
+        "private": [paths.finite_home, paths.hermes_home],
+        "max_bytes": max_bytes,
+    }
     meta = {
-        "id": brain_id, "name": brain.get("name"), "kind": brain.get("kind"), "role": brain.get("role"),
-        "sync": synced, "folders": folders, "assets": brain_assets(tree, prefix, stage, limits), **copied,
+        "id": brain_id,
+        "name": brain.get("name"),
+        "kind": brain.get("kind"),
+        "role": brain.get("role"),
+        "sync": synced,
+        "folders": folders,
+        "assets": brain_assets(tree, prefix, stage, limits),
+        **copied,
     }
     stage.write_json(f"{prefix}/meta.json", meta)
     return {"id": brain_id, "name": brain.get("name"), "kind": brain.get("kind"), **copied}
@@ -1290,7 +1619,9 @@ def export_brains(paths, chosen, stage, max_bytes):
 
 
 def list_projects():
-    listed, error = run_json(["fsite", "project", "list", "--output", "json", "--existing-identity"], timeout=120)
+    listed, error = run_json(
+        ["fsite", "project", "list", "--output", "json", "--existing-identity"], timeout=120
+    )
     if listed is None:
         return [], error
     projects = listed.get("projects", []) if isinstance(listed, dict) else []
@@ -1308,8 +1639,11 @@ def survey_sites():
     projects, error = list_projects()
     rows = [
         {
-            "slug": p["slug"], "role": p.get("role"), "export": site_decision(p),
-            "url": (p.get("site") or {}).get("url"), "visibility": (p.get("site") or {}).get("visibility"),
+            "slug": p["slug"],
+            "role": p.get("role"),
+            "export": site_decision(p),
+            "url": (p.get("site") or {}).get("url"),
+            "visibility": (p.get("site") or {}).get("visibility"),
         }
         for p in projects
     ]
@@ -1321,7 +1655,10 @@ def skip_site_dir(relative, _absolute):
 
 
 def shallow_clone(remote, branch, dest):
-    out, error = run(["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, remote, str(dest)], timeout=300)
+    out, error = run(
+        ["git", "clone", "--depth", "1", "--single-branch", "--branch", branch, remote, str(dest)],
+        timeout=300,
+    )
     if out is None:
         shutil.rmtree(dest, ignore_errors=True)
         out, error = run(["git", "clone", "--depth", "1", remote, str(dest)], timeout=300)
@@ -1342,7 +1679,9 @@ def clone_site(project, scratch):
         cloned, error = shallow_clone(remote, branch, dest)
         if cloned:
             return dest, ""
-    auth, auth_error = run_json(["fsite", "auth", "git", slug_name, "--store", "--output", "json"], timeout=120)
+    auth, auth_error = run_json(
+        ["fsite", "auth", "git", slug_name, "--store", "--output", "json"], timeout=120
+    )
     remote = (auth or {}).get("git_remote_url") or remote
     if not remote:
         return None, auth_error or "no git remote"
@@ -1353,17 +1692,25 @@ def clone_site(project, scratch):
 def site_meta(project):
     site = project.get("site") or {}
     return {
-        "slug": project["slug"], "project_id": project.get("project_id"), "role": project.get("role"),
-        "name": site.get("name"), "url": site.get("url"),
+        "slug": project["slug"],
+        "project_id": project.get("project_id"),
+        "role": project.get("role"),
+        "name": site.get("name"),
+        "url": site.get("url"),
         "visibility": "public" if site.get("visibility") == "public" else "private",
-        "old_visibility": site.get("visibility"), "branch": site.get("branch"), "path": site.get("path") or ".",
-        "spa": bool(site.get("spa")), "active_version": site.get("active_version"),
+        "old_visibility": site.get("visibility"),
+        "branch": site.get("branch"),
+        "path": site.get("path") or ".",
+        "spa": bool(site.get("spa")),
+        "active_version": site.get("active_version"),
     }
 
 
 # What in a site's served files only worked on Finite Sites (its old
 # address aside, which site_attention counts on its own).
-SITE_OLD_PLATFORM = re.compile(r"fsite|fbrain|finitebrain|finite\.site/api|/data/(?:agent|workspace)|FINITECHAT", re.IGNORECASE)
+SITE_OLD_PLATFORM = re.compile(
+    r"fsite|fbrain|finitebrain|finite\.site/api|/data/(?:agent|workspace)|FINITECHAT", re.IGNORECASE
+)
 
 
 # The new Finite serves a site's files by their extension, with `nosniff`
@@ -1392,7 +1739,10 @@ def wrong_type_code(html):
     name the new Finite won't serve as code, in the page's order."""
     found = []
     for match in CODE_TAG.finditer(html):
-        attrs = {m.group(1).lower(): next(v for v in m.groups()[1:] if v is not None) for m in TAG_ATTR.finditer(match.group(2))}
+        attrs = {
+            m.group(1).lower(): next(v for v in m.groups()[1:] if v is not None)
+            for m in TAG_ATTR.finditer(match.group(2))
+        }
         load = code_load(match.group(1).lower(), attrs)
         if load is None or not load[1] or ELSEWHERE.match(load[1]):
             continue
@@ -1413,7 +1763,9 @@ def site_wrong_type_code(served):
                 continue
         except OSError:
             continue
-        found += [{"page": relative.as_posix(), **load} for load in wrong_type_code(read_text(path))]
+        found += [
+            {"page": relative.as_posix(), **load} for load in wrong_type_code(read_text(path))
+        ]
     return found
 
 
@@ -1428,13 +1780,23 @@ def site_attention(source, meta):
     agent's eye: everything else moves as it is."""
     served = source / meta["path"]
     host = urllib.parse.urlparse(meta.get("url") or "").netloc
-    self_links = count_matches(served, re.compile(rf"https?://{re.escape(host)}", re.IGNORECASE), skip_site_dir) if host else 0
+    self_links = (
+        count_matches(
+            served, re.compile(rf"https?://{re.escape(host)}", re.IGNORECASE), skip_site_dir
+        )
+        if host
+        else 0
+    )
     old_refs = count_matches(served, SITE_OLD_PLATFORM, skip_site_dir)
     has_index = (served / "index.html").is_file()
     wrong_type = site_wrong_type_code(served)
     attention = (
         (["a single-page app (spa = true)"] if meta.get("spa") else [])
-        + ([f"{self_links} link{'s' if self_links != 1 else ''} to its old address"] if self_links else [])
+        + (
+            [f"{self_links} link{'s' if self_links != 1 else ''} to its old address"]
+            if self_links
+            else []
+        )
         + ([f"mentions the old platform ({old_refs} times)"] if old_refs else [])
         + ([] if has_index else ["no index.html in its site folder"])
         + ([wrong_type_line(wrong_type)] if wrong_type else [])
@@ -1455,8 +1817,10 @@ def export_sites(chosen, left_out, stage, scratch, max_bytes):
     for slug in sorted(set(left_out)):
         stage.skip(f"sites/{safe_name(slug)}", "left out by the person's choice")
     wanted = [
-        p for p in projects
-        if p["slug"] not in left_out and (site_decision(p) == "yes" or (site_decision(p) == "ask" and p["slug"] in chosen))
+        p
+        for p in projects
+        if p["slug"] not in left_out
+        and (site_decision(p) == "yes" or (site_decision(p) == "ask" and p["slug"] in chosen))
     ]
     exported = []
     for project in sorted(wanted, key=lambda p: p["slug"]):
@@ -1468,7 +1832,9 @@ def export_sites(chosen, left_out, stage, scratch, max_bytes):
         copied = stage.copy_tree(source, f"{prefix}/source", skip_site_dir, max_bytes)
         meta = site_meta(project)
         if not (source / meta["path"]).exists():
-            stage.problem(f"site {project['slug']}: its site folder {meta['path']!r} is not in its files")
+            stage.problem(
+                f"site {project['slug']}: its site folder {meta['path']!r} is not in its files"
+            )
         stage.write_json(f"{prefix}/meta.json", {**meta, **copied, **site_attention(source, meta)})
         exported.append(project["slug"])
     return exported
@@ -1487,7 +1853,10 @@ def is_site_checkout(directory):
 def beside_project_file(folder):
     try:
         with os.scandir(folder) as entries:
-            return any(e.is_file() and (e.name in PROJECT_FILES or e.name.endswith(PROJECT_SUFFIXES)) for e in entries)
+            return any(
+                e.is_file() and (e.name in PROJECT_FILES or e.name.endswith(PROJECT_SUFFIXES))
+                for e in entries
+            )
     except OSError:
         return False
 
@@ -1544,9 +1913,13 @@ def survey_workspace(paths, out_dir, max_bytes):
     large = sorted((f for f in rest if f["bytes"] > max_bytes), key=lambda f: -f["bytes"])
     going = [f["bytes"] for f in rest if f["bytes"] <= max_bytes]
     return {
-        "files": len(going), "bytes": sum(going), "bytes_under_1mb": sum(b for b in going if b <= MiB),
+        "files": len(going),
+        "bytes": sum(going),
+        "bytes_under_1mb": sum(b for b in going if b <= MiB),
         "ask": sum(going) > WORKSPACE_ASK_BYTES,
-        "too_large": large[:KIND_EXAMPLES], "too_large_count": len(large), "too_large_bytes": sum(f["bytes"] for f in large),
+        "too_large": large[:KIND_EXAMPLES],
+        "too_large_count": len(large),
+        "too_large_bytes": sum(f["bytes"] for f in large),
         "build_output": folder_summary(build_output),
         "media_and_binaries": kind_summary(media),
     }
@@ -1563,14 +1936,24 @@ def export_workspace(paths, stage, out_dir, max_bytes):
         media.append({"path": target, "bytes": path.stat().st_size})
         return True
 
-    skip = workspace_skipper(paths, out_dir, lambda relative: build_output.append(f"workspace/{relative}"))
+    skip = workspace_skipper(
+        paths, out_dir, lambda relative: build_output.append(f"workspace/{relative}")
+    )
     copied = stage.copy_tree(paths.workspace, "workspace", skip, max_bytes, set_aside=set_aside)
     if build_output:
-        stage.skip_kind("workspace", "build_output", "build output and dependencies: made again from their projects' source",
-                        folder_summary(build_output))
+        stage.skip_kind(
+            "workspace",
+            "build_output",
+            "build output and dependencies: made again from their projects' source",
+            folder_summary(build_output),
+        )
     if media:
-        stage.skip_kind("workspace", "media_and_binaries", "video, audio, archives and other binaries: left out by kind",
-                        kind_summary(media))
+        stage.skip_kind(
+            "workspace",
+            "media_and_binaries",
+            "video, audio, archives and other binaries: left out by kind",
+            kind_summary(media),
+        )
     return copied
 
 
@@ -1581,7 +1964,7 @@ def guarded(stage, name, step, default):
     """Run one section; a failure is noted and the export goes on."""
     try:
         return step()
-    except Exception as error:  # noqa: BLE001 - one section never stops the rest
+    except Exception as error:
         stage.problem(f"{name}: {type(error).__name__}: {error}")
         return default
 
@@ -1596,11 +1979,16 @@ def survey(paths, env, out_dir, max_bytes):
             "agent": guarded(notes, "agent", lambda: agent_profile(paths, env), {}),
             "chats": guarded(notes, "chats", lambda: survey_chats(paths, notes.root), {}),
             "memories": [p.name for p in memory_files(paths, max_bytes)],
-            "skills": [{k: s[k] for k in ("name", "provenance", "comes_over", "description")} for s in guarded(notes, "skills", lambda: find_skills(paths), [])],
+            "skills": [
+                {k: s[k] for k in ("name", "provenance", "comes_over", "description")}
+                for s in guarded(notes, "skills", lambda: find_skills(paths), [])
+            ],
             "cron": guarded(notes, "cron", lambda: survey_cron(paths), []),
             "brains": brains,
             "sites": sites,
-            "workspace": guarded(notes, "workspace", lambda: survey_workspace(paths, out_dir, max_bytes), {}),
+            "workspace": guarded(
+                notes, "workspace", lambda: survey_workspace(paths, out_dir, max_bytes), {}
+            ),
             "integrations": guarded(notes, "integrations", lambda: integrations(paths), {}),
         }
         problems = notes.problems + [e for e in (brain_error, site_error) if e]
@@ -1612,9 +2000,13 @@ def survey(paths, env, out_dir, max_bytes):
 def survey_notes(paths):
     notes = []
     if paths.legacy.is_dir():
-        notes.append(f"{paths.legacy} holds what an earlier Finite migration kept; it is not exported.")
+        notes.append(
+            f"{paths.legacy} holds what an earlier Finite migration kept; it is not exported."
+        )
     if (paths.hermes_home / "memory_store.db").is_file():
-        notes.append("This agent has a memory store (memory_store.db); it is exported with the memories.")
+        notes.append(
+            "This agent has a memory store (memory_store.db); it is exported with the memories."
+        )
     return notes
 
 
@@ -1638,18 +2030,28 @@ def readme(profile, counts, choices):
 
 def write_manifest(stage, profile, counts, choices):
     files = sorted(p for p in stage.root.rglob("*") if p.is_file())
-    listed = [{"path": p.relative_to(stage.root).as_posix(), "bytes": p.stat().st_size, "sha256": sha256_file(p)} for p in files]
-    stage.write_json("manifest.json", {
-        "format": FORMAT,
-        "created_at": now_iso(),
-        "source": {"platform": "finite-mono", "hermes_version": profile.get("hermes_version")},
-        "agent": {"name": profile.get("name")},
-        "counts": counts,
-        "choices": choices,
-        "skipped": stage.skipped,
-        "problems": stage.problems,
-        "files": listed,
-    })
+    listed = [
+        {
+            "path": p.relative_to(stage.root).as_posix(),
+            "bytes": p.stat().st_size,
+            "sha256": sha256_file(p),
+        }
+        for p in files
+    ]
+    stage.write_json(
+        "manifest.json",
+        {
+            "format": FORMAT,
+            "created_at": now_iso(),
+            "source": {"platform": "finite-mono", "hermes_version": profile.get("hermes_version")},
+            "agent": {"name": profile.get("name")},
+            "counts": counts,
+            "choices": choices,
+            "skipped": stage.skipped,
+            "problems": stage.problems,
+            "files": listed,
+        },
+    )
 
 
 def make_zip(stage, target):
@@ -1678,31 +2080,66 @@ def build(paths, env, options):
     scratch = Path(tempfile.mkdtemp(prefix="finite-export-"))
     stage = Stage(scratch / "zip")
     try:
-        profile = guarded(stage, "agent", lambda: export_agent(paths, env, stage), {"name": "Finite Agent"})
+        profile = guarded(
+            stage, "agent", lambda: export_agent(paths, env, stage), {"name": "Finite Agent"}
+        )
         counts = {
-            "chats": guarded(stage, "chats", lambda: export_chats(paths, stage, scratch, profile.get("name")), {}),
-            "memories": guarded(stage, "memories", lambda: export_memories(paths, stage, max_bytes), {}),
+            "chats": guarded(
+                stage, "chats", lambda: export_chats(paths, stage, scratch, profile.get("name")), {}
+            ),
+            "memories": guarded(
+                stage, "memories", lambda: export_memories(paths, stage, max_bytes), {}
+            ),
             "skills": guarded(stage, "skills", lambda: export_skills(paths, stage, max_bytes), {}),
             "cron": guarded(stage, "cron", lambda: export_cron(paths, stage, max_bytes), {}),
-            "brains": guarded(stage, "brains", lambda: export_brains(paths, options.brain, stage, max_bytes), []),
+            "brains": guarded(
+                stage, "brains", lambda: export_brains(paths, options.brain, stage, max_bytes), []
+            ),
         }
-        sites = guarded(stage, "sites", lambda: export_sites(options.site, options.leave_out_site, stage, scratch, max_bytes), [])
+        sites = guarded(
+            stage,
+            "sites",
+            lambda: export_sites(options.site, options.leave_out_site, stage, scratch, max_bytes),
+            [],
+        )
         if not options.no_workspace:
-            counts = {**counts, "workspace": guarded(stage, "workspace", lambda: export_workspace(paths, stage, out_dir, max_bytes), {})}
-        stage.write_json("integrations.json", guarded(stage, "integrations", lambda: integrations(paths), {}))
+            counts = {
+                **counts,
+                "workspace": guarded(
+                    stage,
+                    "workspace",
+                    lambda: export_workspace(paths, stage, out_dir, max_bytes),
+                    {},
+                ),
+            }
+        stage.write_json(
+            "integrations.json", guarded(stage, "integrations", lambda: integrations(paths), {})
+        )
         choices = {
-            "brains": list(options.brain), "sites": sites, "sites_left_out": sorted(set(options.leave_out_site)),
-            "workspace": not options.no_workspace, "max_file_mb": options.max_file_mb,
+            "brains": list(options.brain),
+            "sites": sites,
+            "sites_left_out": sorted(set(options.leave_out_site)),
+            "workspace": not options.no_workspace,
+            "max_file_mb": options.max_file_mb,
         }
         stage.write_text("README.md", readme(profile, counts, choices))
         write_manifest(stage, profile, counts, choices)
-        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d-%H%M")
-        target = make_zip(stage, out_dir / f"finite-export-{slug(profile.get('name') or 'agent')}-{stamp}.zip")
+        stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M")
+        target = make_zip(
+            stage, out_dir / f"finite-export-{slug(profile.get('name') or 'agent')}-{stamp}.zip"
+        )
         size = target.stat().st_size
         return {
-            "zip": str(target), "bytes": size, "limit_bytes": LIMIT_BYTES, "fits": size <= LIMIT_BYTES,
-            "send_line": f"MEDIA:{target}", "largest": largest_parts(target), "counts": counts, "choices": choices,
-            "skipped": len(stage.skipped), "problems": stage.problems,
+            "zip": str(target),
+            "bytes": size,
+            "limit_bytes": LIMIT_BYTES,
+            "fits": size <= LIMIT_BYTES,
+            "send_line": f"MEDIA:{target}",
+            "largest": largest_parts(target),
+            "counts": counts,
+            "choices": choices,
+            "skipped": len(stage.skipped),
+            "problems": stage.problems,
             "agent": {"name": profile.get("name"), "hermes_version": profile.get("hermes_version")},
         }
     finally:
@@ -1725,7 +2162,11 @@ def agent_identity(paths, env, name):
     which never makes one) and its owners' account ids. No secret."""
     status, _ = run_json(["fbrain", "auth", "status", "--json"], timeout=30)
     npub = status.get("npub") if isinstance(status, dict) else None
-    owners = [line.strip()[:128] for line in read_text(paths.finite_home / "allowed-users").splitlines() if line.strip()]
+    owners = [
+        line.strip()[:128]
+        for line in read_text(paths.finite_home / "allowed-users").splitlines()
+        if line.strip()
+    ]
     identity = {
         "agent_id": (env.get("FINITE_AGENT_ID") or "")[:128],
         "agent_npub": (npub or "")[:80],
@@ -1744,7 +2185,9 @@ def survey_counts(found):
         "skills": sum(1 for skill in found.get("skills") or [] if skill.get("comes_over")),
         "cron": len(found.get("cron") or []),
         "brains_offered": sum(1 for b in found.get("brains") or [] if b.get("can_export")),
-        "sites_offered": sum(1 for s in found.get("sites") or [] if s.get("export") in ("yes", "ask")),
+        "sites_offered": sum(
+            1 for s in found.get("sites") or [] if s.get("export") in ("yes", "ask")
+        ),
         "workspace_files": (found.get("workspace") or {}).get("files", 0),
         "problems": len(found.get("problems") or []),
     }
@@ -1773,13 +2216,26 @@ def send_report(url, event, identity, counts, hermes):
     can't get is noted in the result, never a failure of the export."""
     if not url:
         return "off"
-    report = {"event": event, "run": RUN_ID, **identity, "hermes": (hermes or "")[:120], "script": script_version(), "counts": counts}
-    body = {"id": uuid.uuid4().hex, "input": {key: value for key, value in report.items() if value not in (None, "", [], {})}}
+    report = {
+        "event": event,
+        "run": RUN_ID,
+        **identity,
+        "hermes": (hermes or "")[:120],
+        "script": script_version(),
+        "counts": counts,
+    }
+    body = {
+        "id": uuid.uuid4().hex,
+        "input": {key: value for key, value in report.items() if value not in (None, "", [], {})},
+    }
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
         method="POST",
-        headers={"content-type": "application/json", "user-agent": f"finite-export/{script_version()}"},
+        headers={
+            "content-type": "application/json",
+            "user-agent": f"finite-export/{script_version()}",
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=REPORT_TIMEOUT_S) as response:
@@ -1794,7 +2250,10 @@ def reported(result, event, paths, env, enabled):
     counts = survey_counts(result) if event == "survey" else build_counts(result)
     url = env.get("FINITE_EXPORT_REPORT_URL", REPORT_URL) if enabled else ""
     identity = agent_identity(paths, env, agent.get("name")) if url else {}
-    return {**result, "reported": send_report(url, event, identity, counts, agent.get("hermes_version"))}
+    return {
+        **result,
+        "reported": send_report(url, event, identity, counts, agent.get("hermes_version")),
+    }
 
 
 # --- Which Finite this is ----------------------------------------------------
@@ -1811,7 +2270,12 @@ def platform(paths, env):
     marker = Path(env.get("FINITE_EXPORT_NEW_MARKER", NEW_FINITE_MARKER))
     if env.get("FRAGMENT_AS_AGENT") or env.get("FRAGMENT_FOR") or marker.is_dir():
         return "new"
-    if paths.finite_home.is_dir() or paths.hermes_home.is_dir() or shutil.which("fsite") or shutil.which("fbrain"):
+    if (
+        paths.finite_home.is_dir()
+        or paths.hermes_home.is_dir()
+        or shutil.which("fsite")
+        or shutil.which("fbrain")
+    ):
         return "old"
     return "unknown"
 
@@ -1833,19 +2297,46 @@ def wrong_platform(where):
 
 
 def parse(argv):
-    parser = argparse.ArgumentParser(description="Export this agent for the new Finite (see export.md).")
+    parser = argparse.ArgumentParser(
+        description="Export this agent for the new Finite (see export.md)."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     survey_cmd = commands.add_parser("survey", help="what there is to export; changes nothing")
     survey_cmd.add_argument("--max-file-mb", type=int, default=DEFAULT_MAX_FILE_MB)
-    survey_cmd.add_argument("--no-report", action="store_true", help="don't tell the move site this ran")
+    survey_cmd.add_argument(
+        "--no-report", action="store_true", help="don't tell the move site this ran"
+    )
     build_cmd = commands.add_parser("build", help="write the zip")
-    build_cmd.add_argument("--brain", action="append", default=[], help="a brain's id to include (repeat)")
-    build_cmd.add_argument("--site", action="append", default=[], help="a site the agent may edit but does not own (repeat)")
-    build_cmd.add_argument("--leave-out-site", action="append", default=[], help="a site to leave out, by its slug (repeat)")
-    build_cmd.add_argument("--no-workspace", action="store_true", help="leave the workspace's files out")
-    build_cmd.add_argument("--max-file-mb", type=int, default=DEFAULT_MAX_FILE_MB, help="leave out any file larger than this")
-    build_cmd.add_argument("--out", help="the folder for the zip (default: <workspace>/finite-export)")
-    build_cmd.add_argument("--no-report", action="store_true", help="don't tell the move site this ran")
+    build_cmd.add_argument(
+        "--brain", action="append", default=[], help="a brain's id to include (repeat)"
+    )
+    build_cmd.add_argument(
+        "--site",
+        action="append",
+        default=[],
+        help="a site the agent may edit but does not own (repeat)",
+    )
+    build_cmd.add_argument(
+        "--leave-out-site",
+        action="append",
+        default=[],
+        help="a site to leave out, by its slug (repeat)",
+    )
+    build_cmd.add_argument(
+        "--no-workspace", action="store_true", help="leave the workspace's files out"
+    )
+    build_cmd.add_argument(
+        "--max-file-mb",
+        type=int,
+        default=DEFAULT_MAX_FILE_MB,
+        help="leave out any file larger than this",
+    )
+    build_cmd.add_argument(
+        "--out", help="the folder for the zip (default: <workspace>/finite-export)"
+    )
+    build_cmd.add_argument(
+        "--no-report", action="store_true", help="don't tell the move site this ran"
+    )
     options = parser.parse_args(argv)
     if options.max_file_mb < 1:
         parser.error("--max-file-mb must be at least 1")
@@ -1865,9 +2356,13 @@ def main(argv=None):
         found = survey(paths, os.environ, out_dir, options.max_file_mb * MiB)
         result = reported(found, "survey", paths, os.environ, not options.no_report)
     else:
-        result = reported(build(paths, os.environ, options), "build", paths, os.environ, not options.no_report)
+        result = reported(
+            build(paths, os.environ, options), "build", paths, os.environ, not options.no_report
+        )
         # Kept beside the zip too, for a build run in the background.
-        Path(result["zip"]).with_name("last-build.json").write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        Path(result["zip"]).with_name("last-build.json").write_text(
+            json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     json.dump(result, sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
