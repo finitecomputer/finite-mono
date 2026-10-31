@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 from pathlib import Path
@@ -36,10 +37,36 @@ INFERENCE_CREDENTIAL_ENV_NAMES = (
     "OPENAI_API_KEY",
     "FINITECHAT_HERMES_API_KEY",
 )
+# The reply poll reads state with an SSE wait of this length. The CLI
+# negotiates it as the stream heartbeat and bounds the stream read by three
+# heartbeats plus 5 s (finitechat-client `sync_stream_read_timeout`).
+REPLY_POLL_WAIT_MS = 4000
+REPLY_POLL_STREAM_READ_BUDGET_S = (3 * REPLY_POLL_WAIT_MS + 5000) / 1000
+MISSED_HEARTBEAT_STDERR = (
+    "delivery error: SSE hint stream read failed: request or response body error"
+)
+# Chat servers without the heartbeat deadline fix restart a stream's heartbeat
+# timer on every write anywhere on the server, so on a busy server the poll's
+# quiet stream can miss its heartbeat until the CLI's read budget runs out.
+# Product clients read state again after that, and so may the poll, at most
+# this many times per phase.
+MAX_MISSED_HEARTBEATS_PER_PHASE = 2
 
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+class CommandFailed(SmokeFailure):
+    """A command exited non-zero. Keeps its exit code and stderr."""
+
+    def __init__(self, args: list[str], proc: subprocess.CompletedProcess[str]) -> None:
+        super().__init__(
+            f"command failed: {args!r}\nexit={proc.returncode}\n"
+            f"stdout={proc.stdout[-3000:]}\nstderr={proc.stderr[-3000:]}"
+        )
+        self.returncode = proc.returncode
+        self.stderr = proc.stderr
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,10 +104,7 @@ def run(
         timeout=timeout,
     )
     if check and proc.returncode != 0:
-        raise SmokeFailure(
-            f"command failed: {args!r}\nexit={proc.returncode}\n"
-            f"stdout={proc.stdout[-3000:]}\nstderr={proc.stderr[-3000:]}"
-        )
+        raise CommandFailed(args, proc)
     return proc
 
 
@@ -467,6 +491,20 @@ def first_matching_mine_message_id(state: dict[str, Any], prompt: str) -> str | 
     return None
 
 
+def is_missed_heartbeat(exc: CommandFailed, read_s: float) -> bool:
+    """Whether a failed reply-poll read is a missed server heartbeat.
+
+    Only the CLI's exact read error, exiting 1, after at least the full stream
+    read budget. The same error sooner means the stream broke for another
+    reason, and that stays fatal.
+    """
+    return (
+        exc.returncode == 1
+        and exc.stderr.strip() == MISSED_HEARTBEAT_STDERR
+        and read_s >= REPLY_POLL_STREAM_READ_BUDGET_S
+    )
+
+
 def agent_log_tail(container: str, lines: int = 200) -> str:
     """Best-effort agent container log tail for failure diagnosis."""
     logs = run(["docker", "logs", "--tail", str(lines), container], check=False, timeout=30)
@@ -497,16 +535,51 @@ def run_model_smoke(
     )
     deadline = time.monotonic() + 180
     last_state: dict[str, Any] | None = None
+    missed_heartbeat_reads_s: list[float] = []
     while time.monotonic() < deadline:
-        state = docker_user_app(
-            image=image,
-            user_volume=user_volume,
-            server_url=server_url,
-            args=["state", "--start-runtime", "--wait-update-ms", "4000", "--room-id", room_id],
-            env=env,
-            timeout=60,
-            docker_extra_args=docker_extra_args,
-        )
+        read_started = time.monotonic()
+        try:
+            state = docker_user_app(
+                image=image,
+                user_volume=user_volume,
+                server_url=server_url,
+                args=[
+                    "state",
+                    "--start-runtime",
+                    "--wait-update-ms",
+                    str(REPLY_POLL_WAIT_MS),
+                    "--room-id",
+                    room_id,
+                ],
+                env=env,
+                timeout=60,
+                docker_extra_args=docker_extra_args,
+            )
+        except CommandFailed as exc:
+            read_s = time.monotonic() - read_started
+            if not is_missed_heartbeat(exc, read_s):
+                raise
+            # Read state again. Never resend the prompt or accept a reply
+            # that a successful read did not return.
+            missed_heartbeat_reads_s.append(round(read_s, 1))
+            if len(missed_heartbeat_reads_s) > MAX_MISSED_HEARTBEATS_PER_PHASE:
+                raise SmokeFailure(
+                    f"reply poll missed the server heartbeat {len(missed_heartbeat_reads_s)} "
+                    f"times while waiting for {expected!r}; the cap is "
+                    f"{MAX_MISSED_HEARTBEATS_PER_PHASE} per phase; "
+                    f"read seconds={missed_heartbeat_reads_s}\n"
+                    f"last read error: {exc}\n"
+                    f"agent container logs (tail):\n{agent_log_tail(agent_container)}"
+                ) from exc
+            print(
+                f"reply poll missed the server heartbeat after {read_s:.1f}s "
+                f"({len(missed_heartbeat_reads_s)} of {MAX_MISSED_HEARTBEATS_PER_PHASE} "
+                "allowed this phase); reading state again",
+                file=sys.stderr,
+            )
+            ensure_container_running(agent_container)
+            time.sleep(2)
+            continue
         last_state = state
         for message in state.get("messages") or []:
             text = str(message.get("text") or "")
@@ -517,6 +590,7 @@ def run_model_smoke(
                     "prompt_message_id": first_matching_mine_message_id(sent, prompt),
                     "reply_message_id": message.get("message_id"),
                     "reply_text": text,
+                    "missed_heartbeat_reads_s": missed_heartbeat_reads_s,
                 }
         time.sleep(2)
     sample = [
@@ -529,6 +603,7 @@ def run_model_smoke(
     ]
     raise SmokeFailure(
         f"expected Hermes reply {expected!r} not found; recent messages={sample!r}\n"
+        f"missed heartbeat read seconds={missed_heartbeat_reads_s}\n"
         f"agent container logs (tail):\n{agent_log_tail(agent_container)}\n"
         # The observation side fails silently without this (2026-08-18 depot
         # hunt): the user runtime's full last view shows whether the room
