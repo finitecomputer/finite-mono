@@ -243,6 +243,7 @@ STATUS_BUNDLE_FILES = (
     "finite_status_brain_bindings.py",
     "finite_status_brain_protocol.py",
     "finite_tinfoil_status.py",
+    "finite_status_tcp_security.py",
     "kata_guest_probe.py",
     "kata_network_probe.py",
 )
@@ -4896,6 +4897,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
                       help="read one Project's exact Core recovery inputs without credential values; emits JSON")
     mode.add_argument("--kata-recovery-host", action="store_true",
                       help="read host prerequisites for an isolated Kata recovery rehearsal; emits JSON")
+    mode.add_argument("--tcp-security", action="store_true",
+                      help="read CVE-2026-98432 packet-filter, MPTCP, and boot-persistence evidence; emits JSON")
     mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
                       help="compare one owned Kata Runtime's direct and published identity routes")
     mode.add_argument("--runtime-lifecycle", nargs=4,
@@ -5003,6 +5006,10 @@ def main(arguments: list[str] | None = None) -> None:
         elif options.runtime_lifecycle:
             report = collect_runtime_lifecycle(*options.runtime_lifecycle,
                                                guest_agent_probe=options.guest_agent_probe)
+        elif options.tcp_security:
+            from finite_status_tcp_security import collect
+
+            report = collect()
         elif options.tinfoil:
             from finite_tinfoil_status import collect
 
@@ -5049,6 +5056,7 @@ def main(arguments: list[str] | None = None) -> None:
         }
     if (
         options.json
+        or options.tcp_security
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity
