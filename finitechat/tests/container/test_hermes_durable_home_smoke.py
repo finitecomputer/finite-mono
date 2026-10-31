@@ -258,6 +258,11 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
         self.assertEqual(result["missed_heartbeat_reads_s"], [18.0])
         self.assertEqual(poll.commands(), ["send", "state", "state", "state"])
         alive.assert_called_once_with("agent")
+        self.assertEqual(
+            poll.stderr.getvalue(),
+            "reply poll missed the server heartbeat after 18.0s (1 of 2 allowed this phase);"
+            " reading state again\n",
+        )
 
     def test_reply_poll_fails_past_the_missed_heartbeat_cap(self) -> None:
         reply = {"is_mine": False, "text": "hello", "message_id": "reply"}
@@ -333,6 +338,7 @@ class ReplyPoll:
         self.steps = list(steps)
         self.now = 0.0
         self.app = mock.Mock(side_effect=self._app)
+        self.stderr = io.StringIO()
 
     def _app(self, **_kwargs: object) -> object:
         seconds, result = self.steps.pop(0)
@@ -351,7 +357,7 @@ class ReplyPoll:
             mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
             mock.patch.object(smoke.time, "monotonic", lambda: self.now),
             mock.patch.object(smoke.time, "sleep", self._sleep),
-            mock.patch.object(smoke.sys, "stderr", io.StringIO()),
+            mock.patch.object(smoke.sys, "stderr", self.stderr),
             mock.patch.object(smoke, "ensure_container_running") as alive,
         ):
             yield alive
