@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import importlib.util
-import io
+import json
+import subprocess
 import unittest
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -227,154 +225,55 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
             )
         self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
 
-    def test_command_failure_keeps_exit_code_and_stderr(self) -> None:
-        failed = smoke.subprocess.CompletedProcess(
-            ["docker"], 1, stdout="", stderr=smoke.MISSED_HEARTBEAT_STDERR + "\n"
-        )
+    def test_reply_read_error_is_fatal_even_after_slow_command_setup(self) -> None:
+        # Docker startup and StartRuntime precede the SSE read. Total command
+        # time cannot distinguish an early stream break from a read timeout.
+        for setup_seconds, stream_seconds in ((0, 3), (15, 3), (35, 3), (0, 17)):
+            with self.subTest(setup=setup_seconds, stream=stream_seconds):
+                self.assert_read_failure_is_fatal(setup_seconds, stream_seconds)
+
+    def assert_read_failure_is_fatal(self, setup_seconds: int, stream_seconds: int) -> None:
+        clock = 0.0
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal clock
+            calls.append(args)
+            if "send" in args:
+                return subprocess.CompletedProcess(args, 0, '{"messages": []}', "")
+            if "state" in args and sum("state" in call for call in calls) == 1:
+                clock += setup_seconds + stream_seconds
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    "",
+                    "delivery error: SSE hint stream read failed: request or response body error\n",
+                )
+            if "inspect" in args:
+                return subprocess.CompletedProcess(args, 0, '[{"State": {"Running": true}}]', "")
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"messages": [{"is_mine": False, "text": "hello"}]}), ""
+            )
+
         with (
-            mock.patch.object(smoke.subprocess, "run", return_value=failed),
-            self.assertRaises(smoke.CommandFailed) as raised,
+            mock.patch.object(smoke.subprocess, "run", side_effect=fake_run),
+            mock.patch.object(smoke.time, "monotonic", side_effect=lambda: clock),
+            mock.patch.object(smoke.time, "sleep"),
+            self.assertRaises(smoke.SmokeFailure) as raised,
         ):
-            smoke.run(["docker", "run"])
-        self.assertIsInstance(raised.exception, smoke.SmokeFailure)
-        self.assertEqual(raised.exception.returncode, 1)
-        self.assertEqual(raised.exception.stderr.strip(), smoke.MISSED_HEARTBEAT_STDERR)
-        self.assertIn("exit=1", str(raised.exception))
-
-    def test_reply_poll_reads_again_after_a_missed_heartbeat_without_resending(self) -> None:
-        reply = {"is_mine": False, "text": "hello", "message_id": "reply"}
-        poll = ReplyPoll(
-            [
-                (1, {"messages": []}),
-                (4, {"messages": []}),
-                (18, missed_heartbeat()),
-                (4, {"messages": [reply]}),
-            ],
-        )
-        with poll.patched() as alive:
-            result = poll.run()
-        self.assertEqual(result["status"], "passed")
-        self.assertEqual(result["reply_message_id"], "reply")
-        self.assertEqual(result["missed_heartbeat_reads_s"], [18.0])
-        self.assertEqual(poll.commands(), ["send", "state", "state", "state"])
-        alive.assert_called_once_with("agent")
-        self.assertEqual(
-            poll.stderr.getvalue(),
-            "reply poll missed the server heartbeat after 18.0s (1 of 2 allowed this phase);"
-            " reading state again\n",
-        )
-
-    def test_reply_poll_fails_past_the_missed_heartbeat_cap(self) -> None:
-        reply = {"is_mine": False, "text": "hello", "message_id": "reply"}
-        poll = ReplyPoll(
-            [
-                (1, {"messages": []}),
-                (18, missed_heartbeat()),
-                (18, missed_heartbeat()),
-                (18, missed_heartbeat()),
-                (4, {"messages": [reply]}),
-            ],
-        )
-        with poll.patched(), self.assertRaises(smoke.SmokeFailure) as raised:
-            poll.run()
-        self.assertIn("missed the server heartbeat 3 times", str(raised.exception))
-        self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
-        self.assertEqual(poll.commands(), ["send", "state", "state", "state"])
-
-    def test_reply_poll_keeps_other_read_failures_fatal(self) -> None:
-        cases = {
-            "before the read budget": (16.9, missed_heartbeat()),
-            "another exit code": (18, missed_heartbeat(returncode=2)),
-            "another error": (18, missed_heartbeat(stderr="delivery error: server error 500")),
-            "extra stderr": (
-                18,
-                missed_heartbeat(stderr="warning\n" + smoke.MISSED_HEARTBEAT_STDERR),
-            ),
-            "not a command failure": (1, smoke.SmokeFailure(smoke.MISSED_HEARTBEAT_STDERR)),
-        }
-        for name, (seconds, error) in cases.items():
-            with self.subTest(name):
-                poll = ReplyPoll([(1, {"messages": []}), (seconds, error)])
-                with poll.patched() as alive, self.assertRaises(smoke.SmokeFailure) as raised:
-                    poll.run()
-                self.assertIs(raised.exception, error)
-                self.assertEqual(poll.commands(), ["send", "state"])
-                alive.assert_not_called()
-
-    def test_reply_poll_keeps_its_deadline_across_missed_heartbeats(self) -> None:
-        reply = {"is_mine": False, "text": "hello", "message_id": "reply"}
-        poll = ReplyPoll(
-            [
-                (1, {"messages": []}),
-                (58, missed_heartbeat()),
-                (58, missed_heartbeat()),
-                (58, {"messages": []}),
-                (4, {"messages": [reply]}),
-            ],
-        )
-        with poll.patched(), self.assertRaises(smoke.SmokeFailure) as raised:
-            poll.run()
-        self.assertIn("expected Hermes reply 'hello' not found", str(raised.exception))
-        self.assertIn("missed heartbeat read seconds=[58.0, 58.0]", str(raised.exception))
-        self.assertEqual(poll.commands(), ["send", "state", "state", "state"])
-
-
-def missed_heartbeat(
-    *, returncode: int = 1, stderr: str = smoke.MISSED_HEARTBEAT_STDERR + "\n"
-) -> Exception:
-    return smoke.CommandFailed(
-        ["docker", "run"],
-        smoke.subprocess.CompletedProcess(["docker"], returncode, stdout="", stderr=stderr),
-    )
-
-
-class ReplyPoll:
-    """Runs `run_model_smoke` against scripted CLI results on a fake clock.
-
-    Each step is (seconds the command takes, state dict or exception).
-    """
-
-    def __init__(self, steps: list[tuple[float, object]]) -> None:
-        self.steps = list(steps)
-        self.now = 0.0
-        self.app = mock.Mock(side_effect=self._app)
-        self.stderr = io.StringIO()
-
-    def _app(self, **_kwargs: object) -> object:
-        seconds, result = self.steps.pop(0)
-        self.now += seconds
-        if isinstance(result, Exception):
-            raise result
-        return result
-
-    def _sleep(self, seconds: float) -> None:
-        self.now += seconds
-
-    @contextlib.contextmanager
-    def patched(self) -> Iterator[mock.Mock]:
-        with (
-            mock.patch.object(smoke, "docker_user_app", self.app),
-            mock.patch.object(smoke, "agent_log_tail", return_value="AGENT-LOG-TAIL"),
-            mock.patch.object(smoke.time, "monotonic", lambda: self.now),
-            mock.patch.object(smoke.time, "sleep", self._sleep),
-            mock.patch.object(smoke.sys, "stderr", self.stderr),
-            mock.patch.object(smoke, "ensure_container_running") as alive,
-        ):
-            yield alive
-
-    def run(self) -> dict[str, Any]:
-        return smoke.run_model_smoke(
-            image="test",
-            user_volume="user",
-            server_url="https://chat.example",
-            room_id="room",
-            expected="hello",
-            env={},
-            agent_container="agent",
-        )
-
-    def commands(self) -> list[str]:
-        return [call.kwargs["args"][0] for call in self.app.call_args_list]
+            smoke.run_model_smoke(
+                image="test",
+                user_volume="user",
+                server_url="https://chat.example",
+                room_id="room",
+                expected="hello",
+                env={},
+                agent_container="agent",
+            )
+        self.assertIn("SSE hint stream read failed", str(raised.exception))
+        self.assertEqual(sum("send" in call for call in calls), 1)
+        self.assertEqual(sum("state" in call for call in calls), 1)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
