@@ -6,6 +6,10 @@ checkpoint, MPK, images and serving command for usage-api admission. The
 separate degraded-allowlist configuration is an explicit operational override,
 not evidence of current production state.
 
+Optional [Numes marketplace serving](numes.md) has separate credentials,
+accounting and a Finite-owned concurrency cap that can be tuned without a deploy.
+It is disabled unless explicitly configured.
+
 Inspect the live measured tag and configuration with `scripts/finite-status`
 and `infra/runbooks/finite-private-ops.sh status` before a deployment. Preserve
 the exact previous tag, container identity, configuration and credential custody
