@@ -210,6 +210,60 @@ async fn marketplace_returns_raw_usage_without_touching_core() {
 }
 
 #[tokio::test]
+async fn tinfoil_relay_without_request_ids_gets_generated_ids_and_unchanged_usage() {
+    let h = harness(Engine::new(), Duration::from_secs(5)).await;
+    let mut ids = Vec::new();
+    for streaming in [false, true] {
+        let mut request = request(KEY, streaming);
+        request.headers_mut().remove("x-request-id");
+        let response = h.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let id = response.headers()["x-request-id"]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(id.starts_with("fp_req_"));
+        ids.push(id);
+        let expected = "prompt=10,completion=2,total=12,model=glm-5-3-flash";
+        if streaming {
+            h.engine.release.add_permits(1);
+            let collected = response.into_body().collect().await.unwrap();
+            assert_eq!(collected.trailers().unwrap()[USAGE_HEADER], expected);
+        } else {
+            assert_eq!(response.headers()[USAGE_HEADER], expected);
+        }
+        wait_for(async || inflight(&h.app).await == 0).await;
+    }
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(h.core_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn invalid_or_ambiguous_supplied_request_ids_fail_before_dispatch() {
+    let h = harness(Engine::new(), Duration::from_secs(5)).await;
+    for value in ["".to_owned(), "contains spaces".to_owned(), "a".repeat(129)] {
+        let mut request = request(KEY, false);
+        request
+            .headers_mut()
+            .insert("x-request-id", HeaderValue::from_str(&value).unwrap());
+        assert_eq!(
+            h.app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let mut duplicate = request(KEY, false);
+    duplicate
+        .headers_mut()
+        .append("x-request-id", HeaderValue::from_static("second-id"));
+    assert_eq!(
+        h.app.clone().oneshot(duplicate).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(h.engine.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(h.core_calls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn live_capacity_control_is_finite_only_and_drains_without_cancelling() {
     let h = harness(Engine::new(), Duration::from_secs(5)).await;
     let response = h.app.clone().oneshot(request(KEY, true)).await.unwrap();

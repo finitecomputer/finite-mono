@@ -245,18 +245,27 @@ pub(super) async fn serve(
             "The body and X-Tinfoil-Model must name the canonical model; usage metrics must be requested.",
         );
     }
-    let Some(request_id) = header(&headers, "x-request-id").filter(|id| {
-        !id.is_empty()
-            && id.len() <= 128
-            && id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
-    }) else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "numes_invalid_request_id",
-            "A bounded opaque X-Request-Id is required.",
-        );
+    // Tinfoil relays need not supply an application-specific request ID.
+    // Generate correlation metadata locally without changing the usage format.
+    let request_id = if headers.contains_key("x-request-id") {
+        match header(&headers, "x-request-id").filter(|id| {
+            !id.is_empty()
+                && id.len() <= 128
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"-_.:".contains(&b))
+        }) {
+            Some(id) => id.to_owned(),
+            None => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "numes_invalid_request_id",
+                    "When supplied, X-Request-Id must be a bounded opaque identifier.",
+                );
+            }
+        }
+    } else {
+        new_request_id()
     };
     let Some(object) = value.as_object_mut() else {
         unreachable!()
@@ -337,7 +346,6 @@ pub(super) async fn serve(
     // Own the slot in a detached worker BEFORE prefill. A dropped handler or
     // body must never release GPU capacity while generation is still running.
     let (reply_tx, reply_rx) = oneshot::channel();
-    let request_id = request_id.to_owned();
     let body = Bytes::from(serde_json::to_vec(&value).expect("JSON value serialization"));
     tokio::spawn(async move {
         let _slot = slot;

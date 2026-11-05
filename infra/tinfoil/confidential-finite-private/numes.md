@@ -72,8 +72,10 @@ The draft contract requires these headers on every Numes inference request:
 - `Authorization: Bearer <dedicated Numes relay credential>`
 - `X-Tinfoil-Model: glm-5-3-flash`, exactly matching the decrypted body's model
 - `X-Tinfoil-Request-Usage-Metrics: true`
-- `X-Request-Id`: an opaque 1–128 character ASCII identifier using letters,
-  digits, `-`, `_`, `.`, or `:`; echoed on the response
+
+`X-Request-Id` is optional. When omitted, the adapter generates a correlation ID;
+when supplied, it must be a single opaque 1–128 character ASCII identifier using
+letters, digits, `-`, `_`, `.`, or `:`. Either ID is returned on the response.
 
 Aliases are reserved for existing Finite clients. Numes lists the canonical
 model only. The model server must enforce its published context window. The
@@ -97,7 +99,7 @@ malformed or interrupted usage produces **no billable usage header/trailer**;
 there are no estimated marketplace charges. Cache discounts and `cost_usd` are
 not reported. Numes calculates cost using its approved marketplace rates.
 
-The HTTP response and echoed request identifier associate the usage with its
+The HTTP response and returned request identifier associate the usage with its
 request; this is not a signed receipt, durable usage ledger or retry-deduplication
 API. A retry is a new inference request. Counts remain visible outside EHBP;
 request and response content do not.
@@ -114,11 +116,28 @@ trailer; no out-of-band settlement is implemented here.
 
 ## Qualification before activation
 
+Merging this code does not activate an offer. Publish and review the new serving
+image and measured configuration, provision the dedicated credentials, deploy
+with authorization, and explicitly raise the live cap from zero. Numes's listing
+must reflect the configured output limit and deadline (defaults: 4096 tokens and
+120 seconds) and the engine's actual context window. `/v1/models` discovery is
+not implemented; supply those facts to Numes explicitly.
+
+The JavaScript SDK/ATC path is a separate activation blocker: this endpoint
+reports `tdx-guest/v2`, and ATC rejects its custom-container attestation request
+with HTTP 501 because it supports only `sev-snp-guest/v2`. The
+[Tinfoil JavaScript verifier](https://docs.tinfoil.sh/sdk/javascript-sdk#what-the-verifier-checks)
+also lacks Intel TDX checks. Supporting this deployment requires both a compatible
+attestation bundle service and a TDX-capable customer-side verifier, or a separately
+qualified deployment on supported hardware. Updating this adapter cannot resolve
+that gap. Never bypass verification or substitute relay-side verification for
+customer-side verification; prove the approved workload verifies before activation.
+
 Synthetic tests cover local cap races, live pause/raise/lower, client drops during
 prefill/streaming, deadlines, valid HTTP/1 streaming trailers, invalid usage and
 continued Finite subscription admission/settlement at marketplace saturation.
 Still qualify EHBP/trailer transport through the deployed Tinfoil shim and Numes
 relay, mismatched encrypted model rejection, actual engine limits/cancellation,
-and Finite-user latency under the chosen marketplace cap. Confirm the final
-request identifier and usage format with Numes. Do not enable the offer on the
-strength of local tests alone.
+and Finite-user latency under the chosen marketplace cap. Confirm the usage format
+and configured listing limits with Numes. Do not enable the offer on the strength
+of local tests alone.
