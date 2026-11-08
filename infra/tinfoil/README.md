@@ -32,4 +32,5 @@ without proving its configured API route and credentials.
 ## Secrets
 
 Tinfoil sealed secrets (`FINITE_USAGE_API_SERVICE_KEY`, `VLLM_INTERNAL_API_KEY`,
-`VLLM_API_KEY`) are set through the Tinfoil deployment surface, never in git.
+`VLLM_API_KEY`, `FINITE_PRIVATE_METRICS_TOKEN`) are set through the Tinfoil
+deployment surface, never in git.
