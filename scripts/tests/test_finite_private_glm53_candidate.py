@@ -84,6 +84,26 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
                     any("NVLink" in item for item in violations), violations
                 )
 
+    def test_equivalent_or_unterminated_duplicate_security_keys_are_rejected(
+        self,
+    ) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        for header in ("security:", "security :", '"security":', "'security':"):
+            for ending in ("\n", ""):
+                with self.subTest(header=header, ending=ending):
+                    text = (
+                        original
+                        + f"\n{header}\n  allow-unencrypted-nvlink: false"
+                        + ending
+                    )
+                    with temporary_repository(main_text=text) as temporary_directory:
+                        violations = check_repository(
+                            Path(temporary_directory), release_ready=True
+                        )
+                    self.assertTrue(
+                        any("NVLink" in item for item in violations), violations
+                    )
+
     def test_model_requires_private_ipc_and_256g_shared_memory(self) -> None:
         original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         settings = "    ipc: private\n    shm_size: 256g\n"

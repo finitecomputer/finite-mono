@@ -24,7 +24,9 @@ GPUs require replacement with downtime; holding for review is unavailable and
 the update cannot be canceled after the old enclave stops. Do not override
 secrets, variables, security settings or volumes during a CVM-only update.
 Omitted overrides preserve the selected secret names, but deployment resolves
-their current values; review any secret refreshes reported by the plan.
+their current values. Before confirming, independently check rotations and
+credential compatibility with the secret custodian. The plan lists names and
+refreshes, but does not prove that secret values match the serving enclave.
 
 Confirm the exact new tag and verify attestation against its published
 measurement before accepting readiness. The ops helper's `wait-ready` checks

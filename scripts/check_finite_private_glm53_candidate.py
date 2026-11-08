@@ -129,11 +129,16 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         )
     # CVM 0.14.17 refuses multiple Hopper GPUs without measured consent to
     # unencrypted NVLink. A container-local setting cannot satisfy this gate.
+    security_headers = re.findall(
+        r"""^(?:security|"security"|'security')[ \t]*:""", text, re.MULTILINE
+    )
     security_blocks = re.findall(
         r"^security:[^\n]*\n.*?(?=^\S|\Z)", text, re.MULTILINE | re.DOTALL
     )
-    if len(security_blocks) != 1 or security_blocks[0].strip() != (
-        "security:\n  allow-unencrypted-nvlink: true"
+    if (
+        security_headers != ["security:"]
+        or len(security_blocks) != 1
+        or security_blocks[0].strip() != "security:\n  allow-unencrypted-nvlink: true"
     ):
         violations.append(
             "GLM candidate must declare exactly one top-level security block "
