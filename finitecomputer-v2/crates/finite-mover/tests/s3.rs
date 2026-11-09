@@ -186,11 +186,20 @@ fn the_host_stream_is_staged_resumed_and_read_back() {
     let staged = bucket.get(&target.zip_key()).unwrap().unwrap();
     assert_eq!(staged, stream);
     let stored = bucket.get(&target.manifest_key()).unwrap().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&stored).unwrap()["attempt"],
-        1
+    let stored: serde_json::Value = serde_json::from_slice(&stored).unwrap();
+    assert_eq!(stored, serde_json::to_value(&manifest).unwrap());
+    assert_eq!((manifest.files, manifest.attempt), (4, 1));
+    // The host's left lines arrive by class: the identity and the .env.
+    let left: Vec<(&str, &str)> = manifest
+        .left
+        .iter()
+        .map(|line| (line.path.as_str(), line.why.as_str()))
+        .collect();
+    assert!(left.contains(&("agent/identity", "secret")), "{left:?}");
+    assert!(
+        left.contains(&("agent/hermes-home/.env", "secret")),
+        "{left:?}"
     );
-    assert_eq!(manifest.files, 4);
 
     let mut zip = zip::ZipArchive::new(io::Cursor::new(staged)).unwrap();
     let mut names: Vec<String> = zip.file_names().map(str::to_string).collect();

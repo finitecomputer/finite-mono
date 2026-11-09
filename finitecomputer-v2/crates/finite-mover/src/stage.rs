@@ -42,7 +42,12 @@ pub const PARTS_MAX: u32 = 10_000;
 /// How much of the stream's end is kept to read its central directory:
 /// about 300,000 entries.
 pub const TAIL_BYTES: usize = 64 * 1024 * 1024;
-const OLD_MAX: usize = 128;
+/// The longest old agent id (Core's project ids are 28 bytes).
+const OLD_MAX: usize = 64;
+/// `manifest.json` is read whole: at most this, and at most this many
+/// `left` lines (fragment's `MANIFEST_MAX_BYTES`, `MANIFEST_LEFT_MAX`).
+pub const MANIFEST_MAX_BYTES: usize = 256 * 1024;
+pub const MANIFEST_LEFT_MAX: usize = 1_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,27 +119,40 @@ impl StageTarget {
     }
 }
 
-/// `manifest.json`: what a staged attempt holds.
+/// `manifest.json`: what a staged attempt holds. The shape is fragment's
+/// `fragment_proto::migrations::Manifest`, which the platform and the
+/// importer read.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
+    /// `finite-stage/1`.
     pub format: String,
-    pub phase: Phase,
     pub old: String,
+    pub phase: Phase,
     pub attempt: u32,
+    /// How the zip's tree is laid out, for the importer.
     pub layout: String,
-    pub zip: ZipFacts,
-    /// Staged files in the zip, its summary not counted.
+    pub zip_bytes: u64,
+    /// The zip's SHA-256, hex.
+    pub zip_sha256: String,
+    /// The staged files' bytes, uncompressed, and how many there are: the
+    /// zip's entries but its summary.
+    pub bytes: u64,
     pub files: u64,
-    /// The host reader's summary, verbatim: each class's files and bytes,
-    /// and what stayed behind and why.
-    pub summary: serde_json::Value,
+    /// What stayed behind, largest first, at most `MANIFEST_LEFT_MAX`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub left: Vec<LeftBehind>,
+    /// Files left behind past the list.
+    #[serde(default)]
+    pub left_more: u64,
 }
 
+/// One path that stayed behind: a file, or a directory that stayed whole.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ZipFacts {
-    pub key: String,
+pub struct LeftBehind {
+    pub path: String,
     pub bytes: u64,
-    pub sha256: String,
+    /// The classifier's class: `secret`, `cache` or `runtime`.
+    pub why: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -209,23 +227,35 @@ pub fn upload_stage(
         Err(error) => return Err(error),
     };
     bucket.complete(&key, &upload_id, &uploaded.parts)?;
-    let manifest = Manifest {
+    let mut manifest = Manifest {
         format: MANIFEST_FORMAT.to_string(),
-        phase: target.phase,
         old: target.old.clone(),
+        phase: target.phase,
         attempt: target.attempt,
         layout: LAYOUT.to_string(),
-        zip: ZipFacts {
-            key,
-            bytes: uploaded.tail.total(),
-            sha256: uploaded.sha256,
-        },
+        zip_bytes: uploaded.tail.total(),
+        zip_sha256: uploaded.sha256,
+        bytes: summary.bytes,
         files: summary.files,
-        summary: summary.json,
+        left: summary.left,
+        left_more: summary.left_more,
     };
-    let body = serde_json::to_vec_pretty(&manifest).expect("a manifest serializes");
+    let body = manifest_body(&mut manifest, summary.left_files);
     bucket.put(&target.manifest_key(), &body, "application/json")?;
     Ok(manifest)
+}
+
+/// The manifest's JSON within `MANIFEST_MAX_BYTES`: the smallest `left`
+/// lines move into `left_more` until it fits. `left_files` is each line's
+/// file count.
+fn manifest_body(manifest: &mut Manifest, mut left_files: Vec<u64>) -> Vec<u8> {
+    loop {
+        let body = serde_json::to_vec(manifest).expect("a manifest serializes");
+        if body.len() <= MANIFEST_MAX_BYTES || manifest.left.pop().is_none() {
+            return body;
+        }
+        manifest.left_more += left_files.pop().unwrap_or(1);
+    }
 }
 
 /// Refuse if a later attempt has begun; abort earlier unfinished uploads.
@@ -347,18 +377,50 @@ fn read_full(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
 
 struct CheckedSummary {
     files: u64,
-    json: serde_json::Value,
+    bytes: u64,
+    left: Vec<LeftBehind>,
+    left_files: Vec<u64>,
+    left_more: u64,
+}
+
+/// The parts of `finite-mover-host`'s summary the manifest carries.
+#[derive(Deserialize)]
+struct HostSummary {
+    left: Vec<HostLeft>,
+    left_more: HostTally,
+}
+
+#[derive(Deserialize)]
+struct HostLeft {
+    path: String,
+    class: String,
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct HostTally {
+    files: u64,
 }
 
 /// The second check: every name through the host's classifier.
 fn check(tail: &Tail) -> Result<CheckedSummary, StageError> {
     let entries = zip_tail::entries(tail)?;
     let mut summary = None;
+    let mut names = std::collections::BTreeSet::new();
+    let mut bytes = 0u64;
     for entry in &entries {
+        if !names.insert(entry.name.as_str()) {
+            // Readers disagree on which of two same-named entries wins.
+            return Err(StageError::UnsafeName {
+                path: entry.name.clone(),
+            });
+        }
         if entry.name == SUMMARY_ENTRY {
             summary = Some(entry);
             continue;
         }
+        bytes += entry.size;
         let parts: Vec<&str> = entry.name.split('/').collect();
         let unsafe_name = entry.name.starts_with('/')
             || parts.iter().any(|part| {
@@ -377,11 +439,33 @@ fn check(tail: &Tail) -> Result<CheckedSummary, StageError> {
         }
     }
     let summary = summary.ok_or(StageError::NoSummary)?;
-    let json = serde_json::from_slice(zip_tail::data(tail, summary)?)
+    let host: HostSummary = serde_json::from_slice(zip_tail::data(tail, summary)?)
         .map_err(|_| StageError::NoSummary)?;
+    let listed = host.left.len().min(MANIFEST_LEFT_MAX);
+    let left_more = host.left_more.files
+        + host.left[listed..]
+            .iter()
+            .map(|line| line.files)
+            .sum::<u64>();
+    let (left, left_files) = host
+        .left
+        .into_iter()
+        .take(listed)
+        .map(|line| {
+            let behind = LeftBehind {
+                path: line.path,
+                bytes: line.bytes,
+                why: line.class,
+            };
+            (behind, line.files)
+        })
+        .unzip();
     Ok(CheckedSummary {
         files: entries.len() as u64 - 1,
-        json,
+        bytes,
+        left,
+        left_files,
+        left_more,
     })
 }
 

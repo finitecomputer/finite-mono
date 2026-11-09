@@ -4,6 +4,8 @@ use std::io::{self, Read};
 
 use finite_mover_host::zip64::ZipStream;
 
+use serde_json::json;
+
 use super::*;
 use crate::bucket::Part;
 
@@ -146,7 +148,10 @@ fn stage(files: &[(&str, Vec<u8>)]) -> Vec<u8> {
     for (name, body) in files {
         stream.entry(name, 0o644, 0, &mut &body[..]).unwrap();
     }
-    let summary = br#"{"format":"finite-mover-host/summary/1","id":"runtime_1"}"#;
+    let summary = br#"{"format":"finite-mover-host/summary/1","id":"runtime_1",
+        "left":[{"path":"agent/identity","class":"secret","why":"nostr-identity","files":1,"bytes":300},
+                {"path":"workspace/app/node_modules","class":"cache","why":"cache-dir","files":40,"bytes":9000}],
+        "left_more":{"files":7,"bytes":70}}"#;
     stream
         .entry(SUMMARY_ENTRY, 0o644, 0, &mut &summary[..])
         .unwrap();
@@ -206,12 +211,21 @@ fn a_stage_is_uploaded_whole_and_its_manifest_comes_last() {
     let stored: Manifest =
         serde_json::from_slice(&state.objects["p1/proj_old1/1/manifest.json"]).unwrap();
     assert_eq!(stored, manifest);
+    // The host's left lines arrive by class; the rest are counted.
     assert_eq!(
-        (manifest.files, manifest.zip.bytes, manifest.layout.as_str()),
-        (2, bytes.len() as u64, "finite-computer")
+        serde_json::to_value(&manifest).unwrap(),
+        json!({
+            "format": "finite-stage/1", "old": "proj_old1", "phase": "p1", "attempt": 1,
+            "layout": "finite-computer", "zip_bytes": bytes.len(),
+            "zip_sha256": hex::encode(Sha256::digest(&bytes)),
+            "bytes": 2 + 12 * MIB, "files": 2,
+            "left": [
+                {"path": "agent/identity", "bytes": 300, "why": "secret"},
+                {"path": "workspace/app/node_modules", "bytes": 9000, "why": "cache"},
+            ],
+            "left_more": 7,
+        })
     );
-    assert_eq!(manifest.zip.sha256, hex::encode(Sha256::digest(&bytes)));
-    assert_eq!(manifest.summary["id"], "runtime_1");
 }
 
 #[test]
@@ -393,9 +407,55 @@ fn a_staged_attempt_is_answered_from_its_manifest() {
 }
 
 #[test]
+fn a_long_left_list_is_cut_to_fit_the_manifest() {
+    let mut manifest = Manifest {
+        format: MANIFEST_FORMAT.to_string(),
+        old: "proj_old1".to_string(),
+        phase: Phase::P1,
+        attempt: 1,
+        layout: LAYOUT.to_string(),
+        zip_bytes: 1,
+        zip_sha256: String::new(),
+        bytes: 1,
+        files: 1,
+        left: (0..MANIFEST_LEFT_MAX)
+            .map(|index| LeftBehind {
+                path: format!("workspace/{}/{index}", "deep/".repeat(80)),
+                bytes: 1,
+                why: "runtime".to_string(),
+            })
+            .collect(),
+        left_more: 5,
+    };
+    let body = manifest_body(&mut manifest, vec![3; MANIFEST_LEFT_MAX]);
+    assert!(body.len() <= MANIFEST_MAX_BYTES);
+    let cut = MANIFEST_LEFT_MAX - manifest.left.len();
+    assert!(cut > 0);
+    assert_eq!(manifest.left_more, 5 + 3 * cut as u64);
+    assert_eq!(serde_json::from_slice::<Manifest>(&body).unwrap(), manifest);
+}
+
+#[test]
+fn duplicate_names_are_refused() {
+    let bucket = Memory::default();
+    let bytes = stage(&[
+        ("workspace/a.md", b"one".to_vec()),
+        ("workspace/a.md", b"two".to_vec()),
+    ]);
+    let error = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap_err();
+    assert!(
+        matches!(&error, StageError::UnsafeName { path } if path == "workspace/a.md"),
+        "{error}"
+    );
+    assert!(bucket.state.borrow().uploads.is_empty());
+}
+
+#[test]
 fn targets_are_validated() {
     assert!(StageTarget::new(Phase::P1, "proj_1", 1).is_ok());
+    let long = "p".repeat(65);
     for (old, attempt) in [
+        (long.as_str(), 1),
         ("", 1),
         ("proj/1", 1),
         ("../x", 1),
