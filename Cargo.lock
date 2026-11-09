@@ -1078,6 +1078,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "finite-mover"
+version = "0.1.0"
+dependencies = [
+ "finite-mover-host",
+ "hex",
+ "hmac 0.12.1",
+ "md-5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "time",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "finite-mover-host"
 version = "0.1.0"
 dependencies = [
