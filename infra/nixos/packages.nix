@@ -421,6 +421,13 @@ rec {
     sharedCargoArtifacts = finiteSaasCargoArtifacts;
     cargoArtifactGroup = "finite-saas";
   };
+  # FIN-463: the read-only reader of one durable tree, run on Runner hosts
+  # only as the mover's forced ssh command (modules/finite-mover-host.nix).
+  finite-mover-host = mkWorkspaceCrate {
+    pname = "finite-mover-host";
+    dir = "finitecomputer-v2/crates/finite-mover-host";
+    sourcePaths = [ "finitecomputer-v2/crates/finite-mover-host" ];
+  };
   finitechat-server = mkWorkspaceCrate {
     pname = "finitechat-server";
     dir = "finitechat/crates/finitechat-server";
