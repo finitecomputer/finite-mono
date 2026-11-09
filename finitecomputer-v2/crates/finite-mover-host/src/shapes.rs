@@ -37,6 +37,56 @@ enum Encoding {
     Utf16Be,
 }
 
+/// The largest text file held whole while it is read for credentials:
+/// fragment's blob limit, past which the import leaves a file behind
+/// anyway.
+pub const TEXT_SNAPSHOT_MAX: u64 = 256 * 1024 * 1024;
+
+/// What reading a file once found, with the bytes a text file is staged
+/// from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Snapshot {
+    /// Binary: its contents are not read for credentials, as the export's
+    /// are not.
+    Binary,
+    /// Clean text, every byte of it: the stage holds exactly what was
+    /// checked, whatever the file holds a moment later.
+    Text(Vec<u8>),
+    /// Text holding a credential-shaped string.
+    Secret,
+    /// Text too large to hold (`TEXT_SNAPSHOT_MAX`), or with a run too long
+    /// to check.
+    Uncheckable,
+}
+
+/// Read a file once: decide whether it is binary from its first bytes, and
+/// hold a text file whole to check it and to stage it from.
+pub fn snapshot(mut reader: impl Read, size: u64) -> io::Result<Snapshot> {
+    let mut first = vec![0; BINARY_PROBE];
+    let probed = read_full(&mut reader, &mut first)?;
+    first.truncate(probed);
+    if !first.starts_with(b"\xff\xfe") && !first.starts_with(b"\xfe\xff") && first.contains(&0) {
+        return Ok(Snapshot::Binary);
+    }
+    if size > TEXT_SNAPSHOT_MAX {
+        return Ok(Snapshot::Uncheckable);
+    }
+    let mut text = first;
+    reader
+        .take(TEXT_SNAPSHOT_MAX + 1 - text.len() as u64)
+        .read_to_end(&mut text)?;
+    if text.len() as u64 > TEXT_SNAPSHOT_MAX {
+        return Ok(Snapshot::Uncheckable);
+    }
+    Ok(match scan(&text[..])? {
+        TextVerdict::Clean => Snapshot::Text(text),
+        // A NUL past the first 8 KiB: as text it was read, and it is clean.
+        TextVerdict::Binary => Snapshot::Text(text),
+        TextVerdict::Secret => Snapshot::Secret,
+        TextVerdict::Uncheckable => Snapshot::Uncheckable,
+    })
+}
+
 /// Read `reader` to its end, or until a credential is found.
 pub fn scan(mut reader: impl Read) -> io::Result<TextVerdict> {
     let mut chunk = vec![0; CHUNK];
@@ -381,6 +431,24 @@ mod tests {
             utf16.extend_from_slice(&unit.to_le_bytes());
         }
         assert_eq!(scan(&utf16[..]).unwrap(), TextVerdict::Secret);
+    }
+
+    #[test]
+    fn a_snapshot_holds_text_and_skips_binary() {
+        let text = b"notes, and no credential\n".to_vec();
+        assert_eq!(
+            snapshot(&text[..], text.len() as u64).unwrap(),
+            Snapshot::Text(text.clone())
+        );
+        let token = b"key ghp_abcdefghij0123456789\n";
+        assert_eq!(snapshot(&token[..], 29).unwrap(), Snapshot::Secret);
+        let binary = b"SQLite format 3\0ghp_abcdefghij0123456789";
+        assert_eq!(snapshot(&binary[..], 40).unwrap(), Snapshot::Binary);
+        assert_eq!(
+            snapshot(&text[..], TEXT_SNAPSHOT_MAX + 1).unwrap(),
+            Snapshot::Uncheckable,
+            "a text file too large to hold is never read past its start"
+        );
     }
 
     #[test]

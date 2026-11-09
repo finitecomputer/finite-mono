@@ -164,6 +164,7 @@ fn sizes_equal_what_stream_stages_in_each_class() {
         ("workspace/passwd", "not-a-file"),
         ("workspace/other", "not-a-file"),
         ("workspace/pipe", "not-a-file"),
+        ("workspace/report.txt", "not-a-file"),
         ("workspace/bad\u{fffd}name.txt", "uncarried-name"),
         ("agent/hermes-home/config.public.yaml", "replaced-by-copy"),
         ("agent/hermes-home/logs", "runtime"),
@@ -264,6 +265,64 @@ fn a_tree_written_while_it_is_streamed_is_refused() {
     );
 }
 
+/// Writes the stage, and once a megabyte of it has arrived, while a large
+/// text file is being copied, puts a token into the rest of that file.
+struct RacingWriter {
+    file: std::path::PathBuf,
+    received: Vec<u8>,
+}
+
+impl std::io::Write for RacingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        use std::io::{Seek, SeekFrom};
+        let before = self.received.len();
+        self.received.extend_from_slice(buffer);
+        if before < (1 << 20) && self.received.len() >= (1 << 20) {
+            let mut file = std::fs::OpenOptions::new().write(true).open(&self.file)?;
+            file.seek(SeekFrom::Start(3 << 20))?;
+            file.write_all(b" ghp_abcdefghij0123456789 ")?;
+        }
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_text_file_written_while_it_is_streamed_never_reaches_the_stage() {
+    let dir = tempfile::Builder::new()
+        .prefix("mover-host-race-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let tree = dir.path().join("kata/rt_race");
+    std::fs::create_dir_all(tree.join("workspace")).unwrap();
+    let big = tree.join("workspace/big.txt");
+    std::fs::write(&big, "clean notes line\n".repeat(4 << 16)).unwrap();
+    let mut out = RacingWriter {
+        file: big,
+        received: Vec::new(),
+    };
+    let result = run(dir.path(), op("stream rt_race"), &mut out);
+    assert!(
+        matches!(&result, Err(HostError::TreeChanged(path)) if path.ends_with("big.txt")),
+        "{result:?}"
+    );
+    assert!(
+        !contains(&out.received, b"ghp_"),
+        "the token written after the check never left the host"
+    );
+}
+
+#[test]
+fn a_stopped_tree_streams_the_same_bytes_every_time() {
+    // The uploader resumes by comparing parts of a second stream with the
+    // first: an unchanged tree must stream identically.
+    let fixture = fixture::build();
+    assert_eq!(stream(&fixture), stream(&fixture));
+}
+
 #[test]
 fn secrets_reads_the_three_values() {
     let fixture = fixture::build();
@@ -292,6 +351,14 @@ fn secrets_reads_the_three_values() {
         ("nsec", SECRET_HEX.to_owned())
     );
     assert_eq!(answer["absent"], serde_json::json!([]));
+
+    // A key file that is a hard link is not read.
+    let identity = fixture.tree.join("agent/identity/identity.json");
+    std::fs::hard_link(&identity, fixture.work_root.join("identity-elsewhere.json")).unwrap();
+    let out = run_bytes(&fixture, &format!("secrets {ID} nostr_nsec")).unwrap();
+    let answer: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(answer["absent"], serde_json::json!(["nostr_nsec"]));
+    std::fs::remove_file(fixture.work_root.join("identity-elsewhere.json")).unwrap();
 
     // An agent with none of them reports each as absent.
     for path in [

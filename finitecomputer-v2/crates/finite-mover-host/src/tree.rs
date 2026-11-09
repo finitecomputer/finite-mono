@@ -93,8 +93,13 @@ impl Tree {
         self.device
     }
 
-    /// Open a regular file at `parts`, or `None` if any part is missing.
+    /// Open a regular file with one name at `parts`, or `None` if any part
+    /// is missing.
     pub fn open_file(&self, parts: &[&str]) -> Result<Option<File>, HostError> {
+        self.open_path(parts, false)
+    }
+
+    fn open_path(&self, parts: &[&str], any_links: bool) -> Result<Option<File>, HostError> {
         let Some((name, directories)) = parts.split_last() else {
             return Ok(None);
         };
@@ -109,7 +114,12 @@ impl Tree {
             };
         }
         let name = CString::new(*name).map_err(|_| HostError::BadId)?;
-        match open_regular(&directory, &name) {
+        let opened = if any_links {
+            open_any_regular(&directory, &name).map(|file| file.map(|(file, _)| file))
+        } else {
+            open_regular(&directory, &name)
+        };
+        match opened {
             Ok(file) => Ok(file),
             Err(Errno::NOENT | Errno::LOOP) => Ok(None),
             Err(error) => Err(self.error(parts, error)),
@@ -147,7 +157,7 @@ impl Tree {
     /// file is open: no agent can open its store for writing meanwhile.
     /// A tree without the lease file has no store a writer could hold.
     pub fn take_writer_lease(&self) -> Result<Option<File>, HostError> {
-        let Some(lease) = self.open_file(&WRITER_LEASE)? else {
+        let Some(lease) = self.open_path(&WRITER_LEASE, true)? else {
             return Ok(None);
         };
         match rustix::fs::flock(&lease, FlockOperation::NonBlockingLockExclusive) {
@@ -182,8 +192,19 @@ pub fn open_directory(parent: impl AsFd, name: &CStr) -> Result<OwnedFd, Errno> 
 }
 
 /// Open the regular file `name` in `parent`, never through a link and
-/// never blocking on a pipe; anything else is `None`.
+/// never blocking on a pipe; anything else is `None`. A file with more
+/// than one name is `None` too: a hard link can be a file outside the
+/// tree, and `O_NOFOLLOW` does not see it.
 pub fn open_regular(parent: impl AsFd, name: &CStr) -> Result<Option<File>, Errno> {
+    let Some((file, stat)) = open_any_regular(parent, name)? else {
+        return Ok(None);
+    };
+    Ok((stat.st_nlink == 1).then_some(file))
+}
+
+/// `open_regular`, whatever the file's link count: only for a file whose
+/// contents are never read, such as the writer lease.
+fn open_any_regular(parent: impl AsFd, name: &CStr) -> Result<Option<(File, Stat)>, Errno> {
     let flags =
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::NOCTTY | OFlags::CLOEXEC;
     let fd = rustix::fs::openat(parent, name, flags, Mode::empty())?;
@@ -191,7 +212,7 @@ pub fn open_regular(parent: impl AsFd, name: &CStr) -> Result<Option<File>, Errn
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
         return Ok(None);
     }
-    Ok(Some(File::from(fd)))
+    Ok(Some((File::from(fd), stat)))
 }
 
 /// `lstat` of `name` in `parent`.
