@@ -1,10 +1,13 @@
-//! The one walk over a durable tree. `sizes` and `stream` both run it, so
-//! what `sizes` counts in a class is exactly what `stream` stages.
+//! The one walk over a durable tree. `sizes` and `stream` both run it, with
+//! the one classifier, so `sizes` estimates exactly the rules `stream`
+//! stages by.
 //!
-//! For each entry it asks [`classify`], then, for a file the path rules
-//! would stage, reads the file for credentials ([`shapes::scan`]). It
-//! never follows a link, never leaves the tree's filesystem and never
-//! opens anything for writing.
+//! For each entry it asks [`classify`]. Staging (`stream`), it then reads a
+//! file the path rules would stage for credentials ([`shapes::snapshot`]).
+//! Measuring (`sizes`), it opens no regular file at all: its numbers come
+//! from `lstat` and the path rules alone, so they are an estimate of what
+//! `stream` stages. It never follows a link, never leaves the tree's
+//! filesystem and never opens anything for writing.
 
 use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
@@ -32,8 +35,11 @@ const HERMES_CONFIG: [&str; 3] = ["agent", "hermes-home", "config.yaml"];
 /// How the walk treats a tree that changes under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// `sizes`: the agent may be running, so an entry that vanishes is
-    /// skipped and the numbers are approximate.
+    /// `sizes`: an estimate from metadata, while the agent may be running.
+    /// No regular file is opened: an entry that vanishes is skipped, a text
+    /// file holding a credential counts in its path's class, there is no
+    /// config copy, and a brain tree counts as owned when its folder is
+    /// named by an owned brain's id (where `fbrain open` puts it).
     Measure,
     /// `stream`: the agent is stopped and its lease held, so any change is
     /// an error and the stage is abandoned.
@@ -50,6 +56,8 @@ pub enum Source {
     Text { bytes: Vec<u8>, stat: Box<Stat> },
     /// The allow-listed copy of `config.yaml`.
     Bytes(Vec<u8>),
+    /// A file measured, not read: its size from `lstat`.
+    Measured(u64),
 }
 
 impl Source {
@@ -57,6 +65,7 @@ impl Source {
         match self {
             Source::File { stat, .. } => file_bytes(stat),
             Source::Text { bytes, .. } | Source::Bytes(bytes) => bytes.len() as u64,
+            Source::Measured(bytes) => *bytes,
         }
     }
 }
@@ -160,10 +169,14 @@ impl Walk<'_> {
         let parts: Vec<&[u8]> = path.iter().map(Vec::as_slice).collect();
         let verdict = classify::classify(&parts, kind, brain);
         if verdict.class.staged() {
+            if self.mode == Mode::Measure {
+                return visit.staged("", verdict.class, Source::Measured(file_bytes(&stat)));
+            }
             return self.staged(directory, name, &parts, verdict, stat, visit);
         }
         visit.left(&parts, verdict, file_bytes(&stat))?;
-        if kind == EntryKind::File && parts[..] == HERMES_CONFIG.map(str::as_bytes)[..] {
+        let config = parts[..] == HERMES_CONFIG.map(str::as_bytes)[..];
+        if kind == EntryKind::File && config && self.mode == Mode::Stage {
             self.config_copy(directory, name, path, visit)?;
         }
         Ok(())
@@ -272,9 +285,15 @@ impl Walk<'_> {
         if !is_brain {
             return outer;
         }
+        let owned = match self.mode {
+            // Measuring reads no file, not even the manifest.
+            Mode::Measure => std::str::from_utf8(&path[path.len() - 1])
+                .is_ok_and(|name| self.owned_brains.contains(name)),
+            Mode::Stage => brain_id(directory).is_some_and(|id| self.owned_brains.contains(&id)),
+        };
         BrainScope::Brain {
             depth: path.len(),
-            owned: brain_id(directory).is_some_and(|id| self.owned_brains.contains(&id)),
+            owned,
         }
     }
 
