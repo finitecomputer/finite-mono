@@ -9,6 +9,7 @@ publish = false
 description = "The mover of finite.computer agents to finite.chat (FIN-463), run on lat-2."
 
 [dependencies]
+crc32fast = "1.5"
 finite-mover-host = { path = "../finite-mover-host" }
 hex.workspace = true
 hmac.workspace = true

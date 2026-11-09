@@ -167,6 +167,15 @@ fn big_stage() -> Vec<u8> {
     ])
 }
 
+/// A lock directory for one test, under the target directory.
+fn locks() -> std::path::PathBuf {
+    tempfile::Builder::new()
+        .prefix("mover-locks-")
+        .tempdir()
+        .unwrap()
+        .keep()
+}
+
 fn target(attempt: u32) -> StageTarget {
     StageTarget::new(Phase::P1, "proj_old1", attempt).unwrap()
 }
@@ -194,7 +203,7 @@ impl Read for Breaks<'_> {
 fn a_stage_is_uploaded_whole_and_its_manifest_comes_last() {
     let bucket = Memory::default();
     let bytes = big_stage();
-    let manifest = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap();
+    let manifest = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap();
     assert_eq!(
         bucket.writes(),
         [
@@ -236,7 +245,7 @@ fn an_interrupted_upload_resumes_without_resending_its_parts() {
         bytes: &bytes,
         limit: 2 * PART_BYTES_MIN + 100,
     };
-    let error = upload_stage(&bucket, &target(1), broken, PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(&bucket, &target(1), broken, PART_BYTES_MIN, &locks()).unwrap_err();
     assert!(matches!(error, StageError::Read(_)), "{error}");
     assert_eq!(
         bucket.writes(),
@@ -248,7 +257,7 @@ fn an_interrupted_upload_resumes_without_resending_its_parts() {
     );
 
     // The mover runs `stream` again and the upload picks up where it was.
-    upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap();
+    upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap();
     assert_eq!(
         bucket.writes(),
         [
@@ -275,7 +284,7 @@ fn a_part_that_differs_on_resume_is_uploaded_again() {
         .unwrap();
     bucket.writes();
     let bytes = big_stage();
-    upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap();
+    upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap();
     assert_eq!(
         bucket.writes(),
         [
@@ -306,7 +315,8 @@ fn a_secret_path_refuses_the_whole_stage() {
             ("workspace/photos/cat.jpg", photo),
             (secret, b"TOKEN=1".to_vec()),
         ]);
-        let error = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap_err();
+        let error =
+            upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap_err();
         assert!(
             matches!(&error, StageError::Refused { path } if path == secret),
             "{error}"
@@ -334,6 +344,7 @@ fn unsafe_names_and_unreadable_stages_are_refused() {
         &target(1),
         &stage(&[("workspace/../x", vec![1])])[..],
         PART_BYTES_MIN,
+        &locks(),
     )
     .unwrap_err();
     assert!(matches!(error, StageError::UnsafeName { .. }), "{error}");
@@ -344,13 +355,20 @@ fn unsafe_names_and_unreadable_stages_are_refused() {
         .entry("workspace/a.md", 0o644, 0, &mut &b"a"[..])
         .unwrap();
     let no_summary = no_summary.finish().unwrap();
-    let error = upload_stage(&bucket, &target(1), &no_summary[..], PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(
+        &bucket,
+        &target(1),
+        &no_summary[..],
+        PART_BYTES_MIN,
+        &locks(),
+    )
+    .unwrap_err();
     assert!(matches!(error, StageError::NoSummary), "{error}");
 
     let truncated = &big_stage()[..PART_BYTES_MIN + 10];
-    let error = upload_stage(&bucket, &target(1), truncated, PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(&bucket, &target(1), truncated, PART_BYTES_MIN, &locks()).unwrap_err();
     assert!(matches!(error, StageError::Unreadable(_)), "{error}");
-    let error = upload_stage(&bucket, &target(1), &b""[..], PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(&bucket, &target(1), &b""[..], PART_BYTES_MIN, &locks()).unwrap_err();
     assert!(matches!(error, StageError::Empty), "{error}");
     assert!(
         !bucket
@@ -371,15 +389,16 @@ fn a_stale_attempt_never_writes_and_a_newer_one_clears_it() {
         bytes: &bytes,
         limit: PART_BYTES_MIN + 1,
     };
-    upload_stage(&bucket, &target(1), broken, PART_BYTES_MIN).unwrap_err();
+    upload_stage(&bucket, &target(1), broken, PART_BYTES_MIN, &locks()).unwrap_err();
     bucket.writes();
-    upload_stage(&bucket, &target(2), &bytes[..], PART_BYTES_MIN).unwrap();
+    upload_stage(&bucket, &target(2), &bytes[..], PART_BYTES_MIN, &locks()).unwrap();
     let writes = bucket.writes();
     assert_eq!(writes[0], "abort p1/proj_old1/1/stage.zip");
     assert_eq!(writes.last().unwrap(), "put p1/proj_old1/2/manifest.json");
 
     // A late command for attempt 1 now writes nothing.
-    let error = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap_err();
+    let error =
+        upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap_err();
     assert!(
         matches!(error, StageError::StaleAttempt { newer: 2 }),
         "{error}"
@@ -391,7 +410,7 @@ fn a_stale_attempt_never_writes_and_a_newer_one_clears_it() {
 fn a_staged_attempt_is_answered_from_its_manifest() {
     let bucket = Memory::default();
     let bytes = big_stage();
-    let first = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap();
+    let first = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap();
     bucket.writes();
     struct Unread;
     impl Read for Unread {
@@ -400,7 +419,7 @@ fn a_staged_attempt_is_answered_from_its_manifest() {
         }
     }
     assert_eq!(
-        upload_stage(&bucket, &target(1), Unread, PART_BYTES_MIN).unwrap(),
+        upload_stage(&bucket, &target(1), Unread, PART_BYTES_MIN, &locks()).unwrap(),
         first
     );
     assert!(bucket.writes().is_empty());
@@ -442,12 +461,32 @@ fn duplicate_names_are_refused() {
         ("workspace/a.md", b"one".to_vec()),
         ("workspace/a.md", b"two".to_vec()),
     ]);
-    let error = upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN).unwrap_err();
+    let error =
+        upload_stage(&bucket, &target(1), &bytes[..], PART_BYTES_MIN, &locks()).unwrap_err();
     assert!(
         matches!(&error, StageError::UnsafeName { path } if path == "workspace/a.md"),
         "{error}"
     );
     assert!(bucket.state.borrow().uploads.is_empty());
+}
+
+#[test]
+fn a_second_run_of_the_same_agent_waits_its_turn() {
+    let bucket = Memory::default();
+    let locks = locks();
+    let held = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(locks.join("p1-proj_old1.lock"))
+        .unwrap();
+    held.lock().unwrap();
+    let bytes = big_stage();
+    let error = upload_stage(&bucket, &target(2), &bytes[..], PART_BYTES_MIN, &locks).unwrap_err();
+    assert!(matches!(error, StageError::Busy), "{error}");
+    assert!(bucket.writes().is_empty(), "a busy run touches nothing");
+    held.unlock().unwrap();
+    upload_stage(&bucket, &target(2), &bytes[..], PART_BYTES_MIN, &locks).unwrap();
 }
 
 #[test]

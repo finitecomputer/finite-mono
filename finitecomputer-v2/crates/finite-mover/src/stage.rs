@@ -13,13 +13,18 @@
 //!   bucket holds; a part that differs is uploaded again in place.
 //! - **Stale attempts.** An attempt never writes once a later attempt of the
 //!   same agent has begun; an earlier attempt's unfinished upload is aborted.
+//! - **One run at a time.** A run holds a lock on its old agent from its
+//!   first look at the bucket to its manifest, so two runs can never
+//!   interleave a completed object with another run's manifest.
 //! - **The refusal.** Before the upload completes, every name in the zip's
 //!   central directory goes through the host reader's own classifier. One
 //!   secret path refuses the whole stage: the upload is aborted, so nothing
 //!   of it can be read, and no manifest is written.
 
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 
 use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
 use finite_mover_host::stage::SUMMARY_ENTRY;
@@ -177,6 +182,10 @@ pub enum StageError {
     Refused { path: String },
     #[error("the stage was refused whole: {path} is not a safe name")]
     UnsafeName { path: String },
+    #[error("another run is staging this old agent")]
+    Busy,
+    #[error("the stage lock could not be taken: {0}")]
+    Lock(io::Error),
 }
 
 /// The manifest of `target` if that attempt is already staged.
@@ -196,13 +205,19 @@ pub fn staged_manifest(
 
 /// Upload `stream` as `target`'s stage and write its manifest last.
 /// Returns the stored manifest unread if the attempt is already staged.
+///
+/// `locks` is a directory only the mover writes, on the one host it runs
+/// on: a run holds `<phase>-<old>.lock` there until it returns, and a
+/// second run of the same old agent meanwhile is `Busy`.
 pub fn upload_stage(
     bucket: &impl Bucket,
     target: &StageTarget,
     stream: impl Read,
     part_bytes: usize,
+    locks: &Path,
 ) -> Result<Manifest, StageError> {
     assert!(part_bytes >= PART_BYTES_MIN, "parts are at least 5 MiB");
+    let _held = lock(locks, target)?;
     refuse_if_stale(bucket, target)?;
     if let Some(manifest) = staged_manifest(bucket, target)? {
         return Ok(manifest);
@@ -255,6 +270,22 @@ fn manifest_body(manifest: &mut Manifest, mut left_files: Vec<u64>) -> Vec<u8> {
             return body;
         }
         manifest.left_more += left_files.pop().unwrap_or(1);
+    }
+}
+
+/// The old agent's lock, held while the returned file is open.
+fn lock(locks: &Path, target: &StageTarget) -> Result<File, StageError> {
+    let path = locks.join(format!("{}-{}.lock", target.phase.as_str(), target.old));
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .map_err(StageError::Lock)?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(StageError::Busy),
+        Err(std::fs::TryLockError::Error(error)) => Err(StageError::Lock(error)),
     }
 }
 

@@ -1081,6 +1081,7 @@ dependencies = [
 name = "finite-mover"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "finite-mover-host",
  "hex",
  "hmac 0.12.1",

@@ -161,7 +161,7 @@ fn the_host_stream_is_staged_resumed_and_read_back() {
         bytes: &stream,
         limit: 2 * PART_BYTES_MIN + 1,
     };
-    let error = upload_stage(&counted, &target, broken, PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(&counted, &target, broken, PART_BYTES_MIN, dir.path()).unwrap_err();
     assert!(matches!(error, StageError::Read(_)), "{error}");
     assert_eq!(counted.parts.get(), 2);
     let pending = bucket.uploads(&target.zip_key()).unwrap();
@@ -181,7 +181,8 @@ fn the_host_stream_is_staged_resumed_and_read_back() {
 
     // The next run streams again and sends only what is missing.
     counted.parts.set(0);
-    let manifest = upload_stage(&counted, &target, &stream[..], PART_BYTES_MIN).unwrap();
+    let manifest =
+        upload_stage(&counted, &target, &stream[..], PART_BYTES_MIN, dir.path()).unwrap();
     assert_eq!(counted.parts.get(), 1, "only the last part is sent again");
     let staged = bucket.get(&target.zip_key()).unwrap().unwrap();
     assert_eq!(staged, stream);
@@ -227,6 +228,10 @@ fn the_host_stream_is_staged_resumed_and_read_back() {
 #[ignore = "needs a local S3 (FINITE_MOVER_TEST_S3_*)"]
 fn a_secret_path_is_refused_and_leaves_nothing() {
     let bucket = s3();
+    let dir = tempfile::Builder::new()
+        .prefix("mover-s3-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
     let target = StageTarget::new(Phase::P1, &old("refused"), 1).unwrap();
     let mut zip = ZipStream::new(Vec::new());
     zip.entry(
@@ -240,7 +245,8 @@ fn a_secret_path_is_refused_and_leaves_nothing() {
         .unwrap();
     zip.entry(SUMMARY_ENTRY, 0o644, 0, &mut &b"{}"[..]).unwrap();
     let stream = zip.finish().unwrap();
-    let error = upload_stage(&bucket, &target, &stream[..], PART_BYTES_MIN).unwrap_err();
+    let error =
+        upload_stage(&bucket, &target, &stream[..], PART_BYTES_MIN, dir.path()).unwrap_err();
     assert!(
         matches!(&error, StageError::Refused { path } if path == "workspace/.env"),
         "{error}"
@@ -265,9 +271,9 @@ fn a_stale_attempt_writes_nothing() {
     let stream = host_stream(dir.path());
     let old = old("stale");
     let second = StageTarget::new(Phase::P1, &old, 2).unwrap();
-    upload_stage(&bucket, &second, &stream[..], PART_BYTES_MIN).unwrap();
+    upload_stage(&bucket, &second, &stream[..], PART_BYTES_MIN, dir.path()).unwrap();
     let first = StageTarget::new(Phase::P1, &old, 1).unwrap();
-    let error = upload_stage(&bucket, &first, &stream[..], PART_BYTES_MIN).unwrap_err();
+    let error = upload_stage(&bucket, &first, &stream[..], PART_BYTES_MIN, dir.path()).unwrap_err();
     assert!(
         matches!(error, StageError::StaleAttempt { newer: 2 }),
         "{error}"
