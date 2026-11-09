@@ -159,6 +159,10 @@ fn sizes_equal_what_stream_stages_in_each_class() {
         ("agent/hermes-home/config.yaml", "hermes-config"),
         ("workspace/notes/keys.md", "token-in-text"),
         ("workspace/app/node_modules", "cache-dir"),
+        ("workspace/app/dist", "build-output"),
+        ("workspace/.config", "hidden-folder"),
+        ("workspace/finite-export", "earlier-export"),
+        ("agent/agentd", "agentd"),
         ("workspace/finitebrain/brain-org", "not-owned-brain"),
         ("workspace/finitebrain/broken", "not-owned-brain"),
         ("workspace/passwd", "not-a-file"),
@@ -471,4 +475,69 @@ fn zip64_carries_a_file_over_4_gib_and_70k_entries() {
     let mut text = String::new();
     after.read_to_string(&mut text).unwrap();
     assert_eq!(text, "after the big file");
+}
+
+/// export.py's `build --raw` reference (tools/finite-raw-export), run on
+/// the same tree.
+fn raw_exporter() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tools/finite-raw-export")
+}
+
+#[test]
+fn the_raw_exporter_matches_the_classifier() {
+    let fixture = fixture::build();
+    let staged = entries(&stream(&fixture));
+    let out = fixture.work_root.join("raw.zip");
+    let run = Command::new("python3")
+        .arg("-I")
+        .arg(raw_exporter().join("raw_export.py"))
+        .args(["--root".as_ref(), fixture.tree.as_os_str()])
+        .args(["--out".as_ref(), out.as_os_str()])
+        .args(["--brain", OWNED_BRAIN, "--id", ID])
+        .output()
+        .expect("python3 runs the raw-folder exporter");
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let raw = entries(&std::fs::read(&out).unwrap());
+    // The same names, the same bytes: the config copy and the summary too.
+    assert_eq!(
+        raw.keys().collect::<Vec<_>>(),
+        staged.keys().collect::<Vec<_>>()
+    );
+    for (name, bytes) in &staged {
+        if name == SUMMARY_ENTRY {
+            let ours: Value = serde_json::from_slice(bytes).unwrap();
+            let theirs: Value = serde_json::from_slice(&raw[name]).unwrap();
+            assert_eq!(theirs, ours, "the summaries");
+        } else {
+            assert_eq!(&raw[name], bytes, "{name}");
+        }
+    }
+    let raw_bytes = std::fs::read(&out).unwrap();
+    for needle in [MARKER, TELEGRAM_TOKEN, OPENROUTER_KEY, SECRET_HEX] {
+        assert!(
+            !contains(&raw_bytes, needle.as_bytes()),
+            "the raw zip holds {needle}"
+        );
+    }
+}
+
+#[test]
+fn the_raw_exporters_own_tests_pass() {
+    let run = Command::new("python3")
+        .args(["-I", "-m", "unittest", "discover", "-s"])
+        .arg(raw_exporter())
+        .args(["-p", "test_raw_export.py"])
+        .output()
+        .expect("python3 runs the raw-folder exporter's tests");
+    assert!(
+        run.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }
