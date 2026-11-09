@@ -205,6 +205,18 @@ pub fn build() -> Fixture {
     )
     .unwrap();
     write_raw_name(&tree.join("workspace"), b"bad\xffname.txt");
+    // A hard link is not a symbolic link: O_NOFOLLOW opens it. It names a
+    // file outside the tree, so it must never be read.
+    std::fs::write(
+        work_root.join("outside.txt"),
+        format!("{MARKER}-hard-link\n"),
+    )
+    .unwrap();
+    std::fs::hard_link(
+        work_root.join("outside.txt"),
+        tree.join("workspace/report.txt"),
+    )
+    .unwrap();
     Fixture {
         _dir: dir,
         work_root,

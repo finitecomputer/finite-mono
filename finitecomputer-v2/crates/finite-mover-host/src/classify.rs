@@ -98,7 +98,8 @@ pub enum Why {
     /// A text file holding a credential-shaped string (export.py:225-243,
     /// 386-403).
     TokenInText,
-    /// A text file with a run too long to check for credentials
+    /// A text file too large to hold while it is read for credentials
+    /// (over `shapes::TEXT_SNAPSHOT_MAX`), or with a run too long to check
     /// (export.py:497-501).
     UncheckableText,
     /// The allow-listed copy of `config.yaml`.
@@ -112,7 +113,8 @@ pub enum Why {
     /// person, or one whose `.finitebrain/brain-directory.json` can't be
     /// read.
     NotOwnedBrain,
-    /// A link, socket, pipe or device: never followed, never staged.
+    /// A link (symbolic, or a file with more than one name), socket, pipe
+    /// or device: never followed, never read, never staged.
     NotAFile,
     /// A name that is not UTF-8, or holds a control character or a
     /// backslash, which a zip can't carry faithfully.

@@ -105,6 +105,12 @@ impl<W: Write> Visit for Stage<W> {
                     .entry(name, 0o644, 0, &mut &data[..])
                     .map_err(write_error)?;
             }
+            Source::Text { bytes: data, stat } => {
+                self.zip
+                    .entry(name, stat.st_mode, stat.st_mtime, &mut &data[..])
+                    .map_err(write_error)?;
+                self.copied.push((name.to_owned(), *stat));
+            }
             Source::File { file, stat } => {
                 let copied = self
                     .zip

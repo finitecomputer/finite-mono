@@ -19,7 +19,7 @@ use rustix::io::Errno;
 use crate::classify::{self, BrainScope, CONFIG_COPY_PATH, Class, EntryKind, Verdict, Why};
 use crate::config_copy::{CONFIG_MAX_BYTES, public_config};
 use crate::error::HostError;
-use crate::shapes::{self, TextVerdict};
+use crate::shapes::{self, Snapshot};
 use crate::tree::{Tree, open_directory, open_regular, stat_entry};
 
 /// The deepest directory the walk enters; deeper is refused.
@@ -42,9 +42,12 @@ pub enum Mode {
 
 /// A file going into the stage.
 pub enum Source {
-    /// A file in the tree, positioned at its start, with the `lstat` it
-    /// was classified by.
+    /// A binary file in the tree, positioned at its start, with the
+    /// `fstat` it was classified by.
     File { file: File, stat: Box<Stat> },
+    /// A text file, as it was when it was checked: the stage holds exactly
+    /// these bytes. `stat` is the file's `fstat` when it was read.
+    Text { bytes: Vec<u8>, stat: Box<Stat> },
     /// The allow-listed copy of `config.yaml`.
     Bytes(Vec<u8>),
 }
@@ -53,7 +56,7 @@ impl Source {
     pub fn bytes(&self) -> u64 {
         match self {
             Source::File { stat, .. } => file_bytes(stat),
-            Source::Bytes(bytes) => bytes.len() as u64,
+            Source::Text { bytes, .. } | Source::Bytes(bytes) => bytes.len() as u64,
         }
     }
 }
@@ -147,7 +150,9 @@ impl Walk<'_> {
             let brain = self.brain_scope(&child, path, brain);
             return self.directory(&child, path, brain, visit);
         }
-        let kind = if file_type == FileType::RegularFile {
+        // A file with another name may be outside the tree: it is never
+        // read, like a symbolic link.
+        let kind = if file_type == FileType::RegularFile && stat.st_nlink == 1 {
             EntryKind::File
         } else {
             EntryKind::Other
@@ -164,7 +169,9 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// A file the path rules stage: read it for credentials first.
+    /// A file the path rules stage: read it for credentials first. A text
+    /// file is read once and staged from what was read, so nothing written
+    /// to it after the check can reach the stage.
     fn staged(
         &self,
         directory: &OwnedFd,
@@ -184,12 +191,13 @@ impl Walk<'_> {
         if !same_file(&stat, &opened) && self.mode == Mode::Stage {
             return Err(HostError::TreeChanged(display(&path())));
         }
-        let scanned =
-            shapes::scan(&mut file).map_err(|error| HostError::io(display(&path()), error))?;
-        let why = match scanned {
-            TextVerdict::Clean | TextVerdict::Binary => None,
-            TextVerdict::Secret => Some(Why::TokenInText),
-            TextVerdict::Uncheckable => Some(Why::UncheckableText),
+        let size = file_bytes(&opened);
+        let read = shapes::snapshot(&mut file, size)
+            .map_err(|error| HostError::io(display(&path()), error))?;
+        let why = match &read {
+            Snapshot::Binary | Snapshot::Text(_) => None,
+            Snapshot::Secret => Some(Why::TokenInText),
+            Snapshot::Uncheckable => Some(Why::UncheckableText),
         };
         if let Some(why) = why {
             let secret = Verdict {
@@ -197,10 +205,8 @@ impl Walk<'_> {
                 why,
                 depth: parts.len(),
             };
-            return visit.left(parts, secret, file_bytes(&opened));
+            return visit.left(parts, secret, size);
         }
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| HostError::io(display(&path()), error))?;
         let name = parts
             .iter()
             .map(|part| std::str::from_utf8(part))
@@ -208,7 +214,20 @@ impl Walk<'_> {
             .map_err(|_| HostError::TreeChanged(display(&path())))?
             .join("/");
         let stat = Box::new(opened);
-        visit.staged(&name, verdict.class, Source::File { file, stat })
+        let source = match read {
+            Snapshot::Text(bytes) => {
+                if bytes.len() as u64 != size && self.mode == Mode::Stage {
+                    return Err(HostError::TreeChanged(display(&path())));
+                }
+                Source::Text { bytes, stat }
+            }
+            _ => {
+                file.seek(SeekFrom::Start(0))
+                    .map_err(|error| HostError::io(display(&path()), error))?;
+                Source::File { file, stat }
+            }
+        };
+        visit.staged(&name, verdict.class, source)
     }
 
     /// Stage the allow-listed copy of `config.yaml` beside it.
