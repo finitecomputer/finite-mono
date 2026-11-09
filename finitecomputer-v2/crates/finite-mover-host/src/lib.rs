@@ -5,7 +5,8 @@
 //! The mover on lat-2 runs it on each runner host over ssh, as the forced
 //! command of its key, and nothing else does. It has three operations:
 //!
-//! - `sizes`: bytes and files in each [`classify::Class`];
+//! - `sizes`: bytes and files in each [`classify::Class`], estimated from
+//!   metadata alone: it opens no regular file (the roster's daily numbers);
 //! - `stream`: the stage, a zip64 of the `history` and `work` classes and
 //!   the allow-listed `config` copy, to stdout;
 //! - `secrets`: the Telegram token, OpenRouter key and Nostr key, to

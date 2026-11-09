@@ -1,6 +1,6 @@
-//! Totals by class and what was left behind. `sizes` prints this summary;
-//! `stream` writes the same summary as the stage's last entry, so the two
-//! can be compared byte for byte.
+//! Totals by class and what was left behind. `stream` writes the exact
+//! summary as the stage's last entry; `sizes` prints the same shape,
+//! estimated from metadata.
 
 use std::collections::BTreeMap;
 

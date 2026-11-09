@@ -104,16 +104,14 @@ fn the_stage_is_exactly_history_work_and_the_config_copy() {
 }
 
 #[test]
-fn sizes_equal_what_stream_stages_in_each_class() {
+fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
     let fixture = fixture::build();
     let measured = sizes(&fixture);
     let stage = stream(&fixture);
     let entries = entries(&stage);
-    // The stage's summary is the summary `sizes` prints.
     let embedded: Value = serde_json::from_slice(&entries[SUMMARY_ENTRY]).unwrap();
-    assert_eq!(embedded, measured);
     let summary: BTreeMap<String, Tally> =
-        serde_json::from_value(measured["classes"].clone()).unwrap();
+        serde_json::from_value(embedded["classes"].clone()).unwrap();
     let mut streamed: BTreeMap<String, Tally> = BTreeMap::new();
     for (name, bytes) in &entries {
         if name == SUMMARY_ENTRY {
@@ -178,6 +176,81 @@ fn sizes_equal_what_stream_stages_in_each_class() {
             "left lists {path} ({why})"
         );
     }
+
+    // `sizes` reads no file, so it differs from the stage in exactly two
+    // ways: a text file holding a credential counts in its path's class,
+    // and there is no config copy. Everything else is the same.
+    let estimate: BTreeMap<String, Tally> =
+        serde_json::from_value(measured["classes"].clone()).unwrap();
+    let in_text: Vec<u64> = fixture::SECRET_TEXT
+        .iter()
+        .map(|(path, _)| std::fs::metadata(fixture.tree.join(path)).unwrap().len())
+        .collect();
+    let text = Tally {
+        files: in_text.len() as u64,
+        bytes: in_text.iter().sum(),
+    };
+    for class in ["cache", "runtime"] {
+        assert_eq!(estimate[class], summary[class], "{class}");
+    }
+    assert_eq!(estimate["config"], Tally::default());
+    assert_eq!(
+        estimate["secret"].files,
+        summary["secret"].files - text.files
+    );
+    assert_eq!(
+        estimate["secret"].bytes,
+        summary["secret"].bytes - text.bytes
+    );
+    let staged_by_path = |tallies: &BTreeMap<String, Tally>| {
+        (
+            tallies["history"].files + tallies["work"].files,
+            tallies["history"].bytes + tallies["work"].bytes,
+        )
+    };
+    let (files, bytes) = staged_by_path(&summary);
+    assert_eq!(
+        staged_by_path(&estimate),
+        (files + text.files, bytes + text.bytes)
+    );
+}
+
+/// Every regular file in `root`, made unreadable (or readable again).
+fn set_readable(root: &Path, readable: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).unwrap() {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() {
+                stack.push(entry.path());
+            } else if kind.is_file() {
+                let mode = if readable { 0o644 } else { 0o000 };
+                std::fs::set_permissions(entry.path(), std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            }
+        }
+    }
+}
+
+#[test]
+fn sizes_opens_no_regular_file() {
+    let fixture = fixture::build();
+    let before = sizes(&fixture);
+    set_readable(&fixture.tree, false);
+    if run_bytes(&fixture, &format!("stream {ID}")).is_ok() {
+        // As root, a file's mode does not stop a read: nothing to prove.
+        set_readable(&fixture.tree, true);
+        eprintln!("skipped: unreadable files can still be read here (root)");
+        return;
+    }
+    // Not one file can be opened, and the estimate is unchanged.
+    let after = run_bytes(&fixture, &format!("sizes {ID} --brain {OWNED_BRAIN}"));
+    set_readable(&fixture.tree, true);
+    let after: Value =
+        serde_json::from_slice(&after.expect("sizes answers without opening a file")).unwrap();
+    assert_eq!(after, before);
 }
 
 #[test]
