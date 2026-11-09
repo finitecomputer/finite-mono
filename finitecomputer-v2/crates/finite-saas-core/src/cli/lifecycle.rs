@@ -81,7 +81,55 @@ pub(crate) async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs
         })
         .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(args.wait_timeout_seconds);
+    wait_until_stopped(
+        &store,
+        request,
+        args.wait_timeout_seconds,
+        "runtime retirement",
+    )
+    .await
+}
+
+pub(crate) async fn runtime_stop_exact_command(args: RuntimeStopExactCliArgs) -> Result<()> {
+    let project_id = required_cli_value(args.project_id, "--project-id")?;
+    let expected_agent_runtime_id = required_cli_value(
+        args.expected_agent_runtime_id,
+        "--expected-agent-runtime-id",
+    )?;
+    let expected_source_host_id =
+        required_cli_value(args.expected_source_host_id, "--expected-source-host-id")?;
+    let expected_source_machine_id = required_cli_value(
+        args.expected_source_machine_id,
+        "--expected-source-machine-id",
+    )?;
+    let admin_verified_email = required_cli_value(args.admin_email, "--admin-email")?;
+    let admin_workos_user_id =
+        required_cli_value(args.admin_workos_user_id, "--admin-workos-user-id")?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
+    let request = store
+        .admin_request_runtime_stop_exact(AdminRuntimeStopExactInput {
+            admin_verified_email,
+            admin_workos_user_id,
+            project_id,
+            expected_agent_runtime_id,
+            expected_source_host_id,
+            expected_source_machine_id,
+            now: args.now,
+        })
+        .await?;
+    wait_until_stopped(&store, request, args.wait_timeout_seconds, "runtime stop").await
+}
+
+/// Poll one down-bound control request until it is terminal, print it, and
+/// succeed only if it confirmed into Stopped. Succeeded is reserved for
+/// runtimes that proved ready.
+async fn wait_until_stopped(
+    store: &CoreStore,
+    request: RuntimeControlRequest,
+    wait_timeout_seconds: u64,
+    operation: &str,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(wait_timeout_seconds);
     let mut current = request;
     loop {
         current = store.runtime_control_request(&current.id).await?;
@@ -91,17 +139,37 @@ pub(crate) async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs
         let now = Instant::now();
         if now >= deadline {
             print_json(&current)?;
-            bail!("runtime retirement timed out; the same request remains retryable");
+            bail!("{operation} timed out; the same request remains retryable");
         }
         sleep(Duration::from_secs(2).min(deadline.saturating_duration_since(now))).await;
     }
     print_json(&current)?;
-    // A retired runtime confirms into the Stopped terminal; Succeeded is
-    // reserved for runtimes that proved ready.
     if current.status != RuntimeControlRequestStatus::Stopped {
-        bail!("runtime retirement failed; the same request remains retryable");
+        bail!("{operation} failed; the same request remains retryable");
     }
     Ok(())
+}
+
+pub(crate) async fn runtime_mark_moved_exact_command(
+    args: RuntimeMarkMovedExactCliArgs,
+) -> Result<RuntimeMoveReceipt> {
+    let moved = RuntimeMoved::parse(&args.moved)
+        .ok_or_else(|| anyhow::anyhow!("--moved is migrated or archived"))?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
+    store
+        .admin_mark_runtime_moved_exact(AdminMarkRuntimeMovedExactInput {
+            admin_verified_email: args.admin_email,
+            admin_workos_user_id: args.admin_workos_user_id,
+            project_id: args.project_id,
+            expected_agent_runtime_id: args.expected_agent_runtime_id,
+            expected_source_host_id: args.expected_source_host_id,
+            expected_source_machine_id: args.expected_source_machine_id,
+            moved,
+            agent_npub: args.agent_npub,
+            now: args.now,
+        })
+        .await
+        .map_err(Into::into)
 }
 
 pub(crate) async fn runtime_cold_relocate_exact_command(

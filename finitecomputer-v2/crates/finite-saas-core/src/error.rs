@@ -178,6 +178,12 @@ pub enum CoreError {
         "runtime offboarding is already at {phase}; resume it with runtime-offboard-retired-exact instead of enqueueing a new destroy"
     )]
     RuntimeOffboardingResumeRequired { phase: OffboardingPhase },
+    #[error(
+        "a migrated runtime needs the canonical npub of the finite.chat agent it became; an archived one has none"
+    )]
+    InvalidRuntimeMoveNpub,
+    #[error("the runtime is already marked moved differently")]
+    RuntimeMoveConflict,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not in the launching phase")]
