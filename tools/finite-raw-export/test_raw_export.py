@@ -99,12 +99,14 @@ class Config(unittest.TestCase):
         quoted = b'model:\n  default: "gpt-x" # the default\n'
         self.assertEqual(raw_export.public_config(quoted), b'model:\n  default: "gpt-x"\n')
 
-    def test_without_pyyaml_there_is_no_copy(self):
-        # `import yaml` fails while the module is None.
+    def test_without_pyyaml_no_copy_is_made_quietly(self):
+        # `import yaml` fails while the module is None: the copy refuses
+        # rather than leave the person's settings out unsaid.
         saved = sys.modules.get("yaml")
         sys.modules["yaml"] = None
         try:
-            self.assertIsNone(raw_export.public_config(self.ORIGINAL))
+            with self.assertRaisesRegex(RuntimeError, "PyYAML"):
+                raw_export.public_config(self.ORIGINAL)
         finally:
             if saved is None:
                 del sys.modules["yaml"]
@@ -130,6 +132,23 @@ class Export(unittest.TestCase):
 
     def export(self, **options):
         return raw_export.export_raw(self.root, self.out, **options)
+
+    def test_without_pyyaml_the_export_stops_before_writing(self):
+        # Hermes reads config.yaml with PyYAML, and so does the copy of it.
+        # Run by a Python without it, the export stops before it writes
+        # anything, rather than quietly leaving the person's settings out.
+        write(self.root, "agent/hermes-home/config.yaml", "timezone: America/Chicago\n")
+        saved = sys.modules.get("yaml")
+        sys.modules["yaml"] = None
+        try:
+            with self.assertRaisesRegex(RuntimeError, "PyYAML"):
+                self.export()
+        finally:
+            if saved is None:
+                del sys.modules["yaml"]
+            else:
+                sys.modules["yaml"] = saved
+        self.assertFalse(self.out.exists())
 
     def names(self):
         with zipfile.ZipFile(self.out) as archive:

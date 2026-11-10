@@ -27,9 +27,12 @@ Differences from the host reader, because this runs inside the live agent:
 - Owned brains, sites and the small fact files come from the caller
   (export.py knows them through `fbrain`, `fsite` and the agent's env).
 
-Standard library only, so it runs on the old runtime's own Python. It never
-follows a link, never reads a file with a second name, and never writes
-inside the folder it exports. Each run prints one JSON line.
+It needs the standard library and PyYAML, which Hermes's own Python has
+(Hermes reads `config.yaml` with it): run it with that Python, as the
+export plugin does (`sys.executable`). Without PyYAML it stops before it
+writes anything, so the person's settings are never quietly left out. It
+never follows a link, never reads a file with a second name, and never
+writes inside the folder it exports. Each run prints one JSON line.
 """
 
 from __future__ import annotations
@@ -452,14 +455,22 @@ def quoted(value):
     return json.dumps(value, ensure_ascii=False)
 
 
-def read_yaml(original):
-    """`config.yaml` read with PyYAML, which Hermes itself reads it with.
-    Without PyYAML there is no copy: a reader of our own could misread a
-    value (FIN-463 review of #1148)."""
+def require_yaml():
+    """PyYAML, which Hermes itself reads `config.yaml` with; a reader of our
+    own could misread a value (FIN-463 review of #1148). The export needs it."""
     try:
         import yaml
     except ImportError:
-        return None
+        raise RuntimeError(
+            "the raw export needs PyYAML to copy the agent's settings: "
+            "run it with Hermes's own Python"
+        ) from None
+    return yaml
+
+
+def read_yaml(original):
+    """`config.yaml` read as Hermes reads it, or None if it can't be."""
+    yaml = require_yaml()
     try:
         return yaml.safe_load(original.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError):
@@ -844,6 +855,7 @@ def export_raw(root, out, owned_brains=(), sites=None, facts=None, summary_id="r
     """Write the raw-folder zip to `out` and return its summary. `sites`
     maps a slug to a cloned site folder; `facts` maps an allowed fact path
     to its JSON bytes. On any failure the partial zip is removed."""
+    require_yaml()
     out = Path(out)
     sites = dict(sites or {})
     facts = dict(facts or {})
