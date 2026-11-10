@@ -171,14 +171,13 @@ class Export(unittest.TestCase):
         conn.execute("INSERT INTO messages VALUES ('a private row from outside')")
         conn.commit()
         os.link(outside.with_name("outside.db-wal"), database.with_name("state.db-wal"))
-        self.export()
+        # Neither the outside rows nor a history missing its WAL: no zip.
+        with self.assertRaisesRegex(ValueError, "agent/hermes-home/state.db"):
+            self.export()
         conn.close()
-        names = self.names()
-        self.assertNotIn("agent/hermes-home/state.db-wal", names)
-        with zipfile.ZipFile(self.out) as archive:
-            staged = archive.read("agent/hermes-home/state.db") if "agent/hermes-home/state.db" in names else b""
-        self.assertNotIn(b"a private row from outside", staged)
-        self.assertEqual(staged, main_file, "the walk's copy of the main file alone")
+        self.assertFalse(self.out.exists(), "no partial zip is left")
+        self.assertEqual(list(self.out.parent.glob(".raw-export-*")), [], "no temporary copy is left")
+        self.assertEqual(database.read_bytes(), main_file, "the tree is untouched")
 
     def test_a_site_already_in_the_tree_is_staged_from_it(self):
         write(self.root, "sites/garden/index.html", "<h1>in the tree</h1>\n")

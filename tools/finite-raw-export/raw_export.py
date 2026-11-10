@@ -648,8 +648,13 @@ class Export:
             return main in self.vacuumed
         folder = Path(os.path.abspath(self.root.joinpath(*(p.decode("utf-8") for p in path[:-1]))))
         if not self.sqlite_reads_what_was_walked(fd, folder, database):
-            # The walk copies it as it is; a linked sidecar stays behind.
-            return False
+            # Copying the main file alone would leave the rows in its WAL
+            # behind, and SQLite would read a linked one: stop instead.
+            raise ValueError(
+                f"{path_text(path)} or one of its -wal, -shm or -journal files has another name "
+                "or isn't a plain file, so its history can't be copied whole; remove the extra "
+                "link and export again"
+            )
         target = Path(tempfile.mkstemp(prefix=".raw-export-", suffix=".db", dir=self.out.parent)[1])
         target.unlink()
         self.temporary.append(target)
