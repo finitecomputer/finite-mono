@@ -4,10 +4,13 @@
 //! Bespoke because the workspace's zip 4.6.1 refuses, when streaming, any
 //! entry over 4 GiB even with `large_file` set (its `write_data_descriptor`
 //! checks the size the wrong way round), and zip 9, which fixes it, needs
-//! a newer `libc` for the whole workspace. Stored entries with data
-//! descriptors are the simplest form there is: every entry carries zip64
-//! sizes, so one rule covers a 1-byte file and a 99 GB one, and any file's
-//! bytes sit contiguously where one range request reaches them.
+//! a newer `libc` for the whole workspace. Every entry is stored and
+//! carries zip64 sizes, so one rule covers a 1-byte file and a 99 GB one,
+//! and any file's bytes sit contiguously where one range request reaches
+//! them. The local header carries the size, which the caller knows up
+//! front, so a reader of the stream (the mover's uploader) learns each
+//! entry's name and length before its bytes; the CRC follows the data in a
+//! zip64 data descriptor.
 
 use std::io::{self, Read, Write};
 
@@ -58,8 +61,9 @@ impl<W: Write> ZipStream<W> {
         name: &str,
         mode: u32,
         mtime: i64,
+        size: u64,
         data: &mut impl Read,
-    ) -> io::Result<u64> {
+    ) -> io::Result<()> {
         let name = name.as_bytes().to_vec();
         if name.is_empty() || name.len() > usize::from(u16::MAX) || name.contains(&0) {
             return Err(io::Error::other(
@@ -81,17 +85,19 @@ impl<W: Write> ZipStream<W> {
         put16(&mut header, name.len() as u16);
         put16(&mut header, 20);
         header.extend_from_slice(&name);
-        // Zip64 sizes, known only after the data: the data descriptor
-        // carries them.
+        // The size up front, so a reader of the stream (the mover's
+        // uploader) knows each entry's name before its bytes and where it
+        // ends; the CRC follows the data, in the descriptor.
         put16(&mut header, ZIP64_EXTRA);
         put16(&mut header, 16);
-        put64(&mut header, 0);
-        put64(&mut header, 0);
+        put64(&mut header, size);
+        put64(&mut header, size);
         self.out.write_all(&header)?;
 
         let mut hasher = crc32fast::Hasher::new();
-        let mut size = 0u64;
+        let mut written = 0u64;
         let mut buffer = vec![0; 1024 * 1024];
+        let mut data = data.take(size);
         loop {
             let read = match data.read(&mut buffer) {
                 Ok(0) => break,
@@ -101,7 +107,13 @@ impl<W: Write> ZipStream<W> {
             };
             hasher.update(&buffer[..read]);
             self.out.write_all(&buffer[..read])?;
-            size += read as u64;
+            written += read as u64;
+        }
+        if written != size {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "an entry ended before its declared size",
+            ));
         }
         let crc = hasher.finalize();
         let mut descriptor = Vec::with_capacity(24);
@@ -119,7 +131,7 @@ impl<W: Write> ZipStream<W> {
             size,
             offset,
         });
-        Ok(size)
+        Ok(())
     }
 
     /// Write the central directory and its zip64 end records; return `out`.
@@ -277,9 +289,16 @@ mod tests {
     fn a_reader_opens_what_it_writes() {
         let mut stream = ZipStream::new(Vec::new());
         stream
-            .entry("a/one.txt", 0o640, 1_704_067_200, &mut &b"one"[..])
+            .entry("a/one.txt", 0o640, 1_704_067_200, 3, &mut &b"one"[..])
             .unwrap();
-        stream.entry("b/empty", 0o600, 0, &mut &b""[..]).unwrap();
+        stream.entry("b/empty", 0o600, 0, 0, &mut &b""[..]).unwrap();
+        // A source shorter than its declared size is an error, never a
+        // short entry.
+        let mut short = ZipStream::new(Vec::new());
+        let error = short
+            .entry("c/short", 0o600, 0, 5, &mut &b"abc"[..])
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
         let bytes = stream.finish().unwrap();
         let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
         assert_eq!(archive.len(), 2);
