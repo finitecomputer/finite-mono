@@ -46,6 +46,37 @@ impl HostCommands {
         Ok(command)
     }
 
+    /// `sizes <durable_state_id> [--brain <id>]...`: the host reader's
+    /// summary from metadata alone (it opens no file), as the roster counts.
+    pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
+        let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
+        for brain in &binding.owned_brains {
+            words.extend(["--brain".to_string(), brain.clone()]);
+        }
+        let output = self
+            .command(binding, &words)?
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|error| HostError::NotRun(error.to_string()))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            return Err(HostError::NotRun(short(&format!(
+                "{}: {}",
+                output.status,
+                last.trim()
+            ))));
+        }
+        serde_json::from_slice(&output.stdout)
+            .ok()
+            .and_then(|summary| crate::sizes::sizes_of(&summary))
+            .ok_or_else(|| HostError::NotRun("the host reader's sizes could not be read".into()))
+    }
+
     /// `stream <durable_state_id> [--brain <id>]...`: the stage, as the
     /// host reader writes it. Its failure, or its exit before the end, is a
     /// read error at the stream's end.
