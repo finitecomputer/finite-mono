@@ -569,6 +569,11 @@ class Export:
             st = lstat(fd, name)
         except FileNotFoundError:
             raise TreeChanged(path_text(path)) from None
+        regular = stat_module.S_ISREG(st.st_mode) and st.st_nlink == 1
+        if not regular and main_history_database(path):
+            # Whatever else it is (a link, a folder, a pipe), skipping it
+            # would leave its WAL to go alone.
+            raise history_refused(path)
         if stat_module.S_ISDIR(st.st_mode) and st.st_dev == self.device:
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
             try:
@@ -578,10 +583,6 @@ class Export:
             finally:
                 os.close(child)
             return
-        regular = stat_module.S_ISREG(st.st_mode) and st.st_nlink == 1
-        if not regular and main_history_database(path):
-            # Left out as "not a file", it would leave its WAL to go alone.
-            raise history_refused(path)
         verdict = classify(path, "file" if regular else "other", brain, build)
         size = st.st_size if stat_module.S_ISREG(st.st_mode) else 0
         if verdict.cls in STAGED:

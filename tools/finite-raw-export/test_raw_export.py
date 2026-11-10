@@ -208,6 +208,14 @@ class Export(unittest.TestCase):
         os.mkfifo(self.root / "agent/hermes-home/memory_store.db")
         with self.assertRaisesRegex(ValueError, "agent/hermes-home/memory_store.db"):
             self.export()
+        os.unlink(self.root / "agent/hermes-home/memory_store.db")
+        # A folder by that name, its sidecars beside it: it used to be
+        # walked as a folder while the sidecars went alone.
+        database.mkdir()
+        write(self.root, "agent/hermes-home/state.db-wal", "wal")
+        write(self.root, "agent/hermes-home/state.db-shm", "shm")
+        with self.assertRaisesRegex(ValueError, "agent/hermes-home/state.db"):
+            self.export()
         self.assertFalse(self.out.exists(), "no partial zip is left")
         self.assertEqual(list(self.out.parent.glob(".raw-export-*")), [], "no temporary copy is left")
 
