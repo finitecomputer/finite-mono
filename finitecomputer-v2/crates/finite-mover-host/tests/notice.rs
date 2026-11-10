@@ -328,7 +328,9 @@ fn the_command_reads_the_text_from_stdin_and_answers_in_json() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(text).unwrap();
+        // A command refused for its arguments may exit before reading its
+        // text: a closed pipe is then expected, and its status is the answer.
+        let _ = child.stdin.take().unwrap().write_all(text);
         child.wait_with_output().unwrap()
     };
     let output = run(Some(&host.log), "move-p1", TEXT.as_bytes());
