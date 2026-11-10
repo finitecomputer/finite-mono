@@ -78,10 +78,19 @@ pub fn stream(
         tallies,
         copied,
     } = stage;
+    // The carried SimpleX databases must still be settled: no WAL holding
+    // rows the stage doesn't. Checked before the files are re-stat'ed below,
+    // so a WAL checkpointed into its database and removed at any moment
+    // shows either here, still there, or below, the database changed.
+    if let Ok((folder, _)) = &carried
+        && !simplex::still_settled(tree, folder)?
+    {
+        return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
+    }
     // A runtime started while the walk ran (a restart from the old
     // dashboard) would leave files copied before it wrote them stale: a
     // session store without its newest log. Every staged file must still be
-    // as it was copied.
+    // as it was copied. This comes last.
     for (name, stat) in &copied {
         let parts: Vec<&str> = name.split('/').collect();
         if !tree
@@ -91,15 +100,10 @@ pub fn stream(
             return Err(HostError::TreeChanged(name.into()));
         }
     }
-    // Staged and checked, still settled, the agent still stopped and its
-    // lease held: seal the old SimpleX where every later start sees it.
+    // Staged, settled and checked, the agent still stopped and its lease
+    // held: seal the old SimpleX where every later start sees it.
     let carry = match carried {
-        Ok((folder, seal)) => {
-            if !simplex::still_settled(tree, &folder)? {
-                return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
-            }
-            Carry::carried(simplex::seal(tree, seal)?)
-        }
+        Ok((_, seal)) => Carry::carried(simplex::seal(tree, seal)?),
         Err(why) => Carry::refused(why),
     };
     let mut summary = tallies.summary(tree.id().as_str());
