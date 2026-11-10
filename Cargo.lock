@@ -1078,6 +1078,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "finite-mover"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "finite-mover-host",
+ "finite-nostr",
+ "hex",
+ "nostr",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
 name = "finite-mover-host"
 version = "0.1.0"
 dependencies = [
