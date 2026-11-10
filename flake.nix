@@ -433,7 +433,10 @@
             postgresql_16
             process-compose
             protobuf
-            python3
+            # PyYAML: the raw-folder exporter (tools/finite-raw-export) reads
+            # config.yaml with it, as Hermes's own Python does, and its tests
+            # run under this Python.
+            (python3.withPackages (ps: [ ps.pyyaml ]))
           ];
           rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
           # CI's devfinity smoke starts the dashboard dev server, but it does not

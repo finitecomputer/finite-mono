@@ -22,8 +22,14 @@ fn every_secret_path_is_secret() {
         ("agent/hermes-home/config.yaml", Why::HermesConfig),
         ("agent/hermes-home/config.yaml.bak", Why::HermesConfig),
         ("agent/hermes-home/.config.yaml.tmp", Why::HermesConfig),
-        ("agent/agentd/agentd.sqlite3", Why::AgentdLedger),
-        ("agent/agentd/agentd.sqlite3-wal", Why::AgentdLedger),
+        ("agent/agentd/agentd.sqlite3", Why::Agentd),
+        ("agent/agentd/agentd.sqlite3-wal", Why::Agentd),
+        ("agent/agentd/google-workspace.json", Why::Agentd),
+        ("agent/agentd/status.json", Why::Agentd),
+        (
+            "workspace/bots/pairing/telegram-approved.json",
+            Why::Pairing,
+        ),
         ("agent/client.sqlite3", Why::ChatClientStore),
         ("agent/client.sqlite3-wal", Why::ChatClientStore),
         ("agent/client.sqlite3.writer-lease", Why::ChatClientStore),
@@ -142,7 +148,6 @@ fn the_runtime_is_everything_else() {
         "agent/managed-skills/other/current/x.md",
         "agent/exports/agent.zip",
         "agent/fbrain/sync-locks/a",
-        "agent/agentd/status.json",
         "agent/allowed-users",
         "migration/old.tar",
         ".finite-durable-state-root-migration.json",
@@ -153,6 +158,27 @@ fn the_runtime_is_everything_else() {
     assert_eq!(
         of("agent/hermes-home/config.public.yaml"),
         (Class::Runtime, Why::ReplacedByCopy)
+    );
+    for (path, why, decided) in [
+        ("workspace/.config/gh/hosts.yml", Why::HiddenFolder, 2),
+        ("workspace/app/.docker/config.json", Why::HiddenFolder, 3),
+        (
+            "workspace/finite-export/finite-export-agent.zip",
+            Why::EarlierExport,
+            2,
+        ),
+    ] {
+        assert_eq!(of(path), (Class::Runtime, why), "{path}");
+        assert_eq!(depth(path), decided, "{path}");
+    }
+    // Hidden files stay: a `.gitignore` tells the import what to leave.
+    assert_eq!(
+        of("workspace/app/.gitignore"),
+        (Class::Work, Why::Workspace)
+    );
+    assert_eq!(
+        of("workspace/notes/pairing/notes.md"),
+        (Class::Work, Why::Workspace)
     );
 }
 
@@ -165,6 +191,9 @@ fn work_is_the_workspace_less_caches() {
     ] {
         assert_eq!(of(path), (Class::Work, Why::Workspace), "{path}");
     }
+    assert_eq!(of("sites/garden/index.html"), (Class::Work, Why::Site));
+    assert_eq!(of("sites/garden.json"), (Class::Runtime, Why::Runtime));
+    assert_eq!(of("sites/garden/.git/HEAD"), (Class::Cache, Why::CacheDir));
     for path in [
         "workspace/app/node_modules/pkg/index.js",
         "workspace/app/.git/HEAD",
@@ -217,6 +246,29 @@ fn links_brains_and_odd_names_stay_behind() {
             (Class::Runtime, Why::UncarriedName, 2)
         );
     }
+}
+
+#[test]
+fn build_output_is_cache_where_the_walk_found_it() {
+    let parts: Vec<&[u8]> = vec![b"workspace", b"app", b"dist", b"bundle.js"];
+    let scope = Scope {
+        brain: BrainScope::None,
+        build_output: Some(3),
+    };
+    let verdict = classify(&parts, EntryKind::File, scope);
+    assert_eq!(
+        (verdict.class, verdict.why, verdict.depth),
+        (Class::Cache, Why::BuildOutput, 3)
+    );
+    // Secrets still come first.
+    let parts: Vec<&[u8]> = vec![b"workspace", b"app", b"dist", b".env"];
+    assert_eq!(
+        classify(&parts, EntryKind::File, scope).class,
+        Class::Secret
+    );
+    assert!(
+        project_file(b"package.json") && project_file(b"App.csproj") && !project_file(b"notes.md")
+    );
 }
 
 #[test]
