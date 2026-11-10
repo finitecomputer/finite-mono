@@ -18,13 +18,16 @@
 //!   (403 or 409), and the run stops.
 //! - **One run at a time.** A run holds a lock on its old agent from its
 //!   first call to its complete, so two runs never interleave their parts.
-//! - **The end.** The scanner reads nothing past the central directory, so
-//!   from the part the directory begins in, parts are held back until the
-//!   directory lists exactly the entries that streamed past. A forged
-//!   directory signature therefore carries nothing unread out. Then
-//!   `complete` makes the zip whole and writes `manifest.json` last.
+//! - **Only decided bytes leave.** A part is sent only once the scanner has
+//!   decided every byte in it ([`Scanner::decided`]). A header still
+//!   arriving at a part's end holds that part back until the next part
+//!   completes it. From the central directory on, which the scanner doesn't
+//!   read, parts wait until the directory lists exactly the entries that
+//!   streamed past. So a forged directory signature carries nothing
+//!   unread out, wherever it falls. Then `complete` makes the zip whole and
+//!   writes `manifest.json` last.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
@@ -273,11 +276,10 @@ struct Sent {
     sha256: String,
 }
 
-/// Send the stream's parts and check the stage. Every part before the
-/// central directory goes once the scanner has read it. From the part the
-/// directory begins in, parts are held back until the directory lists
-/// exactly the entries that streamed past, so a forged directory signature
-/// can't carry unread entries out.
+/// Send the stream's parts, in order, each once the scanner has decided
+/// every byte in it, and check the stage. Parts still waiting when the
+/// stream ends go only once the directory lists exactly the entries that
+/// streamed past.
 fn send_parts(
     sink: &impl StageSink,
     stage: &str,
@@ -289,8 +291,10 @@ fn send_parts(
         .into_iter()
         .map(|part| (part.n, part))
         .collect();
-    let mut withheld: Vec<(u32, Vec<u8>)> = Vec::new();
-    let mut withheld_bytes = 0usize;
+    // Parts read but not yet decided: (n, where the part ends, its bytes).
+    let mut waiting: VecDeque<(u32, u64, Vec<u8>)> = VecDeque::new();
+    let mut waiting_bytes = 0usize;
+    let mut read = 0u64;
     let mut scanner = Scanner::default();
     let mut tail = Tail::new(TAIL_BYTES);
     let mut hash = Sha256::new();
@@ -309,14 +313,21 @@ fn send_parts(
         scanner.feed(body)?;
         tail.push(body);
         hash.update(body);
-        if scanner.in_directory() {
-            withheld_bytes += filled;
-            if withheld_bytes > TAIL_BYTES + part_bytes {
+        read += filled as u64;
+        let decided = scanner.decided();
+        if waiting.is_empty() && decided >= read {
+            send_part(sink, stage, &taken, n, body)?;
+        } else {
+            waiting_bytes += filled;
+            if waiting_bytes > TAIL_BYTES + part_bytes {
                 return Err(TailError::OutOfReach.into());
             }
-            withheld.push((n, body.to_vec()));
-        } else {
-            send_part(sink, stage, &taken, n, body)?;
+            waiting.push_back((n, read, body.to_vec()));
+            while waiting.front().is_some_and(|(_, end, _)| *end <= decided) {
+                let (n, _, body) = waiting.pop_front().expect("a waiting part");
+                waiting_bytes -= body.len();
+                send_part(sink, stage, &taken, n, &body)?;
+            }
         }
         if filled < part_bytes {
             break;
@@ -334,7 +345,7 @@ fn send_parts(
         sha256: hex::encode(hash.finalize()),
     };
     let summary = check(&sent)?;
-    for (n, body) in withheld {
+    for (n, _, body) in waiting {
         send_part(sink, stage, &taken, n, &body)?;
     }
     Ok((sent, summary))

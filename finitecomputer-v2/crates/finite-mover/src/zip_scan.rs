@@ -217,11 +217,17 @@ impl Scanner {
         Ok(())
     }
 
-    /// Whether the central directory has begun. The scanner reads nothing
-    /// after it, so its bytes must not leave before the directory has been
-    /// checked against the entries that streamed past.
-    pub fn in_directory(&self) -> bool {
-        matches!(self.state, State::Directory)
+    /// How many of the stream's bytes the scanner has decided. Every byte
+    /// before this belongs to an entry whose name passed; none from it on
+    /// may leave yet. A header or descriptor still arriving is undecided,
+    /// and so is everything from the central directory on, which the
+    /// scanner doesn't read: it waits for the directory's check against the
+    /// entries that streamed past.
+    pub fn decided(&self) -> u64 {
+        match self.state {
+            State::Directory => self.directory_offset.unwrap_or(self.offset),
+            _ => self.offset,
+        }
     }
 
     /// The entries, once the stream has reached its central directory.

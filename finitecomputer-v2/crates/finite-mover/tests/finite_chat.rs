@@ -677,6 +677,65 @@ fn a_forged_directory_signature_carries_nothing_out() {
     );
     assert!(!contains(&chat.received, b"workspace/.env"));
     assert!(chat.completed.is_empty());
+    drop(chat);
+
+    // In a part's last 29 bytes, where the scanner can't yet tell a header
+    // from a directory record: that part waits, and nothing goes.
+    let fake = Fake::new();
+    let name = "workspace/photo.jpg";
+    let header = 30 + name.len() + 20;
+    let photo = vec![1; PART_BYTES_MIN - 29 - header - 24];
+    let honest = hand_stage(&[(name, &photo)]);
+    let end = header + photo.len() + 24;
+    assert_eq!(end, PART_BYTES_MIN - 29);
+    let forged = [&0x0201_4b50u32.to_le_bytes()[..], SECRET_MARKER, &[0; 2]].concat();
+    assert_eq!(forged.len(), 30);
+    let bytes = [&honest[..end], &forged, &honest[end..]].concat();
+    let error = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, StageError::Unreadable(_)), "{error}");
+    assert_eq!(fake.calls(), ["GET parts"]);
+    assert!(
+        !contains(&fake.chat().received, SECRET_MARKER),
+        "no byte past the signature"
+    );
+}
+
+/// A local header split across two parts: the first part waits for the
+/// second, then both go, in order.
+#[test]
+fn a_header_split_across_parts_holds_its_part_until_decided() {
+    let fake = Fake::new();
+    let first = vec![1; PART_BYTES_MIN - 30 - "workspace/a.bin".len() - 20 - 24 - 10];
+    let bytes = hand_stage(&[
+        ("workspace/a.bin", &first),
+        ("workspace/second.md", b"second"),
+    ]);
+    let name = bytes
+        .windows(19)
+        .position(|window| window == b"workspace/second.md")
+        .unwrap();
+    // Its header starts 10 bytes before part 1's end.
+    assert_eq!(name - 30, PART_BYTES_MIN - 10);
+    upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        ["GET parts", "PUT 1", "PUT 2", "POST complete"]
+    );
+    assert_eq!(fake.chat().completed[&stage_id(1)].0, bytes);
 }
 
 #[test]
