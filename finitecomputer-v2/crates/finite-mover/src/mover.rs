@@ -299,7 +299,7 @@ impl<'a> Mover<'a> {
         self.report(command, Report::of(&command.id, 0, "stopped"))?;
         let stream = self
             .hosts
-            .stream(&binding)
+            .stream(&binding, &target.stage_id())
             .map_err(|error| Stop::Failed("stream", error.to_string()))?;
         let mut last = Instant::now();
         let mut progress = |bytes: u64, files: u64| {
