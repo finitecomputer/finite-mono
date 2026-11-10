@@ -117,6 +117,19 @@ test("moved people land on finite.chat, from the real dashboard", { timeout: 300
       assert.ok(page.url().startsWith(`${phaseOne.origin}/dashboard`), page.url());
     }, "phase-1-not-moved"));
 
+    // The layout doesn't re-render on client navigation, so an open tab
+    // must recheck on its own (the review's repro: an in-app link).
+    await t.test("an open dashboard follows the move on its next navigation", () => withPage(async (page) => {
+      state.moved = false;
+      await page.goto(`${phaseOne.origin}/dashboard/skills`);
+      const choose = page.getByRole("link", { name: "Choose an agent" });
+      await choose.waitFor();
+      state.moved = true;
+      await choose.click();
+      await page.waitForURL(finiteChat, { timeout: 20_000 });
+      await page.getByRole("heading", { name: FINITE_CHAT }).waitFor();
+    }, "phase-1-moved-while-open"));
+
     await t.test("a person whose agents have all moved is sent to finite.chat", () => withPage(async (page) => {
       state.moved = true;
       // The dashboard reads `/me` through a short cache; the first visit

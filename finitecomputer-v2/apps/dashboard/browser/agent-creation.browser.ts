@@ -1210,8 +1210,12 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       const bindingAuthorizationCount =
         hostedDevice.state.bindingAuthorizations.length;
       core.state.runtimeRouteProjectIdOverride = "project_second";
+      // Each navigation's move check (FIN-463) reads Core once; let it land
+      // before the baseline, so the count below is binding recovery's alone.
+      const moveCheck = page.waitForResponse((response) => response.url().endsWith("/api/finite-chat-move"));
       await openWebChat.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_completed-oslo-bot\/chat$/u);
+      await moveCheck;
       await page
         .getByRole("button", { name: "Finish chat setup", exact: true })
         .first()
