@@ -48,6 +48,78 @@ pub struct AdminRuntimeRetireExactInput {
     pub now: Option<String>,
 }
 
+/// Operator-only stop of the exact active Runtime observed before
+/// enqueueing (FIN-463's mover stops an agent before staging it). The stop
+/// is recorded as explicit intent, so billing never resumes it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRuntimeStopExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub now: Option<String>,
+}
+
+/// Where a Runtime went in FIN-463's move to finite.chat.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMoved {
+    /// Its owner moved it and the import finished; `agent_npub` is the
+    /// finite.chat agent it became.
+    Migrated,
+    /// Archived at the cutoff without an import. A late import may still
+    /// make it `Migrated`.
+    Archived,
+}
+
+impl RuntimeMoved {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Migrated => "migrated",
+            Self::Archived => "archived",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "migrated" => Some(Self::Migrated),
+            "archived" => Some(Self::Archived),
+            _ => None,
+        }
+    }
+}
+
+/// Operator-only mark that one exact Runtime has moved, so the mover's
+/// roster never offers it again. Bound to the Runtime's exact project,
+/// host and machine; it may be marked whether or not it is still linked.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminMarkRuntimeMovedExactInput {
+    pub admin_verified_email: String,
+    pub admin_workos_user_id: String,
+    pub project_id: String,
+    pub expected_agent_runtime_id: String,
+    pub expected_source_host_id: String,
+    pub expected_source_machine_id: String,
+    pub moved: RuntimeMoved,
+    /// Required for `Migrated`, refused for `Archived`.
+    pub agent_npub: Option<String>,
+    pub now: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeMoveReceipt {
+    pub project_id: String,
+    pub agent_runtime_id: String,
+    pub moved: RuntimeMoved,
+    pub moved_at: String,
+    pub agent_npub: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeControlExpectedBinding {
     pub agent_runtime_id: String,
