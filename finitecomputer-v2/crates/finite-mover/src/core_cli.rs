@@ -3,12 +3,10 @@
 //! machine the mover read (finite-mono #1146; Core keeps no listener for
 //! the mover). On lat-2 it runs through sudo for these subcommands alone.
 
-use std::io::Read;
-use std::process::{Command, Stdio};
-use std::thread::JoinHandle;
+use std::process::Command;
 use std::time::Duration;
 
-use crate::child::{Watchdog, spawn_alone};
+use crate::child::{RunError, run_within};
 use crate::contract::{Mark, short};
 use crate::fleet::Binding;
 
@@ -46,10 +44,10 @@ pub enum CoreError {
     },
     #[error("Core's {subcommand} answered nothing the mover can read")]
     Unreadable { subcommand: &'static str },
-    #[error("Core's {subcommand} had not ended after {seconds} s, so it was stopped")]
+    #[error("Core's {subcommand} {why}")]
     Stuck {
         subcommand: &'static str,
-        seconds: u64,
+        why: RunError,
     },
 }
 
@@ -83,35 +81,21 @@ impl CoreCli {
             subcommand,
             why: "no Core command is configured".into(),
         })?;
-        let not_run = |error: std::io::Error| CoreError::NotRun {
-            subcommand,
-            why: error.to_string(),
-        };
-        let mut child = spawn_alone(
+        let (ended, stdout, stderr) = run_within(
             Command::new(program)
                 .args(prefix)
                 .arg(subcommand)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
+                .args(args),
+            self.deadline,
         )
-        .map_err(not_run)?;
-        // Watched from its start to its pipes' end: a program that lingers
-        // holding them is stopped too.
-        let watchdog = Watchdog::watch(&child, self.deadline);
-        watchdog.waiting(true);
-        let stdout = read_all(child.stdout.take().expect("a piped stdout"));
-        let stderr = read_all(child.stderr.take().expect("a piped stderr"));
-        let status = child.wait().map_err(not_run)?;
-        let (stdout, stderr) = (stdout.join(), stderr.join());
-        if watchdog.fired() {
-            return Err(CoreError::Stuck {
+        .map_err(|error| match error {
+            RunError::NotRun(error) => CoreError::NotRun {
                 subcommand,
-                seconds: self.deadline.as_secs(),
-            });
-        }
-        let (stdout, stderr) = (stdout.unwrap_or_default(), stderr.unwrap_or_default());
+                why: error.to_string(),
+            },
+            why => CoreError::Stuck { subcommand, why },
+        })?;
+        let status = ended.status;
         if !status.success() {
             // Core's errors name ids and states, never a credential.
             let stderr = String::from_utf8_lossy(&stderr);
@@ -157,15 +141,6 @@ impl CoreCli {
         self.run("runtime-restart-exact", self.waited(binding))
             .map(drop)
     }
-}
-
-/// A pipe read to its end beside the program.
-fn read_all(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = pipe.read_to_end(&mut bytes);
-        bytes
-    })
 }
 
 /// The `id` of the last JSON object on `out`'s lines (Core prints the

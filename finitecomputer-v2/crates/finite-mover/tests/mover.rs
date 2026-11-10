@@ -538,6 +538,8 @@ dir="$MOVER_WORLD"
 printf '%s\n' "$*" >> "$dir/core.log"
 if [ -e "$dir/fail-$1" ]; then echo "error: the runtime is not the one bound" >&2; exit 1; fi
 if [ -e "$dir/quiet-$1" ]; then sleep 30; fi
+if [ -e "$dir/stray-away-$1" ]; then (trap '' TERM; exec sleep 60) >/dev/null 2>&1 </dev/null & echo $! > "$dir/stray.pid"; sleep 30; fi
+if [ -e "$dir/stray-held-$1" ]; then (trap '' TERM; exec sleep 60) & echo $! > "$dir/stray.pid"; sleep 30; fi
 case "$1" in runtime-retire-exact) printf '{\n  "id": "rcr_retired",\n  "status": "stopped"\n}\n' ;; esac
 "#;
 
@@ -548,6 +550,8 @@ dir="$MOVER_WORLD"
 printf '%s\n' "$*" >> "$dir/host.log"
 if [ -e "$dir/fail-stream" ]; then head -c 6000000 "$dir/stage.zip"; echo "finite-mover-host: runtime_a changed while it was read" >&2; exit 75; fi
 if [ -e "$dir/quiet-stream" ]; then head -c 100 "$dir/stage.zip"; sleep 30; exit 0; fi
+if [ -e "$dir/stray-away-stream" ]; then head -c 100 "$dir/stage.zip"; (trap '' TERM; exec sleep 60) >/dev/null 2>&1 </dev/null & echo $! > "$dir/stray.pid"; sleep 30; exit 0; fi
+if [ -e "$dir/stray-held-stream" ]; then head -c 100 "$dir/stage.zip"; (trap '' TERM; exec sleep 60) & echo $! > "$dir/stray.pid"; sleep 30; exit 0; fi
 cat "$dir/stage.zip"
 "#;
 
@@ -1021,4 +1025,56 @@ fn a_core_call_that_never_ends_is_stopped_and_fails_its_step() {
         "{worked:?}"
     );
     assert_eq!(world.fake.state(OLD), "held");
+}
+
+/// Whether the TERM-ignoring child a stand-in started is gone (or dead,
+/// waiting only to be reaped).
+fn stray_gone(world: &World) -> bool {
+    let pid = std::fs::read_to_string(world.dir.join("stray.pid")).unwrap();
+    match std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+        Err(_) => true,
+        Ok(stat) => stat
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+    }
+}
+
+#[test]
+fn a_timed_out_host_reader_leaves_nothing_of_itself_running() {
+    // A child that ignores TERM, with its pipes moved away or holding them.
+    for stray in ["stray-away-stream", "stray-held-stream"] {
+        let mut world = World::new();
+        world.hosts.idle = Duration::from_secs(1);
+        std::fs::write(world.dir.join(stray), "").unwrap();
+        world.fake.tell(OLD, "asked", 1, stage_command(1));
+        let worked = world.work();
+        assert_eq!(worked[0].outcome, "failed", "{stray}: {worked:?}");
+        assert!(
+            stray_gone(&world),
+            "{stray}: a TERM-ignoring child outlived the reader's deadline"
+        );
+    }
+}
+
+#[test]
+fn a_timed_out_core_call_leaves_nothing_of_itself_running() {
+    for stray in [
+        "stray-away-runtime-restart-exact",
+        "stray-held-runtime-restart-exact",
+    ] {
+        let mut world = World::new();
+        world.core.deadline = Duration::from_secs(1);
+        std::fs::write(world.dir.join(stray), "").unwrap();
+        world.fake.tell(OLD, "held", 1, restart_command(OLD));
+        let worked = world.work();
+        assert_eq!(
+            (worked[0].outcome.as_str(), worked[0].step.as_deref()),
+            ("failed", Some("restart")),
+            "{stray}: {worked:?}"
+        );
+        assert!(
+            stray_gone(&world),
+            "{stray}: a TERM-ignoring child outlived Core's deadline"
+        );
+    }
 }
