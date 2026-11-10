@@ -595,6 +595,19 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
         world.log("host.log"),
         ["stream runtime_a --stage proj_a.p1.1 --brain brain_x"]
     );
+    // And the reader's own parser takes exactly those words.
+    let streamed = &world.log("host.log")[0];
+    match parse(streamed.split_whitespace()).unwrap() {
+        finite_mover_host::command::Operation::Stream {
+            stage,
+            owned_brains,
+            ..
+        } => {
+            assert_eq!(stage.as_deref(), Some("proj_a.p1.1"));
+            assert_eq!(owned_brains, ["brain_x".to_owned()].into());
+        }
+        other => panic!("not a stream: {other:?}"),
+    }
     let kinds = world.fake.kinds();
     assert_eq!(kinds.first().map(String::as_str), Some("stopped"));
     assert_eq!(kinds.last().map(String::as_str), Some("staged"));
