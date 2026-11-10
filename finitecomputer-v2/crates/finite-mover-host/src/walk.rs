@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use rustix::fs::{Dir, FileType, Stat};
 use rustix::io::Errno;
 
-use crate::classify::{self, BrainScope, CONFIG_COPY_PATH, Class, EntryKind, Verdict, Why};
+use crate::classify::{
+    self, BUILD_DIRS, BrainScope, CONFIG_COPY_PATH, Class, EntryKind, Scope, Verdict, Why,
+};
 use crate::config_copy::{CONFIG_MAX_BYTES, public_config};
 use crate::error::HostError;
 use crate::shapes::{self, Snapshot};
@@ -92,7 +94,7 @@ pub fn walk(
         mode,
     };
     let root = rustix::io::dup(tree.root()).map_err(|error| walk.io(&[], error))?;
-    walk.directory(&root, &mut Vec::new(), BrainScope::None, visit)
+    walk.directory(&root, &mut Vec::new(), BrainScope::None.into(), visit)
 }
 
 struct Walk<'a> {
@@ -106,15 +108,24 @@ impl Walk<'_> {
         &self,
         directory: &OwnedFd,
         path: &mut Vec<Vec<u8>>,
-        brain: BrainScope,
+        scope: Scope,
         visit: &mut impl Visit,
     ) -> Result<(), HostError> {
         if path.len() >= DEPTH_MAX {
             return Err(HostError::TooDeep(display(path)));
         }
-        for name in self.names(directory, path)? {
+        let names = self.names(directory, path)?;
+        // A build folder is build output only beside the project file that
+        // builds it (export.py's `beside_project_file`).
+        let project_here = names.iter().any(|name| {
+            classify::project_file(name.to_bytes())
+                && stat_entry(directory, name).is_ok_and(|stat| {
+                    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                })
+        });
+        for name in names {
             path.push(name.to_bytes().to_vec());
-            self.entry(directory, &name, path, brain, visit)?;
+            self.entry(directory, &name, path, scope, project_here, visit)?;
             path.pop();
         }
         Ok(())
@@ -141,7 +152,8 @@ impl Walk<'_> {
         directory: &OwnedFd,
         name: &CStr,
         path: &mut Vec<Vec<u8>>,
-        brain: BrainScope,
+        scope: Scope,
+        project_here: bool,
         visit: &mut impl Visit,
     ) -> Result<(), HostError> {
         let stat = match stat_entry(directory, name) {
@@ -156,8 +168,18 @@ impl Walk<'_> {
                 Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return self.vanished(path),
                 Err(error) => return Err(self.io(path, error)),
             };
-            let brain = self.brain_scope(&child, path, brain);
-            return self.directory(&child, path, brain, visit);
+            let build_output = scope.build_output.or_else(|| {
+                let in_workspace = path.first().map(Vec::as_slice) == Some(b"workspace");
+                let build_folder = BUILD_DIRS
+                    .iter()
+                    .any(|dir| path[path.len() - 1] == dir.as_bytes());
+                (in_workspace && project_here && build_folder).then_some(path.len())
+            });
+            let scope = Scope {
+                brain: self.brain_scope(&child, path, scope.brain),
+                build_output,
+            };
+            return self.directory(&child, path, scope, visit);
         }
         // A file with another name may be outside the tree: it is never
         // read, like a symbolic link.
@@ -167,7 +189,7 @@ impl Walk<'_> {
             EntryKind::Other
         };
         let parts: Vec<&[u8]> = path.iter().map(Vec::as_slice).collect();
-        let verdict = classify::classify(&parts, kind, brain);
+        let verdict = classify::classify(&parts, kind, scope);
         if verdict.class.staged() {
             if self.mode == Mode::Measure {
                 return visit.staged("", verdict.class, Source::Measured(file_bytes(&stat)));

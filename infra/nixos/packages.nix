@@ -427,6 +427,8 @@ rec {
     pname = "finite-mover-host";
     dir = "finitecomputer-v2/crates/finite-mover-host";
     sourcePaths = [ "finitecomputer-v2/crates/finite-mover-host" ];
+    # The owner notice's curl, by store path: the forced command's PATH has none.
+    extraAttrs.FINITE_MOVER_CURL = "${pkgs.curl}/bin/curl";
   };
   finitechat-server = mkWorkspaceCrate {
     pname = "finitechat-server";

@@ -13,7 +13,7 @@
 //! A value that looks like a credential is dropped, and a copy that still
 //! looks like one is not made at all.
 
-use serde_yaml::{Mapping, Value};
+use serde_yaml::Value;
 
 use crate::shapes::holds_secret;
 
@@ -27,23 +27,26 @@ const VALUE_MAX_BYTES: usize = 64 * 1024;
 /// the file.
 pub fn public_config(original: &[u8]) -> Option<Vec<u8>> {
     let document: Value = serde_yaml::from_slice(original).ok()?;
-    let mut copy = Mapping::new();
+    let mut lines = Vec::new();
     if let Some(timezone) = text(document.get("timezone")) {
-        copy.insert("timezone".into(), timezone);
+        lines.push(format!("timezone: {timezone}"));
     }
     let personality = document
         .get("agent")
         .and_then(|agent| agent.get("personality"))
         .or_else(|| document.get("personality"));
     if let Some(personality) = text(personality) {
-        copy.insert("agent".into(), nested("personality", personality));
+        lines.extend([
+            "agent:".to_string(),
+            format!("  personality: {personality}"),
+        ]);
     }
     let model = document.get("model");
     let default_model = model
         .and_then(|model| model.get("default"))
         .or(model.filter(|model| model.is_string()));
     if let Some(default_model) = text(default_model) {
-        copy.insert("model".into(), nested("default", default_model));
+        lines.extend(["model:".to_string(), format!("  default: {default_model}")]);
     }
     let telegram = document
         .get("gateway")
@@ -52,27 +55,28 @@ pub fn public_config(original: &[u8]) -> Option<Vec<u8>> {
         .and_then(|telegram| telegram.get("enabled"))
         .and_then(Value::as_bool);
     if let Some(enabled) = telegram {
-        let telegram = nested("enabled", Value::Bool(enabled));
-        let platforms = nested("telegram", telegram);
-        copy.insert("gateway".into(), nested("platforms", platforms));
+        lines.extend([
+            "gateway:".to_string(),
+            "  platforms:".to_string(),
+            "    telegram:".to_string(),
+            format!("      enabled: {enabled}"),
+        ]);
     }
-    let bytes = serde_yaml::to_string(&Value::Mapping(copy))
-        .ok()?
-        .into_bytes();
+    let bytes = if lines.is_empty() {
+        b"{}\n".to_vec()
+    } else {
+        format!("{}\n", lines.join("\n")).into_bytes()
+    };
     (!holds_secret(&bytes)).then_some(bytes)
 }
 
-fn nested(key: &str, value: Value) -> Value {
-    let mut mapping = Mapping::new();
-    mapping.insert(key.into(), value);
-    Value::Mapping(mapping)
-}
-
-/// A string value that is short and no credential.
-fn text(value: Option<&Value>) -> Option<Value> {
+/// A string value that is short and no credential, written as a JSON
+/// string: a YAML double-quoted scalar, which the raw-folder exporter
+/// writes the same way, byte for byte.
+fn text(value: Option<&Value>) -> Option<String> {
     let value = value?.as_str()?;
     (value.len() <= VALUE_MAX_BYTES && !holds_secret(value.as_bytes()))
-        .then(|| Value::String(value.to_owned()))
+        .then(|| serde_json::to_string(value).expect("a string serializes"))
 }
 
 #[cfg(test)]

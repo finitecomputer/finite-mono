@@ -12,7 +12,7 @@ description = "Read-only reader of one Agent Runtime's durable tree for the fini
 bech32.workspace = true
 crc32fast = "1.5"
 hex.workspace = true
-rustix = { workspace = true, features = ["fs"] }
+rustix = { workspace = true, features = ["fs", "thread"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

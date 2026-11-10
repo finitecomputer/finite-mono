@@ -17,6 +17,55 @@ impl CoreStore {
         self.finish(tx).await?;
         Ok(result)
     }
+
+    /// Whether this person's agents have all moved to finite.chat, so the
+    /// dashboard sends them there: at least one agent they belong to was
+    /// marked moved (even if since offboarded, which archives their
+    /// membership), and every agent the dashboard still shows them carries
+    /// a move mark. An agent still being created, or one whose creation
+    /// failed, keeps them on the dashboard; a cancelled one it hides
+    /// doesn't.
+    pub async fn moved_to_finite_chat_for_workos_user(
+        &self,
+        workos_user_id: &str,
+    ) -> CoreResult<bool> {
+        let client = self.connection().await?;
+        let row = client
+            .query_one(
+                "WITH belongs AS (
+                   SELECT membership.project_id, membership.archived_at
+                   FROM users AS person
+                   JOIN chat_identities AS identity ON identity.user_id = person.id
+                   JOIN project_room_memberships AS membership
+                     ON membership.chat_identity_id = identity.id
+                   WHERE person.workos_user_id = $1
+                 )
+                 SELECT EXISTS (
+                          SELECT 1 FROM belongs
+                          JOIN agent_runtime_moves AS moved ON moved.project_id = belongs.project_id
+                        )
+                    AND NOT EXISTS (
+                          SELECT 1 FROM belongs
+                          JOIN projects AS project ON project.id = belongs.project_id
+                          WHERE belongs.archived_at IS NULL
+                            AND project.import_candidate_id IS NULL
+                            AND NOT EXISTS (
+                              SELECT 1 FROM agent_creation_requests AS hidden
+                              WHERE hidden.project_id = project.id
+                                AND hidden.status = 'cancelled'
+                                AND hidden.agent_runtime_id IS NULL
+                            )
+                            AND NOT EXISTS (
+                              SELECT 1 FROM agent_runtime_moves AS moved
+                              WHERE moved.project_id = project.id
+                            )
+                        ) AS moved",
+                &[&workos_user_id],
+            )
+            .await
+            .map_err(store_error)?;
+        Ok(row.get("moved"))
+    }
 }
 
 async fn postgres_admin_mark_runtime_moved_exact<C>(
