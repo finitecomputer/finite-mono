@@ -9,7 +9,7 @@
 //! `stream` staged and left, exactly, in the shape `sizes` estimates.
 
 use std::collections::BTreeSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use rustix::fs::Stat;
 
@@ -80,7 +80,7 @@ pub fn stream(
     }
     let summary = tallies.summary(tree.id().as_str());
     let json = serde_json::to_vec_pretty(&summary).map_err(write_error)?;
-    zip.entry(SUMMARY_ENTRY, 0o644, 0, &mut &json[..])
+    zip.entry(SUMMARY_ENTRY, 0o644, 0, json.len() as u64, &mut &json[..])
         .map_err(write_error)?;
     zip.finish().map_err(write_error)?;
     Ok(summary)
@@ -107,23 +107,28 @@ impl<W: Write> Visit for Stage<W> {
             }
             Source::Bytes(data) => {
                 self.zip
-                    .entry(name, 0o644, 0, &mut &data[..])
+                    .entry(name, 0o644, 0, bytes, &mut &data[..])
                     .map_err(write_error)?;
             }
             Source::Text { bytes: data, stat } => {
                 self.zip
-                    .entry(name, stat.st_mode, stat.st_mtime, &mut &data[..])
+                    .entry(name, stat.st_mode, stat.st_mtime, bytes, &mut &data[..])
                     .map_err(write_error)?;
                 self.copied.push((name.to_owned(), *stat));
             }
             Source::File { file, stat } => {
-                let copied = self
+                match self
                     .zip
-                    .entry(name, stat.st_mode, stat.st_mtime, &mut (&file).take(bytes))
-                    .map_err(write_error)?;
+                    .entry(name, stat.st_mode, stat.st_mtime, bytes, &mut &file)
+                {
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                        return Err(HostError::TreeChanged(name.into()));
+                    }
+                    other => other.map_err(write_error)?,
+                }
                 let after = rustix::fs::fstat(&file)
                     .map_err(|error| HostError::io(name.into(), error.into()))?;
-                if copied != bytes || !same_file(&stat, &after) {
+                if !same_file(&stat, &after) {
                     return Err(HostError::TreeChanged(name.into()));
                 }
                 self.copied.push((name.to_owned(), after));
