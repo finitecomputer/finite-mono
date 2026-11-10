@@ -54,8 +54,10 @@ impl<W: Write> ZipStream<W> {
         }
     }
 
-    /// Write one entry from `data`, read to its end, with Unix `mode` and
-    /// modification time `mtime` (seconds since 1970). Returns its size.
+    /// Write one entry of exactly `size` bytes from `data`, with Unix `mode`
+    /// and modification time `mtime` (seconds since 1970). The size goes in
+    /// the local header. A source shorter than `size` is `UnexpectedEof`;
+    /// bytes past `size` are left unread.
     pub fn entry(
         &mut self,
         name: &str,
