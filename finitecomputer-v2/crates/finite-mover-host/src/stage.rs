@@ -63,12 +63,13 @@ pub fn stream(
         copied: Vec::new(),
     };
     walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
-    let carry = match simplex::decide(tree)? {
+    let (carry, carried_from) = match simplex::decide(tree)? {
         Ok(carried) => {
+            let folder = carried.folder.clone();
             stage.carry(carried)?;
-            Carry::carried()
+            (Carry::carried(), Some(folder))
         }
-        Err(why) => Carry::refused(why),
+        Err(why) => (Carry::refused(why), None),
     };
     let Stage {
         mut zip,
@@ -87,6 +88,11 @@ pub fn stream(
         {
             return Err(HostError::TreeChanged(name.into()));
         }
+    }
+    if let Some(folder) = carried_from
+        && !simplex::still_settled(tree, &folder)?
+    {
+        return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
     }
     let mut summary = tallies.summary(tree.id().as_str());
     summary.simplex = Some(carry);

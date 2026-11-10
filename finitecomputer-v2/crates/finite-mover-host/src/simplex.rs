@@ -17,7 +17,9 @@
 //! - Hermes approved exactly one contact, by a single decimal id;
 //! - both databases are there, plain files with one name, and plain SQLite
 //!   (their header, so not encrypted);
-//! - neither has a `-journal` or `-wal` beside it, so both are settled;
+//! - neither has a `-journal` or `-wal` beside it, so both are settled,
+//!   and still none at the stage's end ([`still_settled`]): the agent's
+//!   lease doesn't hold SimpleX's own writers;
 //! - together they are at most [`SIMPLEX_MAX_BYTES`].
 //!
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
@@ -115,6 +117,8 @@ pub struct Database {
 pub struct Carried {
     pub contact: i64,
     pub databases: Vec<Database>,
+    /// The folder they are in, in `agent/`.
+    pub folder: String,
 }
 
 impl Carried {
@@ -190,14 +194,41 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
     if total > SIMPLEX_MAX_BYTES {
         return Ok(Err(Refused::TooLarge));
     }
-    Ok(Ok(Carried { contact, databases }))
+    Ok(Ok(Carried {
+        contact,
+        databases,
+        folder: FOLDER[1].to_owned(),
+    }))
+}
+
+/// Whether the carried databases in `agent/<folder>` are still settled at
+/// the stage's end: no `-journal` or `-wal` beside them. A SimpleX writer
+/// that committed meanwhile may leave the database itself as it was, its
+/// rows in a WAL the stage doesn't hold.
+pub fn still_settled(tree: &Tree, folder: &str) -> Result<bool, HostError> {
+    let Some(folder) = folder_at(tree, folder)? else {
+        return Ok(false);
+    };
+    for (name, _) in DATABASES {
+        for suffix in UNSETTLED {
+            if present_in(&folder, &format!("{name}{suffix}"))? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// `agent/simplex/`, if it is a folder in the tree.
 fn folder(tree: &Tree) -> Result<Option<OwnedFd>, HostError> {
+    folder_at(tree, FOLDER[1])
+}
+
+/// `agent/<name>/`, if it is a folder in the tree.
+fn folder_at(tree: &Tree, name: &str) -> Result<Option<OwnedFd>, HostError> {
     let mut directory = rustix::io::dup(tree.root())
         .map_err(|error| HostError::io(FOLDER.join("/").into(), error.into()))?;
-    for part in FOLDER {
+    for part in [FOLDER[0], name] {
         directory = match open_directory(&directory, &c_name(part)?) {
             Ok(next) => next,
             Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
