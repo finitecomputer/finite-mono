@@ -416,6 +416,8 @@ export type CoreMe = {
   workos_user_id: string;
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
+  /** FIN-463: every agent this person had has moved to finite.chat. Older Core omits it. */
+  moved_to_finite_chat?: boolean;
 };
 
 export type CoreMeResult = {

@@ -79,6 +79,10 @@ async fn me_response_for_identity(
         .store
         .agent_creation_requests_for_workos_user(&identity.workos_user_id)
         .await?;
+    let moved_to_finite_chat = state
+        .store
+        .moved_to_finite_chat_for_workos_user(&identity.workos_user_id)
+        .await?;
     Ok(MeResponse {
         email: identity.email.clone(),
         workos_user_id: identity.workos_user_id.clone(),
@@ -87,6 +91,7 @@ async fn me_response_for_identity(
             .into_iter()
             .map(AgentCreationRequestSummary::from)
             .collect(),
+        moved_to_finite_chat,
     })
 }
 

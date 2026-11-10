@@ -334,3 +334,117 @@ async fn postgres_runtime_moves_constraints_and_reapply() {
     })
     .await;
 }
+
+/// The dashboard's redirect: a person is sent to finite.chat once every
+/// agent they belong to has moved, offboarded ones included, and not while
+/// any agent they can see still runs here.
+#[tokio::test]
+async fn postgres_moved_to_finite_chat_once_every_agent_a_person_sees_has_moved() {
+    with_isolated_postgres(|store| async move {
+        let owner = format!("workos_{RUN}_owner");
+        let moved = |who: String| {
+            let store = &store;
+            async move { store.moved_to_finite_chat_for_workos_user(&who).await.unwrap() }
+        };
+        let (project_id, runtime_id) = launched_kata_runtime(&store, RUN, HOST).await;
+        assert!(!moved(owner.clone()).await, "an agent still running here");
+        assert!(!moved("workos_nobody".into()).await, "no agents at all");
+
+        // They also belong to another person's agent, which still runs.
+        const OTHER: &str = "fin463-other";
+        let (other_project, other_runtime) =
+            launched_kata_runtime(&store, OTHER, "fin463-other-host").await;
+        let client = store.connection().await.unwrap();
+        let shared = client
+            .execute(
+                "INSERT INTO project_room_memberships (id, project_id, chat_identity_id, role, created_at)
+                 SELECT 'membership-fin463-shared', $1, identity.id, 'member', now()
+                 FROM chat_identities AS identity
+                 JOIN users AS person ON person.id = identity.user_id
+                 WHERE person.workos_user_id = $2",
+                &[&other_project, &owner],
+            )
+            .await
+            .unwrap();
+        assert_eq!(shared, 1);
+
+        store
+            .admin_mark_runtime_moved_exact(mark_input(
+                &project_id,
+                &runtime_id,
+                RuntimeMoved::Migrated,
+                Some(NPUB),
+            ))
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "their own moved, a shared one not");
+        // What offboarding leaves: the membership archived, the link inactive.
+        client
+            .execute(
+                "UPDATE project_room_memberships SET archived_at = now() WHERE project_id = $1",
+                &[&project_id],
+            )
+            .await
+            .unwrap();
+        client
+            .execute(
+                "UPDATE project_runtime_links SET active = FALSE WHERE agent_runtime_id = $1",
+                &[&runtime_id],
+            )
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "offboarded, and the shared one still runs");
+
+        let (admin_verified_email, admin_workos_user_id) = admin();
+        store
+            .admin_mark_runtime_moved_exact(AdminMarkRuntimeMovedExactInput {
+                admin_verified_email,
+                admin_workos_user_id,
+                project_id: other_project.clone(),
+                expected_agent_runtime_id: other_runtime.clone(),
+                expected_source_host_id: "fin463-other-host".into(),
+                expected_source_machine_id: format!("{OTHER}-agent-001"),
+                moved: RuntimeMoved::Archived,
+                agent_npub: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert!(moved(owner.clone()).await, "every agent they saw has moved");
+        assert!(moved(format!("workos_{OTHER}_owner")).await);
+
+        // A new agent they asked for, not yet running, keeps them here, and
+        // so does one whose creation failed. A cancelled one doesn't.
+        let launch_code = issue_test_launch_code(&store, "2026-07-21T12:00:00Z").await;
+        let pending = store
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: format!("{RUN}-owner@finite.vip"),
+                workos_user_id: owner.clone(),
+                display_name: format!("{RUN} Second Agent"),
+                launch_code,
+                idempotency_key: format!("{RUN}-second"),
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "an agent still being created");
+        let project = pending.project.id.clone();
+        client
+            .execute(
+                "UPDATE agent_creation_requests SET status = 'failed' WHERE project_id = $1",
+                &[&project],
+            )
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "a failed creation it shows them");
+        client
+            .execute(
+                "UPDATE agent_creation_requests SET status = 'cancelled' WHERE project_id = $1",
+                &[&project],
+            )
+            .await
+            .unwrap();
+        assert!(moved(owner).await, "a cancelled creation is hidden");
+    })
+    .await;
+}
