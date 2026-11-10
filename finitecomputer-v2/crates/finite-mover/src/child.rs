@@ -4,8 +4,9 @@
 //! killed. One stuck program never holds the mailbox, whose lock would
 //! keep every later run from doing anything.
 
+use std::io::Read;
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -18,6 +19,57 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 /// Start `command` as the leader of a process group of its own.
 pub fn spawn_alone(command: &mut Command) -> std::io::Result<Child> {
     command.process_group(0).spawn()
+}
+
+/// What a watched program printed, once it ended.
+pub struct Ended {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RunError {
+    #[error("could not be started: {0}")]
+    NotRun(std::io::Error),
+    #[error("had not ended after {0} s, so it was stopped")]
+    Stuck(u64),
+}
+
+/// Run `command` to its end, alone in its group, with no input, stopped
+/// once it runs past `limit`, counted from its start to its pipes' end (a
+/// program that lingers holding them is stopped too).
+pub fn run_within(command: &mut Command, limit: Duration) -> Result<Ended, RunError> {
+    let mut child = spawn_alone(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(RunError::NotRun)?;
+    let watchdog = Watchdog::watch(&child, limit);
+    watchdog.waiting(true);
+    let stdout = read_all(child.stdout.take().expect("a piped stdout"));
+    let stderr = read_all(child.stderr.take().expect("a piped stderr"));
+    let status = child.wait().map_err(RunError::NotRun)?;
+    let (stdout, stderr) = (stdout.join(), stderr.join());
+    if watchdog.fired() {
+        return Err(RunError::Stuck(limit.as_secs()));
+    }
+    Ok(Ended {
+        status,
+        stdout: stdout.unwrap_or_default(),
+        stderr: stderr.unwrap_or_default(),
+    })
+}
+
+/// A pipe read to its end beside the program.
+fn read_all(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
 }
 
 /// Kill `child`'s whole group (its leader not yet waited for, so the

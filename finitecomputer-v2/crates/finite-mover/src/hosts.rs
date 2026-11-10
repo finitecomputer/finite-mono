@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::child::{Watchdog, kill_group, spawn_alone};
+use crate::child::{Watchdog, kill_group, run_within, spawn_alone};
 use crate::contract::short;
 use crate::fleet::Binding;
 
@@ -57,15 +57,13 @@ impl HostCommands {
 
     /// `sizes <durable_state_id> [--brain <id>]...`: the host reader's
     /// summary from metadata alone (it opens no file), as the roster counts.
+    /// It answers only at its end, so it has `idle` to do so.
     pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
         let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
         for brain in &binding.owned_brains {
             words.extend(["--brain".to_string(), brain.clone()]);
         }
-        let output = self
-            .command(binding, &words)?
-            .stdin(Stdio::null())
-            .output()
+        let output = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

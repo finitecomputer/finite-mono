@@ -97,6 +97,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_host_that_never_answers_is_stopped_and_keeps_its_last_sizes() {
+        let hosts = HostCommands {
+            hosts: [(
+                "lat-a".to_string(),
+                vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "sleep 30 & sleep 30".into(),
+                    "host".into(),
+                ],
+            )]
+            .into(),
+            idle: std::time::Duration::from_secs(1),
+        };
+        let binding = Binding {
+            old: "proj_a".into(),
+            agent_runtime_id: "rt_a".into(),
+            source_host_id: "lat-a".into(),
+            source_machine_id: "machine_a".into(),
+            durable_state_id: "rt_a".into(),
+            owned_brains: Vec::new(),
+            retired_receipt: None,
+        };
+        let yesterday = Sizes {
+            cache: 1,
+            history: 2,
+            work: 3,
+            staged: 5,
+            total: 6,
+        };
+        let last = SizesCache {
+            measured_ms: 1,
+            agents: [("proj_a".to_string(), yesterday)].into(),
+        };
+        let started = std::time::Instant::now();
+        let (fresh, failed) = measure(&[binding], &hosts, &last, 2);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(fresh.agents.get("proj_a"), Some(&yesterday));
+        assert_eq!(failed.len(), 1);
+        assert!(
+            failed[0].1.contains("had not ended after 1 s"),
+            "{failed:?}"
+        );
+    }
+
+    #[test]
     fn a_summary_counts_as_the_roster_lists_it() {
         let summary = serde_json::json!({
             "classes": {
