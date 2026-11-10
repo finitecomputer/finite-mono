@@ -11,20 +11,20 @@ description = "The mover of finite.computer agents to finite.chat (FIN-463), run
 [dependencies]
 crc32fast = "1.5"
 finite-mover-host = { path = "../finite-mover-host" }
+finite-nostr.workspace = true
 hex.workspace = true
-hmac.workspace = true
-md-5 = "0.11"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
-time.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# The fake finite.chat's check of the mover's signature.
+nostr.workspace = true
 tempfile.workspace = true
-# Reads stages back in the S3 test.
+# Reads stages back in the fake finite.chat test.
 zip.workspace = true
 
 [lints]

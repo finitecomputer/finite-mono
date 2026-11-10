@@ -1083,16 +1083,15 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "finite-mover-host",
+ "finite-nostr",
  "hex",
- "hmac 0.12.1",
- "md-5",
+ "nostr",
  "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror",
- "time",
  "zeroize",
  "zip",
 ]

@@ -1,53 +1,55 @@
 //! Uploading one old agent's stage: the zip `finite-mover-host stream`
-//! writes, into the stage bucket as
+//! writes, sent in parts to finite.chat, which writes it to its stage
+//! bucket ([`crate::sink`]). The stage's id is `<old>.<phase>.<attempt>`;
+//! `<old>` is Core's opaque project id, so no id holds a name or an email.
 //!
-//! ```text
-//! <phase>/<old>/<attempt>/stage.zip       resumable multipart upload
-//! <phase>/<old>/<attempt>/manifest.json   written last; its presence means staged
-//! ```
-//!
-//! `<old>` is Core's opaque project id: no key holds a name or an email.
-//!
-//! - **Resume.** A stopped upload is found again by its key. Each part is
-//!   re-read from the new stream and skipped when its MD5 matches what the
-//!   bucket holds; a part that differs is uploaded again in place.
-//! - **Stale attempts.** An attempt never writes once a later attempt of the
-//!   same agent has begun; an earlier attempt's unfinished upload is aborted.
+//! - **The refusal, at the source.** The stream is read as it goes
+//!   ([`crate::zip_scan`]): every entry's name goes through the host
+//!   reader's own classifier before the part holding it is sent. One secret
+//!   path refuses the whole stage: none of that file's bytes, nor anything
+//!   after it, leaves the mover. Parts already sent hold only entries that
+//!   passed (and at most the start of the refused one's header), and the
+//!   stage is never completed.
+//! - **Resume.** `GET …/parts` lists what finite.chat holds. Each part is
+//!   re-read from the new stream and skipped when its size and SHA-256
+//!   match; a part that differs is sent again in its place.
+//! - **Stale attempts.** finite.chat takes parts only for the stage its
+//!   current command names, while it stages: any other is refused
+//!   (403 or 409), and the run stops.
 //! - **One run at a time.** A run holds a lock on its old agent from its
-//!   first look at the bucket to its manifest, so two runs can never
-//!   interleave a completed object with another run's manifest.
-//! - **The refusal.** Before the upload completes, every name in the zip's
-//!   central directory goes through the host reader's own classifier. One
-//!   secret path refuses the whole stage: the upload is aborted, so nothing
-//!   of it can be read, and no manifest is written.
+//!   first call to its complete, so two runs never interleave their parts.
+//! - **The end.** The central directory must list exactly the entries
+//!   streamed. Then `complete` makes the zip whole and writes
+//!   `manifest.json` last.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
-use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
 use finite_mover_host::stage::SUMMARY_ENTRY;
-use md5::{Digest as _, Md5};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::bucket::{Bucket, BucketError, Upload};
+use crate::sink::{Completed, SinkError, StageSink};
+use crate::zip_scan::{ScanError, Scanned, Scanner};
 use crate::zip_tail::{self, Tail, TailError};
 
 pub const MANIFEST_FORMAT: &str = "finite-stage/1";
 /// The design's layout name for a finite.computer agent's tree.
 pub const LAYOUT: &str = "finite-computer";
-/// R2 and S3 refuse a part under 5 MiB, except the last.
+/// R2's least part, every part but the last (fragment's `PART_MIN_BYTES`).
 pub const PART_BYTES_MIN: usize = 5 * 1024 * 1024;
-/// Every part but the last has this size (R2 requires equal parts).
+/// Every part but the last has this size (R2 requires equal parts). It is
+/// fragment's `PART_MAX_BYTES`, under a request's body limit.
 pub const PART_BYTES: usize = 64 * 1024 * 1024;
-/// S3's limit; 640 GiB of 64 MiB parts.
+/// R2's limit; 640 GiB of 64 MiB parts (fragment's `PARTS_MAX`).
 pub const PARTS_MAX: u32 = 10_000;
 /// How much of the stream's end is kept to read its central directory:
 /// about 300,000 entries.
 pub const TAIL_BYTES: usize = 64 * 1024 * 1024;
-/// The longest old agent id (Core's project ids are 28 bytes).
+/// The longest old agent id (fragment's `OLD_ID_MAX_BYTES`; Core's
+/// project ids are 28 bytes).
 const OLD_MAX: usize = 64;
 /// `manifest.json` is read whole: at most this, and at most this many
 /// `left` lines (fragment's `MANIFEST_MAX_BYTES`, `MANIFEST_LEFT_MAX`).
@@ -98,29 +100,9 @@ impl StageTarget {
         })
     }
 
-    fn agent_prefix(&self) -> String {
-        format!("{}/{}/", self.phase.as_str(), self.old)
-    }
-
-    fn prefix(&self) -> String {
-        format!("{}{}/", self.agent_prefix(), self.attempt)
-    }
-
-    pub fn zip_key(&self) -> String {
-        format!("{}stage.zip", self.prefix())
-    }
-
-    pub fn manifest_key(&self) -> String {
-        format!("{}manifest.json", self.prefix())
-    }
-
-    /// The attempt a key under this agent's prefix belongs to.
-    fn attempt_of(&self, key: &str) -> Option<u32> {
-        key.strip_prefix(&self.agent_prefix())?
-            .split('/')
-            .next()?
-            .parse()
-            .ok()
+    /// fragment's `stage_id`: `<old>.<phase>.<attempt>`.
+    pub fn stage_id(&self) -> String {
+        format!("{}.{}.{}", self.old, self.phase.as_str(), self.attempt)
     }
 }
 
@@ -146,9 +128,9 @@ pub struct Manifest {
     /// What stayed behind, largest first, at most `MANIFEST_LEFT_MAX`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<LeftBehind>,
-    /// Files left behind past the list.
-    #[serde(default)]
-    pub left_more: u64,
+    /// Files left behind past the list, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_more: Option<u64>,
 }
 
 /// One path that stayed behind: a file, or a directory that stayed whole.
@@ -164,112 +146,107 @@ pub struct LeftBehind {
 pub enum StageError {
     #[error("a stage target is a phase, an old agent id of [A-Za-z0-9_-] and an attempt from 1")]
     InvalidTarget,
-    #[error("attempt {newer} of this agent has already begun; this attempt is stale")]
-    StaleAttempt { newer: u32 },
+    /// A refusal of this stage (403, 409) or a failed call: the parts
+    /// finite.chat took are kept for a resume.
     #[error(transparent)]
-    Bucket(#[from] BucketError),
-    #[error("reading the stage stream failed; the parts uploaded are kept for a resume: {0}")]
+    Sink(#[from] SinkError),
+    #[error("reading the stage stream failed; the parts sent are kept for a resume: {0}")]
     Read(io::Error),
     #[error("the stage stream is empty")]
     Empty,
     #[error("the stage is larger than {PARTS_MAX} parts")]
     TooLarge,
-    #[error("the stage is not a stage the mover can check: {0}")]
-    Unreadable(#[from] TailError),
-    #[error("the stage has no summary entry")]
-    NoSummary,
     #[error("the stage was refused whole: {path} is a secret path")]
     Refused { path: String },
     #[error("the stage was refused whole: {path} is not a safe name")]
     UnsafeName { path: String },
+    #[error("the stage is not a stage the mover can check: {0}")]
+    Malformed(ScanError),
+    #[error("the stage is not a stage the mover can check: {0}")]
+    Unreadable(#[from] TailError),
+    #[error("the stage's central directory does not list the entries streamed")]
+    DirectoryMismatch,
+    #[error("the stage has no summary entry")]
+    NoSummary,
+    #[error("finite.chat completed {got} bytes; the stream was {sent}")]
+    CompletedMismatch { sent: u64, got: u64 },
     #[error("another run is staging this old agent")]
     Busy,
     #[error("the stage lock could not be taken: {0}")]
     Lock(io::Error),
 }
 
-/// The manifest of `target` if that attempt is already staged.
-pub fn staged_manifest(
-    bucket: &impl Bucket,
-    target: &StageTarget,
-) -> Result<Option<Manifest>, StageError> {
-    let Some(bytes) = bucket.get(&target.manifest_key())? else {
-        return Ok(None);
-    };
-    serde_json::from_slice(&bytes).map(Some).map_err(|_| {
-        StageError::Bucket(BucketError::Unreadable {
-            operation: "manifest",
-        })
-    })
+impl From<ScanError> for StageError {
+    fn from(error: ScanError) -> Self {
+        match error {
+            ScanError::Secret(path) => StageError::Refused { path },
+            ScanError::Unsafe(path) => StageError::UnsafeName { path },
+            other => StageError::Malformed(other),
+        }
+    }
 }
 
-/// Upload `stream` as `target`'s stage and write its manifest last.
-/// Returns the stored manifest unread if the attempt is already staged.
+/// Send `stream` to finite.chat as `target`'s stage, in parts of
+/// `part_bytes`, and complete it with its manifest. Returns the manifest
+/// and finite.chat's answer, whose `manifest_sha256` the `staged` report
+/// names.
 ///
 /// `locks` is a directory only the mover writes, on the one host it runs
 /// on: a run holds `<phase>-<old>.lock` there until it returns, and a
 /// second run of the same old agent meanwhile is `Busy`.
 pub fn upload_stage(
-    bucket: &impl Bucket,
+    sink: &impl StageSink,
     target: &StageTarget,
     stream: impl Read,
     part_bytes: usize,
     locks: &Path,
-) -> Result<Manifest, StageError> {
-    assert!(part_bytes >= PART_BYTES_MIN, "parts are at least 5 MiB");
+) -> Result<(Manifest, Completed), StageError> {
+    assert!(
+        (PART_BYTES_MIN..=PART_BYTES).contains(&part_bytes),
+        "parts are 5 to 64 MiB"
+    );
     let _held = lock(locks, target)?;
-    refuse_if_stale(bucket, target)?;
-    if let Some(manifest) = staged_manifest(bucket, target)? {
-        return Ok(manifest);
-    }
-    let key = target.zip_key();
-    let upload_id = resumable_upload(bucket, target, &key)?;
-    let uploaded = match upload_parts(bucket, &key, &upload_id, stream, part_bytes) {
-        Ok(uploaded) => uploaded,
-        Err(error @ StageError::TooLarge) => {
-            bucket.abort(&key, &upload_id)?;
-            return Err(error);
-        }
-        Err(error) => return Err(error),
-    };
-    let summary = match check(&uploaded.tail) {
-        Ok(summary) => summary,
-        Err(error @ (StageError::Refused { .. } | StageError::UnsafeName { .. })) => {
-            // The parts may hold the refused file: drop them all.
-            bucket.abort(&key, &upload_id)?;
-            return Err(error);
-        }
-        Err(error) => return Err(error),
-    };
-    bucket.complete(&key, &upload_id, &uploaded.parts)?;
+    let stage = target.stage_id();
+    let sent = send_parts(sink, &stage, stream, part_bytes)?;
+    let summary = check(&sent)?;
     let mut manifest = Manifest {
         format: MANIFEST_FORMAT.to_string(),
         old: target.old.clone(),
         phase: target.phase,
         attempt: target.attempt,
         layout: LAYOUT.to_string(),
-        zip_bytes: uploaded.tail.total(),
-        zip_sha256: uploaded.sha256,
+        zip_bytes: sent.tail.total(),
+        zip_sha256: sent.sha256.clone(),
         bytes: summary.bytes,
         files: summary.files,
         left: summary.left,
-        left_more: summary.left_more,
+        left_more: (summary.left_more > 0).then_some(summary.left_more),
     };
-    let body = manifest_body(&mut manifest, summary.left_files);
-    bucket.put(&target.manifest_key(), &body, "application/json")?;
-    Ok(manifest)
+    fit_manifest(&mut manifest, summary.left_files);
+    let completed = sink.complete(&stage, &manifest)?;
+    if completed.zip_bytes != manifest.zip_bytes {
+        return Err(StageError::CompletedMismatch {
+            sent: manifest.zip_bytes,
+            got: completed.zip_bytes,
+        });
+    }
+    Ok((manifest, completed))
 }
 
-/// The manifest's JSON within `MANIFEST_MAX_BYTES`: the smallest `left`
-/// lines move into `left_more` until it fits. `left_files` is each line's
-/// file count.
-fn manifest_body(manifest: &mut Manifest, mut left_files: Vec<u64>) -> Vec<u8> {
-    loop {
-        let body = serde_json::to_vec(manifest).expect("a manifest serializes");
-        if body.len() <= MANIFEST_MAX_BYTES || manifest.left.pop().is_none() {
-            return body;
+/// Keep the manifest's JSON within `MANIFEST_MAX_BYTES`: the smallest
+/// `left` lines move into `left_more` until it fits. `left_files` is each
+/// line's file count.
+fn fit_manifest(manifest: &mut Manifest, mut left_files: Vec<u64>) {
+    while serde_json::to_vec(manifest)
+        .expect("a manifest serializes")
+        .len()
+        > MANIFEST_MAX_BYTES
+    {
+        if manifest.left.pop().is_none() {
+            return;
         }
-        manifest.left_more += left_files.pop().unwrap_or(1);
+        let more = left_files.pop().unwrap_or(1);
+        manifest.left_more = Some(manifest.left_more.unwrap_or(0) + more);
     }
 }
 
@@ -289,94 +266,57 @@ fn lock(locks: &Path, target: &StageTarget) -> Result<File, StageError> {
     }
 }
 
-/// Refuse if a later attempt has begun; abort earlier unfinished uploads.
-fn refuse_if_stale(bucket: &impl Bucket, target: &StageTarget) -> Result<(), StageError> {
-    let prefix = target.agent_prefix();
-    let objects = bucket.list_keys(&prefix)?;
-    let uploads = bucket.uploads(&prefix)?;
-    let newer = objects
-        .iter()
-        .chain(uploads.iter().map(|upload| &upload.key))
-        .filter_map(|key| target.attempt_of(key))
-        .filter(|attempt| *attempt > target.attempt)
-        .max();
-    if let Some(newer) = newer {
-        return Err(StageError::StaleAttempt { newer });
-    }
-    for upload in uploads {
-        if target
-            .attempt_of(&upload.key)
-            .is_some_and(|attempt| attempt < target.attempt)
-        {
-            bucket.abort(&upload.key, &upload.id)?;
-        }
-    }
-    Ok(())
-}
-
-/// This attempt's unfinished upload, or a new one. Extra uploads of the
-/// same key (from racing starts) are aborted.
-fn resumable_upload(
-    bucket: &impl Bucket,
-    target: &StageTarget,
-    key: &str,
-) -> Result<String, StageError> {
-    let mut mine: Vec<Upload> = bucket
-        .uploads(&target.prefix())?
-        .into_iter()
-        .filter(|upload| upload.key == key)
-        .collect();
-    let Some(first) = mine.first().cloned() else {
-        return Ok(bucket.create_upload(key)?);
-    };
-    for extra in mine.drain(1..) {
-        bucket.abort(key, &extra.id)?;
-    }
-    Ok(first.id)
-}
-
-struct Uploaded {
-    parts: Vec<(u32, String)>,
+struct Sent {
+    scanned: Vec<Scanned>,
     tail: Tail,
     sha256: String,
 }
 
-fn upload_parts(
-    bucket: &impl Bucket,
-    key: &str,
-    upload_id: &str,
+fn send_parts(
+    sink: &impl StageSink,
+    stage: &str,
     mut stream: impl Read,
     part_bytes: usize,
-) -> Result<Uploaded, StageError> {
-    let existing: BTreeMap<u32, _> = bucket
-        .parts(key, upload_id)?
+) -> Result<Sent, StageError> {
+    let held: BTreeMap<u32, _> = sink
+        .parts(stage)?
         .into_iter()
-        .map(|part| (part.number, part))
+        .map(|part| (part.n, part))
         .collect();
+    let mut scanner = Scanner::default();
     let mut tail = Tail::new(TAIL_BYTES);
     let mut hash = Sha256::new();
-    let mut parts = Vec::new();
     let mut chunk = vec![0; part_bytes];
     let mut filled = read_full(&mut stream, &mut chunk).map_err(StageError::Read)?;
     if filled == 0 {
         return Err(StageError::Empty);
     }
-    let mut number = 1u32;
+    let mut n = 1u32;
     loop {
-        if number > PARTS_MAX {
+        if n > PARTS_MAX {
             return Err(StageError::TooLarge);
         }
         let body = &chunk[..filled];
+        // Every name this part holds or begins is checked before it goes.
+        scanner.feed(body)?;
         tail.push(body);
         hash.update(body);
-        let md5 = hex::encode(Md5::digest(body));
-        let etag = match existing.get(&number) {
-            Some(part) if part.size == filled as u64 && part.etag.eq_ignore_ascii_case(&md5) => {
-                part.etag.clone()
+        let sha256 = hex::encode(Sha256::digest(body));
+        let same = held.get(&n).is_some_and(|part| {
+            part.bytes == filled as u64 && part.sha256.eq_ignore_ascii_case(&sha256)
+        });
+        if !same {
+            let taken = sink.put_part(stage, n, body, &sha256)?;
+            if taken.n != n
+                || taken.bytes != filled as u64
+                || !taken.sha256.eq_ignore_ascii_case(&sha256)
+            {
+                return Err(SinkError::Unreadable {
+                    operation: "put part",
+                }
+                .into());
             }
-            _ => bucket.upload_part(key, upload_id, number, body)?,
-        };
-        parts.push((number, etag));
+        }
         if filled < part_bytes {
             break;
         }
@@ -384,10 +324,11 @@ fn upload_parts(
         if filled == 0 {
             break;
         }
-        number += 1;
+        n += 1;
     }
-    Ok(Uploaded {
-        parts,
+    let (scanned, _directory) = scanner.finish()?;
+    Ok(Sent {
+        scanned,
         tail,
         sha256: hex::encode(hash.finalize()),
     })
@@ -414,63 +355,32 @@ struct CheckedSummary {
     left_more: u64,
 }
 
-/// The parts of `finite-mover-host`'s summary the manifest carries.
-#[derive(Deserialize)]
-struct HostSummary {
-    left: Vec<HostLeft>,
-    left_more: HostTally,
-}
-
-#[derive(Deserialize)]
-struct HostLeft {
-    path: String,
-    class: String,
-    files: u64,
-    bytes: u64,
-}
-
-#[derive(Deserialize)]
-struct HostTally {
-    files: u64,
-}
-
-/// The second check: every name through the host's classifier.
-fn check(tail: &Tail) -> Result<CheckedSummary, StageError> {
-    let entries = zip_tail::entries(tail)?;
-    let mut summary = None;
-    let mut names = std::collections::BTreeSet::new();
-    let mut bytes = 0u64;
-    for entry in &entries {
-        if !names.insert(entry.name.as_str()) {
-            // Readers disagree on which of two same-named entries wins.
-            return Err(StageError::UnsafeName {
-                path: entry.name.clone(),
-            });
-        }
-        if entry.name == SUMMARY_ENTRY {
-            summary = Some(entry);
-            continue;
-        }
-        bytes += entry.size;
-        let parts: Vec<&str> = entry.name.split('/').collect();
-        let unsafe_name = entry.name.starts_with('/')
-            || parts.iter().any(|part| {
-                part.is_empty() || *part == "." || *part == ".." || part.contains(['\\', '\0'])
-            });
-        if unsafe_name {
-            return Err(StageError::UnsafeName {
-                path: entry.name.clone(),
-            });
-        }
-        let bytes: Vec<&[u8]> = parts.iter().map(|part| part.as_bytes()).collect();
-        if classify(&bytes, EntryKind::File, BrainScope::None).class == Class::Secret {
-            return Err(StageError::Refused {
-                path: entry.name.clone(),
-            });
-        }
+/// The end: the central directory lists exactly what streamed past (every
+/// name of which was checked before it went), and the summary is read.
+fn check(sent: &Sent) -> Result<CheckedSummary, StageError> {
+    let entries = zip_tail::entries(&sent.tail)?;
+    let listed: Vec<Scanned> = entries
+        .iter()
+        .map(|entry| Scanned {
+            name: entry.name.clone(),
+            offset: entry.offset,
+            size: entry.size,
+            crc: entry.crc,
+        })
+        .collect();
+    if listed != sent.scanned {
+        return Err(StageError::DirectoryMismatch);
     }
-    let summary = summary.ok_or(StageError::NoSummary)?;
-    let host: HostSummary = serde_json::from_slice(zip_tail::data(tail, summary)?)
+    let summary = entries
+        .iter()
+        .find(|entry| entry.name == SUMMARY_ENTRY)
+        .ok_or(StageError::NoSummary)?;
+    let bytes = entries
+        .iter()
+        .filter(|entry| entry.name != SUMMARY_ENTRY)
+        .map(|entry| entry.size)
+        .sum();
+    let host: HostSummary = serde_json::from_slice(zip_tail::data(&sent.tail, summary)?)
         .map_err(|_| StageError::NoSummary)?;
     let listed = host.left.len().min(MANIFEST_LEFT_MAX);
     let left_more = host.left_more.files
@@ -498,6 +408,26 @@ fn check(tail: &Tail) -> Result<CheckedSummary, StageError> {
         left_files,
         left_more,
     })
+}
+
+/// The parts of `finite-mover-host`'s summary the manifest carries.
+#[derive(Deserialize)]
+struct HostSummary {
+    left: Vec<HostLeft>,
+    left_more: HostTally,
+}
+
+#[derive(Deserialize)]
+struct HostLeft {
+    path: String,
+    class: String,
+    files: u64,
+    bytes: u64,
+}
+
+#[derive(Deserialize)]
+struct HostTally {
+    files: u64,
 }
 
 #[cfg(test)]

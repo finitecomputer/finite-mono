@@ -296,7 +296,9 @@ mod tests {
     fn stage(names: &[&str]) -> Vec<u8> {
         let mut stream = ZipStream::new(Vec::new());
         for name in names {
-            stream.entry(name, 0o644, 0, &mut name.as_bytes()).unwrap();
+            stream
+                .entry(name, 0o644, 0, name.len() as u64, &mut name.as_bytes())
+                .unwrap();
         }
         stream.finish().unwrap()
     }
@@ -401,10 +403,16 @@ mod tests {
         let inner = stage(&["inner.md"]);
         let mut stream = ZipStream::new(Vec::new());
         stream
-            .entry("workspace/archive.zip", 0o644, 0, &mut &inner[..])
+            .entry(
+                "workspace/archive.zip",
+                0o644,
+                0,
+                inner.len() as u64,
+                &mut &inner[..],
+            )
             .unwrap();
         stream
-            .entry("workspace/after.md", 0o644, 0, &mut &b"after"[..])
+            .entry("workspace/after.md", 0o644, 0, 5, &mut &b"after"[..])
             .unwrap();
         let outer = stream.finish().unwrap();
         let cut = find(&outer, &inner[inner.len() - 22..], 0) + 22;
