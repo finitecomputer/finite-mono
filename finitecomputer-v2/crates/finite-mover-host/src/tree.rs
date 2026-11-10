@@ -51,6 +51,14 @@ impl DurableId {
     }
 }
 
+/// [`Tree::read_whole`]'s answer.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Whole {
+    Absent,
+    Bytes(Vec<u8>),
+    Unreadable,
+}
+
 /// One open durable tree.
 pub struct Tree {
     id: DurableId,
@@ -135,6 +143,43 @@ impl Tree {
         rustix::fs::fstat(&file)
             .map(Some)
             .map_err(|error| self.error(parts, error))
+    }
+
+    /// What is at `parts`, for a file whose absence means something (the
+    /// owner notice's pairing): nothing at all, a plain file with one name
+    /// read whole (at most `max` bytes), or something else that must not
+    /// be taken for nothing (a link, another kind of file, a second name,
+    /// a file over `max`, a file where a folder belongs).
+    pub fn read_whole(&self, parts: &[&str], max: u64) -> Result<Whole, HostError> {
+        let Some((name, directories)) = parts.split_last() else {
+            return Ok(Whole::Absent);
+        };
+        let mut directory =
+            rustix::io::dup(&self.root).map_err(|error| self.error(parts, error))?;
+        for part in directories {
+            let part = CString::new(*part).map_err(|_| HostError::BadId)?;
+            directory = match open_directory(&directory, &part) {
+                Ok(next) => next,
+                Err(Errno::NOENT) => return Ok(Whole::Absent),
+                Err(Errno::NOTDIR | Errno::LOOP) => return Ok(Whole::Unreadable),
+                Err(error) => return Err(self.error(parts, error)),
+            };
+        }
+        let name = CString::new(*name).map_err(|_| HostError::BadId)?;
+        let file = match open_regular(&directory, &name) {
+            Ok(Some(file)) => file,
+            Ok(None) | Err(Errno::LOOP) => return Ok(Whole::Unreadable),
+            Err(Errno::NOENT) => return Ok(Whole::Absent),
+            Err(error) => return Err(self.error(parts, error)),
+        };
+        let mut bytes = Vec::new();
+        file.take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| HostError::io(self.display(parts), error))?;
+        if bytes.len() as u64 > max {
+            return Ok(Whole::Unreadable);
+        }
+        Ok(Whole::Bytes(bytes))
     }
 
     /// Read a small regular file at `parts`, refusing one over `max`

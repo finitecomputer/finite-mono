@@ -5,12 +5,12 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::child::{Watchdog, kill_group, run_within, spawn_alone};
+use crate::child::{Watched, run_within};
 use crate::contract::short;
 use crate::fleet::Binding;
 
@@ -63,10 +63,10 @@ impl HostCommands {
         for brain in &binding.owned_brains {
             words.extend(["--brain".to_string(), brain.clone()]);
         }
-        let output = run_within(&mut self.command(binding, &words)?, self.idle)
+        let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        if !ended.status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
             let last = stderr
                 .lines()
                 .rev()
@@ -74,11 +74,11 @@ impl HostCommands {
                 .unwrap_or("");
             return Err(HostError::NotRun(short(&format!(
                 "{}: {}",
-                output.status,
+                ended.status,
                 last.trim()
             ))));
         }
-        serde_json::from_slice(&output.stdout)
+        serde_json::from_slice(&stdout)
             .ok()
             .and_then(|summary| crate::sizes::sizes_of(&summary))
             .ok_or_else(|| HostError::NotRun("the host reader's sizes could not be read".into()))
@@ -92,26 +92,24 @@ impl HostCommands {
         for brain in &binding.owned_brains {
             words.extend(["--brain".to_string(), brain.clone()]);
         }
-        let mut child = spawn_alone(
+        let mut watched = Watched::spawn(
             self.command(binding, &words)?
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
+            self.idle,
         )
         .map_err(|error| HostError::NotRun(error.to_string()))?;
-        let stdout = child.stdout.take().expect("a piped stdout");
-        let stderr = child.stderr.take().expect("a piped stderr");
+        let stdout = watched.stdout().expect("a piped stdout");
+        let stderr = watched.stderr().expect("a piped stderr");
         let kept = Arc::new(Mutex::new(Vec::new()));
         let drain = drain_stderr(stderr, kept.clone());
-        let watchdog = Watchdog::watch(&child, self.idle);
         Ok(HostStream {
-            child,
+            watched,
             stdout,
             stderr: kept,
             drain: Some(drain),
-            watchdog,
             idle: self.idle,
-            reaped: false,
             ended: false,
         })
     }
@@ -137,15 +135,13 @@ fn drain_stderr(mut stderr: ChildStderr, kept: Arc<Mutex<Vec<u8>>>) -> JoinHandl
 
 /// The host reader's output. At its end the reader must have exited 0;
 /// otherwise the end is an error, so a cut stream is never taken whole.
+/// Dropped before its end, the reader's whole group is killed.
 pub struct HostStream {
-    child: Child,
+    watched: Watched,
     stdout: ChildStdout,
     stderr: Arc<Mutex<Vec<u8>>>,
     drain: Option<JoinHandle<()>>,
-    watchdog: Watchdog,
     idle: Duration,
-    /// Its leader was waited for: its group's id is no longer its own.
-    reaped: bool,
     ended: bool,
 }
 
@@ -155,31 +151,30 @@ impl Read for HostStream {
             return Ok(0);
         }
         // Watched only while the mover waits on the reader.
-        self.watchdog.waiting(true);
+        self.watched.waiting(true);
         let read = self.stdout.read(buffer);
-        let read = match read {
-            Ok(0) if !buffer.is_empty() => {
-                let status = self.child.wait();
-                self.reaped = status.is_ok();
-                if let Some(drain) = self.drain.take() {
-                    let _ = drain.join();
-                }
-                status.map(Err)
-            }
-            other => other.map(Ok),
-        };
-        self.watchdog.waiting(false);
-        if self.watchdog.fired() {
+        if !matches!(read, Ok(0)) || buffer.is_empty() {
+            self.watched.waiting(false);
+            return read;
+        }
+        // Its output ended: the reader's end, and its group's.
+        let exited = self.watched.exited();
+        if let Some(drain) = self.drain.take() {
+            let _ = drain.join();
+        }
+        self.watched.waiting(false);
+        exited?;
+        let ended = self
+            .watched
+            .end(false)
+            .map_err(|error| io::Error::other(format!("the host reader {error}")))?;
+        if ended.fired {
             return Err(io::Error::other(format!(
                 "the host reader sent nothing for {} s, so it was stopped",
                 self.idle.as_secs()
             )));
         }
-        let status = match read? {
-            Ok(read) => return Ok(read),
-            Err(status) => status,
-        };
-        if !status.success() {
+        if !ended.status.success() {
             let stderr = self.stderr.lock().expect("the kept stderr");
             let stderr = String::from_utf8_lossy(&stderr);
             let last = stderr
@@ -188,20 +183,12 @@ impl Read for HostStream {
                 .find(|line| !line.trim().is_empty())
                 .unwrap_or("");
             return Err(io::Error::other(short(&format!(
-                "the host reader exited {status}: {}",
+                "the host reader exited {}: {}",
+                ended.status,
                 last.trim()
             ))));
         }
         self.ended = true;
         Ok(0)
-    }
-}
-
-impl Drop for HostStream {
-    fn drop(&mut self) {
-        if !self.reaped {
-            kill_group(&self.child);
-            let _ = self.child.wait();
-        }
     }
 }

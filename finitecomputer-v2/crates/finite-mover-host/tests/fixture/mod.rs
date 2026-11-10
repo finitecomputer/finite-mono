@@ -61,6 +61,8 @@ pub const SECRET_FILES: &[&str] = &[
     "workspace/k8s/secrets.yaml",
     "workspace/.ssh/config",
     "workspace/.aws/credentials",
+    "agent/agentd/status.json",
+    "workspace/bots/pairing/telegram-approved.json",
 ];
 
 /// Text whose contents hold a credential shape: secret by content.
@@ -98,6 +100,8 @@ pub const STAGED: &[(&str, &str)] = &[
     ("workspace/notes/placeholder.md", "work"),
     ("workspace/photos/cat.jpg", "work"),
     ("workspace/finitebrain/brain-owned/page.md", "work"),
+    ("workspace/app/package.json", "work"),
+    ("workspace/notes/build/outline.md", "work"),
 ];
 
 pub fn build() -> Fixture {
@@ -177,6 +181,18 @@ pub fn build() -> Fixture {
         b"module.exports = 1;\n",
     );
     write("workspace/app/.git/HEAD", b"ref: refs/heads/main\n");
+    // Build output beside its project file; a "build" folder of notes is
+    // not (workspace/notes has no project file).
+    write("workspace/app/dist/bundle.js", b"var built = 1;\n");
+    // Tool state in hidden folders, and earlier exports.
+    write(
+        "workspace/.config/tool/settings.json",
+        b"{\"theme\": \"dark\"}\n",
+    );
+    write(
+        "workspace/finite-export/finite-export-agent.zip",
+        b"PK earlier export",
+    );
     write("agent/hermes-home/logs/gateway.log", b"log line\n");
     write(
         "agent/hermes-home/config.public.yaml",

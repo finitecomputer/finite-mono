@@ -44,10 +44,10 @@ pub enum CoreError {
     },
     #[error("Core's {subcommand} answered nothing the mover can read")]
     Unreadable { subcommand: &'static str },
-    #[error("Core's {subcommand} had not ended after {seconds} s, so it was stopped")]
+    #[error("Core's {subcommand} {why}")]
     Stuck {
         subcommand: &'static str,
-        seconds: u64,
+        why: RunError,
     },
 }
 
@@ -81,7 +81,7 @@ impl CoreCli {
             subcommand,
             why: "no Core command is configured".into(),
         })?;
-        let ended = run_within(
+        let (ended, stdout, stderr) = run_within(
             Command::new(program)
                 .args(prefix)
                 .arg(subcommand)
@@ -93,12 +93,9 @@ impl CoreCli {
                 subcommand,
                 why: error.to_string(),
             },
-            RunError::Stuck(seconds) => CoreError::Stuck {
-                subcommand,
-                seconds,
-            },
+            why => CoreError::Stuck { subcommand, why },
         })?;
-        let (status, stdout, stderr) = (ended.status, ended.stdout, ended.stderr);
+        let status = ended.status;
         if !status.success() {
             // Core's errors name ids and states, never a credential.
             let stderr = String::from_utf8_lossy(&stderr);
