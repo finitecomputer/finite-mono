@@ -6,6 +6,7 @@ import {
 } from "@workos-inc/authkit-nextjs";
 import { NextRequest, NextResponse } from "next/server";
 
+import { phaseTwoRedirect } from "@/lib/finite-chat-move";
 import {
   workosInteractiveAuthRequest,
   workosAuthStatus,
@@ -14,6 +15,9 @@ import {
 } from "@/lib/workos-auth";
 
 export default async function proxy(request: NextRequest) {
+  const finiteChat = phaseTwoRedirect(request.nextUrl.pathname, request.method);
+  if (finiteChat) return NextResponse.redirect(finiteChat, 307);
+
   const status = workosAuthStatus();
   const siteAuth = request.nextUrl.pathname === "/site-auth";
 

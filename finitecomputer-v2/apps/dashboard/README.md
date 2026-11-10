@@ -14,6 +14,21 @@ Brain invitation and approval routes use bounded server-side signed requests.
 WorkOS authentication does not replace Brain membership or Folder Key Grants.
 The removed `/client` browser UI is not a current dashboard surface.
 
+## The move to finite.chat (FIN-463)
+
+People move from finite.computer to finite.chat (`src/lib/finite-chat-move.ts`):
+
+- **Phase 1:** once Core's `/me` says `moved_to_finite_chat` (every agent the
+  person belongs to was marked moved with `runtime-mark-moved-exact`), every
+  dashboard page sends them to finite.chat.
+- **Phase 2:** `FC_REDIRECT_ALL_TO_FINITE_CHAT=true` sends every page visit
+  there, signed in or not. `/api/*`, `/health`, `/healthz`, `/callback`,
+  `/site-auth` and `/google-workspace/*` keep answering, and only GET and HEAD
+  are redirected.
+- `FC_FINITE_CHAT_URL` changes the destination (default `https://finite.chat/`).
+
+Delete these with the rest of the move.
+
 ## Agent Skills inventory
 
 The Skills page reads the selected agent's `GET /api/skills?inventory=true`

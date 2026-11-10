@@ -1,3 +1,5 @@
+import { redirect } from "next/navigation";
+
 import { TrialAccessMonitor } from "@/components/trial-access-monitor";
 import { DashboardShell } from "@/components/dashboard-shell";
 import {
@@ -9,6 +11,7 @@ import {
   loadCoreBillingOverview,
 } from "@/lib/core-client";
 import { loadOptionalViewerContext } from "@/lib/dashboard-auth";
+import { movedRedirect } from "@/lib/finite-chat-move";
 
 export default async function DashboardLayout({
   children,
@@ -20,6 +23,8 @@ export default async function DashboardLayout({
     loadCoreMe({ cacheMode: "swr" }),
     loadCoreBillingOverview({ cacheMode: "fresh" }),
   ]);
+  const moved = movedRedirect(core.me);
+  if (moved) redirect(moved);
   const machineIds = new Set<string>();
   const machines = [
     ...coreProductProjects(core.me?.projects ?? []).flatMap((project) => {

@@ -204,6 +204,11 @@ async fn core_api_creates_self_serve_agent_request_with_launch_code() {
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            raw["moved_to_finite_chat"], false,
+            "a new agent has not moved"
+        );
         let me: MeResponse = serde_json::from_slice(&body).unwrap();
         assert_eq!(me.projects.len(), 1);
         assert_eq!(me.projects[0].project.id, result.project.id);
