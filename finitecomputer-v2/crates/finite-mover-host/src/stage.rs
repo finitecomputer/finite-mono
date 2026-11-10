@@ -76,10 +76,19 @@ pub fn stream(
         tallies,
         copied,
     } = stage;
+    // The carried SimpleX databases must still be settled: no WAL holding
+    // rows the stage doesn't. Checked before the files are re-stat'ed below,
+    // so a WAL checkpointed into its database and removed at any moment
+    // shows either here, still there, or below, the database changed.
+    if let Some(folder) = carried_from
+        && !simplex::still_settled(tree, &folder)?
+    {
+        return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
+    }
     // A runtime started while the walk ran (a restart from the old
     // dashboard) would leave files copied before it wrote them stale: a
     // session store without its newest log. Every staged file must still be
-    // as it was copied.
+    // as it was copied. This comes last.
     for (name, stat) in &copied {
         let parts: Vec<&str> = name.split('/').collect();
         if !tree
@@ -88,11 +97,6 @@ pub fn stream(
         {
             return Err(HostError::TreeChanged(name.into()));
         }
-    }
-    if let Some(folder) = carried_from
-        && !simplex::still_settled(tree, &folder)?
-    {
-        return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
     }
     let mut summary = tallies.summary(tree.id().as_str());
     summary.simplex = Some(carry);
