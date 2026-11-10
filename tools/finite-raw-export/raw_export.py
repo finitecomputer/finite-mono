@@ -64,8 +64,10 @@ FACT_MAX_BYTES = 64 * 1024
 
 # Class and reason, in classify.rs's declaration order: the summary breaks
 # ties in this order.
-CLASSES = ("secret", "config", "cache", "runtime", "history", "work")
-STAGED = {"config", "history", "work"}
+# `simplex` is the host reader's SimpleX carry, which this export, run
+# inside the live agent beside its running core, never makes.
+CLASSES = ("secret", "config", "cache", "runtime", "history", "work", "simplex")
+STAGED = {"config", "history", "work", "simplex"}
 WHYS = (
     "nostr-identity",
     "hermes-env",
@@ -208,7 +210,8 @@ def secret_rule(parts):
     if at(0, b"agent"):
         if at(1, b"identity") and length > 2:
             return Verdict("secret", "nostr-identity", 2)
-        if at(1, b"simplex") and length > 2:
+        # `simplex.moved-<stage id>`: the old SimpleX, sealed by a stage.
+        if (at(1, b"simplex") or (length > 1 and parts[1].startswith(b"simplex.moved-"))) and length > 2:
             return Verdict("secret", "simplex", 2)
         if length == 2 and parts[1].startswith(b"client.sqlite3"):
             return Verdict("secret", "chat-client-store", 2)
