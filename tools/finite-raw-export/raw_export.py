@@ -453,67 +453,16 @@ def quoted(value):
 
 
 def read_yaml(original):
+    """`config.yaml` read with PyYAML, which Hermes itself reads it with.
+    Without PyYAML there is no copy: a reader of our own could misread a
+    value (FIN-463 review of #1148)."""
     try:
-        import yaml  # PyYAML, which Hermes itself reads its config with
+        import yaml
     except ImportError:
-        return read_simple_yaml(original)
+        return None
     try:
         return yaml.safe_load(original.decode("utf-8"))
     except (UnicodeDecodeError, yaml.YAMLError):
-        return None
-
-
-def read_simple_yaml(original):
-    """Block-style `key: value` mappings, as Hermes and agentd write
-    config.yaml, for a Python without PyYAML. Lists and flow style are left
-    out; a value that is neither plain nor simply quoted is left out."""
-    try:
-        text = original.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    root = {}
-    stack = [(-1, root)]
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or stripped.startswith("- "):
-            continue
-        match = re.match(r"^( *)([A-Za-z_][\w.-]*):(?:\s+(.*))?$", line)
-        if not match:
-            continue
-        indent, key, value = len(match.group(1)), match.group(2), match.group(3)
-        while stack and stack[-1][0] >= indent:
-            stack.pop()
-        if not stack:
-            return None
-        parent = stack[-1][1]
-        if value is None or value.strip() == "" or value.strip().startswith("#"):
-            child = {}
-            parent[key] = child
-            stack.append((indent, child))
-            continue
-        parent[key] = simple_scalar(value)
-    return root
-
-
-def simple_scalar(value):
-    value = value.strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
-        inner = value[1:-1]
-        return inner.replace("''", "'") if value[0] == "'" else json_unquote(value)
-    value = value.split(" #", 1)[0].strip()
-    if value in ("true", "True", "yes"):
-        return True
-    if value in ("false", "False", "no"):
-        return False
-    if value in ("", "~", "null", "|", ">") or value[0] in "[{&*!|>":
-        return None
-    return value
-
-
-def json_unquote(value):
-    try:
-        return json.loads(value)
-    except ValueError:
         return None
 
 
@@ -537,7 +486,9 @@ class Export:
         self.staged_files = []
         self.temporary = []
         self.vacuumed = set()
-        self.base = self.root
+        # The folder being walked, and how many leading parts of a path
+        # name it in the zip rather than on disk (`sites/<slug>`).
+        self.walked = (os.fsencode(self.root), 0)
 
     # The summary (summary.rs).
     def add_left(self, parts, verdict, size):
@@ -578,15 +529,22 @@ class Export:
             self.directory(root_fd, [], None, None)
         finally:
             os.close(root_fd)
+        # The tree wins: a clone or fact the tree already holds is not added
+        # again, so no name is in the zip twice.
+        in_tree = set(self.zip.namelist())
         for slug, folder in sorted(sites.items()):
+            if any(name.startswith(f"sites/{slug}/") for name in in_tree):
+                continue
             fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
             try:
                 self.device = os.fstat(fd).st_dev
-                self.base = Path(folder)
+                self.walked = (os.fsencode(folder), 2)
                 self.directory(fd, [b"sites", slug.encode()], None, None)
             finally:
                 os.close(fd)
         for name, data in sorted(facts.items()):
+            if name in in_tree:
+                continue
             self.write_bytes(name, data, 0o644, 0)
             self.add_staged("config", len(data))
         # A file written to after it was staged would leave a stale stage.
@@ -673,10 +631,9 @@ class Export:
             self.staged_files.append((self.absolute(path), opened))
 
     def absolute(self, path):
-        """Where a staged path is on disk: under the root, or a site's folder."""
-        if path[0] == b"sites":
-            return os.path.join(os.fsencode(self.base), *path[2:])
-        return os.path.join(os.fsencode(self.root), *path)
+        """Where a staged path is on disk: under the folder being walked."""
+        folder, skip = self.walked
+        return os.path.join(folder, *path[skip:])
 
     def database(self, fd, name, path, st):
         """A history database through `VACUUM INTO`: its live rows, whole,
@@ -689,12 +646,15 @@ class Export:
                 if database.endswith(sidecar):
                     main = database[: -len(sidecar)]
             return main in self.vacuumed
-        source = self.root.joinpath(*(p.decode("utf-8") for p in path))
+        folder = Path(os.path.abspath(self.root.joinpath(*(p.decode("utf-8") for p in path[:-1]))))
+        if not self.sqlite_reads_what_was_walked(fd, folder, database):
+            # The walk copies it as it is; a linked sidecar stays behind.
+            return False
         target = Path(tempfile.mkstemp(prefix=".raw-export-", suffix=".db", dir=self.out.parent)[1])
         target.unlink()
         self.temporary.append(target)
         try:
-            conn = sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)
+            conn = sqlite3.connect((folder / database.decode("utf-8")).as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("VACUUM INTO ?", (str(target),))
             finally:
@@ -702,12 +662,37 @@ class Export:
         except sqlite3.Error:
             target.unlink(missing_ok=True)
             return False
+        if not self.sqlite_reads_what_was_walked(fd, folder, database):
+            raise TreeChanged(path_text(path))
         copied = target.stat()
         with open(target, "rb") as handle:
             self.write_stream(b"/".join(path).decode("utf-8"), handle, copied, st.st_mode, st.st_mtime)
         target.unlink()
         self.add_staged("history", copied.st_size)
         self.vacuumed.add(database)
+        return True
+
+    def sqlite_reads_what_was_walked(self, fd, folder, database):
+        """SQLite opens a database and its sidecars by name, past the walk's
+        checks. So the folder at that name must be the one walked, and the
+        database and each sidecar there a regular file with one name on the
+        tree's filesystem: never a link to rows outside it."""
+        try:
+            here = os.stat(folder)
+        except OSError:
+            return False
+        walked = os.fstat(fd)
+        if (here.st_dev, here.st_ino) != (walked.st_dev, walked.st_ino):
+            return False
+        for suffix in (b"",) + SQLITE_SIDECARS:
+            try:
+                st = lstat(fd, database + suffix)
+            except FileNotFoundError:
+                if suffix:
+                    continue
+                return False
+            if not stat_module.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_dev != self.device:
+                return False
         return True
 
     def config_copy(self, fd, name):

@@ -94,16 +94,22 @@ class Config(unittest.TestCase):
         "gateway:\n  platforms:\n    telegram:\n      enabled: true\n"
     ).encode()
 
-    def test_the_copy_without_pyyaml_holds_only_the_allow_list(self):
-        document = raw_export.read_simple_yaml(self.ORIGINAL)
-        self.assertEqual(document["agent"]["personality"], "kind and brief")
-        original_reader = raw_export.read_yaml
-        raw_export.read_yaml = raw_export.read_simple_yaml
+    def test_the_copy_holds_only_the_allow_list(self):
+        self.assertEqual(raw_export.public_config(self.ORIGINAL), self.EXPECTED)
+        quoted = b'model:\n  default: "gpt-x" # the default\n'
+        self.assertEqual(raw_export.public_config(quoted), b'model:\n  default: "gpt-x"\n')
+
+    def test_without_pyyaml_there_is_no_copy(self):
+        # `import yaml` fails while the module is None.
+        saved = sys.modules.get("yaml")
+        sys.modules["yaml"] = None
         try:
-            copy = raw_export.public_config(self.ORIGINAL)
+            self.assertIsNone(raw_export.public_config(self.ORIGINAL))
         finally:
-            raw_export.read_yaml = original_reader
-        self.assertEqual(copy, self.EXPECTED)
+            if saved is None:
+                del sys.modules["yaml"]
+            else:
+                sys.modules["yaml"] = saved
 
     def test_a_value_shaped_like_a_credential_is_dropped(self):
         copy = raw_export.public_config(b"model: gpt-x\npersonality: use sk-proj4abcdefghijklmnop\n")
@@ -150,6 +156,48 @@ class Export(unittest.TestCase):
         self.assertEqual(rows, [("hello from the old agent",)])
         self.assertEqual(summary["classes"]["history"]["files"], 2)
         self.assertEqual(list(self.out.parent.glob(".raw-export-*")), [], "no temporary copy is left")
+
+    def test_a_linked_sidecar_never_brings_rows_from_outside(self):
+        # A database whose WAL is another database's, by a hard link.
+        outside = Path(self.dir.name, "outside.db")
+        conn = sqlite3.connect(outside)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        conn.execute("CREATE TABLE messages (body TEXT)")
+        conn.commit()
+        database = self.root / "agent/hermes-home/state.db"
+        main_file = outside.read_bytes()
+        database.write_bytes(main_file)
+        conn.execute("INSERT INTO messages VALUES ('a private row from outside')")
+        conn.commit()
+        os.link(outside.with_name("outside.db-wal"), database.with_name("state.db-wal"))
+        self.export()
+        conn.close()
+        names = self.names()
+        self.assertNotIn("agent/hermes-home/state.db-wal", names)
+        with zipfile.ZipFile(self.out) as archive:
+            staged = archive.read("agent/hermes-home/state.db") if "agent/hermes-home/state.db" in names else b""
+        self.assertNotIn(b"a private row from outside", staged)
+        self.assertEqual(staged, main_file, "the walk's copy of the main file alone")
+
+    def test_a_site_already_in_the_tree_is_staged_from_it(self):
+        write(self.root, "sites/garden/index.html", "<h1>in the tree</h1>\n")
+        clone = Path(self.dir.name, "garden")
+        write(clone, "index.html", "<h1>cloned</h1>\n")
+        write(clone, "about.html", "<h1>about</h1>\n")
+        facts = {
+            "sites/garden.json": b'{"url": "https://garden.finite.site"}',
+            "workspace/finitebrain/b1.json": b'{"name": "from the fact"}',
+        }
+        write(self.root, "workspace/finitebrain/b1.json", '{"name": "from the tree"}')
+        self.export(sites={"garden": clone}, facts=facts)
+        with zipfile.ZipFile(self.out) as archive:
+            names = archive.namelist()
+            self.assertEqual(len(names), len(set(names)), "no name twice")
+            self.assertEqual(archive.read("sites/garden/index.html"), b"<h1>in the tree</h1>\n")
+            self.assertEqual(archive.read("sites/garden.json"), facts["sites/garden.json"])
+            self.assertEqual(archive.read("workspace/finitebrain/b1.json"), b'{"name": "from the tree"}')
+        self.assertNotIn("sites/garden/about.html", names, "the tree's copy wins whole")
 
     def test_export_pys_own_checks_can_be_added(self):
         def secret_reason(name):
