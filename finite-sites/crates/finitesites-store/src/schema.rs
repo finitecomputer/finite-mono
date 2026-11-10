@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS sites (
   active_version_id TEXT REFERENCES versions(id),
   publisher_email_principal_id TEXT REFERENCES sites_email_principals(id),
   originating_publisher_principal_id TEXT REFERENCES principals(id),
+  redirect_to TEXT CHECK (redirect_to IS NULL OR (substr(redirect_to, 1, 8) = 'https://' AND length(redirect_to) BETWEEN 11 AND 262)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
