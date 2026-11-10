@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,
         Command::RuntimeStopExact(args) => runtime_stop_exact_command(args).await,
+        Command::RuntimeRestartExact(args) => runtime_restart_exact_command(args).await,
         Command::RuntimeMarkMovedExact(args) => {
             let receipt = runtime_mark_moved_exact_command(args).await?;
             print_json(&receipt)

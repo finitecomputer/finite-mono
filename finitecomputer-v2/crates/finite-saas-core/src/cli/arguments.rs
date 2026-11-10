@@ -140,6 +140,10 @@ pub(crate) enum Command {
     /// resumes it. FIN-463's mover stops an agent before staging it.
     #[command(name = "runtime-stop-exact")]
     RuntimeStopExact(RuntimeStopExactCliArgs),
+    /// Start one exact Runtime again and wait until it is ready. FIN-463's
+    /// mover restarts an old agent staff gave back (`restart-old`).
+    #[command(name = "runtime-restart-exact")]
+    RuntimeRestartExact(RuntimeStopExactCliArgs),
     /// Mark one exact Runtime as moved to finite.chat (FIN-463), so the
     /// mover's roster never offers it again.
     #[command(name = "runtime-mark-moved-exact")]
@@ -451,7 +455,8 @@ pub(crate) struct RuntimeMarkMovedExactCliArgs {
     pub(crate) expected_source_host_id: String,
     #[arg(long)]
     pub(crate) expected_source_machine_id: String,
-    /// `migrated` (needs --agent-npub) or `archived`.
+    /// `migrated` (its finite.chat agent's --agent-npub if known) or
+    /// `archived` (no npub).
     #[arg(long, value_parser = ["migrated", "archived"])]
     pub(crate) moved: String,
     /// The finite.chat agent a migrated Runtime became.
