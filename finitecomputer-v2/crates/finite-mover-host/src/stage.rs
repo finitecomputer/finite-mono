@@ -17,7 +17,7 @@ use rustix::fs::Stat;
 
 use crate::classify::{Class, Verdict};
 use crate::error::HostError;
-use crate::simplex::{self, Carried, Carry};
+use crate::simplex::{self, Carried, Carry, Seal};
 use crate::summary::{Summary, Tallies};
 use crate::tree::Tree;
 use crate::walk::{self, Mode, Source, Visit, same_file};
@@ -50,25 +50,25 @@ impl Visit for Count {
 }
 
 /// Write the stage to `out`, holding the chat store's writer lease for
-/// the whole walk. Refuses a running agent. Returns the summary it wrote.
+/// the whole walk. Refuses a running agent. `stage` names the stage, for
+/// the SimpleX seal ([`simplex`]). Returns the summary it wrote.
 pub fn stream(
     tree: &Tree,
     owned_brains: &BTreeSet<String>,
+    stage: Option<&str>,
     out: impl Write,
 ) -> Result<Summary, HostError> {
     let _lease = tree.take_writer_lease()?;
+    let stage_id = stage;
     let mut stage = Stage {
         zip: ZipStream::new(io::BufWriter::with_capacity(1024 * 1024, out)),
         tallies: Tallies::default(),
         copied: Vec::new(),
     };
     walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
-    let carry = match simplex::decide(tree)? {
-        Ok(carried) => {
-            stage.carry(carried)?;
-            Carry::carried()
-        }
-        Err(why) => Carry::refused(why),
+    let seal = match simplex::decide(tree, stage_id)? {
+        Ok(carried) => Ok(stage.carry(carried)?),
+        Err(why) => Err(why),
     };
     let Stage {
         mut zip,
@@ -88,6 +88,12 @@ pub fn stream(
             return Err(HostError::TreeChanged(name.into()));
         }
     }
+    // Staged and checked, the agent still stopped and its lease held: seal
+    // the old SimpleX where every later start sees it.
+    let carry = match seal {
+        Ok(seal) => Carry::carried(simplex::seal(tree, seal)?),
+        Err(why) => Carry::refused(why),
+    };
     let mut summary = tallies.summary(tree.id().as_str());
     summary.simplex = Some(carry);
     let json = serde_json::to_vec_pretty(&summary).map_err(write_error)?;
@@ -106,8 +112,8 @@ struct Stage<W: Write> {
 
 impl<W: Write> Stage<W> {
     /// Stage the SimpleX conversation. Its databases are checked again at
-    /// the end with every other copied file.
-    fn carry(&mut self, carried: Carried) -> Result<(), HostError> {
+    /// the end with every other copied file. Returns the seal to make.
+    fn carry(&mut self, carried: Carried) -> Result<Seal, HostError> {
         let owner = carried.owner();
         for database in carried.databases {
             let bytes = u64::try_from(database.stat.st_size).unwrap_or(0);
@@ -141,7 +147,7 @@ impl<W: Write> Stage<W> {
             )
             .map_err(write_error)?;
         self.tallies.staged(Class::Simplex, owner.len() as u64);
-        Ok(())
+        Ok(carried.seal)
     }
 }
 

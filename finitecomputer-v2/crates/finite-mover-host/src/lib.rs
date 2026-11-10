@@ -16,8 +16,12 @@
 //!   agent's own Telegram bot ([`notice`]).
 //!
 //! It reads only, follows no link, and refuses to stage or hand off from a
-//! running agent (the chat store's writer lease). The one thing it writes
-//! is its own notice log, outside every agent's tree.
+//! running agent (the chat store's writer lease). It writes its own notice
+//! log, outside every agent's tree; and in an agent's tree one thing, its
+//! single exception to reading only: once `stream` has staged the SimpleX
+//! conversation, it seals the old SimpleX so the old core never runs
+//! again ([`simplex::seal`]: a rename aside and managed SimpleX turned
+//! off, nothing deleted).
 //!
 //! Delete it with the rest of the move (FIN-463's removal plan): once every
 //! roster agent is moved, withdrawn or expired.

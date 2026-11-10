@@ -22,16 +22,42 @@
 //!
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
 //! its relay settings. `stream` already refuses a running agent.
+//!
+//! ## The seal: the reader's one write in an agent's tree
+//!
+//! If the old core ever ran again on its copy, the conversation would fork:
+//! messages lost, and the old bot able to talk to the owner. So once the
+//! carried entries are staged and checked, still holding the stopped
+//! agent's lease, `stream` seals SimpleX where every later start of the
+//! old agent sees it ([`seal`]):
+//!
+//! - `agent/simplex` is renamed `agent/simplex.moved-<stage id>`, never
+//!   over anything, never deleted, so it can be undone by hand. With its
+//!   identity gone, `simplex_runtime.py`'s `supervise()` fails closed;
+//! - managed SimpleX is turned off in `agent/hermes-home/config.yaml`
+//!   (`gateway.platforms.simplex.enabled: false`), rewritten whole by a
+//!   rename that keeps its owner and mode, only if it was on.
+//!
+//! Restarting the old agent brings back everything else, never SimpleX.
+//! A stage after that carries from the sealed folder again and seals
+//! nothing more. Without a stage id there is nothing to name the seal by,
+//! so an unsealed conversation is not carried at all. The summary records
+//! the sealed folder.
 
 use std::ffi::CString;
 use std::fs::File;
+use std::io::{Read, Write};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileExt;
 
-use rustix::fs::Stat;
+use rustix::fs::{
+    AtFlags, Dir, FileType, Gid, Mode, OFlags, RenameFlags, Stat, Uid, fchmod, fchown, fsync,
+    openat, renameat, renameat_with, unlinkat,
+};
 use rustix::io::Errno;
 use serde::Serialize;
 
+use crate::config_copy::CONFIG_MAX_BYTES;
 use crate::error::HostError;
 use crate::pairing::{Approved, approved};
 use crate::tree::{Tree, open_directory, open_regular, stat_entry};
@@ -43,7 +69,14 @@ pub const OWNER_ENTRY: &str = ".finite-stage/simplex/owner.json";
 /// holds a few megabytes; its files stay behind.
 pub const SIMPLEX_MAX_BYTES: u64 = 256 * 1024 * 1024;
 
-const FOLDER: [&str; 2] = ["agent", "simplex"];
+const AGENT: &str = "agent";
+const FOLDER: &str = "simplex";
+/// A sealed folder: `simplex.moved-<stage id>`, beside where it was.
+const SEALED_PREFIX: &str = "simplex.moved-";
+/// The Hermes config, and the temporary file it is rewritten through.
+const HERMES_HOME: &str = "hermes-home";
+const CONFIG: &str = "config.yaml";
+const CONFIG_REWRITE: &str = ".config.yaml.finite-mover-seal";
 /// Each database, and the stage entry it becomes.
 const DATABASES: [(&str, &str); 2] = [
     ("identity_chat.db", CHAT_ENTRY),
@@ -75,6 +108,10 @@ pub enum Refused {
     JournalPresent,
     /// Over [`SIMPLEX_MAX_BYTES`].
     TooLarge,
+    /// No stage id to seal by, and it isn't sealed yet.
+    NoStageId,
+    /// More than one sealed folder and no `agent/simplex`: which is it?
+    SeveralSealed,
 }
 
 /// The summary's record of the carry (`stream` only).
@@ -83,13 +120,17 @@ pub struct Carry {
     pub carried: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub why: Option<Refused>,
+    /// The folder the old SimpleX is sealed in, `agent/simplex.moved-<id>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<String>,
 }
 
 impl Carry {
-    pub fn carried() -> Self {
+    pub fn carried(sealed: String) -> Self {
         Self {
             carried: true,
             why: None,
+            sealed: Some(sealed),
         }
     }
 
@@ -97,8 +138,18 @@ impl Carry {
         Self {
             carried: false,
             why: Some(why),
+            sealed: None,
         }
     }
+}
+
+/// Where the conversation is, and the seal to make once it is staged.
+pub struct Seal {
+    agent: OwnedFd,
+    /// `agent/simplex`, to rename to this sealed name; or already sealed.
+    rename_to: Option<String>,
+    /// The sealed folder's name in `agent/`.
+    sealed: String,
 }
 
 /// One database to stage: open, at its start, with the `fstat` it was
@@ -111,10 +162,11 @@ pub struct Database {
     pub stat: Stat,
 }
 
-/// What the carry stages.
+/// What the carry stages, and the seal to make after.
 pub struct Carried {
     pub contact: i64,
     pub databases: Vec<Database>,
+    pub seal: Seal,
 }
 
 impl Carried {
@@ -125,11 +177,28 @@ impl Carried {
     }
 }
 
-/// Decide the carry for a stopped tree.
-pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
-    let Some(folder) = folder(tree)? else {
+/// Decide the carry for a stopped tree, to be sealed by `stage`.
+pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refused>, HostError> {
+    let Some(agent) = open_in(tree.root(), AGENT)? else {
         return Ok(Err(Refused::NoSimplex));
     };
+    // The conversation is in `agent/simplex`, or, after a stage, in the one
+    // folder it was sealed in.
+    let (name, rename_to) = if open_in(&agent, FOLDER)?.is_some() {
+        let sealed = stage.map(|stage| format!("{SEALED_PREFIX}{stage}"));
+        (FOLDER.to_owned(), sealed)
+    } else {
+        let mut sealed = sealed_folders(&agent)?;
+        match (sealed.pop(), sealed.pop()) {
+            (None, _) => return Ok(Err(Refused::NoSimplex)),
+            (Some(one), None) => (one, None),
+            _ => return Ok(Err(Refused::SeveralSealed)),
+        }
+    };
+    let Some(folder) = open_in(&agent, &name)? else {
+        return Ok(Err(Refused::NoSimplex));
+    };
+    let path = format!("{AGENT}/{name}");
     let mut present = 0;
     for (name, _) in DATABASES {
         if present_in(&folder, name)? {
@@ -141,6 +210,11 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
         1 => return Ok(Err(Refused::DatabaseMissing)),
         _ => {}
     }
+    let sealed = match (&rename_to, name == FOLDER) {
+        (Some(sealed), _) => sealed.clone(),
+        (None, true) => return Ok(Err(Refused::NoStageId)),
+        (None, false) => name.clone(),
+    };
     let contact = match approved(tree, "simplex")? {
         Approved::Unreadable => return Ok(Err(Refused::PairingUnreadable)),
         Approved::Ids(ids) => {
@@ -154,7 +228,7 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
     };
     let mut databases = Vec::new();
     for (name, entry_name) in DATABASES {
-        let source = format!("{}/{name}", FOLDER.join("/"));
+        let source = format!("{path}/{name}");
         let file = match open_regular(&folder, &c_name(name)?) {
             Ok(Some(file)) => file,
             Ok(None) | Err(Errno::LOOP | Errno::NOENT) => {
@@ -190,21 +264,140 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
     if total > SIMPLEX_MAX_BYTES {
         return Ok(Err(Refused::TooLarge));
     }
-    Ok(Ok(Carried { contact, databases }))
+    Ok(Ok(Carried {
+        contact,
+        databases,
+        seal: Seal {
+            agent,
+            rename_to,
+            sealed,
+        },
+    }))
 }
 
-/// `agent/simplex/`, if it is a folder in the tree.
-fn folder(tree: &Tree) -> Result<Option<OwnedFd>, HostError> {
-    let mut directory = rustix::io::dup(tree.root())
-        .map_err(|error| HostError::io(FOLDER.join("/").into(), error.into()))?;
-    for part in FOLDER {
-        directory = match open_directory(&directory, &c_name(part)?) {
-            Ok(next) => next,
-            Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
-            Err(error) => return Err(HostError::io(FOLDER.join("/").into(), error.into())),
-        };
+/// Seal the old SimpleX after its conversation was staged: the folder
+/// renamed aside (unless it already was) and managed SimpleX turned off.
+/// Returns the sealed folder's path.
+pub fn seal(tree: &Tree, seal: Seal) -> Result<String, HostError> {
+    let path = format!("{AGENT}/{}", seal.sealed);
+    if let Some(rename_to) = &seal.rename_to {
+        let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
+        renameat_with(
+            &seal.agent,
+            FOLDER,
+            &seal.agent,
+            rename_to.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(failed)?;
+        fsync(&seal.agent).map_err(failed)?;
     }
-    Ok(Some(directory))
+    turn_off(tree)?;
+    Ok(path)
+}
+
+/// Turn managed SimpleX off in the Hermes config, if it is on: the whole
+/// file rewritten through a temporary beside it, with the original's
+/// owner and mode, then renamed over it. A config that can't be read as
+/// YAML is left as it is (`simplex_runtime.py` reads it as off too).
+fn turn_off(tree: &Tree) -> Result<(), HostError> {
+    let path = format!("{AGENT}/{HERMES_HOME}/{CONFIG}");
+    let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
+    let Some(agent) = open_in(tree.root(), AGENT)? else {
+        return Ok(());
+    };
+    let Some(home) = open_in(&agent, HERMES_HOME)? else {
+        return Ok(());
+    };
+    let file = match open_regular(&home, &c_name(CONFIG)?) {
+        Ok(Some(file)) => file,
+        Ok(None) | Err(Errno::NOENT | Errno::LOOP) => return Ok(()),
+        Err(error) => return Err(failed(error)),
+    };
+    let stat = rustix::fs::fstat(&file).map_err(failed)?;
+    let mut original = Vec::new();
+    (&file)
+        .take(CONFIG_MAX_BYTES + 1)
+        .read_to_end(&mut original)
+        .map_err(|error| HostError::io(path.clone().into(), error))?;
+    if original.len() as u64 > CONFIG_MAX_BYTES {
+        return Ok(());
+    }
+    let Ok(mut config) = serde_yaml::from_slice::<serde_yaml::Value>(&original) else {
+        return Ok(());
+    };
+    let enabled = config
+        .get_mut("gateway")
+        .and_then(|gateway| gateway.get_mut("platforms"))
+        .and_then(|platforms| platforms.get_mut("simplex"))
+        .and_then(|simplex| simplex.get_mut("enabled"));
+    match enabled {
+        Some(enabled) if *enabled == serde_yaml::Value::Bool(true) => {
+            *enabled = serde_yaml::Value::Bool(false);
+        }
+        _ => return Ok(()),
+    }
+    let rewritten = serde_yaml::to_string(&config)
+        .map_err(|error| HostError::Write(format!("{path}: {error}")))?;
+    let _ = unlinkat(&home, CONFIG_REWRITE, AtFlags::empty());
+    let mut temporary = File::from(
+        openat(
+            &home,
+            CONFIG_REWRITE,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(failed)?,
+    );
+    let mut write = || -> Result<(), Errno> {
+        temporary
+            .write_all(rewritten.as_bytes())
+            .map_err(|error| Errno::from_io_error(&error).unwrap_or(Errno::IO))?;
+        fchmod(&temporary, Mode::from_raw_mode(stat.st_mode & 0o777))?;
+        fsync(&temporary)?;
+        // Its owner last: once it isn't ours, its mode is no longer ours to set.
+        fchown(
+            &temporary,
+            Some(Uid::from_raw(stat.st_uid)),
+            Some(Gid::from_raw(stat.st_gid)),
+        )?;
+        renameat(&home, CONFIG_REWRITE, &home, CONFIG)?;
+        fsync(&home)
+    };
+    if let Err(error) = write() {
+        let _ = unlinkat(&home, CONFIG_REWRITE, AtFlags::empty());
+        return Err(failed(error));
+    }
+    Ok(())
+}
+
+/// The folder `name` in `parent`, if it is one (never through a link).
+fn open_in(parent: impl std::os::fd::AsFd, name: &str) -> Result<Option<OwnedFd>, HostError> {
+    match open_directory(parent, &c_name(name)?) {
+        Ok(folder) => Ok(Some(folder)),
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(None),
+        Err(error) => Err(HostError::io(name.into(), error.into())),
+    }
+}
+
+/// The sealed folders in `agent/`, by name.
+fn sealed_folders(agent: &OwnedFd) -> Result<Vec<String>, HostError> {
+    let failed = |error: Errno| HostError::io(AGENT.into(), error.into());
+    let mut sealed = Vec::new();
+    for entry in Dir::read_from(agent).map_err(failed)? {
+        let entry = entry.map_err(failed)?;
+        let Ok(name) = entry.file_name().to_str() else {
+            continue;
+        };
+        if name.starts_with(SEALED_PREFIX)
+            && stat_entry(agent, entry.file_name())
+                .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
+        {
+            sealed.push(name.to_owned());
+        }
+    }
+    sealed.sort();
+    Ok(sealed)
 }
 
 /// Whether anything at all (of any kind) is at `name` in the folder.
@@ -212,10 +405,7 @@ fn present_in(folder: &OwnedFd, name: &str) -> Result<bool, HostError> {
     match stat_entry(folder, &c_name(name)?) {
         Ok(_) => Ok(true),
         Err(Errno::NOENT) => Ok(false),
-        Err(error) => Err(HostError::io(
-            format!("{}/{name}", FOLDER.join("/")).into(),
-            error.into(),
-        )),
+        Err(error) => Err(HostError::io(name.into(), error.into())),
     }
 }
 

@@ -210,7 +210,8 @@ def secret_rule(parts):
     if at(0, b"agent"):
         if at(1, b"identity") and length > 2:
             return Verdict("secret", "nostr-identity", 2)
-        if at(1, b"simplex") and length > 2:
+        # `simplex.moved-<stage id>`: the old SimpleX, sealed by a stage.
+        if (at(1, b"simplex") or (length > 1 and parts[1].startswith(b"simplex.moved-"))) and length > 2:
             return Verdict("secret", "simplex", 2)
         if length == 2 and parts[1].startswith(b"client.sqlite3"):
             return Verdict("secret", "chat-client-store", 2)

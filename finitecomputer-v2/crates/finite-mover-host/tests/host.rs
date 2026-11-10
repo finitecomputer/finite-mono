@@ -587,11 +587,11 @@ fn the_raw_exporter_matches_the_classifier() {
             let theirs: Value = serde_json::from_slice(&raw[name]).unwrap();
             // The raw export runs in the live agent, beside its running
             // SimpleX core: it never carries SimpleX, so it has no record of
-            // it. The fixture's pairing file isn't one, so nothing is carried.
+            // it. Streamed here without a stage id, nothing is carried.
             let carry = ours.as_object_mut().unwrap().remove("simplex");
             assert_eq!(
                 carry,
-                Some(serde_json::json!({"carried": false, "why": "pairing-unreadable"}))
+                Some(serde_json::json!({"carried": false, "why": "no-stage-id"}))
             );
             assert_eq!(theirs, ours, "the summaries");
         } else {

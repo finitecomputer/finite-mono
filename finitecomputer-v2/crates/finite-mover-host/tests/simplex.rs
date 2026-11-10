@@ -2,11 +2,15 @@
 //! for the bound agent (`.finite-stage/simplex/`) only when exactly one
 //! owner was approved and both identity databases are plain, settled
 //! SQLite under the cap; otherwise nothing of it, and the summary says why.
+//! Once carried, the old SimpleX is sealed so the old core never runs
+//! again: its folder renamed aside and managed SimpleX turned off.
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
 use finite_mover_host::command::{parse, run};
@@ -20,6 +24,11 @@ const AGENT: &str = ".finite-stage/simplex/agent.db";
 const OWNER: &str = ".finite-stage/simplex/owner.json";
 const APPROVED: &str = "agent/hermes-home/platforms/pairing/simplex-approved.json";
 const LEGACY_APPROVED: &str = "agent/hermes-home/pairing/simplex-approved.json";
+const CONFIG: &str = "agent/hermes-home/config.yaml";
+const STAGE: &str = "proj_a.p1.1";
+const SEALED: &str = "agent/simplex.moved-proj_a.p1.1";
+/// The Hermes config, managed SimpleX on, beside settings that must stay.
+const CONFIG_ON: &str = "model:\n  default: gpt-x\ntimezone: America/Chicago\ngateway:\n  platforms:\n    simplex:\n      enabled: true\n      extra:\n        finite_managed: true\n    telegram:\n      enabled: true\n";
 
 struct Tree {
     _dir: tempfile::TempDir,
@@ -68,13 +77,31 @@ impl Tree {
             APPROVED,
             br#"{"3": {"user_name": "Owner", "approved_at": 1}}"#,
         );
+        self.write(CONFIG, CONFIG_ON.as_bytes());
+    }
+
+    /// `stream`, for the stage `stage` (the mover always names it).
+    fn stream_for(&self, stage: Option<&str>) -> Vec<u8> {
+        let mut out = Vec::new();
+        let words = match stage {
+            Some(stage) => format!("stream {ID} --stage {stage}"),
+            None => format!("stream {ID}"),
+        };
+        run(
+            &self.work_root,
+            parse(words.split_whitespace()).unwrap(),
+            &mut out,
+        )
+        .unwrap();
+        out
     }
 
     fn stream(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
-        run(&self.work_root, operation, &mut out).unwrap();
-        out
+        self.stream_for(Some(STAGE))
+    }
+
+    fn read(&self, path: &str) -> Vec<u8> {
+        fs::read(self.path(path)).unwrap()
     }
 }
 
@@ -120,7 +147,10 @@ fn a_lone_owners_conversation_is_carried_and_nothing_else_of_simplex() {
         .collect();
     assert_eq!(simplex, [AGENT, CHAT, OWNER], "no address, files or relays");
     let summary = summary(&stage);
-    assert_eq!(summary["simplex"], json!({"carried": true}));
+    assert_eq!(
+        summary["simplex"],
+        json!({"carried": true, "sealed": SEALED})
+    );
     let bytes = (stage[CHAT].len() + stage[AGENT].len() + stage[OWNER].len()) as u64;
     assert_eq!(
         summary["classes"]["simplex"],
@@ -135,12 +165,225 @@ fn a_lone_owners_conversation_is_carried_and_nothing_else_of_simplex() {
 }
 
 #[test]
-fn staging_twice_gives_the_same_bytes() {
+fn a_stage_seals_the_old_simplex_where_every_later_start_sees_it() {
     let tree = Tree::new();
     tree.simplex();
-    let first = tree.stream();
-    assert!(entries(&first).contains_key(CHAT));
-    assert_eq!(tree.stream(), first);
+    let before: BTreeMap<String, Vec<u8>> = [
+        "identity_chat.db",
+        "identity_agent.db",
+        "address.json",
+        "files/photo.jpg",
+    ]
+    .iter()
+    .map(|name| {
+        (
+            name.to_string(),
+            tree.read(&format!("agent/simplex/{name}")),
+        )
+    })
+    .collect();
+    tree.stream();
+    // Renamed aside whole, nothing deleted.
+    assert!(!tree.path("agent/simplex").exists());
+    for (name, bytes) in &before {
+        assert_eq!(&tree.read(&format!("{SEALED}/{name}")), bytes, "{name}");
+    }
+    // Managed SimpleX off; every other setting as it was.
+    let config: serde_yaml::Value = serde_yaml::from_slice(&tree.read(CONFIG)).unwrap();
+    let mut expected: serde_yaml::Value = serde_yaml::from_str(CONFIG_ON).unwrap();
+    expected["gateway"]["platforms"]["simplex"]["enabled"] = serde_yaml::Value::Bool(false);
+    assert_eq!(config, expected);
+}
+
+#[test]
+fn a_second_stage_carries_it_again_and_seals_nothing_more() {
+    use std::os::unix::fs::MetadataExt;
+    let tree = Tree::new();
+    tree.simplex();
+    let first = entries(&tree.stream());
+    let sealed_config = tree.read(CONFIG);
+    let config_before = fs::metadata(tree.path(CONFIG)).unwrap();
+    // Staff retried: a new attempt's stage, from the sealed folder.
+    let second = tree.stream_for(Some("proj_a.p1.2"));
+    let stage = entries(&second);
+    for name in [CHAT, AGENT, OWNER] {
+        assert_eq!(stage[name], first[name], "{name}");
+    }
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": true, "sealed": SEALED})
+    );
+    assert!(!tree.path("agent/simplex.moved-proj_a.p1.2").exists());
+    assert!(!tree.path("agent/simplex").exists());
+    assert_eq!(tree.read(CONFIG), sealed_config);
+    let config_after = fs::metadata(tree.path(CONFIG)).unwrap();
+    assert_eq!(
+        (
+            config_after.ino(),
+            config_after.mtime_nsec(),
+            config_after.mtime()
+        ),
+        (
+            config_before.ino(),
+            config_before.mtime_nsec(),
+            config_before.mtime()
+        ),
+        "the config isn't written again"
+    );
+    // From then on, every stage of the tree is the same.
+    assert_eq!(tree.stream_for(Some("proj_a.p1.2")), second);
+}
+
+#[test]
+fn a_carry_refused_or_unnamed_seals_nothing() {
+    type Spoil = fn(&Tree);
+    let cases: [(&str, Option<&str>, Spoil); 3] = [
+        ("several-contacts", Some(STAGE), |tree| {
+            tree.write(APPROVED, br#"{"3": {}, "4": {}}"#);
+        }),
+        ("journal-present", Some(STAGE), |tree| {
+            tree.write("agent/simplex/identity_chat.db-journal", b"");
+        }),
+        // Without a stage id there is nothing to name the seal by.
+        ("no-stage-id", None, |_| {}),
+    ];
+    for (why, stage, spoil) in cases {
+        let tree = Tree::new();
+        tree.simplex();
+        spoil(&tree);
+        let stage = entries(&tree.stream_for(stage));
+        assert!(carried_nothing(&stage), "{why}");
+        assert_eq!(
+            summary(&stage)["simplex"],
+            json!({"carried": false, "why": why})
+        );
+        assert!(
+            tree.path("agent/simplex/identity_chat.db").exists(),
+            "{why}"
+        );
+        assert!(!tree.path(SEALED).exists(), "{why}");
+        assert_eq!(tree.read(CONFIG), CONFIG_ON.as_bytes(), "{why}");
+    }
+}
+
+/// `finite-agentd/simplex_runtime.py`, the old runtime's SimpleX supervisor,
+/// run on a tree with a stand-in `simplex-chat` that records every start.
+/// Hermes' own modules, which it imports but doesn't need here, are stubs.
+struct OldRuntime {
+    dir: tempfile::TempDir,
+}
+
+impl OldRuntime {
+    fn new() -> Self {
+        let dir = tempfile::Builder::new()
+            .prefix("old-runtime-")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .unwrap();
+        let file = |path: &str, contents: &str| {
+            let path = dir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, contents).unwrap();
+            path
+        };
+        file("stubs/websockets.py", "");
+        file("stubs/gateway/__init__.py", "");
+        file(
+            "stubs/gateway/pairing.py",
+            "class PairingStore:\n    @staticmethod\n    def looks_like_request_id(value):\n        return False\n\n    def list_pending(self, platform):\n        return []\n",
+        );
+        let core = file(
+            "bin/simplex-chat",
+            "#!/bin/sh\necho \"$@\" >> \"$CORE_STARTS\"\nexec sleep 30\n",
+        );
+        fs::set_permissions(&core, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        Self { dir }
+    }
+
+    fn command(&self, tree: &Tree, operation: &str) -> Command {
+        let script = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../finite-agentd/simplex_runtime.py"
+        );
+        let path = format!(
+            "{}:{}",
+            self.dir.path().join("bin").display(),
+            std::env::var("PATH").unwrap()
+        );
+        let mut command = Command::new("python3");
+        command
+            .arg(script)
+            .arg(operation)
+            .env("PYTHONPATH", self.dir.path().join("stubs"))
+            .env("PATH", path)
+            .env("CORE_STARTS", self.starts())
+            .env("HERMES_HOME", tree.path("agent/hermes-home"))
+            .env("FINITECHAT_HOME", tree.path("agent"))
+            .stdin(Stdio::null());
+        command
+    }
+
+    fn starts(&self) -> PathBuf {
+        self.dir.path().join("core-starts")
+    }
+
+    /// Run `supervise` until a core starts or `quiet` passes, then stop it
+    /// as the runtime does (TERM). Whether a core started.
+    fn supervise(&self, tree: &Tree, quiet: Duration) -> bool {
+        let mut child = self
+            .command(tree, "supervise")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        while !self.starts().exists() && started.elapsed() < quiet {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .status()
+            .unwrap();
+        child.wait().unwrap();
+        self.starts().exists()
+    }
+
+    fn status(&self, tree: &Tree) -> Value {
+        let out = self.command(tree, "status").output().unwrap();
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            panic!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    }
+}
+
+#[test]
+fn a_sealed_old_agent_starts_no_simplex_core() {
+    // Unsealed, the same harness sees the old core start: the control.
+    let unsealed = Tree::new();
+    unsealed.simplex();
+    let runtime = OldRuntime::new();
+    assert!(
+        runtime.supervise(&unsealed, Duration::from_secs(20)),
+        "the control's core never started"
+    );
+    assert_eq!(runtime.status(&unsealed)["enabled"], true);
+
+    // Staged and sealed: a start of the old agent starts no core through
+    // the supervisor's first checks (every 2 s), and its status says
+    // SimpleX is off.
+    let sealed = Tree::new();
+    sealed.simplex();
+    sealed.stream();
+    let runtime = OldRuntime::new();
+    assert!(
+        !runtime.supervise(&sealed, Duration::from_secs(5)),
+        "a sealed agent started its core"
+    );
+    let status = runtime.status(&sealed);
+    assert_eq!(status["enabled"], false, "{status}");
+    assert!(status.get("error").is_none(), "{status}");
 }
 
 /// Each way a carry is refused, and why the summary gives.
@@ -185,6 +428,7 @@ fn a_conversation_that_cant_be_carried_safely_carries_nothing_and_says_why() {
         tree.simplex();
         spoil(&tree);
         let stage = entries(&tree.stream());
+        assert!(tree.path("agent/simplex").exists(), "{why}: nothing sealed");
         assert!(carried_nothing(&stage), "{why}: {:?}", stage.keys());
         assert_eq!(
             summary(&stage)["simplex"],

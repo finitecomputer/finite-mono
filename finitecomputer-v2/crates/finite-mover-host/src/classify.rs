@@ -362,7 +362,13 @@ fn secret_rule(parts: &[&[u8]]) -> Option<Verdict> {
         if at(1, "identity") && len > 2 {
             return secret(Why::NostrIdentity, 2);
         }
-        if at(1, "simplex") && len > 2 {
+        // `simplex.moved-<stage id>`: the old SimpleX, sealed by a stage.
+        if (at(1, "simplex")
+            || parts
+                .get(1)
+                .is_some_and(|part| part.starts_with(b"simplex.moved-")))
+            && len > 2
+        {
             return secret(Why::Simplex, 2);
         }
         if len == 2 && parts[1].starts_with(b"client.sqlite3") {
