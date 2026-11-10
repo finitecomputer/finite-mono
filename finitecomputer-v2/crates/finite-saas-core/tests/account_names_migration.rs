@@ -89,7 +89,7 @@ async fn snapshot(client: &Client, table: &str) -> Vec<serde_json::Value> {
 #[tokio::test]
 async fn account_names_upgrade_and_reapply_preserve_existing_scoped_mappings() {
     with_legacy_database(|client| async move {
-        let previous = CORE_SCHEMA_SQL.strip_suffix(NAMES_SQL).expect("0043 is the last migration");
+        let previous = CORE_SCHEMA_SQL.split_once(NAMES_SQL).expect("0043 is in the schema").0;
         client.batch_execute(previous).await.unwrap();
         client.batch_execute(r#"
             INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)

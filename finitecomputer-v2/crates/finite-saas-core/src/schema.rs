@@ -85,7 +85,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0042_brain_scoped_records.sql"),
     "\n",
-    include_str!("../migrations/0043_account_names_and_key_aliases.sql")
+    include_str!("../migrations/0043_account_names_and_key_aliases.sql"),
+    "\n",
+    include_str!("../migrations/0044_runtime_moves.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =
