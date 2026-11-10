@@ -179,6 +179,38 @@ class Export(unittest.TestCase):
         self.assertEqual(list(self.out.parent.glob(".raw-export-*")), [], "no temporary copy is left")
         self.assertEqual(database.read_bytes(), main_file, "the tree is untouched")
 
+    def test_a_linked_or_odd_main_database_stops_the_export(self):
+        # A second name for the main file, with the writer still open: it
+        # used to be left out as "not a file" while its WAL went alone.
+        database = self.root / "agent/hermes-home/state.db"
+        conn = sqlite3.connect(database)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE messages (body TEXT)")
+        conn.execute("INSERT INTO messages VALUES ('committed history')")
+        conn.commit()
+        os.link(database, Path(self.dir.name, "backup.db"))
+        try:
+            with self.assertRaisesRegex(ValueError, "agent/hermes-home/state.db"):
+                self.export()
+        finally:
+            conn.close()
+        self.assertFalse(self.out.exists(), "no partial zip is left")
+        for sidecar in database.parent.glob("state.db*"):
+            sidecar.unlink()
+
+        # Not a plain file at all: a link elsewhere, or a pipe.
+        elsewhere = Path(self.dir.name, "elsewhere.db")
+        sqlite3.connect(elsewhere).close()
+        os.symlink(elsewhere, database)
+        with self.assertRaisesRegex(ValueError, "agent/hermes-home/state.db"):
+            self.export()
+        database.unlink()
+        os.mkfifo(self.root / "agent/hermes-home/memory_store.db")
+        with self.assertRaisesRegex(ValueError, "agent/hermes-home/memory_store.db"):
+            self.export()
+        self.assertFalse(self.out.exists(), "no partial zip is left")
+        self.assertEqual(list(self.out.parent.glob(".raw-export-*")), [], "no temporary copy is left")
+
     def test_a_site_already_in_the_tree_is_staged_from_it(self):
         write(self.root, "sites/garden/index.html", "<h1>in the tree</h1>\n")
         clone = Path(self.dir.name, "garden")
@@ -256,40 +288,60 @@ class BuildRawPatch(unittest.TestCase):
     `build --raw` writes the raw-folder zip (no fbrain, fsite or hermes on
     PATH: no brains, no sites, a default profile)."""
 
-    def test_the_patch_applies_and_builds(self):
+    def patched(self, scratch):
+        """export.py with the patch applied, and an agent's folder for it."""
         here = Path(__file__).resolve().parent
         repo = here.parents[1]
         dashboard = "finite-agentd/integrations/hermes/finite-export/dashboard"
-        with tempfile.TemporaryDirectory(prefix="raw-export-patch-") as scratch:
-            target = Path(scratch, dashboard)
-            target.mkdir(parents=True)
-            (target / "export.py").write_bytes((repo / dashboard / "export.py").read_bytes())
-            (target / "raw_export.py").write_bytes((here / "raw_export.py").read_bytes())
-            applied = subprocess.run(
-                ["git", "apply", str(here / "export-py-build-raw.patch")],
-                cwd=scratch,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(applied.returncode, 0, applied.stderr)
-            root = Path(scratch, "data")
-            write(root, "agent/hermes-home/SOUL.md", "kind\n")
-            write(root, "agent/hermes-home/.env", "OPENROUTER_API_KEY='sk-or-v1-0123456789abcdef0123'\n")
-            write(root, "workspace/notes.md", "notes\n")
-            env = {
-                "PATH": "/usr/bin:/bin",
-                "FINITE_HOME": str(root / "agent"),
-                "HERMES_HOME": str(root / "agent/hermes-home"),
-                "FINITECHAT_WORKSPACE": str(root / "workspace"),
-                "FINITE_AGENT_NAME": "Old Agent",
-            }
-            built = subprocess.run(
-                [sys.executable, "-I", str(target / "export.py"), "build", "--raw", "--no-report"],
+        target = Path(scratch, dashboard)
+        target.mkdir(parents=True)
+        (target / "export.py").write_bytes((repo / dashboard / "export.py").read_bytes())
+        (target / "raw_export.py").write_bytes((here / "raw_export.py").read_bytes())
+        applied = subprocess.run(
+            ["git", "apply", str(here / "export-py-build-raw.patch")],
+            cwd=scratch,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(applied.returncode, 0, applied.stderr)
+        root = Path(scratch, "data")
+        write(root, "agent/hermes-home/SOUL.md", "kind\n")
+        write(root, "agent/hermes-home/.env", "OPENROUTER_API_KEY='sk-or-v1-0123456789abcdef0123'\n")
+        write(root, "workspace/notes.md", "notes\n")
+        env = {
+            "PATH": "/usr/bin:/bin",
+            "FINITE_HOME": str(root / "agent"),
+            "HERMES_HOME": str(root / "agent/hermes-home"),
+            "FINITECHAT_WORKSPACE": str(root / "workspace"),
+            "FINITE_AGENT_NAME": "Old Agent",
+        }
+
+        def run(*options):
+            return subprocess.run(
+                [sys.executable, "-I", str(target / "export.py"), "build", "--raw", "--no-report", *options],
                 env=env,
                 capture_output=True,
                 text=True,
                 timeout=300,
             )
+
+        return root, run
+
+    def test_raw_refuses_the_options_it_does_not_honor(self):
+        # These choose what goes in for `build`; the raw zip takes the
+        # folder by its own rules, so it must not quietly ignore them.
+        with tempfile.TemporaryDirectory(prefix="raw-export-patch-") as scratch:
+            root, run = self.patched(scratch)
+            for options in [["--no-workspace"], ["--everything"], ["--max-file-mb", "5"]]:
+                refused = run(*options)
+                self.assertEqual(refused.returncode, 2, options)
+                self.assertIn(options[0], refused.stderr)
+            self.assertFalse((root / "agent/exports").exists(), "no zip was made")
+
+    def test_the_patch_applies_and_builds(self):
+        with tempfile.TemporaryDirectory(prefix="raw-export-patch-") as scratch:
+            root, run = self.patched(scratch)
+            built = run()
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             result = json.loads(built.stdout)
             self.assertTrue(result["zip"].startswith(str(root / "agent/exports")))

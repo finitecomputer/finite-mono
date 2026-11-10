@@ -579,6 +579,9 @@ class Export:
                 os.close(child)
             return
         regular = stat_module.S_ISREG(st.st_mode) and st.st_nlink == 1
+        if not regular and main_history_database(path):
+            # Left out as "not a file", it would leave its WAL to go alone.
+            raise history_refused(path)
         verdict = classify(path, "file" if regular else "other", brain, build)
         size = st.st_size if stat_module.S_ISREG(st.st_mode) else 0
         if verdict.cls in STAGED:
@@ -650,11 +653,7 @@ class Export:
         if not self.sqlite_reads_what_was_walked(fd, folder, database):
             # Copying the main file alone would leave the rows in its WAL
             # behind, and SQLite would read a linked one: stop instead.
-            raise ValueError(
-                f"{path_text(path)} or one of its -wal, -shm or -journal files has another name "
-                "or isn't a plain file, so its history can't be copied whole; remove the extra "
-                "link and export again"
-            )
+            raise history_refused(path)
         target = Path(tempfile.mkstemp(prefix=".raw-export-", suffix=".db", dir=self.out.parent)[1])
         target.unlink()
         self.temporary.append(target)
@@ -793,6 +792,23 @@ def brain_id(fd):
     except (ValueError, KeyError, TypeError):
         return None
     return identifier if isinstance(identifier, str) else None
+
+
+def main_history_database(path):
+    """Whether `path` is one of the agent's history databases itself (not a
+    sidecar)."""
+    return len(path) == 3 and path[:2] == [b"agent", b"hermes-home"] and path[2] in HISTORY_DATABASES
+
+
+def history_refused(path):
+    """One rule for a history database: it and each of its sidecars are
+    plain files with one name, or the export stops, rather than send a
+    history with rows missing."""
+    return ValueError(
+        f"{path_text(path)} or one of its -wal, -shm or -journal files has another name "
+        "or isn't a plain file, so its history can't be copied whole; remove the extra "
+        "link and export again"
+    )
 
 
 def path_text(path):

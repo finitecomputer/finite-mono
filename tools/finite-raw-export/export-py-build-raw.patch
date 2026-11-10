@@ -1,6 +1,6 @@
 --- a/finite-agentd/integrations/hermes/finite-export/dashboard/export.py
 +++ b/finite-agentd/integrations/hermes/finite-export/dashboard/export.py
-@@ -2242,6 +2242,89 @@
+@@ -2242,6 +2242,89 @@ def file_limit(options):
      return float("inf") if options.everything else options.max_file_mb * MiB
  
  
@@ -90,20 +90,49 @@
  def build(paths, env, options):
      max_bytes = file_limit(options)
      out_dir = Path(options.out) if options.out else paths.workspace / "finite-export"
-@@ -2511,6 +2594,12 @@
+@@ -2503,17 +2586,39 @@ def parse(argv):
+     build_cmd.add_argument(
+         "--max-file-mb",
+         type=int,
+-        default=DEFAULT_MAX_FILE_MB,
+-        help="leave out any file larger than this",
++        default=None,
++        help=f"leave out any file larger than this (default {DEFAULT_MAX_FILE_MB})",
+     )
+     build_cmd.add_argument(
+         "--out", help="the folder for the zip (default: <workspace>/finite-export)"
      )
      build_cmd.add_argument("--everything", action="store_true", help=EVERYTHING_HELP)
-     build_cmd.add_argument(
++    build_cmd.add_argument(
 +        "--raw",
 +        action="store_true",
 +        help="write the raw-folder zip for fragment home (FIN-463) instead "
 +        "(default --out: <finite home>/exports)",
 +    )
-+    build_cmd.add_argument(
+     build_cmd.add_argument(
          "--no-report", action="store_true", help="don't tell the move site this ran"
      )
      options = parser.parse_args(argv)
-@@ -2532,8 +2621,9 @@
++    # The raw zip takes the folder by raw_export.py's own rules, so these
++    # choices of `build` would be quietly ignored: refuse them instead.
++    if getattr(options, "raw", False):
++        ignored = [
++            flag
++            for flag, given in [
++                ("--no-workspace", options.no_workspace),
++                ("--everything", options.everything),
++                ("--max-file-mb", options.max_file_mb is not None),
++            ]
++            if given
++        ]
++        if ignored:
++            parser.error(f"--raw does not take {', '.join(ignored)}")
++    if options.max_file_mb is None:
++        options.max_file_mb = DEFAULT_MAX_FILE_MB
+     if options.max_file_mb < 1:
+         parser.error("--max-file-mb must be at least 1")
+     return options
+@@ -2532,8 +2637,9 @@ def main(argv=None):
          found = survey(paths, os.environ, out_dir, file_limit(options), options.everything)
          result = reported(found, "survey", paths, os.environ, not options.no_report)
      else:
