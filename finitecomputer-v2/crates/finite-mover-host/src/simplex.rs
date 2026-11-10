@@ -17,7 +17,9 @@
 //! - Hermes approved exactly one contact, by a single decimal id;
 //! - both databases are there, plain files with one name, and plain SQLite
 //!   (their header, so not encrypted);
-//! - neither has a `-journal` or `-wal` beside it, so both are settled;
+//! - neither has a `-journal` or `-wal` beside it, so both are settled,
+//!   and still none at the stage's end ([`still_settled`]): the agent's
+//!   lease doesn't hold SimpleX's own writers;
 //! - together they are at most [`SIMPLEX_MAX_BYTES`].
 //!
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
@@ -167,6 +169,9 @@ pub struct Carried {
     pub contact: i64,
     pub databases: Vec<Database>,
     pub seal: Seal,
+    /// The folder they are in, in `agent/`: `simplex`, or the one it was
+    /// sealed in.
+    pub folder: String,
 }
 
 impl Carried {
@@ -272,7 +277,29 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
             rename_to,
             sealed,
         },
+        folder: name,
     }))
+}
+
+/// Whether the carried databases in `agent/<folder>` are still settled at
+/// the stage's end: no `-journal` or `-wal` beside them. A SimpleX writer
+/// that committed meanwhile may leave the database itself as it was, its
+/// rows in a WAL the stage doesn't hold.
+pub fn still_settled(tree: &Tree, folder: &str) -> Result<bool, HostError> {
+    let Some(agent) = open_in(tree.root(), AGENT)? else {
+        return Ok(false);
+    };
+    let Some(folder) = open_in(&agent, folder)? else {
+        return Ok(false);
+    };
+    for (name, _) in DATABASES {
+        for suffix in UNSETTLED {
+            if present_in(&folder, &format!("{name}{suffix}"))? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
 }
 
 /// Seal the old SimpleX after its conversation was staged: the folder

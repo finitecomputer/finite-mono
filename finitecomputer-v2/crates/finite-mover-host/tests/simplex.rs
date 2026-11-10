@@ -459,3 +459,49 @@ fn the_uploaders_second_check_lets_the_carried_entries_through() {
         assert_ne!(class, Class::Secret, "{name}");
     }
 }
+
+/// The stage's output, which makes a WAL appear beside the chat database
+/// at its first write: a SimpleX writer the lease doesn't stop, committing
+/// while the stage is written.
+struct WalAppears {
+    wal: PathBuf,
+    out: Vec<u8>,
+}
+
+impl std::io::Write for WalAppears {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if !self.wal.exists() {
+            fs::write(&self.wal, b"a committed row").unwrap();
+        }
+        self.out.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_database_unsettled_while_it_is_staged_fails_the_stage() {
+    let tree = Tree::new();
+    tree.simplex();
+    // Past the stage's write buffer, so the output sees writes mid-carry.
+    let mut rows = vec![b'r'; 3 * 1024 * 1024];
+    rows[..16].copy_from_slice(SQLITE);
+    tree.write("agent/simplex/identity_chat.db", &rows);
+    let mut out = WalAppears {
+        wal: tree.path("agent/simplex/identity_chat.db-wal"),
+        out: Vec::new(),
+    };
+    let operation = parse(format!("stream {ID} --stage {STAGE}").split_whitespace()).unwrap();
+    let result = run(&tree.work_root, operation, &mut out);
+    assert!(tree.path("agent/simplex").exists(), "nothing sealed");
+    assert!(out.wal.exists(), "the WAL appeared while it was staged");
+    assert!(
+        matches!(
+            result,
+            Err(finite_mover_host::error::HostError::TreeChanged(_))
+        ),
+        "a stage that missed a committed row was taken: {result:?}"
+    );
+}

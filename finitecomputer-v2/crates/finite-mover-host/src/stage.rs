@@ -66,8 +66,11 @@ pub fn stream(
         copied: Vec::new(),
     };
     walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
-    let seal = match simplex::decide(tree, stage_id)? {
-        Ok(carried) => Ok(stage.carry(carried)?),
+    let carried = match simplex::decide(tree, stage_id)? {
+        Ok(carried) => {
+            let folder = carried.folder.clone();
+            Ok((folder, stage.carry(carried)?))
+        }
         Err(why) => Err(why),
     };
     let Stage {
@@ -88,10 +91,15 @@ pub fn stream(
             return Err(HostError::TreeChanged(name.into()));
         }
     }
-    // Staged and checked, the agent still stopped and its lease held: seal
-    // the old SimpleX where every later start sees it.
-    let carry = match seal {
-        Ok(seal) => Carry::carried(simplex::seal(tree, seal)?),
+    // Staged and checked, still settled, the agent still stopped and its
+    // lease held: seal the old SimpleX where every later start sees it.
+    let carry = match carried {
+        Ok((folder, seal)) => {
+            if !simplex::still_settled(tree, &folder)? {
+                return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
+            }
+            Carry::carried(simplex::seal(tree, seal)?)
+        }
         Err(why) => Carry::refused(why),
     };
     let mut summary = tallies.summary(tree.id().as_str());
