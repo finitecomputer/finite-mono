@@ -31,7 +31,8 @@ use crate::error::HostError;
 use crate::secrets;
 use crate::tree::{DurableId, Tree};
 
-/// Telegram's own limit on a message.
+/// Telegram's own limit on a message, counted here in UTF-16 units, the
+/// strictest way to read it: an emoji counts twice.
 pub const TEXT_MAX_CHARS: usize = 4096;
 /// Attempts per agent in any 24 hours.
 pub const NOTICES_PER_DAY: usize = 3;
@@ -131,7 +132,7 @@ pub struct Answer {
     pub telegram_error: Option<u16>,
 }
 
-/// The text, from stdin: 1 to 4,096 characters of UTF-8, sent as it is.
+/// The text, from stdin: UTF-8 of 1 to 4,096 UTF-16 units, sent as it is.
 pub fn read_text(input: impl Read) -> Result<Zeroizing<String>, HostError> {
     let bad = || HostError::Usage("the text is 1 to 4096 characters of UTF-8 on stdin".into());
     let mut bytes = Zeroizing::new(Vec::new());
@@ -140,7 +141,7 @@ pub fn read_text(input: impl Read) -> Result<Zeroizing<String>, HostError> {
         .read_to_end(&mut bytes)
         .map_err(|_| bad())?;
     let text = std::str::from_utf8(&bytes).map_err(|_| bad())?;
-    if text.trim().is_empty() || text.chars().count() > TEXT_MAX_CHARS {
+    if text.trim().is_empty() || text.encode_utf16().count() > TEXT_MAX_CHARS {
         return Err(bad());
     }
     Ok(Zeroizing::new(text.to_owned()))
@@ -420,10 +421,18 @@ mod tests {
             &*read_text(&b"Hello \xf0\x9f\x91\x8b\n"[..]).unwrap(),
             "Hello \u{1f44b}\n"
         );
-        let longest = "\u{1f44b}".repeat(TEXT_MAX_CHARS);
-        assert!(read_text(longest.as_bytes()).is_ok());
+        assert!(read_text("a".repeat(TEXT_MAX_CHARS).as_bytes()).is_ok());
+        // An emoji is two UTF-16 units.
+        assert!(read_text("\u{1f44b}".repeat(TEXT_MAX_CHARS / 2).as_bytes()).is_ok());
         let too_long = "a".repeat(TEXT_MAX_CHARS + 1);
-        for bad in [&b""[..], b"  \n", b"\xff\xfe", too_long.as_bytes()] {
+        let too_many_emoji = "\u{1f44b}".repeat(TEXT_MAX_CHARS / 2 + 1);
+        for bad in [
+            &b""[..],
+            b"  \n",
+            b"\xff\xfe",
+            too_long.as_bytes(),
+            too_many_emoji.as_bytes(),
+        ] {
             assert!(read_text(bad).is_err());
         }
     }
