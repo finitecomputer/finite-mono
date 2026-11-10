@@ -28,8 +28,9 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::HostError;
+use crate::pairing::{Approved, approved};
 use crate::secrets;
-use crate::tree::{DurableId, Tree, Whole};
+use crate::tree::{DurableId, Tree};
 
 /// Telegram's own limit on a message, counted here in UTF-16 units, the
 /// strictest way to read it: an emoji counts twice.
@@ -40,21 +41,8 @@ pub const TELEGRAM_API: &str = "https://api.telegram.org";
 const DAY_SECONDS: u64 = 24 * 60 * 60;
 const NOTICE_ID_MAX: usize = 64;
 const TEXT_MAX_BYTES: u64 = 4 * TEXT_MAX_CHARS as u64;
-const PAIRING_MAX_BYTES: u64 = 64 * 1024;
 const LOG_MAX_BYTES: u64 = 1024 * 1024;
 const ANSWER_MAX_BYTES: u64 = 64 * 1024;
-/// The agent's Telegram pairing, where Hermes keeps approved users
-/// (finite-agentd/src/connections.rs `platform_people`).
-const APPROVED: [&[&str]; 2] = [
-    &[
-        "agent",
-        "hermes-home",
-        "platforms",
-        "pairing",
-        "telegram-approved.json",
-    ],
-    &["agent", "hermes-home", "pairing", "telegram-approved.json"],
-];
 /// curl, pinned by the package build; `curl` from PATH elsewhere (tests).
 const CURL: &str = match option_env!("FINITE_MOVER_CURL") {
     Some(path) => path,
@@ -219,28 +207,16 @@ enum Owner {
 /// is there but can't be read whole is never taken for no file: it may
 /// hold the users that make the other folder's lone user not the owner.
 fn owner(tree: &Tree) -> Result<Owner, HostError> {
-    let mut users = std::collections::BTreeSet::new();
-    for path in APPROVED {
-        let bytes = match tree.read_whole(path, PAIRING_MAX_BYTES)? {
-            Whole::Absent => continue,
-            Whole::Unreadable => return Ok(Owner::NotOne),
-            Whole::Bytes(bytes) => bytes,
-        };
-        // Hermes keys approved users by id; anything else is not a pairing.
-        let Ok(serde_json::Value::Object(approved)) = serde_json::from_slice(&bytes) else {
-            return Ok(Owner::NotOne);
-        };
-        users.extend(approved.keys().cloned());
-    }
-    let mut users = users.into_iter();
-    match (users.next(), users.next()) {
-        (None, _) => Ok(Owner::None),
-        (Some(user), None) => match user.parse::<i64>() {
-            Ok(chat) if chat > 0 && chat.to_string() == user => Ok(Owner::One(chat)),
-            _ => Ok(Owner::NotOne),
-        },
-        _ => Ok(Owner::NotOne),
-    }
+    let ids = match approved(tree, "telegram")? {
+        Approved::Unreadable => return Ok(Owner::NotOne),
+        Approved::Ids(ids) => ids,
+    };
+    let mut ids = ids.into_iter();
+    Ok(match (ids.next(), ids.next()) {
+        (None, _) => Owner::None,
+        (Some(chat), None) => Owner::One(chat),
+        _ => Owner::NotOne,
+    })
 }
 
 /// Give up every capability, for good. NixOS's wrapper raises the reader's

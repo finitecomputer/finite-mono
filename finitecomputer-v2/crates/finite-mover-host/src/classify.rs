@@ -21,6 +21,8 @@
 //!
 //! `config` is never a source path: it is the allow-listed copy that
 //! [`crate::config_copy`] makes of `config.yaml`, which itself is secret.
+//! Nor is `simplex`: it is the SimpleX conversation [`crate::simplex`]
+//! carries out of `agent/simplex/`, which itself stays secret.
 //! A text file classified `history` or `work` becomes `secret` when its
 //! contents hold a credential ([`crate::shapes`]); [`crate::walk`] applies
 //! that, since it needs the file.
@@ -37,21 +39,26 @@ pub enum Class {
     Runtime,
     History,
     Work,
+    Simplex,
 }
 
 impl Class {
-    pub const ALL: [Class; 6] = [
+    pub const ALL: [Class; 7] = [
         Class::Secret,
         Class::Config,
         Class::Cache,
         Class::Runtime,
         Class::History,
         Class::Work,
+        Class::Simplex,
     ];
 
     /// Whether this class goes into the stage.
     pub fn staged(self) -> bool {
-        matches!(self, Class::Config | Class::History | Class::Work)
+        matches!(
+            self,
+            Class::Config | Class::History | Class::Work | Class::Simplex
+        )
     }
 }
 
@@ -88,7 +95,9 @@ pub enum Why {
     /// and credentials (runtime.Dockerfile:162-163).
     GoogleWorkspaceCli,
     /// `agent/simplex/`: the SimpleX identity databases
-    /// (finite-agentd/simplex_runtime.py:82-91).
+    /// (finite-agentd/simplex_runtime.py:82-91). Its conversation with the
+    /// owner is carried for the bound agent only when that is safe
+    /// ([`crate::simplex`]); the folder itself never is.
     Simplex,
     /// `agent/hermes-home/pairing/` and `.../platforms/pairing/`: approved
     /// and pending contacts (finite-agentd/src/connections.rs:650-657,

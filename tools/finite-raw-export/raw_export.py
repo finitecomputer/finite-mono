@@ -64,8 +64,10 @@ FACT_MAX_BYTES = 64 * 1024
 
 # Class and reason, in classify.rs's declaration order: the summary breaks
 # ties in this order.
-CLASSES = ("secret", "config", "cache", "runtime", "history", "work")
-STAGED = {"config", "history", "work"}
+# `simplex` is the host reader's SimpleX carry, which this export, run
+# inside the live agent beside its running core, never makes.
+CLASSES = ("secret", "config", "cache", "runtime", "history", "work", "simplex")
+STAGED = {"config", "history", "work", "simplex"}
 WHYS = (
     "nostr-identity",
     "hermes-env",

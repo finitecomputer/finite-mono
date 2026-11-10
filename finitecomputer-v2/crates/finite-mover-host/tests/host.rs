@@ -583,8 +583,16 @@ fn the_raw_exporter_matches_the_classifier() {
     );
     for (name, bytes) in &staged {
         if name == SUMMARY_ENTRY {
-            let ours: Value = serde_json::from_slice(bytes).unwrap();
+            let mut ours: Value = serde_json::from_slice(bytes).unwrap();
             let theirs: Value = serde_json::from_slice(&raw[name]).unwrap();
+            // The raw export runs in the live agent, beside its running
+            // SimpleX core: it never carries SimpleX, so it has no record of
+            // it. The fixture's pairing file isn't one, so nothing is carried.
+            let carry = ours.as_object_mut().unwrap().remove("simplex");
+            assert_eq!(
+                carry,
+                Some(serde_json::json!({"carried": false, "why": "pairing-unreadable"}))
+            );
             assert_eq!(theirs, ours, "the summaries");
         } else {
             assert_eq!(&raw[name], bytes, "{name}");
