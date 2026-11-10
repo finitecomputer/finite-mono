@@ -136,6 +136,14 @@ pub(crate) enum Command {
     /// Retire one exact Runtime through the verified Recovery Snapshot lifecycle.
     #[command(name = "runtime-retire-exact")]
     RuntimeRetireExact(RuntimeRetireExactCliArgs),
+    /// Stop one exact Runtime, recorded as explicit intent so billing never
+    /// resumes it. FIN-463's mover stops an agent before staging it.
+    #[command(name = "runtime-stop-exact")]
+    RuntimeStopExact(RuntimeStopExactCliArgs),
+    /// Mark one exact Runtime as moved to finite.chat (FIN-463), so the
+    /// mover's roster never offers it again.
+    #[command(name = "runtime-mark-moved-exact")]
+    RuntimeMarkMovedExact(RuntimeMarkMovedExactCliArgs),
     /// Rebind one stopped Kata Runtime after its exact durable state is staged.
     #[command(name = "runtime-cold-relocate-exact")]
     RuntimeColdRelocateExact(RuntimeColdRelocateExactCliArgs),
@@ -405,6 +413,54 @@ pub(crate) struct RuntimeRetireExactCliArgs {
         value_parser = clap::value_parser!(u64).range(60..=3600)
     )]
     pub(crate) wait_timeout_seconds: u64,
+    #[arg(long)]
+    pub(crate) now: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct RuntimeStopExactCliArgs {
+    #[arg(long)]
+    pub(crate) project_id: String,
+    #[arg(long)]
+    pub(crate) expected_agent_runtime_id: String,
+    #[arg(long)]
+    pub(crate) expected_source_host_id: String,
+    #[arg(long)]
+    pub(crate) expected_source_machine_id: String,
+    #[arg(long)]
+    pub(crate) admin_email: String,
+    #[arg(long)]
+    pub(crate) admin_workos_user_id: String,
+    #[arg(
+        long = "wait-timeout-seconds",
+        default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(60..=3600)
+    )]
+    pub(crate) wait_timeout_seconds: u64,
+    #[arg(long)]
+    pub(crate) now: Option<String>,
+}
+
+#[derive(Debug, clap::Args)]
+pub(crate) struct RuntimeMarkMovedExactCliArgs {
+    #[arg(long)]
+    pub(crate) project_id: String,
+    #[arg(long)]
+    pub(crate) expected_agent_runtime_id: String,
+    #[arg(long)]
+    pub(crate) expected_source_host_id: String,
+    #[arg(long)]
+    pub(crate) expected_source_machine_id: String,
+    /// `migrated` (needs --agent-npub) or `archived`.
+    #[arg(long, value_parser = ["migrated", "archived"])]
+    pub(crate) moved: String,
+    /// The finite.chat agent a migrated Runtime became.
+    #[arg(long)]
+    pub(crate) agent_npub: Option<String>,
+    #[arg(long)]
+    pub(crate) admin_email: String,
+    #[arg(long)]
+    pub(crate) admin_workos_user_id: String,
     #[arg(long)]
     pub(crate) now: Option<String>,
 }
