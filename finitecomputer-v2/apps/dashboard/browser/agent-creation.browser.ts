@@ -6,7 +6,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
 import { sealData } from "iron-session";
 
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
@@ -264,6 +264,7 @@ test("organization launch code: explicit submission, auth continuation and bindi
     await waitForDashboard(port, output);
     browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
     const context = await browser.newContext();
+    await withoutMoveCheck(context);
     const page = await context.newPage();
     page.setDefaultTimeout(30_000);
     const base = `http://127.0.0.1:${port}`;
@@ -3479,6 +3480,14 @@ async function handleCoreRequest(
   writeJson(response, 404, { error: "not found" });
 }
 
+/** This file counts Core reads exactly. An open dashboard's move check
+ * (FIN-463) reads Core on each navigation, and a check a navigation cut
+ * short still reads it on the server, so here its route answers "not
+ * moved" in the browser. finite-chat-move.browser.ts covers the check. */
+async function withoutMoveCheck(context: BrowserContext) {
+  await context.route("**/api/finite-chat-move", (route) => route.fulfill({ json: { redirect: null } }));
+}
+
 async function withSignedInPage(
   browser: Browser,
   dashboardPort: number,
@@ -3486,6 +3495,7 @@ async function withSignedInPage(
 ) {
   const context = await browser.newContext();
   try {
+    await withoutMoveCheck(context);
     const page = await context.newPage();
     page.setDefaultNavigationTimeout(90_000);
     await fn(page);

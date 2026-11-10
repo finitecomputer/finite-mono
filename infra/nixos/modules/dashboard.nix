@@ -37,6 +37,9 @@
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
+      # FIN-463 phase 2, Paul's switch: FC_REDIRECT_ALL_TO_FINITE_CHAT = "true";
+      # sends every page visit to finite.chat (machine routes keep answering;
+      # apps/dashboard/README.md). Needs a dashboard image with the redirect.
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s
