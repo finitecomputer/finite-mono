@@ -13,7 +13,11 @@ crc32fast = "1.5"
 finite-mover-host = { path = "../finite-mover-host" }
 finite-nostr.workspace = true
 hex.workspace = true
+# The mover key's npub (`finite-mover npub`).
+nostr.workspace = true
 reqwest.workspace = true
+# Stops a stuck child's whole process group (src/child.rs).
+rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -21,8 +25,6 @@ thiserror.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-# The fake finite.chat's check of the mover's signature.
-nostr.workspace = true
 tempfile.workspace = true
 # Reads stages back in the fake finite.chat test.
 zip.workspace = true
