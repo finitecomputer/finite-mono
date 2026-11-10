@@ -1,14 +1,15 @@
-//! `sizes` and `stream`: the same walk, counted or written.
+//! `sizes` and `stream`: the same walk, estimated from metadata or
+//! written.
 //!
 //! The stage is a zip64 of stored (uncompressed) entries, streamed with
 //! data descriptors, so it can be written to a pipe and any file in it
 //! read later by one range request. Each staged file keeps its path in
 //! the tree (`agent/hermes-home/state.db`, `workspace/...`), plus the
-//! allow-listed config copy. The last entry is [`SUMMARY_ENTRY`], the
-//! same summary `sizes` prints.
+//! allow-listed config copy. The last entry is [`SUMMARY_ENTRY`]: what
+//! `stream` staged and left, exactly, in the shape `sizes` estimates.
 
 use std::collections::BTreeSet;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use rustix::fs::Stat;
 
@@ -23,7 +24,8 @@ use crate::zip64::ZipStream;
 /// top-level name other than `agent` and `workspace` is never staged.
 pub const SUMMARY_ENTRY: &str = ".finite-stage/summary.json";
 
-/// Count every class without writing anything. The agent may be running.
+/// Estimate every class from metadata, opening no regular file. The agent
+/// may be running. The exact bytes are `stream`'s.
 pub fn sizes(tree: &Tree, owned_brains: &BTreeSet<String>) -> Result<Summary, HostError> {
     let mut count = Count(Tallies::default());
     walk::walk(tree, owned_brains, Mode::Measure, &mut count)?;
@@ -78,7 +80,7 @@ pub fn stream(
     }
     let summary = tallies.summary(tree.id().as_str());
     let json = serde_json::to_vec_pretty(&summary).map_err(write_error)?;
-    zip.entry(SUMMARY_ENTRY, 0o644, 0, &mut &json[..])
+    zip.entry(SUMMARY_ENTRY, 0o644, 0, json.len() as u64, &mut &json[..])
         .map_err(write_error)?;
     zip.finish().map_err(write_error)?;
     Ok(summary)
@@ -100,25 +102,33 @@ impl<W: Write> Visit for Stage<W> {
     fn staged(&mut self, name: &str, class: Class, source: Source) -> Result<(), HostError> {
         let bytes = source.bytes();
         match source {
+            Source::Measured(_) => {
+                return Err(HostError::Write("a measured file can't be staged".into()));
+            }
             Source::Bytes(data) => {
                 self.zip
-                    .entry(name, 0o644, 0, &mut &data[..])
+                    .entry(name, 0o644, 0, bytes, &mut &data[..])
                     .map_err(write_error)?;
             }
             Source::Text { bytes: data, stat } => {
                 self.zip
-                    .entry(name, stat.st_mode, stat.st_mtime, &mut &data[..])
+                    .entry(name, stat.st_mode, stat.st_mtime, bytes, &mut &data[..])
                     .map_err(write_error)?;
                 self.copied.push((name.to_owned(), *stat));
             }
             Source::File { file, stat } => {
-                let copied = self
+                match self
                     .zip
-                    .entry(name, stat.st_mode, stat.st_mtime, &mut (&file).take(bytes))
-                    .map_err(write_error)?;
+                    .entry(name, stat.st_mode, stat.st_mtime, bytes, &mut &file)
+                {
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                        return Err(HostError::TreeChanged(name.into()));
+                    }
+                    other => other.map_err(write_error)?,
+                }
                 let after = rustix::fs::fstat(&file)
                     .map_err(|error| HostError::io(name.into(), error.into()))?;
-                if copied != bytes || !same_file(&stat, &after) {
+                if !same_file(&stat, &after) {
                     return Err(HostError::TreeChanged(name.into()));
                 }
                 self.copied.push((name.to_owned(), after));
