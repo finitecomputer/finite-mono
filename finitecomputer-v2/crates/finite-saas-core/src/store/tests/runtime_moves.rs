@@ -410,8 +410,41 @@ async fn postgres_moved_to_finite_chat_once_every_agent_a_person_sees_has_moved(
             })
             .await
             .unwrap();
-        assert!(moved(owner).await, "every agent they saw has moved");
+        assert!(moved(owner.clone()).await, "every agent they saw has moved");
         assert!(moved(format!("workos_{OTHER}_owner")).await);
+
+        // A new agent they asked for, not yet running, keeps them here, and
+        // so does one whose creation failed. A cancelled one doesn't.
+        let launch_code = issue_test_launch_code(&store, "2026-07-21T12:00:00Z").await;
+        let pending = store
+            .request_agent_creation(RequestAgentCreationInput {
+                verified_email: format!("{RUN}-owner@finite.vip"),
+                workos_user_id: owner.clone(),
+                display_name: format!("{RUN} Second Agent"),
+                launch_code,
+                idempotency_key: format!("{RUN}-second"),
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "an agent still being created");
+        let project = pending.project.id.clone();
+        client
+            .execute(
+                "UPDATE agent_creation_requests SET status = 'failed' WHERE project_id = $1",
+                &[&project],
+            )
+            .await
+            .unwrap();
+        assert!(!moved(owner.clone()).await, "a failed creation it shows them");
+        client
+            .execute(
+                "UPDATE agent_creation_requests SET status = 'cancelled' WHERE project_id = $1",
+                &[&project],
+            )
+            .await
+            .unwrap();
+        assert!(moved(owner).await, "a cancelled creation is hidden");
     })
     .await;
 }

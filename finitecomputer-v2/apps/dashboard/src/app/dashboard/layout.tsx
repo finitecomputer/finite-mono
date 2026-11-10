@@ -23,7 +23,7 @@ export default async function DashboardLayout({
     loadCoreMe({ cacheMode: "swr" }),
     loadCoreBillingOverview({ cacheMode: "fresh" }),
   ]);
-  const moved = movedRedirect(core.me);
+  const moved = movedRedirect(core.me, viewer);
   if (moved) redirect(moved);
   const machineIds = new Set<string>();
   const machines = [

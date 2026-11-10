@@ -141,16 +141,33 @@ test("moved people land on finite.chat, from the real dashboard", { timeout: 300
     });
     await stop(phaseOne.dashboard);
 
-    const phaseTwo = await startDashboard(corePort, finiteChat, { FC_REDIRECT_ALL_TO_FINITE_CHAT: "1" });
+    // Phase 2, signed in as an operator whose own agents have moved.
+    const phaseTwo = await startDashboard(corePort, finiteChat, {
+      FC_REDIRECT_ALL_TO_FINITE_CHAT: "1",
+      FC_DASHBOARD_DEV_ADMIN_EMAILS: "move@example.test",
+    });
     dashboards.push(phaseTwo.dashboard);
     await t.test("phase 2 sends every page visit to finite.chat", () => withPage(async (page) => {
       state.moved = false;
-      for (const path of ["/", "/login", "/signup", "/code", "/dashboard"]) {
+      for (const path of ["/", "/signup", "/code", "/dashboard"]) {
         await page.goto(`${phaseTwo.origin}${path}`);
         assert.equal(page.url(), finiteChat, path);
       }
       await page.getByRole("heading", { name: FINITE_CHAT }).waitFor();
     }, "phase-2"));
+
+    await t.test("operators keep sign-in and the admin pages", () => withPage(async (page) => {
+      state.moved = true;
+      const login = await fetch(`${phaseTwo.origin}/login`, { redirect: "manual" });
+      assert.notEqual(login.headers.get("location"), finiteChat);
+      // Moved, but an operator: neither phase sends them away from admin.
+      for (let attempt = 0; attempt < 10; attempt++) {
+        await page.goto(`${phaseTwo.origin}/dashboard/admin`);
+        await page.waitForTimeout(1_000);
+      }
+      assert.ok(page.url().startsWith(`${phaseTwo.origin}/dashboard/admin`), page.url());
+      assert.equal(await page.getByRole("heading", { name: FINITE_CHAT }).count(), 0);
+    }, "phase-2-operator"));
 
     await t.test("phase 2 keeps health and machine routes answering", async () => {
       const health = await fetch(`${phaseTwo.origin}/health`, { redirect: "manual" });

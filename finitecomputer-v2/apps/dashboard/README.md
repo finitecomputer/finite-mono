@@ -20,11 +20,11 @@ People move from finite.computer to finite.chat (`src/lib/finite-chat-move.ts`):
 
 - **Phase 1:** once Core's `/me` says `moved_to_finite_chat` (every agent the
   person belongs to was marked moved with `runtime-mark-moved-exact`), every
-  dashboard page sends them to finite.chat.
+  dashboard page sends them to finite.chat. Operators stay.
 - **Phase 2:** `FC_REDIRECT_ALL_TO_FINITE_CHAT=true` sends every page visit
   there, signed in or not. `/api/*`, `/health`, `/healthz`, `/callback`,
-  `/site-auth` and `/google-workspace/*` keep answering, and only GET and HEAD
-  are redirected.
+  `/site-auth`, `/google-workspace/*`, `/login`, `/logout` and
+  `/dashboard/admin/*` keep answering, and only GET and HEAD are redirected.
 - `FC_FINITE_CHAT_URL` changes the destination (default `https://finite.chat/`).
 
 Delete these with the rest of the move.

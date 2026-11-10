@@ -3,8 +3,10 @@
  *
  * - Phase 1: once Core says every agent a person had has moved
  *   (`moved_to_finite_chat` on `/me`), the dashboard sends them there.
+ *   Operators stay: they run the fleet the move leaves behind.
  * - Phase 2: one switch, `FC_REDIRECT_ALL_TO_FINITE_CHAT`, sends every page
- *   visit there, signed in or not. Machine routes keep answering.
+ *   visit there, signed in or not. Machine routes, sign-in and the
+ *   operators' admin pages keep answering.
  *
  * finite.chat opens agents by their fragment, not by npub, so both go to
  * its front page. Delete with the rest of the move.
@@ -18,10 +20,20 @@ export const FINITE_CHAT_URL = "https://finite.chat/";
 
 /**
  * Paths that keep answering in phase 2: Core's and the runner's API calls,
- * webhooks, health checks, and the sign-in callbacks a connection may still
- * be finishing.
+ * webhooks, health checks, the sign-in callbacks a connection may still be
+ * finishing, and sign-in for operators on their way to the admin pages.
  */
-const PHASE_TWO_STAYS = ["/api", "/health", "/healthz", "/callback", "/site-auth", "/google-workspace"];
+const PHASE_TWO_STAYS = [
+  "/api",
+  "/health",
+  "/healthz",
+  "/callback",
+  "/site-auth",
+  "/google-workspace",
+  "/login",
+  "/logout",
+  "/dashboard/admin",
+];
 
 /** Where people are sent: `FC_FINITE_CHAT_URL`, or finite.chat itself. */
 export function finiteChatUrl(env: EnvSource = process.env) {
@@ -47,6 +59,10 @@ export function phaseTwoRedirect(pathname: string, method: string, env: EnvSourc
 }
 
 /** Phase 1: where a person whose agents have all moved goes, or null. */
-export function movedRedirect(me: { moved_to_finite_chat?: boolean } | null | undefined, env: EnvSource = process.env) {
-  return me?.moved_to_finite_chat === true ? finiteChatUrl(env) : null;
+export function movedRedirect(
+  me: { moved_to_finite_chat?: boolean } | null | undefined,
+  viewer: { isAdmin: boolean },
+  env: EnvSource = process.env,
+) {
+  return me?.moved_to_finite_chat === true && !viewer.isAdmin ? finiteChatUrl(env) : null;
 }

@@ -21,7 +21,10 @@ impl CoreStore {
     /// Whether this person's agents have all moved to finite.chat, so the
     /// dashboard sends them there: at least one agent they belong to was
     /// marked moved (even if since offboarded, which archives their
-    /// membership), and no agent they can still see runs unmoved.
+    /// membership), and every agent the dashboard still shows them carries
+    /// a move mark. An agent still being created, or one whose creation
+    /// failed, keeps them on the dashboard; a cancelled one it hides
+    /// doesn't.
     pub async fn moved_to_finite_chat_for_workos_user(
         &self,
         workos_user_id: &str,
@@ -44,13 +47,17 @@ impl CoreStore {
                     AND NOT EXISTS (
                           SELECT 1 FROM belongs
                           JOIN projects AS project ON project.id = belongs.project_id
-                          JOIN project_runtime_links AS link
-                            ON link.project_id = belongs.project_id AND link.active
                           WHERE belongs.archived_at IS NULL
                             AND project.import_candidate_id IS NULL
                             AND NOT EXISTS (
+                              SELECT 1 FROM agent_creation_requests AS hidden
+                              WHERE hidden.project_id = project.id
+                                AND hidden.status = 'cancelled'
+                                AND hidden.agent_runtime_id IS NULL
+                            )
+                            AND NOT EXISTS (
                               SELECT 1 FROM agent_runtime_moves AS moved
-                              WHERE moved.agent_runtime_id = link.agent_runtime_id
+                              WHERE moved.project_id = project.id
                             )
                         ) AS moved",
                 &[&workos_user_id],
