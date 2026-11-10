@@ -1,12 +1,15 @@
 # The FIN-463 mover's read-only access to Agent Runtime durable trees on a
 # Kata Runner host. One system account, finite-mover, whose only login is
 # the mover's ssh key, forced to run finite-mover-host for one
-# kata/<durable_state_id>: `sizes`, `stream` or `secrets`, nothing else.
+# kata/<durable_state_id>: `sizes`, `stream`, `secrets` or
+# `owner-telegram-notice`, nothing else.
 #
 # The reader needs to read trees owned by the runtimes, so its wrapper holds
 # CAP_DAC_READ_SEARCH (read and traverse only; no write, no other root power)
-# and only the finite-mover group may run it. The crate never writes, follows
-# no link, and refuses to stage a running agent.
+# and only the finite-mover group may run it. The crate never writes a tree,
+# follows no link, and refuses to stage a running agent. Its one write is
+# the owner notices' log, in a directory only finite-mover owns; it gives
+# up the capability before the notice's curl runs.
 #
 # Nothing exists until authorizedKeys is set: an empty list (the default)
 # changes no host. Installing the mover's public key is an operator step for
@@ -21,9 +24,13 @@
 let
   cfg = config.finite.moverHost;
   reader = "${config.security.wrapperDir}/finite-mover-host";
+  # Each agent's owner notices: id, time and result, never the text.
+  noticeLog = "/var/lib/finite-mover-host/notices";
   # restrict: no pty, no forwarding of any kind. The operation arrives in
   # SSH_ORIGINAL_COMMAND and is parsed by the reader, never by a shell.
-  forced = key: ''restrict,command="${reader} --work-root ${cfg.workRoot} --ssh" ${key}'';
+  forced =
+    key:
+    ''restrict,command="${reader} --work-root ${cfg.workRoot} --notice-log ${noticeLog} --ssh" ${key}'';
 in
 {
   options.finite.moverHost = {
@@ -56,6 +63,11 @@ in
       useDefaultShell = true;
       openssh.authorizedKeys.keys = map forced cfg.authorizedKeys;
     };
+
+    systemd.tmpfiles.rules = [
+      "d /var/lib/finite-mover-host 0700 finite-mover finite-mover -"
+      "d ${noticeLog} 0700 finite-mover finite-mover -"
+    ];
 
     security.wrappers.finite-mover-host = {
       source = "${finitePackages.finite-mover-host}/bin/finite-mover-host";

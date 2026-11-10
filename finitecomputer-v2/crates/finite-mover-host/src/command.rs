@@ -6,18 +6,21 @@
 //! sizes   <durable_state_id> [--brain <brain id>]...
 //! stream  <durable_state_id> [--brain <brain id>]...
 //! secrets <durable_state_id> <kind>[,<kind>...]
+//! owner-telegram-notice <durable_state_id> --notice <notice id>   (text on stdin)
 //! ```
 //!
 //! The work root is never part of it: it comes from the forced command's
 //! own arguments, which only the host's configuration sets.
 
 use std::collections::BTreeSet;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
 use crate::error::HostError;
+use crate::notice::{self, NoticeId};
 use crate::secrets::{self, Kind};
 use crate::stage;
 use crate::tree::{DurableId, Tree};
@@ -42,6 +45,10 @@ pub enum Operation {
         id: DurableId,
         kinds: Vec<Kind>,
     },
+    OwnerTelegramNotice {
+        id: DurableId,
+        notice: NoticeId,
+    },
 }
 
 /// Parse an operation from its words.
@@ -49,11 +56,13 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let mut words = words.into_iter();
     let usage = || {
         HostError::Usage(
-            "sizes|stream <id> [--brain <id>]... | secrets <id> <kind>[,<kind>...]".into(),
+            "sizes|stream <id> [--brain <id>]... | secrets <id> <kind>[,<kind>...] \
+             | owner-telegram-notice <id> --notice <notice id>"
+                .into(),
         )
     };
     let op = words.next().ok_or_else(usage)?;
-    if !["sizes", "stream", "secrets"].contains(&op) {
+    if !["sizes", "stream", "secrets", "owner-telegram-notice"].contains(&op) {
         return Err(usage());
     }
     let id = DurableId::parse(words.next().ok_or_else(usage)?)?;
@@ -91,6 +100,16 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
             kinds.dedup();
             Ok(Operation::Secrets { id, kinds })
         }
+        "owner-telegram-notice" => {
+            if words.next() != Some("--notice") {
+                return Err(usage());
+            }
+            let notice = NoticeId::parse(words.next().ok_or_else(usage)?)?;
+            if words.next().is_some() {
+                return Err(usage());
+            }
+            Ok(Operation::OwnerTelegramNotice { id, notice })
+        }
         _ => Err(usage()),
     }
 }
@@ -111,9 +130,21 @@ fn brain_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
 }
 
-/// Run one operation against `<work_root>/kata/<id>`, writing its answer
-/// to `out`.
-pub fn run(work_root: &Path, operation: Operation, mut out: impl Write) -> Result<(), HostError> {
+/// Run one read operation against `<work_root>/kata/<id>`, writing its
+/// answer to `out`.
+pub fn run(work_root: &Path, operation: Operation, out: impl Write) -> Result<(), HostError> {
+    run_with(work_root, None, operation, std::io::empty(), out)
+}
+
+/// Run any operation. `notice_log` is the host's notice log directory,
+/// which only `owner-telegram-notice` uses; `input` is its text.
+pub fn run_with(
+    work_root: &Path,
+    notice_log: Option<&Path>,
+    operation: Operation,
+    input: impl Read,
+    mut out: impl Write,
+) -> Result<(), HostError> {
     match operation {
         Operation::Sizes { id, owned_brains } => {
             let tree = Tree::open(work_root, id)?;
@@ -126,6 +157,18 @@ pub fn run(work_root: &Path, operation: Operation, mut out: impl Write) -> Resul
         Operation::Secrets { id, kinds } => {
             let tree = Tree::open(work_root, id)?;
             print_json(&mut out, &secrets::read(&tree, &kinds)?)
+        }
+        Operation::OwnerTelegramNotice { id, notice } => {
+            let log = notice_log.ok_or_else(|| {
+                HostError::Usage("this host keeps no notice log (--notice-log)".into())
+            })?;
+            let text = notice::read_text(input)?;
+            let tree = Tree::open(work_root, id)?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            let answer = notice::send(&tree, log, notice::TELEGRAM_API, &notice, &text, now)?;
+            print_json(&mut out, &answer)
         }
     }
 }

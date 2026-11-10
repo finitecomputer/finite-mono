@@ -10,11 +10,13 @@
 //! Rules apply in this order; the first that matches decides:
 //!
 //! 1. `secret`: never staged. Each rule names the code that writes the file.
-//! 2. `cache`: anything under a dependency or cache directory.
+//! 2. `cache`: anything under a dependency or cache directory, or under a
+//!    build folder beside the project file that builds it.
 //! 3. A brain working tree the mover did not name as owned: `runtime`.
 //! 4. Links, sockets and devices, and names a zip can't carry: `runtime`.
 //! 5. `history`: the allow-listed parts of the Hermes home.
-//! 6. `work`: the workspace.
+//! 6. `work`: the workspace, but its hidden folders and earlier exports;
+//!    and `sites/<slug>/`, the agent's own sites, cloned beside the tree.
 //! 7. Everything else: `runtime`.
 //!
 //! `config` is never a source path: it is the allow-listed copy that
@@ -69,10 +71,12 @@ pub enum Why {
     /// (finite-agentd/src/connections.rs:399-402) and `model.api_key`
     /// (connections.rs:320-330). Its allow-listed copy is `config`.
     HermesConfig,
-    /// `agent/agentd/agentd.sqlite3*`: `config_history.before_bytes` keeps
-    /// every replaced config value, old tokens included
-    /// (finite-agentd/src/ledger.rs:59-67, src/daemon.rs:166-168,205).
-    AgentdLedger,
+    /// `agent/agentd/`: `agentd.sqlite3`'s `config_history.before_bytes`
+    /// keeps every replaced config value, old tokens included
+    /// (finite-agentd/src/ledger.rs:59-67, src/daemon.rs:166-168,205), and
+    /// `google-workspace.json` the connected account
+    /// (finite-agentd/src/connections.rs:703-705).
+    Agentd,
     /// `agent/client.sqlite3*`: the Finite Chat client store, device state
     /// and its writer lease (finitechat-client/src/lib.rs:3787-3790,
     /// 8040-8060).
@@ -88,7 +92,7 @@ pub enum Why {
     Simplex,
     /// `agent/hermes-home/pairing/` and `.../platforms/pairing/`: approved
     /// and pending contacts (finite-agentd/src/connections.rs:650-657,
-    /// simplex_runtime.py:405-407).
+    /// simplex_runtime.py:405-407); and `pairing/*-approved.json` anywhere.
     Pairing,
     /// A name that holds, or may hold, a credential: `SECRET_NAMES`,
     /// `SECRET_SUFFIXES` and `SECRET_NAME_SHAPES` of the export
@@ -109,6 +113,9 @@ pub enum Why {
     /// Dependencies, caches and version control (`SKIP_DIRS`,
     /// export.py:66-84). They stay in the Borg backup.
     CacheDir,
+    /// A build folder beside the project file that builds it, in the
+    /// workspace (`BUILD_DIRS`, `PROJECT_FILES`, export.py:85-115, 2003-2020).
+    BuildOutput,
     /// A brain working tree the mover did not name as owned by this
     /// person, or one whose `.finitebrain/brain-directory.json` can't be
     /// read.
@@ -124,6 +131,15 @@ pub enum Why {
     History,
     /// The workspace.
     Workspace,
+    /// A hidden folder in the workspace: tool state, often credentials the
+    /// text check can't see. The export and the importer never bring one
+    /// (export.py:2047, `workspace_skipper`).
+    HiddenFolder,
+    /// `workspace/finite-export/`: earlier exports (export.py:2247).
+    EarlierExport,
+    /// `sites/<slug>/`: a site the agent owns, cloned from Finite Sites
+    /// beside the tree (the mover, and export.py's `clone_site`).
+    Site,
     /// The runtime: everything that is neither history, work nor cache.
     Runtime,
 }
@@ -149,6 +165,24 @@ pub enum BrainScope {
     },
 }
 
+/// Where an entry sits, as only the walk can know: in which brain working
+/// tree, and under which build folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Scope {
+    pub brain: BrainScope,
+    /// The number of components of the build folder the entry is under.
+    pub build_output: Option<usize>,
+}
+
+impl From<BrainScope> for Scope {
+    fn from(brain: BrainScope) -> Self {
+        Scope {
+            brain,
+            build_output: None,
+        }
+    }
+}
+
 /// A path's class, why, and how many leading components decided it. The
 /// summary's `left` groups files by that prefix, so a whole cache
 /// directory is one line.
@@ -166,6 +200,41 @@ const fn verdict(class: Class, why: Why, depth: usize) -> Verdict {
 /// The directory the allow-listed copy of `config.yaml` is written in, and
 /// its name.
 pub const CONFIG_COPY_PATH: [&str; 3] = ["agent", "hermes-home", "config.public.yaml"];
+
+/// Folders a tool builds beside a project file, and the project files
+/// (`BUILD_DIRS`, `PROJECT_FILES`, `PROJECT_SUFFIXES`, export.py:85-115).
+pub const BUILD_DIRS: [&str; 9] = [
+    "dist", "build", "out", "target", "_build", "obj", "deps", "vendor", "coverage",
+];
+pub const PROJECT_FILES: [&str; 18] = [
+    "package.json",
+    "deno.json",
+    "Cargo.toml",
+    "go.mod",
+    "pyproject.toml",
+    "setup.py",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Makefile",
+    "CMakeLists.txt",
+    "mix.exs",
+    "Gemfile",
+    "composer.json",
+    "pubspec.yaml",
+    "Package.swift",
+    "build.zig",
+    "stack.yaml",
+];
+pub const PROJECT_SUFFIXES: [&str; 4] = [".csproj", ".fsproj", ".sln", ".cabal"];
+
+/// Whether `name` is a project file a build folder beside it comes from.
+pub fn project_file(name: &[u8]) -> bool {
+    PROJECT_FILES.iter().any(|file| name == file.as_bytes())
+        || PROJECT_SUFFIXES
+            .iter()
+            .any(|suffix| name.ends_with(suffix.as_bytes()))
+}
 
 /// Directories no stage wants, by name, wherever they are (`SKIP_DIRS`,
 /// export.py:66-84).
@@ -239,7 +308,8 @@ const SQLITE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 ///
 /// This is the rule the mover's uploader repeats on every name it
 /// receives: a `secret` class there refuses the whole stage.
-pub fn classify(parts: &[&[u8]], kind: EntryKind, brain: BrainScope) -> Verdict {
+pub fn classify(parts: &[&[u8]], kind: EntryKind, scope: impl Into<Scope>) -> Verdict {
+    let scope = scope.into();
     let len = parts.len();
     if let Some(secret) = secret_rule(parts) {
         return secret;
@@ -253,9 +323,12 @@ pub fn classify(parts: &[&[u8]], kind: EntryKind, brain: BrainScope) -> Verdict 
     if let BrainScope::Brain {
         depth,
         owned: false,
-    } = brain
+    } = scope.brain
     {
         return verdict(Class::Runtime, Why::NotOwnedBrain, depth);
+    }
+    if let Some(depth) = scope.build_output {
+        return verdict(Class::Cache, Why::BuildOutput, depth);
     }
     if kind == EntryKind::Other {
         return verdict(Class::Runtime, Why::NotAFile, len);
@@ -286,8 +359,8 @@ fn secret_rule(parts: &[&[u8]]) -> Option<Verdict> {
         if len == 2 && parts[1].starts_with(b"client.sqlite3") {
             return secret(Why::ChatClientStore, 2);
         }
-        if len == 3 && at(1, "agentd") && parts[2].starts_with(b"agentd.sqlite3") {
-            return secret(Why::AgentdLedger, 3);
+        if at(1, "agentd") && len > 2 {
+            return secret(Why::Agentd, 2);
         }
         if at(1, "hermes-home") && len > 2 {
             let name = parts[2];
@@ -316,6 +389,9 @@ fn secret_rule(parts: &[&[u8]]) -> Option<Verdict> {
         return secret(Why::CredentialName, index + 1);
     }
     let name = parts.last()?;
+    if len >= 2 && parts[len - 2] == b"pairing" && name.ends_with(b"-approved.json") {
+        return secret(Why::Pairing, len);
+    }
     if [
         "google_token.json",
         "google_client_secret.json",
@@ -373,7 +449,19 @@ fn allow_list(parts: &[&[u8]]) -> Verdict {
     };
     let runtime = |depth: usize| verdict(Class::Runtime, Why::Runtime, depth.min(len));
     if at(0, "workspace") && len > 1 {
+        if at(1, "finite-export") && len > 2 {
+            return verdict(Class::Runtime, Why::EarlierExport, 2);
+        }
+        if let Some(index) = parts[1..len - 1]
+            .iter()
+            .position(|part| part.starts_with(b"."))
+        {
+            return verdict(Class::Runtime, Why::HiddenFolder, index + 2);
+        }
         return verdict(Class::Work, Why::Workspace, 1);
+    }
+    if at(0, "sites") && len > 2 {
+        return verdict(Class::Work, Why::Site, 1);
     }
     if !at(0, "agent") {
         return runtime(1);
