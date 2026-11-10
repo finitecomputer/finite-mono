@@ -559,8 +559,9 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nsh -c 'trap \"\" TERM; while :; do sleep 1; done' &\necho $! > {}\nwait\n",
-                pidfile.display()
+                // Written aside, then renamed in: the pid file appears whole.
+                "#!/bin/sh\nsh -c 'trap \"\" TERM; while :; do sleep 1; done' &\necho $! > {pid}.tmp\nmv {pid}.tmp {pid}\nwait\n",
+                pid = pidfile.display()
             ),
         )
         .unwrap();

@@ -34,9 +34,12 @@ async fn bridge_warmup_exit(signal: bool) {
     let sleeper = write_script("sleep-service", "#!/bin/sh\nexec sleep 60\n");
     let prepare = write_script("prepare", "#!/bin/sh\nexit 0\n");
     let bridge = write_script("bridge", "#!/bin/sh\nexit 1\n");
+    // The pid file appears whole or not at all (written aside, then renamed
+    // in): the test reads it the moment it exists, and `echo >` alone shows
+    // it empty first.
     write_script(
         "hermes",
-        "#!/bin/sh\necho $$ > \"$HERMES_HOME/native.pid\"\nexec sleep 60\n",
+        "#!/bin/sh\necho $$ > \"$HERMES_HOME/native.pid.tmp\"\nmv \"$HERMES_HOME/native.pid.tmp\" \"$HERMES_HOME/native.pid\"\nexec sleep 60\n",
     );
     let reservation = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = reservation.local_addr().unwrap();
