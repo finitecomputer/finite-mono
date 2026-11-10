@@ -1,6 +1,7 @@
-/** FIN-463: an open dashboard rechecks, on each navigation and every 30
- * seconds, whether its person now goes to finite.chat. The layout decides on
- * a full load, but layouts don't re-render on client navigation. */
+/** FIN-463: an open dashboard rechecks, once on each navigation, whether
+ * its person now goes to finite.chat. The layout decides on a full load, but
+ * layouts don't re-render on client navigation. A tab left idle follows on
+ * its next navigation or reload. */
 export const FINITE_CHAT_MOVE_ROUTE = "/api/finite-chat-move";
 
 export function startFiniteChatMoveMonitor({
@@ -23,13 +24,9 @@ export function startFiniteChatMoveMonitor({
       leaving = true;
       replace(redirect);
     } catch {
-      /* The next navigation or tick checks again. */
+      /* The next navigation checks again. */
     }
   }
   void check();
-  const timer = setInterval(() => void check(), 30_000);
-  return () => {
-    clearInterval(timer);
-    controller.abort();
-  };
+  return () => controller.abort();
 }
