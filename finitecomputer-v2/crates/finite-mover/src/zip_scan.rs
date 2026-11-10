@@ -217,6 +217,13 @@ impl Scanner {
         Ok(())
     }
 
+    /// Whether the central directory has begun. The scanner reads nothing
+    /// after it, so its bytes must not leave before the directory has been
+    /// checked against the entries that streamed past.
+    pub fn in_directory(&self) -> bool {
+        matches!(self.state, State::Directory)
+    }
+
     /// The entries, once the stream has reached its central directory.
     pub fn finish(self) -> Result<(Vec<Scanned>, u64), ScanError> {
         match (self.state, self.directory_offset) {

@@ -18,9 +18,11 @@
 //!   (403 or 409), and the run stops.
 //! - **One run at a time.** A run holds a lock on its old agent from its
 //!   first call to its complete, so two runs never interleave their parts.
-//! - **The end.** The central directory must list exactly the entries
-//!   streamed. Then `complete` makes the zip whole and writes
-//!   `manifest.json` last.
+//! - **The end.** The scanner reads nothing past the central directory, so
+//!   from the part the directory begins in, parts are held back until the
+//!   directory lists exactly the entries that streamed past. A forged
+//!   directory signature therefore carries nothing unread out. Then
+//!   `complete` makes the zip whole and writes `manifest.json` last.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -31,7 +33,7 @@ use finite_mover_host::stage::SUMMARY_ENTRY;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
-use crate::sink::{Completed, SinkError, StageSink};
+use crate::sink::{Completed, Part, SinkError, StageSink};
 use crate::zip_scan::{ScanError, Scanned, Scanner};
 use crate::zip_tail::{self, Tail, TailError};
 
@@ -207,8 +209,7 @@ pub fn upload_stage(
     );
     let _held = lock(locks, target)?;
     let stage = target.stage_id();
-    let sent = send_parts(sink, &stage, stream, part_bytes)?;
-    let summary = check(&sent)?;
+    let (sent, summary) = send_parts(sink, &stage, stream, part_bytes)?;
     let mut manifest = Manifest {
         format: MANIFEST_FORMAT.to_string(),
         old: target.old.clone(),
@@ -272,17 +273,24 @@ struct Sent {
     sha256: String,
 }
 
+/// Send the stream's parts and check the stage. Every part before the
+/// central directory goes once the scanner has read it. From the part the
+/// directory begins in, parts are held back until the directory lists
+/// exactly the entries that streamed past, so a forged directory signature
+/// can't carry unread entries out.
 fn send_parts(
     sink: &impl StageSink,
     stage: &str,
     mut stream: impl Read,
     part_bytes: usize,
-) -> Result<Sent, StageError> {
-    let held: BTreeMap<u32, _> = sink
+) -> Result<(Sent, CheckedSummary), StageError> {
+    let taken: BTreeMap<u32, Part> = sink
         .parts(stage)?
         .into_iter()
         .map(|part| (part.n, part))
         .collect();
+    let mut withheld: Vec<(u32, Vec<u8>)> = Vec::new();
+    let mut withheld_bytes = 0usize;
     let mut scanner = Scanner::default();
     let mut tail = Tail::new(TAIL_BYTES);
     let mut hash = Sha256::new();
@@ -301,21 +309,14 @@ fn send_parts(
         scanner.feed(body)?;
         tail.push(body);
         hash.update(body);
-        let sha256 = hex::encode(Sha256::digest(body));
-        let same = held.get(&n).is_some_and(|part| {
-            part.bytes == filled as u64 && part.sha256.eq_ignore_ascii_case(&sha256)
-        });
-        if !same {
-            let taken = sink.put_part(stage, n, body, &sha256)?;
-            if taken.n != n
-                || taken.bytes != filled as u64
-                || !taken.sha256.eq_ignore_ascii_case(&sha256)
-            {
-                return Err(SinkError::Unreadable {
-                    operation: "put part",
-                }
-                .into());
+        if scanner.in_directory() {
+            withheld_bytes += filled;
+            if withheld_bytes > TAIL_BYTES + part_bytes {
+                return Err(TailError::OutOfReach.into());
             }
+            withheld.push((n, body.to_vec()));
+        } else {
+            send_part(sink, stage, &taken, n, body)?;
         }
         if filled < part_bytes {
             break;
@@ -327,11 +328,43 @@ fn send_parts(
         n += 1;
     }
     let (scanned, _directory) = scanner.finish()?;
-    Ok(Sent {
+    let sent = Sent {
         scanned,
         tail,
         sha256: hex::encode(hash.finalize()),
-    })
+    };
+    let summary = check(&sent)?;
+    for (n, body) in withheld {
+        send_part(sink, stage, &taken, n, &body)?;
+    }
+    Ok((sent, summary))
+}
+
+/// Send part `n` unless finite.chat already holds these exact bytes, and
+/// check its answer.
+fn send_part(
+    sink: &impl StageSink,
+    stage: &str,
+    taken: &BTreeMap<u32, Part>,
+    n: u32,
+    body: &[u8],
+) -> Result<(), StageError> {
+    let sha256 = hex::encode(Sha256::digest(body));
+    let bytes = body.len() as u64;
+    let same = taken
+        .get(&n)
+        .is_some_and(|part| part.bytes == bytes && part.sha256.eq_ignore_ascii_case(&sha256));
+    if same {
+        return Ok(());
+    }
+    let answer = sink.put_part(stage, n, body, &sha256)?;
+    if answer.n != n || answer.bytes != bytes || !answer.sha256.eq_ignore_ascii_case(&sha256) {
+        return Err(SinkError::Unreadable {
+            operation: "put part",
+        }
+        .into());
+    }
+    Ok(())
 }
 
 fn read_full(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {

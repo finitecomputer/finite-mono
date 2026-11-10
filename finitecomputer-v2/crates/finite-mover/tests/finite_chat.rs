@@ -623,6 +623,62 @@ fn a_secret_path_refuses_the_whole_stage_before_its_bytes_leave() {
     assert!(fake.chat().received.is_empty());
 }
 
+/// A central-directory signature where a local header belongs: the
+/// scanner reads no further, so nothing after it may leave unchecked.
+#[test]
+fn a_forged_directory_signature_carries_nothing_out() {
+    let forged = [&0x0201_4b50u32.to_le_bytes()[..], &[0; 26]].concat();
+    // At the very start: no part is sent at all.
+    let fake = Fake::new();
+    let bytes = [
+        forged.clone(),
+        hand_stage(&[("workspace/.env", SECRET_MARKER)]),
+    ]
+    .concat();
+    let error = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, StageError::Unreadable(_)), "{error}");
+    assert_eq!(fake.calls(), ["GET parts"]);
+    assert!(fake.chat().received.is_empty());
+
+    // After a real entry: its part goes, the rest never does.
+    let fake = Fake::new();
+    let photo = vec![1; 6 * MIB];
+    let honest = hand_stage(&[
+        ("workspace/photos/cat.jpg", &photo),
+        ("workspace/.env", SECRET_MARKER),
+    ]);
+    let at = honest
+        .windows(14)
+        .position(|window| window == b"workspace/.env")
+        .unwrap()
+        - 30;
+    let bytes = [&honest[..at], &forged, &honest[at..]].concat();
+    let error = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap_err();
+    assert!(matches!(error, StageError::Unreadable(_)), "{error}");
+    assert_eq!(fake.calls(), ["GET parts", "PUT 1"]);
+    let chat = fake.chat();
+    assert!(
+        !contains(&chat.received, SECRET_MARKER),
+        "no secret byte arrived"
+    );
+    assert!(!contains(&chat.received, b"workspace/.env"));
+    assert!(chat.completed.is_empty());
+}
+
 #[test]
 fn unsafe_names_and_unreadable_stages_are_never_completed() {
     let fake = Fake::new();
