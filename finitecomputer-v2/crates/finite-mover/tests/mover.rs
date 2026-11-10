@@ -12,7 +12,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use finite_mover::contract::{Has, Roster, RosterAgent, RosterPerson, Sizes};
 use finite_mover::core_cli::CoreCli;
@@ -64,6 +64,9 @@ struct Platform {
     /// When it takes a report of this kind, the command moves on (staff
     /// retried: a new attempt's).
     replace_on: Option<String>,
+    /// When it takes a report of this kind, this other old agent's command
+    /// is withdrawn (staff, or its deadline).
+    withdraw_on: Option<(String, String)>,
 }
 
 impl Platform {
@@ -262,12 +265,19 @@ fn route(
                 _ => return (400, json!({"error": "a report of another kind"})),
             }
             if platform.replace_on.as_deref() == Some(kind.as_str()) {
+                platform.replace_on = None;
                 // Staff retried: a new attempt's command replaces this one.
                 next.attempt += 1;
                 next.command = Some(
                     json!({"id": format!("{old}:{}:stop_and_stage", next.attempt), "old": old, "attempt": next.attempt, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{old}.p1.{}", next.attempt)}),
                 );
                 next.seq = 0;
+            }
+            if let Some((on, other)) = platform.withdraw_on.clone()
+                && on == kind
+                && let Some(withdrawn) = platform.moves.get_mut(&other)
+            {
+                (withdrawn.state, withdrawn.command) = ("withdrawn".into(), None);
             }
             let answer = json!({"state": next.state, "attempt": next.attempt, "taken": true});
             platform.moves.insert(old.to_string(), next);
@@ -340,12 +350,12 @@ fn part_json(n: u32, body: &[u8]) -> Value {
     json!({"n": n, "bytes": body.len(), "etag": format!("etag-{}", &sha256[..8]), "sha256": sha256})
 }
 
-fn scratch() -> PathBuf {
+/// A world's own folder, deleted with it.
+fn scratch() -> tempfile::TempDir {
     tempfile::Builder::new()
         .prefix("mover-m3-")
         .tempdir()
         .unwrap()
-        .keep()
 }
 
 fn write(root: &Path, path: &str, bytes: &[u8]) {
@@ -381,6 +391,7 @@ fn host_stage(dir: &Path) -> Vec<u8> {
 /// CLI and the host reader as stand-ins that log their arguments.
 struct World {
     fake: Fake,
+    _scratch: tempfile::TempDir,
     dir: PathBuf,
     stage: Vec<u8>,
     fleet: FileFleet,
@@ -393,7 +404,8 @@ struct World {
 impl World {
     fn new() -> Self {
         let fake = Fake::new();
-        let dir = scratch();
+        let scratch = scratch();
+        let dir = scratch.path().to_path_buf();
         let stage = host_stage(&dir);
         std::fs::write(dir.join("stage.zip"), &stage).unwrap();
         std::fs::create_dir_all(dir.join("locks")).unwrap();
@@ -412,6 +424,7 @@ impl World {
                 admin_email: "mover@finite.test".into(),
                 admin_workos_user_id: "user_mover".into(),
                 wait_seconds: 60,
+                deadline: Duration::from_secs(120),
             },
             hosts: HostCommands {
                 hosts: BTreeMap::from([(
@@ -423,10 +436,12 @@ impl World {
                         "host".into(),
                     ],
                 )]),
+                idle: Duration::from_secs(120),
             },
             stage,
             locks: dir.join("locks"),
             dir,
+            _scratch: scratch,
         };
         world.bindings(Some(None));
         world
@@ -522,6 +537,7 @@ const CORE: &str = r#"
 dir="$MOVER_WORLD"
 printf '%s\n' "$*" >> "$dir/core.log"
 if [ -e "$dir/fail-$1" ]; then echo "error: the runtime is not the one bound" >&2; exit 1; fi
+if [ -e "$dir/quiet-$1" ]; then sleep 30; fi
 case "$1" in runtime-retire-exact) printf '{\n  "id": "rcr_retired",\n  "status": "stopped"\n}\n' ;; esac
 "#;
 
@@ -531,6 +547,7 @@ const HOST: &str = r#"
 dir="$MOVER_WORLD"
 printf '%s\n' "$*" >> "$dir/host.log"
 if [ -e "$dir/fail-stream" ]; then head -c 6000000 "$dir/stage.zip"; echo "finite-mover-host: runtime_a changed while it was read" >&2; exit 75; fi
+if [ -e "$dir/quiet-stream" ]; then head -c 100 "$dir/stage.zip"; sleep 30; exit 0; fi
 cat "$dir/stage.zip"
 "#;
 
@@ -687,21 +704,20 @@ fn a_command_replaced_meanwhile_is_left_quietly() {
     world.fake.platform().replace_on = Some("stopped".into());
     world.fake.tell(OLD, "asked", 1, stage_command(1));
     // Staff retry as attempt 1's stop is taken: its parts are refused (403).
+    // The mailbox, read again, holds attempt 2's command, done in its turn.
     let worked = world.work();
-    assert_eq!(worked[0].outcome, "stale", "{worked:?}");
+    let outcomes: Vec<&str> = worked.iter().map(|one| one.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["stale", "staged"], "{worked:?}");
     assert_eq!(
         world.fake.kinds(),
-        ["stopped"],
+        ["stopped", "stopped", "staged"],
         "no failure is reported on attempt 2's behalf"
     );
-    assert!(
-        world.fake.platform().parts.is_empty(),
-        "attempt 1 uploads nothing once replaced"
-    );
+    let stages: Vec<String> = world.fake.platform().parts.keys().cloned().collect();
     assert_eq!(
-        world.fake.platform().command(OLD).unwrap()["attempt"],
-        2,
-        "attempt 2's command stays"
+        stages,
+        ["proj_a.p1.2"],
+        "attempt 1 uploads nothing once replaced"
     );
 }
 
@@ -786,7 +802,7 @@ fn a_mover_restarted_mid_command_is_still_heard() {
     let world = World::new();
     world.fake.tell(OLD, "asked", 1, stage_command(1));
     // The last mover took the stop and reported it, then went away.
-    world.fake.platform().moves.get_mut(OLD).unwrap().seq = SeqClock::default().next();
+    world.fake.platform().moves.get_mut(OLD).unwrap().seq = SeqClock::default().next().unwrap();
     world.fake.platform().moves.get_mut(OLD).unwrap().state = "staging".into();
     std::thread::sleep(Duration::from_millis(2));
     assert_eq!(world.work()[0].outcome, "staged");
@@ -817,4 +833,192 @@ fn another_keys_signature_is_refused_everywhere() {
     assert!(mover.push_roster().is_err());
     assert!(mover.work_mailbox().is_err());
     assert!(world.fake.platform().rosters.is_empty());
+}
+
+/// The fleet file, changed by `edit`.
+fn edit_fleet(world: &World, edit: impl FnOnce(&mut Value)) {
+    let path = world.dir.join("fleet.json");
+    let mut fleet: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut fleet);
+    std::fs::write(&path, fleet.to_string()).unwrap();
+}
+
+fn restart_command(old: &str) -> Value {
+    json!({"id": format!("{old}:1:restart"), "old": old, "attempt": 1, "kind": "restart"})
+}
+
+#[test]
+fn a_binding_that_names_another_agent_is_never_acted_on() {
+    let world = World::new();
+    // A slip in the fleet: proj_a's entry is proj_b's runtime, whole.
+    edit_fleet(&world, |fleet| {
+        let entry = &mut fleet["bindings"][OLD];
+        entry["old"] = json!("proj_b");
+        entry["agent_runtime_id"] = json!("runtime_b");
+        entry["source_machine_id"] = json!("machine_b");
+    });
+    world.fake.tell(OLD, "held", 1, restart_command(OLD));
+    let worked = world.work();
+    assert_eq!(
+        (worked[0].outcome.as_str(), worked[0].step.as_deref()),
+        ("failed", Some("binding"))
+    );
+    assert!(
+        world.log("core.log").is_empty(),
+        "Core is never asked about another agent"
+    );
+}
+
+#[test]
+fn a_command_withdrawn_while_another_ran_is_never_done() {
+    let world = World::new();
+    edit_fleet(&world, |fleet| {
+        let mut other = fleet["bindings"][OLD].clone();
+        other["old"] = json!("proj_b");
+        other["agent_runtime_id"] = json!("runtime_b");
+        other["source_machine_id"] = json!("machine_b");
+        other["durable_state_id"] = json!("runtime_b");
+        fleet["bindings"]["proj_b"] = other;
+    });
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    world.fake.tell(
+        "proj_b",
+        "asked",
+        1,
+        json!({"id": "proj_b:1:stop_and_stage", "old": "proj_b", "attempt": 1, "kind": "stop_and_stage", "phase": "p1", "stage": "proj_b.p1.1"}),
+    );
+    // proj_b is withdrawn while proj_a stages: its runtime must keep running.
+    world.fake.platform().withdraw_on = Some(("staged".into(), "proj_b".into()));
+    let worked = world.work();
+    let outcomes: Vec<&str> = worked.iter().map(|one| one.outcome.as_str()).collect();
+    assert_eq!(outcomes, ["staged"]);
+    let core = world.log("core.log");
+    assert!(core.iter().all(|line| !line.contains("proj_b")), "{core:?}");
+}
+
+#[test]
+fn a_missing_locks_folder_fails_the_run_out_loud() {
+    let world = World::new();
+    let key = world.dir.join("mover.key");
+    std::fs::write(&key, hex::encode(MOVER_KEY)).unwrap();
+    std::fs::set_permissions(&key, std::os::unix::fs::PermissionsExt::from_mode(0o600)).unwrap();
+    let config = world.dir.join("config.json");
+    let missing = world.dir.join("no-such-folder");
+    std::fs::write(
+        &config,
+        json!({
+            "finite_chat": world.fake.base.as_str(),
+            "key_file": key,
+            "locks": missing,
+            "fleet": {"file": world.dir.join("fleet.json")},
+            "core": {"program": world.core.program, "admin_email": "mover@finite.test", "admin_workos_user_id": "user_mover", "wait_seconds": 60},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    world.fake.tell(OLD, "held", 1, restart_command(OLD));
+    let run = std::process::Command::new(env!("CARGO_BIN_EXE_finite-mover"))
+        .arg("--config")
+        .arg(&config)
+        .arg("mailbox")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        !run.status.success() && stderr.contains("no-such-folder"),
+        "{stderr}"
+    );
+    assert!(world.log("core.log").is_empty());
+}
+
+#[test]
+fn a_mover_whose_last_run_was_ahead_of_the_clock_is_still_heard() {
+    let world = World::new();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    // The last run reported with its clock two days fast, then the clock
+    // was put right; its last seq stayed in its locks folder.
+    let ahead = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+        + 2 * 86_400_000;
+    world.fake.platform().moves.get_mut(OLD).unwrap().seq = ahead;
+    world.fake.platform().moves.get_mut(OLD).unwrap().state = "staging".into();
+    std::fs::write(world.locks.join("seq"), ahead.to_string()).unwrap();
+    assert_eq!(world.work()[0].outcome, "staged");
+    assert!(
+        world
+            .fake
+            .platform()
+            .reports
+            .iter()
+            .all(|(_, taken)| *taken),
+        "{:?}",
+        world.fake.kinds()
+    );
+    assert_eq!(world.fake.state(OLD), "importing");
+}
+
+#[test]
+fn a_report_the_platform_did_not_take_fails_the_run() {
+    let world = World::new();
+    world.fake.tell(OLD, "held", 1, restart_command(OLD));
+    world.fake.platform().moves.get_mut(OLD).unwrap().seq = u64::MAX / 2;
+    let error = world.mover().work_mailbox().unwrap_err();
+    assert!(error.to_string().contains("didn't take"), "{error}");
+    assert_eq!(world.fake.kinds(), ["restarted (not taken)"]);
+}
+
+#[test]
+fn a_host_reader_that_goes_quiet_is_stopped_and_its_stage_fails() {
+    let mut world = World::new();
+    world.hosts.idle = Duration::from_secs(1);
+    std::fs::write(world.dir.join("quiet-stream"), "").unwrap();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    let started = Instant::now();
+    let worked = world.work();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(worked[0].outcome, "failed", "{worked:?}");
+    assert!(
+        worked[0]
+            .why
+            .as_deref()
+            .unwrap_or("")
+            .contains("sent nothing for 1 s"),
+        "{worked:?}"
+    );
+    assert!(world.fake.platform().completed.is_empty());
+}
+
+#[test]
+fn a_core_call_that_never_ends_is_stopped_and_fails_its_step() {
+    let mut world = World::new();
+    world.core.deadline = Duration::from_secs(1);
+    std::fs::write(world.dir.join("quiet-runtime-restart-exact"), "").unwrap();
+    world.fake.tell(OLD, "held", 1, restart_command(OLD));
+    let started = Instant::now();
+    let worked = world.work();
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        (worked[0].outcome.as_str(), worked[0].step.as_deref()),
+        ("failed", Some("restart")),
+        "{worked:?}"
+    );
+    assert!(
+        worked[0]
+            .why
+            .as_deref()
+            .unwrap_or("")
+            .contains("had not ended after 1 s"),
+        "{worked:?}"
+    );
+    assert_eq!(world.fake.state(OLD), "held");
 }

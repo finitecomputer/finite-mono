@@ -3,10 +3,18 @@
 //! machine the mover read (finite-mono #1146; Core keeps no listener for
 //! the mover). On lat-2 it runs through sudo for these subcommands alone.
 
+use std::io::Read;
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
+use crate::child::{Watchdog, spawn_alone};
 use crate::contract::{Mark, short};
 use crate::fleet::Binding;
+
+/// How long past its own wait a call to Core's CLI may take (its start, its
+/// database) before it is stopped.
+pub const CORE_MARGIN: Duration = Duration::from_secs(300);
 
 #[derive(Debug, Clone)]
 pub struct CoreCli {
@@ -18,6 +26,9 @@ pub struct CoreCli {
     pub admin_workos_user_id: String,
     /// How long a stop, retirement or restart is waited for.
     pub wait_seconds: u64,
+    /// How long any one call may take before it is stopped: the wait plus
+    /// `CORE_MARGIN`.
+    pub deadline: Duration,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +46,11 @@ pub enum CoreError {
     },
     #[error("Core's {subcommand} answered nothing the mover can read")]
     Unreadable { subcommand: &'static str },
+    #[error("Core's {subcommand} had not ended after {seconds} s, so it was stopped")]
+    Stuck {
+        subcommand: &'static str,
+        seconds: u64,
+    },
 }
 
 impl CoreCli {
@@ -67,19 +83,38 @@ impl CoreCli {
             subcommand,
             why: "no Core command is configured".into(),
         })?;
-        let output = Command::new(program)
-            .args(prefix)
-            .arg(subcommand)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|error| CoreError::NotRun {
+        let not_run = |error: std::io::Error| CoreError::NotRun {
+            subcommand,
+            why: error.to_string(),
+        };
+        let mut child = spawn_alone(
+            Command::new(program)
+                .args(prefix)
+                .arg(subcommand)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .map_err(not_run)?;
+        // Watched from its start to its pipes' end: a program that lingers
+        // holding them is stopped too.
+        let watchdog = Watchdog::watch(&child, self.deadline);
+        watchdog.waiting(true);
+        let stdout = read_all(child.stdout.take().expect("a piped stdout"));
+        let stderr = read_all(child.stderr.take().expect("a piped stderr"));
+        let status = child.wait().map_err(not_run)?;
+        let (stdout, stderr) = (stdout.join(), stderr.join());
+        if watchdog.fired() {
+            return Err(CoreError::Stuck {
                 subcommand,
-                why: error.to_string(),
-            })?;
-        if !output.status.success() {
+                seconds: self.deadline.as_secs(),
+            });
+        }
+        let (stdout, stderr) = (stdout.unwrap_or_default(), stderr.unwrap_or_default());
+        if !status.success() {
             // Core's errors name ids and states, never a credential.
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = String::from_utf8_lossy(&stderr);
             let last = stderr
                 .lines()
                 .rev()
@@ -87,11 +122,11 @@ impl CoreCli {
                 .unwrap_or("");
             return Err(CoreError::Failed {
                 subcommand,
-                status: output.status.to_string(),
+                status: status.to_string(),
                 why: short(last.trim()),
             });
         }
-        String::from_utf8(output.stdout).map_err(|_| CoreError::Unreadable { subcommand })
+        String::from_utf8(stdout).map_err(|_| CoreError::Unreadable { subcommand })
     }
 
     /// Stop the runtime and wait until Core says it stopped. A stopped
@@ -122,6 +157,15 @@ impl CoreCli {
         self.run("runtime-restart-exact", self.waited(binding))
             .map(drop)
     }
+}
+
+/// A pipe read to its end beside the program.
+fn read_all(mut pipe: impl Read + Send + 'static) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
 }
 
 /// The `id` of the last JSON object on `out`'s lines (Core prints the

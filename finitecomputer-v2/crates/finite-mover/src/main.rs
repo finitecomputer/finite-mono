@@ -10,7 +10,7 @@
 //!
 //! It prints one JSON line per result, never a secret or a person's data.
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -74,9 +74,8 @@ fn run() -> Result<(), String> {
             );
         }
         "mailbox" => {
-            let _held = match lock(&config, "mailbox.lock") {
-                Some(held) => held,
-                None => return Ok(()),
+            let Some(_held) = lock(&config, "mailbox.lock")? else {
+                return Ok(());
             };
             let worked = mover.work_mailbox().map_err(|error| error.to_string())?;
             for one in worked {
@@ -100,7 +99,7 @@ fn sizes(config: &Config) -> Result<(), String> {
     else {
         return Err("sizes reads Core's database: the fleet must be postgres".into());
     };
-    let Some(_held) = lock(config, "sizes.lock") else {
+    let Some(_held) = lock(config, "sizes.lock")? else {
         return Ok(());
     };
     let live = PgFleet::new(conninfo, sizes_file)
@@ -125,12 +124,19 @@ fn sizes(config: &Config) -> Result<(), String> {
 }
 
 /// A run lock in the locks folder, or `None` while another run holds it.
-fn lock(config: &Config, name: &str) -> Option<File> {
+/// A lock that can't be had at all is an error, never a quiet run.
+fn lock(config: &Config, name: &str) -> Result<Option<File>, String> {
+    let path = config.locks.join(name);
+    let unusable = |error: std::io::Error| format!("{}: {error}", path.display());
     let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(config.locks.join(name))
-        .ok()?;
-    file.try_lock().ok().map(|()| file)
+        .open(&path)
+        .map_err(unusable)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(unusable(error)),
+    }
 }

@@ -12,9 +12,15 @@
 //! Each step is idempotent: a command read again (its report lost, the
 //! mover restarted) is done again, and `seq` keeps growing, as fragment
 //! takes only a report whose `seq` is past the last it took.
+//!
+//! The mover acts only on the agent a command names, and only while the
+//! mailbox holds that command: it reads the mailbox again before each one,
+//! so a command withdrawn or replaced while another ran is never done.
 
 use std::cell::Cell;
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::io::{self, ErrorKind};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
@@ -31,22 +37,57 @@ use crate::stage::{PART_BYTES, StageError, StageTarget, upload_stage_with_progre
 /// minutes).
 pub const PROGRESS_EVERY: Duration = Duration::from_secs(60);
 
+/// The most commands one mailbox run does.
+pub const COMMANDS_PER_RUN: usize = 256;
+
 /// A report's `seq`: milliseconds since the epoch, and always past the
-/// last one this process gave. A mover that restarts mid-command keeps
-/// growing it, with no state of its own.
+/// last one given. Kept in a file, so a mover started again goes on past
+/// its last seq even if its clock was put back meanwhile.
 #[derive(Debug, Default)]
 pub struct SeqClock {
     last: Cell<u64>,
+    kept: Option<PathBuf>,
+    read: Cell<bool>,
 }
 
 impl SeqClock {
-    pub fn next(&self) -> u64 {
+    /// A clock that keeps its last seq in `path`.
+    pub fn kept_in(path: PathBuf) -> Self {
+        Self {
+            kept: Some(path),
+            ..Self::default()
+        }
+    }
+
+    /// The next seq, kept before it is used.
+    pub fn next(&self) -> io::Result<u64> {
+        if let Some(path) = &self.kept
+            && !self.read.get()
+        {
+            let last = match std::fs::read_to_string(path) {
+                Ok(text) => text.trim().parse::<u64>().map_err(|_| {
+                    io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!("{} holds no seq", path.display()),
+                    )
+                })?,
+                Err(error) if error.kind() == ErrorKind::NotFound => 0,
+                Err(error) => return Err(error),
+            };
+            self.last.set(self.last.get().max(last));
+            self.read.set(true);
+        }
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as u64);
         let next = now.max(self.last.get() + 1);
+        if let Some(path) = &self.kept {
+            let fresh = path.with_extension("new");
+            std::fs::write(&fresh, next.to_string())?;
+            std::fs::rename(&fresh, path)?;
+        }
         self.last.set(next);
-        next
+        Ok(next)
     }
 }
 
@@ -56,6 +97,10 @@ pub enum MoverError {
     Platform(#[from] SinkError),
     #[error(transparent)]
     Fleet(#[from] FleetError),
+    #[error("finite.chat didn't take {command}'s report (seq {seq}): it holds a later one")]
+    NotTaken { command: String, seq: u64 },
+    #[error("the mover's last seq could not be kept: {0}")]
+    Seq(#[from] io::Error),
 }
 
 /// What one command came to, for the run's log: no secret, no person.
@@ -107,7 +152,8 @@ pub struct Mover<'a> {
     pub fleet: &'a dyn Fleet,
     pub core: &'a CoreCli,
     pub hosts: &'a HostCommands,
-    /// The per-agent locks' directory (the uploader's).
+    /// The mover's own folder: the uploader's per-agent locks, and the
+    /// last `seq` given.
     pub locks: &'a Path,
     pub part_bytes: usize,
     /// How often a stage in progress reports (`PROGRESS_EVERY`).
@@ -131,7 +177,7 @@ impl<'a> Mover<'a> {
             locks,
             part_bytes: PART_BYTES,
             progress_every: PROGRESS_EVERY,
-            seq: SeqClock::default(),
+            seq: SeqClock::kept_in(locks.join("seq")),
         }
     }
 
@@ -141,11 +187,22 @@ impl<'a> Mover<'a> {
         Ok(self.platform.push_roster(&roster)?)
     }
 
-    /// Read the mailbox and do each command in it, oldest first.
+    /// Do each command in the mailbox, oldest first, reading it again
+    /// before each: only a command it still holds is done.
     pub fn work_mailbox(&self) -> Result<Vec<Worked>, MoverError> {
-        let mailbox = self.platform.mailbox()?;
         let mut worked = Vec::new();
-        for command in mailbox.commands {
+        let mut seen = BTreeSet::new();
+        while worked.len() < COMMANDS_PER_RUN {
+            let Some(command) = self
+                .platform
+                .mailbox()?
+                .commands
+                .into_iter()
+                .find(|command| !seen.contains(&command.id))
+            else {
+                break;
+            };
+            seen.insert(command.id.clone());
             worked.push(self.work(&command)?);
         }
         Ok(worked)
@@ -184,17 +241,33 @@ impl<'a> Mover<'a> {
         }
     }
 
+    /// Report on `command`. One finite.chat doesn't take is an error: the
+    /// command stays in the mailbox, and the run says so.
     fn report(&self, command: &Command, report: Report) -> Result<Reported, Stop> {
-        let report = Report {
-            seq: self.seq.next(),
-            ..report
-        };
-        Ok(self.platform.report(&command.old, &report)?)
+        let seq = self
+            .seq
+            .next()
+            .map_err(|error| Stop::Platform(error.into()))?;
+        let reported = self
+            .platform
+            .report(&command.old, &Report { seq, ..report })?;
+        if !reported.taken {
+            return Err(Stop::Platform(MoverError::NotTaken {
+                command: command.id.clone(),
+                seq,
+            }));
+        }
+        Ok(reported)
     }
 
     fn binding(&self, command: &Command) -> Result<Binding, Stop> {
         match self.fleet.binding(&command.old) {
-            Ok(Some(binding)) => Ok(binding),
+            // Every call to Core and the host names this agent alone.
+            Ok(Some(binding)) if binding.old == command.old => Ok(binding),
+            Ok(Some(_)) => Err(Stop::Failed(
+                "binding",
+                "the fleet's binding for this old agent names another".into(),
+            )),
             Ok(None) => Err(Stop::Failed(
                 "binding",
                 "Core has no runtime for this old agent".into(),
@@ -313,7 +386,7 @@ mod tests {
     #[test]
     fn seq_only_grows_even_across_movers() {
         let first = SeqClock::default();
-        let seqs: Vec<u64> = (0..1000).map(|_| first.next()).collect();
+        let seqs: Vec<u64> = (0..1000).map(|_| first.next().unwrap()).collect();
         assert!(seqs.windows(2).all(|pair| pair[1] > pair[0]));
         // A mover started again begins at the clock, past every seq of the
         // last one that didn't run ahead of the clock. One that did (more
@@ -328,6 +401,23 @@ mod tests {
         {
             std::thread::sleep(Duration::from_millis(1));
         }
-        assert!(SeqClock::default().next() > last);
+        assert!(SeqClock::default().next().unwrap() > last);
+    }
+
+    #[test]
+    fn a_kept_seq_goes_on_past_a_clock_put_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seq");
+        let ahead = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 86_400_000;
+        std::fs::write(&path, ahead.to_string()).unwrap();
+        let first = SeqClock::kept_in(path.clone());
+        assert_eq!(first.next().unwrap(), ahead + 1);
+        assert_eq!(SeqClock::kept_in(path.clone()).next().unwrap(), ahead + 2);
+        std::fs::write(&path, "not a seq").unwrap();
+        assert!(SeqClock::kept_in(path).next().is_err(), "never guessed");
     }
 }
