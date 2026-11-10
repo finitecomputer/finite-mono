@@ -29,7 +29,7 @@ use zeroize::Zeroizing;
 
 use crate::error::HostError;
 use crate::secrets;
-use crate::tree::{DurableId, Tree};
+use crate::tree::{DurableId, Tree, Whole};
 
 /// Telegram's own limit on a message, counted here in UTF-16 units, the
 /// strictest way to read it: an emoji counts twice.
@@ -215,12 +215,16 @@ enum Owner {
 }
 
 /// The single user the agent's Telegram pairing approved, as a private
-/// chat id (a positive user id; groups are negative).
+/// chat id (a positive user id; groups are negative). A pairing file that
+/// is there but can't be read whole is never taken for no file: it may
+/// hold the users that make the other folder's lone user not the owner.
 fn owner(tree: &Tree) -> Result<Owner, HostError> {
     let mut users = std::collections::BTreeSet::new();
     for path in APPROVED {
-        let Some(bytes) = tree.read_small(path, PAIRING_MAX_BYTES)? else {
-            continue;
+        let bytes = match tree.read_whole(path, PAIRING_MAX_BYTES)? {
+            Whole::Absent => continue,
+            Whole::Unreadable => return Ok(Owner::NotOne),
+            Whole::Bytes(bytes) => bytes,
         };
         // Hermes keys approved users by id; anything else is not a pairing.
         let Ok(serde_json::Value::Object(approved)) = serde_json::from_slice(&bytes) else {
@@ -342,6 +346,22 @@ fn curl_quoted(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Directory syncs this thread made, for the test that a log's
+    /// directory entry is durable before a send.
+    static DIRECTORY_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Make `dir`'s entries durable: syncing a file doesn't persist the name a
+/// new file was just given (fsync(2)).
+fn sync_directory(dir: &Path) -> std::io::Result<()> {
+    File::open(dir)?.sync_all()?;
+    #[cfg(test)]
+    DIRECTORY_SYNCS.with(|count| count.set(count.get() + 1));
+    Ok(())
+}
+
 /// An agent's notice log, locked while open.
 struct NoticeLog {
     file: File,
@@ -359,7 +379,10 @@ impl NoticeLog {
             .open(&path)
             .map_err(|error| HostError::io(path.clone(), error))?;
         flock(&file, FlockOperation::LockExclusive)
-            .map_err(|error| HostError::io(path, error.into()))?;
+            .map_err(|error| HostError::io(path.clone(), error.into()))?;
+        // A new log's name is durable before anything is read or sent, so
+        // a crash after a send can't forget its claim.
+        sync_directory(dir).map_err(|error| HostError::io(path, error))?;
         Ok(Self { file })
     }
 
@@ -396,6 +419,18 @@ impl NoticeLog {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A log's directory entry is made durable when the log is opened,
+    /// before anything is read or sent: a file sync alone doesn't persist
+    /// a new file's name.
+    #[test]
+    fn opening_a_log_syncs_its_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let before = DIRECTORY_SYNCS.with(|count| count.get());
+        let _log = NoticeLog::open(dir.path(), &DurableId::parse("runtime_1").unwrap()).unwrap();
+        assert_eq!(DIRECTORY_SYNCS.with(|count| count.get()), before + 1);
+        assert!(dir.path().join("runtime_1.jsonl").exists());
+    }
 
     #[test]
     fn notice_ids_and_tokens_are_checked() {

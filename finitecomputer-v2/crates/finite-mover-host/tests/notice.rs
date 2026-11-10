@@ -267,6 +267,65 @@ fn only_a_single_private_owner_is_ever_messaged() {
     assert_eq!(fake.requests()[0].1["chat_id"], 4242);
 }
 
+/// A pairing file that is there but can't be read whole (too large, a
+/// link, a second name, not a file) is never taken for no file: the other
+/// folder's lone user is not the owner on its word alone.
+#[test]
+fn a_pairing_that_cant_be_read_whole_sends_nothing() {
+    let (host, fake) = (Host::new(), FakeTelegram::new());
+    host.telegram(true);
+    let legacy = "agent/hermes-home/pairing/telegram-approved.json";
+    let current = "agent/hermes-home/platforms/pairing/telegram-approved.json";
+    let tree = host.work_root.join("kata").join(ID);
+    host.write(legacy, r#"{"4242": {"user_name": "owner"}}"#);
+
+    // The review's case: a current file of 1,000 users, past the 64 KiB read.
+    let many: serde_json::Map<String, Value> = (10_000..11_000)
+        .map(|user| (user.to_string(), json!({ "user_name": "x".repeat(100) })))
+        .collect();
+    host.write(current, &Value::Object(many).to_string());
+    assert!(std::fs::metadata(tree.join(current)).unwrap().len() > 64 * 1024);
+    assert_eq!(
+        host.send(&fake, "move-p1", NOW).result,
+        Outcome::NoSingleOwner
+    );
+
+    // A link to a file of one user, a second name for one, and a pipe.
+    let elsewhere = host.log.parent().unwrap().join("elsewhere.json");
+    std::fs::write(&elsewhere, r#"{"4242": {"user_name": "owner"}}"#).unwrap();
+    std::fs::remove_file(tree.join(current)).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, tree.join(current)).unwrap();
+    assert_eq!(
+        host.send(&fake, "move-p1", NOW).result,
+        Outcome::NoSingleOwner
+    );
+    std::fs::remove_file(tree.join(current)).unwrap();
+    std::fs::hard_link(&elsewhere, tree.join(current)).unwrap();
+    assert_eq!(
+        host.send(&fake, "move-p1", NOW).result,
+        Outcome::NoSingleOwner
+    );
+    std::fs::remove_file(tree.join(current)).unwrap();
+    let made = Command::new("mkfifo")
+        .arg(tree.join(current))
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert_eq!(
+        host.send(&fake, "move-p1", NOW).result,
+        Outcome::NoSingleOwner
+    );
+    assert!(
+        fake.requests().is_empty(),
+        "nothing went to the lone legacy user"
+    );
+
+    // With no current file at all, the legacy file alone is the pairing.
+    std::fs::remove_file(tree.join(current)).unwrap();
+    assert_eq!(host.send(&fake, "move-p1", NOW).result, Outcome::Sent);
+    assert_eq!(fake.requests()[0].1["chat_id"], 4242);
+}
+
 #[test]
 fn each_agent_gets_a_few_notices_a_day() {
     let (host, fake) = (Host::new(), FakeTelegram::new());
