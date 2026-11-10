@@ -146,6 +146,54 @@ mod tests {
         );
     }
 
+    /// Whether the process whose id is in `pid_file` is gone (or dead,
+    /// waiting only to be reaped).
+    fn gone(pid_file: &std::path::Path) -> bool {
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        match std::fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+            Err(_) => true,
+            Ok(stat) => stat
+                .rsplit_once(')')
+                .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')),
+        }
+    }
+
+    #[test]
+    fn a_timed_out_reader_leaves_nothing_of_itself_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("stray.pid");
+        // A child that ignores TERM, with its pipes moved away or holding them.
+        for redirect in [">/dev/null 2>&1 </dev/null", ""] {
+            let script = format!(
+                "(trap '' TERM; exec sleep 60) {redirect} & echo $! > '{}'; sleep 30",
+                pid_file.display()
+            );
+            let hosts = HostCommands {
+                hosts: [(
+                    "lat-a".to_string(),
+                    vec!["sh".into(), "-c".into(), script, "host".into()],
+                )]
+                .into(),
+                idle: std::time::Duration::from_secs(1),
+            };
+            let binding = Binding {
+                old: "proj_a".into(),
+                agent_runtime_id: "rt_a".into(),
+                source_host_id: "lat-a".into(),
+                source_machine_id: "machine_a".into(),
+                durable_state_id: "rt_a".into(),
+                owned_brains: Vec::new(),
+                retired_receipt: None,
+            };
+            let (_, failed) = measure(&[binding], &hosts, &SizesCache::default(), 2);
+            assert_eq!(failed.len(), 1, "{redirect:?}");
+            assert!(
+                gone(&pid_file),
+                "{redirect:?}: a TERM-ignoring child outlived the reader's deadline"
+            );
+        }
+    }
+
     #[test]
     fn a_summary_counts_as_the_roster_lists_it() {
         let summary = serde_json::json!({
