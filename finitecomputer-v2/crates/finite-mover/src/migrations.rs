@@ -1,8 +1,11 @@
-//! The mover's stage calls to finite.chat, each signed with NIP-98 by the
-//! mover's own key (fragment `docs/migrations.md`; the deployment's config
-//! holds only its npub):
+//! The mover's calls to finite.chat's `Migrations`, each signed with NIP-98
+//! by the mover's own key (fragment `docs/migrations.md`; the deployment's
+//! config holds only its npub):
 //!
 //! ```text
+//! PUT  /api/migrations/mover/roster                 {roster}  → {bound, withdrawn, replay}
+//! GET  /api/migrations/mover/mailbox                          → {commands}
+//! POST /api/migrations/mover/agents/{old}/report    {report}  → {state, attempt, taken}
 //! PUT  /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>  body: the part
 //! GET  /api/migrations/mover/stages/{stage}/parts                   → {parts: [{n, bytes, sha256, etag}]}
 //! POST /api/migrations/mover/stages/{stage}/complete  {manifest}    → {manifest_sha256, zip_bytes}
@@ -19,6 +22,7 @@ use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
+use crate::contract::{Mailbox, Report, Reported, Roster, RosterTaken};
 use crate::sink::{Complete, Completed, Part, Parts, SinkError, StageSink};
 use crate::stage::Manifest;
 
@@ -41,10 +45,60 @@ impl MigrationsClient {
     }
 
     fn url(&self, stage: &str, rest: &str) -> String {
+        self.mover_url(&format!("stages/{stage}/{rest}"))
+    }
+
+    fn mover_url(&self, rest: &str) -> String {
         format!(
-            "{}/api/migrations/mover/stages/{stage}/{rest}",
+            "{}/api/migrations/mover/{rest}",
             self.base.as_str().trim_end_matches('/')
         )
+    }
+
+    fn json_body(
+        operation: &'static str,
+        value: &impl serde::Serialize,
+    ) -> Result<Vec<u8>, SinkError> {
+        serde_json::to_vec(value).map_err(|_| SinkError::Unreadable { operation })
+    }
+
+    /// `PUT …/roster`: the whole roster, replacing the last.
+    pub fn push_roster(&self, roster: &Roster) -> Result<RosterTaken, SinkError> {
+        let body = Self::json_body("roster", roster)?;
+        let response = self.send(
+            "roster",
+            reqwest::Method::PUT,
+            self.mover_url("roster"),
+            Some(body),
+            "application/json",
+        )?;
+        Self::answer("roster", response)
+    }
+
+    /// `GET …/mailbox`: what the mover is told to do.
+    pub fn mailbox(&self) -> Result<Mailbox, SinkError> {
+        let response = self.send(
+            "mailbox",
+            reqwest::Method::GET,
+            self.mover_url("mailbox"),
+            None,
+            "",
+        )?;
+        Self::answer("mailbox", response)
+    }
+
+    /// `POST …/agents/{old}/report`. A 409 (`NotStaging` here) means the
+    /// command is no longer this old agent's current one.
+    pub fn report(&self, old: &str, report: &Report) -> Result<Reported, SinkError> {
+        let body = Self::json_body("report", report)?;
+        let response = self.send(
+            "report",
+            reqwest::Method::POST,
+            self.mover_url(&format!("agents/{old}/report")),
+            Some(body),
+            "application/json",
+        )?;
+        Self::answer("report", response)
     }
 
     fn send(
