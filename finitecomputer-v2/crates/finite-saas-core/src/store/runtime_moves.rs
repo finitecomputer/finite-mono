@@ -28,7 +28,8 @@ where
 {
     let agent_npub = match (input.moved, input.agent_npub.as_deref().map(str::trim)) {
         (RuntimeMoved::Migrated, Some(npub)) if canonical_npub(npub) => Some(npub.to_string()),
-        (RuntimeMoved::Archived, None) => None,
+        // The mover's retire command carries no npub (migration 0045).
+        (RuntimeMoved::Migrated, None) | (RuntimeMoved::Archived, None) => None,
         _ => return Err(CoreError::InvalidRuntimeMoveNpub),
     };
     let now = input.now.unwrap_or(current_time_iso()?);
@@ -76,10 +77,20 @@ where
             moved_at: row.get("moved_at"),
             agent_npub: row.get("agent_npub"),
         };
-        if stored.moved == input.moved && stored.agent_npub == agent_npub {
+        // The same mark again, or again without an npub (the mover's),
+        // returns the stored receipt, its npub kept.
+        if stored.moved == input.moved && (agent_npub.is_none() || stored.agent_npub == agent_npub)
+        {
             return Ok(stored);
         }
-        if !(stored.moved == RuntimeMoved::Archived && input.moved == RuntimeMoved::Migrated) {
+        // Forward only: archived to migrated (a late import), or a migrated
+        // mark's missing npub added.
+        let forward = (stored.moved == RuntimeMoved::Archived
+            && input.moved == RuntimeMoved::Migrated)
+            || (stored.moved == RuntimeMoved::Migrated
+                && input.moved == RuntimeMoved::Migrated
+                && stored.agent_npub.is_none());
+        if !forward {
             return Err(CoreError::RuntimeMoveConflict);
         }
     }

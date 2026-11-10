@@ -231,7 +231,6 @@ async fn postgres_mark_moved_exact_refuses_a_wrong_binding_or_npub() {
             Some(NPUB),
         );
         let bad_npubs = [
-            mark_input(&project_id, &runtime_id, RuntimeMoved::Migrated, None),
             mark_input(&project_id, &runtime_id, RuntimeMoved::Archived, Some(NPUB)),
             mark_input(
                 &project_id,
@@ -306,7 +305,6 @@ async fn postgres_runtime_moves_constraints_and_reapply() {
         client.batch_execute(CORE_SCHEMA_SQL).await.unwrap();
         assert_eq!(moves(&store).await, before);
         for (moved, npub) in [
-            ("migrated", None),
             ("archived", Some(NPUB)),
             ("migrated", Some("npub1short")),
             ("gone", None),
@@ -331,6 +329,86 @@ async fn postgres_runtime_moves_constraints_and_reapply() {
             )
             .await;
         assert!(orphan.is_err(), "a mark needs a real Runtime");
+    })
+    .await;
+}
+
+/// The mover marks a Runtime migrated when Migrations says to retire it,
+/// and fragment's command carries no npub: the mark is taken without one,
+/// again without one returns it, and an npub may be added once (0045).
+#[tokio::test]
+async fn postgres_a_migrated_mark_may_come_without_its_npub() {
+    with_isolated_postgres(|store| async move {
+        let (project_id, runtime_id) = launched_kata_runtime(&store, RUN, HOST).await;
+        let mark = |moved, npub: Option<&str>| mark_input(&project_id, &runtime_id, moved, npub);
+        let first = store
+            .admin_mark_runtime_moved_exact(mark(RuntimeMoved::Migrated, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            (first.moved, first.agent_npub.as_deref()),
+            (RuntimeMoved::Migrated, None)
+        );
+        let again = store
+            .admin_mark_runtime_moved_exact(mark(RuntimeMoved::Migrated, None))
+            .await
+            .unwrap();
+        assert_eq!(again, first, "the mover asked again: the same receipt");
+        let named = store
+            .admin_mark_runtime_moved_exact(mark(RuntimeMoved::Migrated, Some(NPUB)))
+            .await
+            .unwrap();
+        assert_eq!(
+            named.agent_npub.as_deref(),
+            Some(NPUB),
+            "staff add the npub"
+        );
+        let mover_again = store
+            .admin_mark_runtime_moved_exact(mark(RuntimeMoved::Migrated, None))
+            .await
+            .unwrap();
+        assert_eq!(
+            mover_again.agent_npub.as_deref(),
+            Some(NPUB),
+            "the mover's mark keeps it"
+        );
+        for refused in [
+            mark(RuntimeMoved::Migrated, Some(OTHER_NPUB)),
+            mark(RuntimeMoved::Archived, None),
+        ] {
+            let error = store
+                .admin_mark_runtime_moved_exact(refused)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, CoreError::RuntimeMoveConflict), "{error:?}");
+        }
+        assert_eq!(moves(&store).await.len(), 1);
+    })
+    .await;
+}
+
+/// Staff gave the old agent back: the mover restarts exactly the bound
+/// Runtime, and nothing for another binding.
+#[tokio::test]
+async fn postgres_admin_restart_exact_restarts_only_the_bound_runtime() {
+    with_isolated_postgres(|store| async move {
+        let (project_id, runtime_id) = launched_kata_runtime(&store, RUN, HOST).await;
+        let mismatch = store
+            .admin_request_runtime_restart_exact(stop_input(&project_id, &runtime_id, "other-host"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(mismatch, CoreError::RuntimeSpecMismatch),
+            "{mismatch:?}"
+        );
+        assert!(store.all("runtime_control_requests").await.is_empty());
+        let restart = store
+            .admin_request_runtime_restart_exact(stop_input(&project_id, &runtime_id, HOST))
+            .await
+            .unwrap();
+        assert_eq!(restart.kind, RuntimeControlKind::Restart);
+        assert_eq!(restart.agent_runtime_id, runtime_id);
+        assert_eq!(restart.status, RuntimeControlRequestStatus::Requested);
     })
     .await;
 }
