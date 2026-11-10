@@ -37,12 +37,14 @@
 //!   over anything, never deleted, so it can be undone by hand. With its
 //!   identity gone, `simplex_runtime.py`'s `supervise()` fails closed;
 //! - managed SimpleX is turned off in `agent/hermes-home/config.yaml`
-//!   (`gateway.platforms.simplex.enabled: false`), rewritten whole by a
-//!   rename that keeps its owner and mode, only if it was on.
+//!   (`gateway.platforms.simplex.enabled: false`), only if it was on: one
+//!   token changed and every other byte as it was, written by a rename
+//!   that keeps its owner and mode.
 //!
 //! Restarting the old agent brings back everything else, never SimpleX.
 //! A stage after that carries from the sealed folder again and seals
-//! nothing more. Without a stage id there is nothing to name the seal by,
+//! nothing more; an `agent/simplex` made again after the seal stays behind
+//! and never takes the sealed conversation's place. Without a stage id there is nothing to name the seal by,
 //! so an unsealed conversation is not carried at all. The summary records
 //! the sealed folder.
 
@@ -57,6 +59,7 @@ use rustix::fs::{
     openat, renameat, renameat_with, unlinkat,
 };
 use rustix::io::Errno;
+use rustix::thread::{CapabilitySet, capabilities, set_capabilities};
 use serde::Serialize;
 
 use crate::config_copy::CONFIG_MAX_BYTES;
@@ -189,16 +192,18 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
     };
     // The conversation is in `agent/simplex`, or, after a stage, in the one
     // folder it was sealed in.
-    let (name, rename_to) = if open_in(&agent, FOLDER)?.is_some() {
-        let sealed = stage.map(|stage| format!("{SEALED_PREFIX}{stage}"));
-        (FOLDER.to_owned(), sealed)
-    } else {
-        let mut sealed = sealed_folders(&agent)?;
-        match (sealed.pop(), sealed.pop()) {
-            (None, _) => return Ok(Err(Refused::NoSimplex)),
-            (Some(one), None) => (one, None),
-            _ => return Ok(Err(Refused::SeveralSealed)),
+    // Once sealed, the sealed folder is the conversation: an `agent/simplex`
+    // made again after it (by the old dashboard, say) stays behind and never
+    // takes its place.
+    let mut sealed = sealed_folders(&agent)?;
+    let (name, rename_to) = match (sealed.pop(), sealed.pop()) {
+        (Some(_), Some(_)) => return Ok(Err(Refused::SeveralSealed)),
+        (Some(one), None) => (one, None),
+        (None, _) if open_in(&agent, FOLDER)?.is_some() => {
+            let sealed = stage.map(|stage| format!("{SEALED_PREFIX}{stage}"));
+            (FOLDER.to_owned(), sealed)
         }
+        (None, _) => return Ok(Err(Refused::NoSimplex)),
     };
     let Some(folder) = open_in(&agent, &name)? else {
         return Ok(Err(Refused::NoSimplex));
@@ -306,6 +311,13 @@ pub fn still_settled(tree: &Tree, folder: &str) -> Result<bool, HostError> {
 /// renamed aside (unless it already was) and managed SimpleX turned off.
 /// Returns the sealed folder's path.
 pub fn seal(tree: &Tree, seal: Seal) -> Result<String, HostError> {
+    raise_writes()?;
+    let sealed = write_seal(tree, &seal);
+    lower_writes()?;
+    sealed
+}
+
+fn write_seal(tree: &Tree, seal: &Seal) -> Result<String, HostError> {
     let path = format!("{AGENT}/{}", seal.sealed);
     if let Some(rename_to) = &seal.rename_to {
         let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
@@ -323,10 +335,11 @@ pub fn seal(tree: &Tree, seal: Seal) -> Result<String, HostError> {
     Ok(path)
 }
 
-/// Turn managed SimpleX off in the Hermes config, if it is on: the whole
-/// file rewritten through a temporary beside it, with the original's
-/// owner and mode, then renamed over it. A config that can't be read as
-/// YAML is left as it is (`simplex_runtime.py` reads it as off too).
+/// Turn managed SimpleX off in the Hermes config, if it is on, by one
+/// token ([`turned_off`]): written through a temporary beside it, with the
+/// original's owner and mode, then renamed over it. A config that can't
+/// be turned off that way is left exactly as it is; the folder renamed
+/// aside already keeps the old core from starting.
 fn turn_off(tree: &Tree) -> Result<(), HostError> {
     let path = format!("{AGENT}/{HERMES_HOME}/{CONFIG}");
     let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
@@ -350,22 +363,9 @@ fn turn_off(tree: &Tree) -> Result<(), HostError> {
     if original.len() as u64 > CONFIG_MAX_BYTES {
         return Ok(());
     }
-    let Ok(mut config) = serde_yaml::from_slice::<serde_yaml::Value>(&original) else {
+    let Some(rewritten) = turned_off(&original) else {
         return Ok(());
     };
-    let enabled = config
-        .get_mut("gateway")
-        .and_then(|gateway| gateway.get_mut("platforms"))
-        .and_then(|platforms| platforms.get_mut("simplex"))
-        .and_then(|simplex| simplex.get_mut("enabled"));
-    match enabled {
-        Some(enabled) if *enabled == serde_yaml::Value::Bool(true) => {
-            *enabled = serde_yaml::Value::Bool(false);
-        }
-        _ => return Ok(()),
-    }
-    let rewritten = serde_yaml::to_string(&config)
-        .map_err(|error| HostError::Write(format!("{path}: {error}")))?;
     let _ = unlinkat(&home, CONFIG_REWRITE, AtFlags::empty());
     let mut temporary = File::from(
         openat(
@@ -378,7 +378,7 @@ fn turn_off(tree: &Tree) -> Result<(), HostError> {
     );
     let mut write = || -> Result<(), Errno> {
         temporary
-            .write_all(rewritten.as_bytes())
+            .write_all(&rewritten)
             .map_err(|error| Errno::from_io_error(&error).unwrap_or(Errno::IO))?;
         fchmod(&temporary, Mode::from_raw_mode(stat.st_mode & 0o777))?;
         fsync(&temporary)?;
@@ -396,6 +396,108 @@ fn turn_off(tree: &Tree) -> Result<(), HostError> {
         return Err(failed(error));
     }
     Ok(())
+}
+
+/// `config.yaml` with managed SimpleX off, every byte but one token as it
+/// was, so Hermes' YAML reader (PyYAML) reads every other value as before;
+/// or `None` if it isn't on, or can't be turned off that way.
+///
+/// The token is the plain `true` of `gateway.platforms.simplex.enabled`,
+/// on a block-mapping line of its own, the way Hermes writes its config;
+/// it becomes `false`. The edit is kept only if the edited document parses
+/// to the original with that one value changed, so a look-alike line
+/// inside a string is never the one changed.
+fn turned_off(original: &[u8]) -> Option<Vec<u8>> {
+    const PATH: [&str; 3] = ["gateway", "platforms", "simplex"];
+    let text = std::str::from_utf8(original).ok()?;
+    let mut parents: Vec<(usize, &str)> = Vec::new();
+    let mut token = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        let body = line.trim_end_matches(['\n', '\r']);
+        let content = body.trim_start_matches(' ');
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        if content.starts_with('\t') {
+            return None;
+        }
+        let indent = body.len() - content.len();
+        while parents.last().is_some_and(|(at, _)| *at >= indent) {
+            parents.pop();
+        }
+        let Some((key, rest)) = content.split_once(':') else {
+            continue;
+        };
+        let plain_key = !key.is_empty()
+            && key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte));
+        if !plain_key || !(rest.is_empty() || rest.starts_with(' ')) {
+            continue;
+        }
+        let value = rest.split(" #").next().unwrap_or("").trim();
+        if value.is_empty() {
+            parents.push((indent, key));
+            continue;
+        }
+        let under_simplex = parents.iter().map(|(_, key)| *key).eq(PATH);
+        if under_simplex && key == "enabled" && value == "true" {
+            if token.is_some() {
+                return None;
+            }
+            let at = start + indent + key.len() + 1 + (rest.len() - rest.trim_start().len());
+            token = Some(at..at + "true".len());
+        }
+    }
+    let token = token?;
+    let edited = format!("{}false{}", &text[..token.start], &text[token.end..]);
+    let mut expected: serde_yaml::Value = serde_yaml::from_str(text).ok()?;
+    let enabled = expected
+        .get_mut("gateway")?
+        .get_mut("platforms")?
+        .get_mut("simplex")?
+        .get_mut("enabled")?;
+    if *enabled != serde_yaml::Value::Bool(true) {
+        return None;
+    }
+    *enabled = serde_yaml::Value::Bool(false);
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&edited).ok()?;
+    (parsed == expected).then(|| edited.into_bytes())
+}
+
+/// The capabilities only the seal uses: held permitted, effective only
+/// while it writes ([`seal`]). Every operation lowers them first
+/// ([`lower_writes`]), so nothing else the reader does can write.
+fn writes() -> CapabilitySet {
+    CapabilitySet::DAC_OVERRIDE | CapabilitySet::CHOWN
+}
+
+/// Lower the seal's capabilities from the effective set.
+pub fn lower_writes() -> Result<(), HostError> {
+    let mut sets = capabilities(None).map_err(capability_error)?;
+    if sets.effective.intersects(writes()) {
+        sets.effective.remove(writes());
+        set_capabilities(None, sets).map_err(capability_error)?;
+    }
+    Ok(())
+}
+
+/// Raise them for the seal, where they are permitted (a test run as the
+/// tree's owner needs none).
+fn raise_writes() -> Result<(), HostError> {
+    let mut sets = capabilities(None).map_err(capability_error)?;
+    if sets.permitted.contains(writes()) && !sets.effective.contains(writes()) {
+        sets.effective.insert(writes());
+        set_capabilities(None, sets).map_err(capability_error)?;
+    }
+    Ok(())
+}
+
+fn capability_error(error: Errno) -> HostError {
+    HostError::Write(format!("the seal's capabilities: {error}"))
 }
 
 /// The folder `name` in `parent`, if it is one (never through a link).

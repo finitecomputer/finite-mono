@@ -505,3 +505,104 @@ fn a_database_unsettled_while_it_is_staged_fails_the_stage() {
         "a stage that missed a committed row was taken: {result:?}"
     );
 }
+
+/// A Hermes config with values PyYAML (the old runtime's reader) would
+/// read otherwise if they lost their quotes, and comments.
+const CONFIG_TRICKY: &str = "# Hermes, by finite-agentd\nmodel:\n  default: \"off\"\ntimezone: \"yes\"\nagent:\n  personality: 'on'\n  version: \"1.0\"\n  mode: \"0o17\"\n  nothing: \"~\"\ngateway:\n  platforms:\n    simplex:\n      enabled: true   # managed by Finite\n      extra:\n        finite_managed: true\n        notes: |\n          enabled: true\n    telegram:\n      enabled: true\n";
+
+/// The config as Hermes and `simplex_runtime.py` read it: PyYAML.
+fn as_hermes_reads(config: &[u8]) -> Value {
+    let out = Command::new("python3")
+        .args([
+            "-c",
+            "import json, sys, yaml; print(json.dumps(yaml.safe_load(sys.stdin.read())))",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(config)?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    assert!(out.status.success());
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn turning_simplex_off_changes_nothing_else_hermes_reads() {
+    let tree = Tree::new();
+    tree.simplex();
+    tree.write(CONFIG, CONFIG_TRICKY.as_bytes());
+    tree.stream();
+    // The one token, and not the look-alike inside the block scalar.
+    let expected = CONFIG_TRICKY.replacen("enabled: true   #", "enabled: false   #", 1);
+    assert_eq!(String::from_utf8(tree.read(CONFIG)).unwrap(), expected);
+    let mut before = as_hermes_reads(CONFIG_TRICKY.as_bytes());
+    before["gateway"]["platforms"]["simplex"]["enabled"] = json!(false);
+    assert_eq!(as_hermes_reads(&tree.read(CONFIG)), before);
+    assert_eq!(before["model"]["default"], "off", "still the string");
+}
+
+#[test]
+fn a_config_it_cant_edit_by_one_token_is_left_and_the_seal_still_holds() {
+    let tree = Tree::new();
+    tree.simplex();
+    // Flow style: no `enabled: true` line of its own to turn off.
+    let flow =
+        "gateway:\n  platforms:\n    simplex: {enabled: true, extra: {finite_managed: true}}\n";
+    tree.write(CONFIG, flow.as_bytes());
+    tree.stream();
+    assert_eq!(tree.read(CONFIG), flow.as_bytes(), "left exactly as it was");
+    assert!(tree.path(SEALED).exists() && !tree.path("agent/simplex").exists());
+    let runtime = OldRuntime::new();
+    assert!(
+        !runtime.supervise(&tree, Duration::from_secs(5)),
+        "renamed aside, the old core still never starts"
+    );
+}
+
+#[test]
+fn a_simplex_folder_made_again_after_the_seal_never_hides_the_sealed_conversation() {
+    // An empty folder, and a fresh identity the old dashboard could make.
+    type Recreate = fn(&Tree);
+    let cases: [(&str, Recreate); 2] = [
+        ("empty", |tree| {
+            fs::create_dir_all(tree.path("agent/simplex")).unwrap()
+        }),
+        ("fresh identity", |tree| {
+            tree.write("agent/simplex/identity_chat.db", &db(b"another chat"));
+            tree.write("agent/simplex/identity_agent.db", &db(b"another agent"));
+        }),
+    ];
+    for (case, recreate) in cases {
+        let tree = Tree::new();
+        tree.simplex();
+        let first = entries(&tree.stream());
+        recreate(&tree);
+        let made_again: Vec<String> = fs::read_dir(tree.path("agent/simplex"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        let retry = entries(&tree.stream_for(Some("proj_a.p1.2")));
+        for name in [CHAT, AGENT, OWNER] {
+            assert_eq!(retry[name], first[name], "{case}: {name}");
+        }
+        assert_eq!(
+            summary(&retry)["simplex"],
+            json!({"carried": true, "sealed": SEALED}),
+            "{case}"
+        );
+        // What was made again stays where it is, behind.
+        let still: Vec<String> = fs::read_dir(tree.path("agent/simplex"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(still, made_again, "{case}");
+        assert!(
+            !tree.path("agent/simplex.moved-proj_a.p1.2").exists(),
+            "{case}"
+        );
+    }
+}

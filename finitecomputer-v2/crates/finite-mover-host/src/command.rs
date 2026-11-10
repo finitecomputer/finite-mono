@@ -162,6 +162,8 @@ pub fn run_with(
     input: impl Read,
     mut out: impl Write,
 ) -> Result<(), HostError> {
+    // The seal's write capabilities stay lowered but around the seal.
+    crate::simplex::lower_writes()?;
     match operation {
         Operation::Sizes { id, owned_brains } => {
             let tree = Tree::open(work_root, id)?;
