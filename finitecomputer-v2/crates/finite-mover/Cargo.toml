@@ -16,6 +16,8 @@ hex.workspace = true
 # The mover key's npub (`finite-mover npub`).
 nostr.workspace = true
 reqwest.workspace = true
+# Stops a stuck child's whole process group (src/child.rs).
+rustix = { workspace = true, features = ["process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

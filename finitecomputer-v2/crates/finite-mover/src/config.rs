@@ -18,13 +18,14 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use reqwest::Url;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use crate::core_cli::CoreCli;
-use crate::hosts::HostCommands;
+use crate::core_cli::{CORE_MARGIN, CoreCli};
+use crate::hosts::{HOST_IDLE, HostCommands};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -123,12 +124,14 @@ impl Config {
             admin_email: self.core.admin_email.clone(),
             admin_workos_user_id: self.core.admin_workos_user_id.clone(),
             wait_seconds: self.core.wait_seconds,
+            deadline: Duration::from_secs(self.core.wait_seconds) + CORE_MARGIN,
         }
     }
 
     pub fn hosts(&self) -> HostCommands {
         HostCommands {
             hosts: self.hosts.clone(),
+            idle: HOST_IDLE,
         }
     }
 }

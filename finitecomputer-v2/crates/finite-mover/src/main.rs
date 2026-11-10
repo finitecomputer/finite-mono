@@ -7,7 +7,7 @@
 //!
 //! It prints one JSON line per result, never a secret or a person's data.
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -61,9 +61,8 @@ fn run() -> Result<(), String> {
             );
         }
         "mailbox" => {
-            let _held = match lock(&config) {
-                Some(held) => held,
-                None => return Ok(()),
+            let Some(_held) = lock(&config)? else {
+                return Ok(());
             };
             let worked = mover.work_mailbox().map_err(|error| error.to_string())?;
             for one in worked {
@@ -78,13 +77,20 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-/// The mailbox's run lock, or `None` while another run holds it.
-fn lock(config: &Config) -> Option<File> {
+/// The mailbox's run lock, or `None` while another run holds it. A lock
+/// that can't be had at all is an error, never a quiet run.
+fn lock(config: &Config) -> Result<Option<File>, String> {
+    let path = config.locks.join("mailbox.lock");
+    let unusable = |error: std::io::Error| format!("{}: {error}", path.display());
     let file = File::options()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(config.locks.join("mailbox.lock"))
-        .ok()?;
-    file.try_lock().ok().map(|()| file)
+        .open(&path)
+        .map_err(unusable)?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(unusable(error)),
+    }
 }
