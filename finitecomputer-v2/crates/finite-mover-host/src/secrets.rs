@@ -109,6 +109,25 @@ fn telegram(tree: &Tree) -> Result<Option<Zeroizing<String>>, HostError> {
     }
 }
 
+/// The bot token of a connected Telegram, for the owner notice: none when
+/// the agent switched Telegram off (`enabled: false`) or has no plausible
+/// token.
+pub(crate) fn connected_telegram(tree: &Tree) -> Result<Option<Zeroizing<String>>, HostError> {
+    let switched_off = config(tree)?.is_some_and(|config| {
+        config
+            .get("gateway")
+            .and_then(|gateway| gateway.get("platforms"))
+            .and_then(|platforms| platforms.get("telegram"))
+            .and_then(|telegram| telegram.get("enabled"))
+            .and_then(Value::as_bool)
+            == Some(false)
+    });
+    if switched_off {
+        return Ok(None);
+    }
+    Ok(telegram(tree)?.filter(|token| plausible(token)))
+}
+
 /// `OPENROUTER_API_KEY` in the Hermes `.env`
 /// (finite-agentd/src/connections.rs:165-181), or the legacy `model.api_key`
 /// when the model provider is OpenRouter (connections.rs:183-188).
