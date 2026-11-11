@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # status run shows the rollback window. PR 2 (cleanup/chat-store-delete-old)
 # deletes this constant and its line.
 CHAT_ENGINE_ROLLOUT_WINDOW_SINCE = "2026-08-31"
-CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-11-18"
+CHAT_ENGINE_ROLLOUT_DELETION_ISSUE = "FIN-493"
 
 # Every operational name lives here. The contract test keeps entries that are
 # owned by Nix aligned with their declaring modules.
@@ -4244,7 +4244,7 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         # the exit code, only be impossible to miss while the window is open.
         "chat_engine_rollback_window": {
             "open_since": CHAT_ENGINE_ROLLOUT_WINDOW_SINCE,
-            "deletion_deadline": CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE,
+            "deletion_issue": CHAT_ENGINE_ROLLOUT_DELETION_ISSUE,
             "note": (
                 "normalized chat engine is the only engine; the first boot folds "
                 "pre-cutover databases; there is no engine flag, so rollback means "
@@ -4312,8 +4312,8 @@ def render_human(report: dict[str, Any]) -> str:
         f"[AMBER] chat engine rollback window open "
         f"(since {CHAT_ENGINE_ROLLOUT_WINDOW_SINCE}); rollback = restore pre-fold "
         f"backup + revert deploy only if `finitechat-server rollback-check` passes, "
-        f"otherwise roll forward; reader/fold deletion PR due by "
-        f"{CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE}",
+        f"otherwise roll forward; reader/fold deletion tracked in "
+        f"{CHAT_ENGINE_ROLLOUT_DELETION_ISSUE}",
         "",
     ]
 
