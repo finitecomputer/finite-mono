@@ -24,22 +24,23 @@
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
 //! its relay settings.
 //!
-//! ## Writers: the stop, then the seal
+//! ## Writers: the hold, then the seal
 //!
 //! The agent's lease doesn't hold SimpleX's own writers. What excludes them
-//! is the stop: the mover streams only once Core has stopped the runtime
-//! (`stop_and_stage`: Core's `runtime-stop-exact`, waited until stopped),
-//! so no SimpleX core runs when `stream` starts. Nothing keeps it stopped
-//! meanwhile, though (a restart from the old dashboard), so the seal comes
-//! before the carry's last checks: a core opens the databases by
-//! `agent/simplex`'s path, and SQLite opens a database's `-wal` and
-//! `-journal` by its path too, so once the folder is renamed no core can
-//! reach them. A connection open across the rename shows its `-wal` (or a
-//! write's `-journal`) beside the database it holds. So the checks after
-//! the rename hold for good: the folder renamed is the one checked and
-//! copied, both databases are settled, and each is as it was copied.
-//! Otherwise the folder goes back where it was, unsealed, and the stage
-//! fails as a changed tree.
+//! is Core's hold (FIN-463): the mover streams only once Core's
+//! `runtime-stop-exact` has stopped the runtime, and from that stop Core
+//! starts it again for nothing but the mover's own restart. So no SimpleX
+//! core runs from before `stream` starts until the move is done. The reader
+//! can't see Core: the stage id is its word for that hold, since the mover
+//! names the stage only after that stop. Without one nothing is carried
+//! (`no-stage-id`), whatever the tree looks like.
+//!
+//! The seal keeps the old core from the databases for good: a core opens
+//! them by `agent/simplex`'s path, and SQLite opens a database's `-wal` and
+//! `-journal` by its path too. The checks after the rename then hold: the
+//! folder renamed is the one checked and copied, both databases are
+//! settled, and each is as it was copied. Otherwise the folder goes back
+//! where it was, unsealed, and the stage fails as a changed tree.
 //!
 //! ## The seal: the reader's one write in an agent's tree
 //!
@@ -51,7 +52,10 @@
 //!
 //! - `agent/simplex` is renamed
 //!   `agent/simplex.moved-<stage id>.owner-<contact>`, never over
-//!   anything, never deleted, so it can be undone by hand. Its name keeps
+//!   anything, never deleted, so it can be undone by hand. It goes there by
+//!   way of `simplex.sealing-…`, where its last checks run, so a sealed name
+//!   only ever holds a folder that passed; a seal cut short stays pending,
+//!   and a later stage refuses it (`seal-unfinished`). Its name keeps
 //!   the owner it was carried for, so a retry never takes another from a
 //!   pairing made since. With its identity gone, `simplex_runtime.py`'s
 //!   `supervise()` fails closed;
@@ -100,6 +104,9 @@ const FOLDER: &str = "simplex";
 /// A sealed folder: `simplex.moved-<stage id>.owner-<contact>`, beside
 /// where it was.
 const SEALED_PREFIX: &str = "simplex.moved-";
+/// A seal under way: renamed to this before its last checks, and to the
+/// sealed name only once they pass. Never taken for a seal.
+const PENDING_PREFIX: &str = "simplex.sealing-";
 const OWNER_MARK: &str = ".owner-";
 /// The Hermes config, and the temporary file it is rewritten through.
 const HERMES_HOME: &str = "hermes-home";
@@ -141,6 +148,10 @@ pub enum Refused {
     NoStageId,
     /// More than one sealed folder and no `agent/simplex`: which is it?
     SeveralSealed,
+    /// A seal was cut short before its last checks passed (the reader
+    /// killed, or its folder not put back): what it renamed may not be the
+    /// conversation that was checked, so it is left for a person.
+    SealUnfinished,
 }
 
 /// The summary's record of the carry (`stream` only).
@@ -230,7 +241,10 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
     // Once sealed, the sealed folder is the conversation: an `agent/simplex`
     // made again after it (by the old dashboard, say) stays behind and never
     // takes its place.
-    let mut sealed = sealed_folders(&agent)?;
+    if !folders_named(&agent, PENDING_PREFIX)?.is_empty() {
+        return Ok(Err(Refused::SealUnfinished));
+    }
+    let mut sealed = folders_named(&agent, SEALED_PREFIX)?;
     let name = match (sealed.pop(), sealed.pop()) {
         (Some(_), Some(_)) => return Ok(Err(Refused::SeveralSealed)),
         (Some(one), None) => one,
@@ -347,14 +361,17 @@ fn settled(folder: &OwnedFd) -> Result<bool, HostError> {
     Ok(true)
 }
 
-/// Seal the old SimpleX once its conversation is staged: the folder
-/// renamed aside (unless it already was), checked a last time, and managed
-/// SimpleX turned off. A folder that fails its last checks goes back where
-/// it was, unsealed, and the stage fails. Returns the sealed folder's path.
+/// Seal the old SimpleX once its conversation is staged, and turn managed
+/// SimpleX off. The folder is renamed to a pending name, checked a last
+/// time there, and only then renamed to its sealed name: so a sealed name
+/// only ever holds a folder that passed. One that fails goes back where it
+/// was, unsealed, and the stage fails; one cut short (the reader killed,
+/// or its folder not put back) keeps the pending name, which a later stage
+/// refuses ([`Refused::SealUnfinished`]). A folder already sealed is checked
+/// where it is. Returns the sealed folder's path.
 pub fn seal(tree: &Tree, seal: Seal) -> Result<String, HostError> {
     let path = format!("{AGENT}/{}", seal.sealed);
     let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
-    let unsealed = seal.name != seal.sealed;
     let rename = |from: &str, to: &str| {
         with_writes(|| {
             renameat_with(&seal.agent, from, &seal.agent, to, RenameFlags::NOREPLACE)
@@ -362,30 +379,40 @@ pub fn seal(tree: &Tree, seal: Seal) -> Result<String, HostError> {
                 .map_err(failed)
         })
     };
-    if unsealed {
-        rename(&seal.name, &seal.sealed)?;
-    }
-    match last_checks(tree, &seal) {
-        Ok(true) => {}
-        checked => {
-            if unsealed {
-                rename(&seal.sealed, &seal.name)?;
+    let changed = |checked: Result<bool, HostError>| {
+        checked
+            .err()
+            .unwrap_or_else(|| HostError::TreeChanged(path.clone().into()))
+    };
+    if seal.name == seal.sealed {
+        match last_checks(tree, &seal, &seal.sealed) {
+            Ok(true) => {}
+            checked => return Err(changed(checked)),
+        }
+    } else {
+        let pending = seal.sealed.replacen(SEALED_PREFIX, PENDING_PREFIX, 1);
+        rename(&seal.name, &pending)?;
+        match last_checks(tree, &seal, &pending) {
+            Ok(true) => rename(&pending, &seal.sealed)?,
+            checked => {
+                rename(&pending, &seal.name)?;
+                return Err(changed(checked));
             }
-            return Err(checked.err().unwrap_or(HostError::TreeChanged(path.into())));
         }
     }
     with_writes(|| turn_off(tree))?;
     Ok(path)
 }
 
-/// The carry's last checks, once sealed, so no core can reach the
-/// databases (the module's "Writers"): what holds now holds for good. The
-/// folder sealed is the one checked and copied; both databases are
+/// The carry's last checks, on the folder now at `name` in `agent/`, once
+/// renamed so no core can reach the databases (the module's "Writers"):
+/// what holds now holds for good. That folder is the one checked and
+/// copied; both databases are
 /// settled; and each is as it was copied. Settled first, so a WAL
 /// checkpointed into its database at any moment shows either there or in
 /// the database, changed.
-fn last_checks(tree: &Tree, seal: &Seal) -> Result<bool, HostError> {
-    let Some(sealed) = open_in(tree, &seal.agent, &seal.sealed)? else {
+fn last_checks(tree: &Tree, seal: &Seal, name: &str) -> Result<bool, HostError> {
+    let Some(sealed) = open_in(tree, &seal.agent, name)? else {
         return Ok(false);
     };
     if !same_folder(&sealed, &seal.folder) || !settled(&seal.folder)? {
@@ -605,8 +632,8 @@ fn open_in(
     }
 }
 
-/// The sealed folders in `agent/`, by name.
-fn sealed_folders(agent: &OwnedFd) -> Result<Vec<String>, HostError> {
+/// The folders in `agent/` whose names start with `prefix`.
+fn folders_named(agent: &OwnedFd, prefix: &str) -> Result<Vec<String>, HostError> {
     let failed = |error: Errno| HostError::io(AGENT.into(), error.into());
     let mut sealed = Vec::new();
     for entry in Dir::read_from(agent).map_err(failed)? {
@@ -614,7 +641,7 @@ fn sealed_folders(agent: &OwnedFd) -> Result<Vec<String>, HostError> {
         let Ok(name) = entry.file_name().to_str() else {
             continue;
         };
-        if name.starts_with(SEALED_PREFIX)
+        if name.starts_with(prefix)
             && stat_entry(agent, entry.file_name())
                 .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory)
         {

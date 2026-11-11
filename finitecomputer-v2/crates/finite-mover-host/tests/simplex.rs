@@ -938,3 +938,154 @@ fn a_folder_swapped_in_before_the_seal_is_never_sealed() {
         "SimpleX not turned off"
     );
 }
+
+/// The stage id is the reader's word that Core holds the runtime stopped
+/// for its move, so no SimpleX core can write meanwhile: without one, the
+/// carry is refused, however settled the tree looks.
+#[test]
+fn without_a_stage_id_nothing_is_carried() {
+    let tree = Tree::new();
+    tree.simplex();
+    let mut out = Vec::new();
+    let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
+    run(&tree.work_root, operation, &mut out).unwrap();
+    let stage = entries(&out);
+    assert!(carried_nothing(&stage), "{:?}", stage.keys());
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": false, "why": "no-stage-id"})
+    );
+}
+
+/// The real reader, run under strace to fail or kill it at one syscall,
+/// with its stdout read as the test chooses.
+fn reader_under_strace(tree: &Tree, stage: &str, inject: &str) -> std::process::Child {
+    let strace = std::env::var("STRACE").unwrap_or_else(|_| "strace".into());
+    Command::new(strace)
+        .args(["-f", "-qq", "-o", "/dev/null", "-e", inject, "--"])
+        .arg(env!("CARGO_BIN_EXE_finite-mover-host"))
+        .arg("--work-root")
+        .arg(&tree.work_root)
+        .args(["stream", ID, "--stage", stage])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// An interrupted seal (the reader killed after its rename, or its rollback
+/// refused because `agent/simplex` was made again) never leaves a folder a
+/// retry takes for a completed seal: the source was replaced before the
+/// rename, and a retry must never carry the replacement as the original
+/// owner's conversation.
+#[test]
+#[ignore = "needs strace, for fault injection (STRACE=<path>)"]
+fn an_interrupted_seal_is_never_taken_for_a_completed_one() {
+    use std::io::Read as _;
+    let cases = [
+        // Killed at its first fsync: the one right after the seal's rename.
+        (
+            "killed after the rename",
+            "inject=fsync:signal=SIGKILL:when=1",
+        ),
+        // The rollback's rename refused, as if `agent/simplex` were made again.
+        ("rollback refused", "inject=renameat2:error=EEXIST:when=2"),
+    ];
+    let mut taken = Vec::new();
+    for (case, inject) in cases {
+        let tree = Tree::new();
+        tree.simplex();
+        sqlite(&tree.path("agent/simplex/identity_chat.db"));
+        let original = tree.read("agent/simplex/identity_chat.db");
+        let mut reader = reader_under_strace(&tree, STAGE, inject);
+        let mut stdout = reader.stdout.take().unwrap();
+        // Its first bytes come mid-carry (past its write buffer); unread,
+        // the rest keeps it there while the source is replaced.
+        let mut first = [0u8; 1];
+        stdout.read_exact(&mut first).unwrap();
+        fs::rename(tree.path("agent/simplex"), tree.path("agent/simplex-aside")).unwrap();
+        tree.write("agent/simplex/identity_chat.db", &db(b"another chat"));
+        tree.write("agent/simplex/identity_agent.db", &db(b"another agent"));
+        let mut rest = Vec::new();
+        stdout.read_to_end(&mut rest).unwrap();
+        let interrupted = reader.wait().unwrap();
+        let agent = || -> Vec<String> {
+            let mut names: Vec<String> = fs::read_dir(tree.path("agent"))
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        };
+        let left = agent();
+        // A folder under this stage's sealed name holding the replacement
+        // looks like a completed seal of it.
+        for name in left
+            .iter()
+            .filter(|name| name.starts_with(&format!("simplex.moved-{STAGE}")))
+        {
+            if tree.read(&format!("agent/{name}/identity_chat.db")) != original {
+                taken.push(format!(
+                    "{case} ({interrupted}): {name} seals the replacement"
+                ));
+            }
+        }
+        // A retry, a new attempt's stage, must not take it for one.
+        let mut out = Vec::new();
+        let operation =
+            parse(format!("stream {ID} --stage proj_a.p1.2").split_whitespace()).unwrap();
+        let retry = run(&tree.work_root, operation, &mut out);
+        let refused = retry.is_ok()
+            && summary(&entries(&out))["simplex"]
+                == json!({"carried": false, "why": "seal-unfinished"});
+        if !refused {
+            taken.push(format!(
+                "{case} ({interrupted}): the retry wasn't refused: {retry:?}"
+            ));
+        }
+        if retry.is_ok() {
+            let stage = entries(&out);
+            let simplex = &summary(&stage)["simplex"];
+            let from_left = simplex["sealed"]
+                .as_str()
+                .is_some_and(|sealed| sealed.starts_with(&format!("agent/simplex.moved-{STAGE}")));
+            if from_left && stage.get(CHAT).is_some_and(|chat| *chat != original) {
+                taken.push(format!(
+                    "{case} ({interrupted}): the retry carried the replacement from {} as {}; agent/ after the interruption: {left:?}",
+                    simplex["sealed"],
+                    String::from_utf8_lossy(&stage[OWNER])
+                ));
+            }
+        }
+    }
+    assert!(taken.is_empty(), "{}", taken.join("\n"));
+}
+
+/// A seal cut short leaves its folder under a pending name, which a stage
+/// never takes for a seal: nothing is carried, and nothing renamed.
+#[test]
+fn a_seal_cut_short_is_left_for_a_person() {
+    let tree = Tree::new();
+    tree.simplex();
+    fs::rename(
+        tree.path("agent/simplex"),
+        tree.path("agent/simplex.sealing-proj_a.p1.1.owner-3"),
+    )
+    .unwrap();
+    let stage = entries(&tree.stream_for(Some("proj_a.p1.2")));
+    assert!(carried_nothing(&stage), "{:?}", stage.keys());
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": false, "why": "seal-unfinished"})
+    );
+    assert!(
+        tree.path("agent/simplex.sealing-proj_a.p1.1.owner-3/identity_chat.db")
+            .exists()
+    );
+    assert!(!tree.path("agent/simplex").exists());
+    assert_eq!(
+        tree.read(CONFIG),
+        CONFIG_ON.as_bytes(),
+        "SimpleX not turned off"
+    );
+}
