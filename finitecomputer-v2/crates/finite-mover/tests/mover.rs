@@ -67,6 +67,10 @@ struct Platform {
     /// When it takes a report of this kind, this other old agent's command
     /// is withdrawn (staff, or its deadline).
     withdraw_on: Option<(String, String)>,
+    /// Each hand-off taken, with the reports and parts taken before it.
+    handoffs: Vec<(Value, usize, usize)>,
+    /// A hand-off is answered this status instead.
+    refuse_handoff: Option<u16>,
 }
 
 impl Platform {
@@ -284,6 +288,26 @@ fn route(
             platform.reports.push((report, true));
             (200, answer)
         }
+        ("POST", rest) if rest.starts_with("agents/") && rest.ends_with("/secrets") => {
+            let old = &rest["agents/".len()..rest.len() - "/secrets".len()];
+            let handoff: Value = serde_json::from_slice(body).unwrap();
+            if let Some(status) = platform.refuse_handoff {
+                return (status, json!({"error": "refused"}));
+            }
+            if platform.command(old).map(|c| &c["id"]) != Some(&handoff["command"]) {
+                return (409, json!({"error": "conflict"}));
+            }
+            let handed: Vec<Value> = handoff["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["kind"].clone())
+                .collect();
+            let parts = platform.parts.values().map(BTreeMap::len).sum();
+            let reports = platform.reports.len();
+            platform.handoffs.push((handoff, reports, parts));
+            (200, json!({"handed": handed}))
+        }
         (method, rest) if rest.starts_with("stages/") => {
             let rest = &rest["stages/".len()..];
             let (stage, action) = rest.split_once('/').unwrap();
@@ -387,6 +411,47 @@ fn host_stage(dir: &Path) -> Vec<u8> {
     out
 }
 
+const TELEGRAM: &str = "123456:AAsentinel-telegram-token";
+const OPENROUTER: &str = "sk-or-v1-sentinel0123456789abcdef";
+const SECRET_HEX: &str = "67dea2ed018072d675f5415ecfaed7d2597555e202d85b3d65ea4e58d2d92ffa";
+/// NIP-19's example: `SECRET_HEX` as an nsec.
+const NSEC: &str = "nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5";
+
+/// The host reader's real `secrets` of a stopped tree that has all three
+/// (a tree of its own: the stage's tree holds no identity).
+fn host_secrets(dir: &Path) -> Vec<u8> {
+    let work_root = dir.join("secrets-work");
+    let root = work_root.join("kata/runtime_s");
+    write(
+        &root,
+        "agent/hermes-home/config.yaml",
+        format!("gateway:\n  platforms:\n    telegram:\n      token: {TELEGRAM}\n").as_bytes(),
+    );
+    write(
+        &root,
+        "agent/hermes-home/.env",
+        format!("OPENROUTER_API_KEY={OPENROUTER}\n").as_bytes(),
+    );
+    write(
+        &root,
+        "agent/identity/identity.json",
+        format!(r#"{{"kind":"nostr-secp256k1","secret_hex":"{SECRET_HEX}"}}"#).as_bytes(),
+    );
+    let mut out = Vec::new();
+    run(
+        &work_root,
+        parse([
+            "secrets",
+            "runtime_s",
+            "telegram_bot_token,openrouter_key,nostr_nsec",
+        ])
+        .unwrap(),
+        &mut out,
+    )
+    .unwrap();
+    out
+}
+
 /// Everything around the mover: the fake platform, a fleet file, Core's
 /// CLI and the host reader as stand-ins that log their arguments.
 struct World {
@@ -408,6 +473,7 @@ impl World {
         let dir = scratch.path().to_path_buf();
         let stage = host_stage(&dir);
         std::fs::write(dir.join("stage.zip"), &stage).unwrap();
+        std::fs::write(dir.join("secrets.json"), host_secrets(&dir)).unwrap();
         std::fs::create_dir_all(dir.join("locks")).unwrap();
         let fleet_file = dir.join("fleet.json");
         let world = Self {
@@ -548,6 +614,10 @@ case "$1" in runtime-retire-exact) printf '{\n  "id": "rcr_retired",\n  "status"
 const HOST: &str = r#"
 dir="$MOVER_WORLD"
 printf '%s\n' "$*" >> "$dir/host.log"
+if [ "$1" = secrets ]; then
+  if [ -e "$dir/fail-secrets" ]; then echo "finite-mover-host: runtime_a is being written" >&2; exit 75; fi
+  cat "$dir/secrets.json"; exit 0
+fi
 if [ -e "$dir/fail-stream" ]; then head -c 6000000 "$dir/stage.zip"; echo "finite-mover-host: runtime_a changed while it was read" >&2; exit 75; fi
 if [ -e "$dir/quiet-stream" ]; then head -c 100 "$dir/stage.zip"; sleep 30; exit 0; fi
 if [ -e "$dir/stray-away-stream" ]; then head -c 100 "$dir/stage.zip"; (trap '' TERM; exec sleep 60) >/dev/null 2>&1 </dev/null & echo $! > "$dir/stray.pid"; sleep 30; exit 0; fi
@@ -649,6 +719,121 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
         "rcr_retired"
     );
     assert_eq!(world.fake.state(OLD), "moved");
+}
+
+fn secrets_command(attempt: u32) -> Value {
+    let mut command = stage_command(attempt);
+    command["secrets"] = json!(["telegram_bot_token", "openrouter_key", "nostr_nsec"]);
+    command
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Every file under `dir`, whole, as one text.
+fn every_file(dir: &Path) -> Vec<u8> {
+    let mut all = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            all.extend(every_file(&path));
+        } else {
+            all.extend(std::fs::read(&path).unwrap_or_default());
+        }
+    }
+    all
+}
+
+#[test]
+fn a_yes_hands_off_the_old_agents_secrets_once_it_is_stopped() {
+    let world = World::new();
+    world.fake.tell(OLD, "asked", 1, secrets_command(1));
+    let worked = world.work();
+    assert_eq!(worked[0].outcome, "staged", "{worked:?}");
+    assert_eq!(
+        world.log("host.log"),
+        [
+            "secrets runtime_a telegram_bot_token,openrouter_key,nostr_nsec",
+            "stream runtime_a --brain brain_x"
+        ],
+        "read after the stop, before the stage"
+    );
+    let platform = world.fake.platform();
+    let [(handoff, reports, parts)] = platform.handoffs.as_slice() else {
+        panic!("one hand-off: {:?}", platform.handoffs);
+    };
+    assert_eq!(
+        handoff,
+        &json!({"command": "proj_a:1:stop_and_stage", "items": [
+            {"kind": "telegram_bot_token", "value": TELEGRAM},
+            {"kind": "openrouter_key", "value": OPENROUTER},
+            {"kind": "nostr_nsec", "value": NSEC},
+        ]})
+    );
+    assert_eq!(
+        (*reports, *parts, platform.reports[0].0["kind"].as_str()),
+        (1, 0, Some("stopped")),
+        "after stopped was taken, before any part"
+    );
+    assert_eq!(platform.completed.len(), 1);
+    drop(platform);
+    // never on the mover's disk, nor in what a run says
+    let kept = every_file(&world.locks);
+    let said = serde_json::to_string(&worked).unwrap();
+    for value in [TELEGRAM, OPENROUTER, NSEC] {
+        assert!(!contains(&kept, value.as_bytes()) && !said.contains(value));
+    }
+}
+
+#[test]
+fn a_command_without_secrets_reads_none() {
+    let world = World::new();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    assert_eq!(world.work()[0].outcome, "staged");
+    assert!(world.fake.platform().handoffs.is_empty());
+    assert_eq!(world.log("host.log"), ["stream runtime_a --brain brain_x"]);
+}
+
+#[test]
+fn secrets_that_cannot_be_read_or_are_refused_never_hold_up_the_stage() {
+    // the host reader fails: nothing is handed off, and the stage goes on
+    let world = World::new();
+    world.fail("secrets");
+    world.fake.tell(OLD, "asked", 1, secrets_command(1));
+    assert_eq!(world.work()[0].outcome, "staged");
+    assert!(world.fake.platform().handoffs.is_empty());
+    // finite.chat refuses the hand-off (400): the stage goes on
+    let world = World::new();
+    world.fake.platform().refuse_handoff = Some(400);
+    world.fake.tell(OLD, "asked", 1, secrets_command(1));
+    assert_eq!(world.work()[0].outcome, "staged");
+    assert_eq!(
+        world.fake.kinds().last().map(String::as_str),
+        Some("staged")
+    );
+}
+
+#[test]
+fn a_hand_off_finite_chat_cannot_take_now_leaves_the_command() {
+    // 409: not this command any more: stopped quietly, nothing streamed
+    let world = World::new();
+    world.fake.platform().refuse_handoff = Some(409);
+    world.fake.tell(OLD, "asked", 1, secrets_command(1));
+    assert_eq!(world.work()[0].outcome, "stale");
+    assert!(world.fake.platform().parts.is_empty());
+    // 503 is not a refusal of it: the run fails, the command stays, and the
+    // next run hands it off again
+    let world = World::new();
+    world.fake.platform().refuse_handoff = Some(503);
+    world.fake.tell(OLD, "asked", 1, secrets_command(1));
+    assert!(world.mover().work_mailbox().is_err());
+    assert!(world.fake.platform().parts.is_empty());
+    world.fake.platform().refuse_handoff = None;
+    assert_eq!(world.work()[0].outcome, "staged");
+    assert_eq!(world.fake.platform().handoffs.len(), 1);
 }
 
 #[test]

@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 use crate::child::{Watched, run_within};
-use crate::contract::short;
+use crate::contract::{HandoffItem, SecretKind, short};
 use crate::fleet::Binding;
 
 /// The most of a host reader's error output kept for a failure's why.
@@ -66,22 +68,45 @@ impl HostCommands {
         let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
         if !ended.status.success() {
-            let stderr = String::from_utf8_lossy(&stderr);
-            let last = stderr
-                .lines()
-                .rev()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("");
-            return Err(HostError::NotRun(short(&format!(
-                "{}: {}",
-                ended.status,
-                last.trim()
-            ))));
+            return Err(failed(&ended.status, &stderr));
         }
         serde_json::from_slice(&stdout)
             .ok()
             .and_then(|summary| crate::sizes::sizes_of(&summary))
             .ok_or_else(|| HostError::NotRun("the host reader's sizes could not be read".into()))
+    }
+
+    /// `secrets <durable_state_id> <kind>,...`: the stopped agent's
+    /// secrets of `kinds` it has, read into memory alone (its answer's
+    /// bytes are cleared once read). A kind it lacks is left out.
+    pub fn secrets(
+        &self,
+        binding: &Binding,
+        kinds: &[SecretKind],
+    ) -> Result<Vec<HandoffItem>, HostError> {
+        let named: Vec<&str> = kinds.iter().filter_map(|kind| kind.as_str()).collect();
+        if named.is_empty() {
+            return Ok(Vec::new());
+        }
+        let words = vec![
+            "secrets".to_string(),
+            binding.durable_state_id.clone(),
+            named.join(","),
+        ];
+        let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
+            .map_err(|error| HostError::NotRun(error.to_string()))?;
+        let stdout = Zeroizing::new(stdout);
+        if !ended.status.success() {
+            return Err(failed(&ended.status, &stderr));
+        }
+        #[derive(serde::Deserialize)]
+        struct Read {
+            items: Vec<HandoffItem>,
+        }
+        // serde's own error could quote a value: never kept
+        serde_json::from_slice::<Read>(&stdout)
+            .map(|read| read.items)
+            .map_err(|_| HostError::NotRun("the host reader's secrets could not be read".into()))
     }
 
     /// `stream <durable_state_id> [--brain <id>]...`: the stage, as the
@@ -113,6 +138,18 @@ impl HostCommands {
             ended: false,
         })
     }
+}
+
+/// A host reader that exited unsuccessfully: its status and the last line
+/// it wrote to stderr (the reader puts no secret in an error).
+fn failed(status: &std::process::ExitStatus, stderr: &[u8]) -> HostError {
+    let stderr = String::from_utf8_lossy(stderr);
+    let last = stderr
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
+    HostError::NotRun(short(&format!("{status}: {}", last.trim())))
 }
 
 /// Keep the end of `stderr`, read to its end beside the stream.

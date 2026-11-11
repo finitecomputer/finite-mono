@@ -4,7 +4,7 @@
 //!
 //! | Command | Steps | Reports |
 //! |---|---|---|
-//! | `stop_and_stage` | Core stops the runtime; the host reader streams it; the stage goes up in parts through finite.chat and is completed | `stopped`, `progress`, `staged`; or `failed` |
+//! | `stop_and_stage` | Core stops the runtime; the secrets it names are read in memory and handed to the person's Vault on finite.chat; the host reader streams it; the stage goes up in parts through finite.chat and is completed | `stopped`, `progress`, `staged`; or `failed` |
 //! | `retire` | Core retires it (its verified backup), unless it did already; Core marks it moved | `retired`; or `failed` |
 //! | `restart` | Core starts it again | `restarted`; or `failed` |
 //! | another kind | nothing: left in the mailbox | none |
@@ -297,6 +297,7 @@ impl<'a> Mover<'a> {
             .stop(&binding)
             .map_err(|error| Stop::Failed("stop", error.to_string()))?;
         self.report(command, Report::of(&command.id, 0, "stopped"))?;
+        self.hand_off(command, &binding)?;
         let stream = self
             .hosts
             .stream(&binding)
@@ -339,6 +340,48 @@ impl<'a> Mover<'a> {
             },
         )?;
         Ok("staged")
+    }
+
+    /// The secrets `command` names (F11), read from the stopped agent
+    /// into memory, never onto disk or into a log, and handed to its
+    /// person's Vault on finite.chat. The stage goes on whatever came of
+    /// them: a host reader that could not read them, or a hand-off
+    /// finite.chat refused (4xx), is said on stderr, never a value, and the
+    /// secrets stay in the old agent's backup. A command no longer current
+    /// stops quietly; a finite.chat that could not be reached, or answered
+    /// 5xx, leaves the command for the next run, which hands them off again.
+    fn hand_off(&self, command: &Command, binding: &Binding) -> Result<(), Stop> {
+        if command.secrets.is_empty() {
+            return Ok(());
+        }
+        let items = match self.hosts.secrets(binding, &command.secrets) {
+            Ok(items) => items,
+            Err(error) => {
+                eprintln!(
+                    "finite-mover: {}: its secrets were not read, so none were handed off: {error}",
+                    command.id
+                );
+                return Ok(());
+            }
+        };
+        if items.is_empty() {
+            return Ok(());
+        }
+        match self.platform.hand_off(&command.old, &command.id, &items) {
+            Ok(_) => Ok(()),
+            Err(
+                error @ SinkError::Refused {
+                    status: 400..=499, ..
+                },
+            ) => {
+                eprintln!(
+                    "finite-mover: {}: its secrets were not handed off: {error}",
+                    command.id
+                );
+                Ok(())
+            }
+            Err(error) => Err(Stop::from(error)),
+        }
     }
 
     fn retire(&self, command: &Command) -> Result<&'static str, Stop> {

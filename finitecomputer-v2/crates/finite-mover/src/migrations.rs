@@ -6,6 +6,7 @@
 //! PUT  /api/migrations/mover/roster                 {roster}  → {bound, withdrawn, replay}
 //! GET  /api/migrations/mover/mailbox                          → {commands}
 //! POST /api/migrations/mover/agents/{old}/report    {report}  → {state, attempt, taken}
+//! POST /api/migrations/mover/agents/{old}/secrets   {command, items}  → {handed}
 //! PUT  /api/migrations/mover/stages/{stage}/parts/{n}?sha256=<hex>  body: the part
 //! GET  /api/migrations/mover/stages/{stage}/parts                   → {parts: [{n, bytes, sha256, etag}]}
 //! POST /api/migrations/mover/stages/{stage}/complete  {manifest}    → {manifest_sha256, zip_bytes}
@@ -22,7 +23,9 @@ use reqwest::{StatusCode, Url};
 use serde::de::DeserializeOwned;
 use zeroize::Zeroizing;
 
-use crate::contract::{Mailbox, Report, Reported, Roster, RosterTaken};
+use crate::contract::{
+    HandedOff, Handoff, HandoffItem, Mailbox, Report, Reported, Roster, RosterTaken,
+};
 use crate::sink::{Complete, Completed, Part, Parts, SinkError, StageSink};
 use crate::stage::Manifest;
 
@@ -99,6 +102,26 @@ impl MigrationsClient {
             "application/json",
         )?;
         Self::answer("report", response)
+    }
+
+    /// `POST …/agents/{old}/secrets`: the old agent's secrets for
+    /// `command`, each into its person's Vault on finite.chat. The body
+    /// is cleared once sent; a refusal keeps its status alone.
+    pub fn hand_off(
+        &self,
+        old: &str,
+        command: &str,
+        items: &[HandoffItem],
+    ) -> Result<HandedOff, SinkError> {
+        let body = Zeroizing::new(Self::json_body("secrets", &Handoff { command, items })?);
+        let response = self.send(
+            "secrets",
+            reqwest::Method::POST,
+            self.mover_url(&format!("agents/{old}/secrets")),
+            Some(body.to_vec()),
+            "application/json",
+        )?;
+        Self::answer("secrets", response)
     }
 
     fn send(
