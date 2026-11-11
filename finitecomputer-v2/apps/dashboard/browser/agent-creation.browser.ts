@@ -6,7 +6,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
 import { sealData } from "iron-session";
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
@@ -1085,12 +1085,23 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         async () =>
           `agent switcher did not hydrate after returning from Skills\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
+      // FIN-495 / FIN-188: this menu has failed to open in CI and never here.
+      // Record what the page does around the click (listeners only, so the
+      // click's timing is unchanged) and report it if the item never shows.
+      const aroundClick = recordPageEvents(page);
       await machineSwitcher.click();
+      aroundClick.mark("clicked");
       const secondAgentItem = page.getByRole("menuitem", {
         name: "Second Oslo Bot",
         exact: true,
       });
-      await secondAgentItem.waitFor({ state: "visible" });
+      await secondAgentItem.waitFor({ state: "visible" }).catch(async (error: Error) => {
+        throw new Error(
+          `${error.message}\n${await switcherState(page)}\n${aroundClick.report()}\n`
+            + `dashboard output (tail):\n${dashboardOutput().slice(-3_000)}`
+        );
+      });
+      aroundClick.stop();
       await secondAgentItem.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
@@ -3670,6 +3681,64 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(await timeoutMessage());
+}
+
+/** Timestamped main-frame navigations, loads, page errors and console
+ * errors or warnings, from now until `stop`. */
+function recordPageEvents(page: Page) {
+  const start = Date.now();
+  const events: string[] = [];
+  const mark = (what: string) => events.push(`+${Date.now() - start}ms ${what}`);
+  const navigated = (frame: Frame) => {
+    if (frame === page.mainFrame()) mark(`navigated ${frame.url()}`);
+  };
+  const loaded = () => mark("load");
+  const failed = (error: Error) => mark(`pageerror ${error.message.slice(0, 300)}`);
+  const logged = (message: ConsoleMessage) => {
+    if (
+      (message.type() === "error" || message.type() === "warning")
+      && !message.text().includes("was preloaded using link preload")
+    ) {
+      mark(`console.${message.type()} ${message.text().slice(0, 300)}`);
+    }
+  };
+  page.on("framenavigated", navigated);
+  page.on("load", loaded);
+  page.on("pageerror", failed);
+  page.on("console", logged);
+  const stop = () => {
+    page.off("framenavigated", navigated);
+    page.off("load", loaded);
+    page.off("pageerror", failed);
+    page.off("console", logged);
+  };
+  return {
+    mark,
+    stop,
+    report: () => {
+      stop();
+      return `page events since just before the click:\n${events.join("\n") || "(none)"}`;
+    },
+  };
+}
+
+/** The agent switchers as the page has them now: hydrated or not, open or
+ * not, and the menu's items. */
+async function switcherState(page: Page) {
+  const state = await page
+    .evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      switchers: Array.from(document.querySelectorAll(".ocean-machine-switcher__button")).map((button) => ({
+        label: button.getAttribute("aria-label"),
+        expanded: button.getAttribute("aria-expanded"),
+        hydrated: Object.keys(button).some((key) => key.startsWith("__reactProps$")),
+      })),
+      menus: Array.from(document.querySelectorAll('[role="menu"]')).map((menu) =>
+        Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent?.trim())),
+    }))
+    .catch((error: unknown) => ({ evaluateFailed: String(error) }));
+  return `switcher state: ${JSON.stringify(state)}`;
 }
 
 async function pageText(page: Page) {
