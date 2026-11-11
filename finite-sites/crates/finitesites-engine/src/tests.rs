@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use finitesites_proto::dto::{
     HostedRequesterAssertionRequest, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest,
-    SharingRequest,
+    SharingRequest, SiteRedirectRequest,
 };
 use finitesites_proto::limits::{LOGIN_TOKEN_TTL_SECONDS, MAX_SHARES_PER_SITE};
 use finitesites_proto::project_config::{
@@ -1343,6 +1343,208 @@ fn sharing_is_owner_controlled_and_public_requires_confirmation() {
         fx.engine
             .set_project_site_sharing(OWNER, "source-only", &confirmed, NOW + 5);
     assert!(matches!(missing_site, Err(EngineError::SiteNotFound)));
+}
+
+// ---- redirect (ADR 0030) ---------------------------------------------------
+
+fn redirect_to(to: Option<&str>) -> SiteRedirectRequest {
+    SiteRedirectRequest {
+        to: to.map(str::to_string),
+    }
+}
+
+fn site_redirect(fx: &Fixture, site_name: &str) -> Option<String> {
+    fx.engine
+        .store
+        .site_by_name(site_name)
+        .unwrap()
+        .unwrap()
+        .redirect_to
+}
+
+#[test]
+fn redirect_is_owner_controlled_canonical_and_replays() {
+    let mut fx = fixture();
+    publish_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let site_id = fx.engine.store.site_by_name("hello").unwrap().unwrap().id;
+
+    let set = fx
+        .engine
+        .set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some("HTTPS://Hello.Finite.Place/")),
+            NOW + 2,
+        )
+        .unwrap();
+    assert_eq!(set.project_slug, "hello-project");
+    assert_eq!(set.site_name, "hello");
+    assert_eq!(set.site_url, "http://hello.sites.test/");
+    assert_eq!(
+        set.redirect_to.as_deref(),
+        Some("https://hello.finite.place")
+    );
+    assert_eq!(
+        site_redirect(&fx, "hello").as_deref(),
+        Some("https://hello.finite.place")
+    );
+
+    // A replay, in any spelling of the same origin, changes nothing.
+    let replay = fx
+        .engine
+        .set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some("https://hello.finite.place")),
+            NOW + 3,
+        )
+        .unwrap();
+    assert_eq!(replay, set);
+    let store = &fx.engine.store;
+    assert_eq!(store.site_event_count(&site_id, "redirect_set").unwrap(), 1);
+
+    let status = fx
+        .engine
+        .project_status(OWNER, "hello-project", remote("hello-project"))
+        .unwrap();
+    assert_eq!(
+        status.site.unwrap().redirect_to.as_deref(),
+        Some("https://hello.finite.place")
+    );
+
+    // Another target replaces the first, and is recorded as a new change.
+    let moved_again = fx
+        .engine
+        .set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some("https://hello-again.finite.place")),
+            NOW + 3,
+        )
+        .unwrap();
+    assert_eq!(
+        moved_again.redirect_to.as_deref(),
+        Some("https://hello-again.finite.place")
+    );
+    assert_eq!(
+        site_redirect(&fx, "hello").as_deref(),
+        Some("https://hello-again.finite.place")
+    );
+    let store = &fx.engine.store;
+    assert_eq!(store.site_event_count(&site_id, "redirect_set").unwrap(), 2);
+
+    let cleared = fx
+        .engine
+        .set_project_site_redirect(OWNER, "hello-project", &redirect_to(None), NOW + 4)
+        .unwrap();
+    assert_eq!(cleared.redirect_to, None);
+    assert_eq!(site_redirect(&fx, "hello"), None);
+    let store = &fx.engine.store;
+    assert_eq!(
+        store
+            .site_event_count(&site_id, "redirect_cleared")
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn redirect_refuses_collaborators_strangers_and_missing_sites() {
+    let mut fx = fixture();
+    publish_project_site(&mut fx.engine, "hello-project", "hello", false);
+    let editor = ProjectGrantRequest {
+        email: String::new(),
+        npub: Some(finitesites_proto::npub::encode_npub(OTHER_OWNER).unwrap()),
+        role: "editor".to_string(),
+    };
+    fx.engine
+        .grant_project(OWNER, "hello-project", &editor, NOW + 2)
+        .unwrap();
+    let target = redirect_to(Some("https://hello.finite.place"));
+
+    for actor in [OTHER_OWNER, STRANGER] {
+        let refused = fx
+            .engine
+            .set_project_site_redirect(actor, "hello-project", &target, NOW + 3);
+        assert!(
+            matches!(refused, Err(EngineError::NotAuthorized)),
+            "{actor} must not redirect the owner's Site: {refused:?}"
+        );
+    }
+    assert_eq!(site_redirect(&fx, "hello"), None);
+
+    let unknown = fx
+        .engine
+        .set_project_site_redirect(OWNER, "no-such-project", &target, NOW + 4);
+    assert!(matches!(unknown, Err(EngineError::NotAuthorized)));
+
+    fx.engine
+        .init_project(
+            OWNER,
+            &source_project_request("source-only", false),
+            remote("source-only"),
+            NOW + 5,
+        )
+        .unwrap();
+    let no_site = fx
+        .engine
+        .set_project_site_redirect(OWNER, "source-only", &target, NOW + 6);
+    assert!(matches!(no_site, Err(EngineError::SiteNotFound)));
+}
+
+#[test]
+fn redirect_refuses_invalid_and_looping_targets_without_changing_state() {
+    let mut fx = fixture();
+    publish_project_site(&mut fx.engine, "hello-project", "hello", false);
+    fx.engine
+        .set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some("https://hello.finite.place")),
+            NOW + 2,
+        )
+        .unwrap();
+
+    for bad in [
+        "http://hello.finite.place",
+        "https://hello.finite.place/blog",
+        "https://hello.finite.place?x=1",
+        "https://user@hello.finite.place",
+        "https://127.0.0.1",
+        "hello.finite.place",
+    ] {
+        let refused = fx.engine.set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some(bad)),
+            NOW + 3,
+        );
+        assert!(
+            matches!(refused, Err(EngineError::Proto(_))),
+            "{bad:?} must be refused: {refused:?}"
+        );
+    }
+    // The service's own domain, and any Site on it, would loop or chain.
+    for looping in [
+        "https://sites.test",
+        "https://other.sites.test",
+        "https://A.Sites.Test/",
+    ] {
+        let refused = fx.engine.set_project_site_redirect(
+            OWNER,
+            "hello-project",
+            &redirect_to(Some(looping)),
+            NOW + 4,
+        );
+        assert!(
+            matches!(refused, Err(EngineError::Validation(_))),
+            "{looping:?} must be refused: {refused:?}"
+        );
+    }
+    assert_eq!(
+        site_redirect(&fx, "hello").as_deref(),
+        Some("https://hello.finite.place")
+    );
 }
 
 #[test]

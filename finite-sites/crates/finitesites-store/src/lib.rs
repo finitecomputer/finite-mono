@@ -156,6 +156,9 @@ pub struct SiteRecord {
     pub app_port: Option<u16>,
     /// Deprecated compatibility field; static-only sites never set this.
     pub active_version_start: Option<String>,
+    /// Canonical `https://{host}` every request for the Site is sent to
+    /// instead of its content (ADR 0030); `None` serves the Site.
+    pub redirect_to: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -516,10 +519,15 @@ pub struct GitRefEventRecord {
     pub error: Option<String>,
 }
 
+/// `sites.redirect_to` as `schema::SCHEMA_SQL` defines it, for registries
+/// created before the column existed. The CHECK is a backstop for
+/// `finitesites_proto::redirect::validate_redirect_target`, which decides.
+const SITES_REDIRECT_TO_COLUMN: &str = "redirect_to TEXT CHECK (redirect_to IS NULL OR (substr(redirect_to, 1, 8) = 'https://' AND length(redirect_to) BETWEEN 11 AND 262))";
+
 const SITE_SELECT: &str = "
     SELECT s.id, c.name, s.owner_pubkey, s.status, s.visibility,
            s.active_version_id, v.version_number, COALESCE(v.spa_fallback, 0),
-           s.kind, s.app_port, v.start_command
+           s.kind, s.app_port, v.start_command, s.redirect_to
     FROM sites s
     JOIN name_claims c ON c.site_id = s.id AND c.status = 'active'
     LEFT JOIN versions v ON v.id = s.active_version_id
@@ -695,6 +703,9 @@ impl Store {
             "originating_publisher_principal_id",
             "originating_publisher_principal_id TEXT REFERENCES principals(id)",
         )?;
+        // A Site's redirect target (ADR 0030): added after the shape
+        // rebuilds so a rebuilt legacy table gains it too.
+        Self::ensure_column(&conn, "sites", "redirect_to", SITES_REDIRECT_TO_COLUMN)?;
         // Must be the final migration-sequence write: the presence of this
         // stamp proves the store completed a full boot migration pass under
         // ledger-aware code (i.e. every legacy shape has been rebuilt).
@@ -3492,6 +3503,7 @@ impl Store {
                 kind: SiteKind::from_db(&kind_raw)?,
                 app_port: app_port.map(|p| p as u16),
                 active_version_start: row.get(10)?,
+                redirect_to: row.get(11)?,
             })
         })())
     }
@@ -3976,6 +3988,58 @@ impl Store {
             return Err(StoreError::NotFound("site"));
         }
         Ok(())
+    }
+
+    /// Set or clear a Site's redirect target and record who did it, in one
+    /// transaction. Returns `false`, writing nothing, when the Site already
+    /// has that target: a replay changes no state and adds no audit row.
+    pub fn set_site_redirect(
+        &mut self,
+        site_id: &str,
+        redirect_to: Option<&str>,
+        actor_pubkey: &str,
+        now: u64,
+    ) -> Result<bool, StoreError> {
+        assert!(redirect_to.is_none_or(|target| target.starts_with("https://")));
+        assert_eq!(actor_pubkey.len(), 64);
+        let tx = self.conn.transaction()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT redirect_to FROM sites WHERE id = ?1",
+                params![site_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or(StoreError::NotFound("site"))?;
+        if current.as_deref() == redirect_to {
+            return Ok(false);
+        }
+        tx.execute(
+            "UPDATE sites SET redirect_to = ?1, updated_at = ?2 WHERE id = ?3",
+            params![redirect_to, now, site_id],
+        )?;
+        let action = if redirect_to.is_some() {
+            "redirect_set"
+        } else {
+            "redirect_cleared"
+        };
+        tx.execute(
+            "INSERT INTO site_events (site_id, action, actor_pubkey, metadata, created_at)
+             VALUES (?1, ?2, ?3, '{}', ?4)",
+            params![site_id, action, actor_pubkey, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// How many audit rows a Site has for `action`.
+    pub fn site_event_count(&self, site_id: &str, action: &str) -> Result<u64, StoreError> {
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM site_events WHERE site_id = ?1 AND action = ?2",
+            params![site_id, action],
+            |row| row.get(0),
+        )?;
+        Ok(u64::try_from(count).expect("COUNT(*) is never negative"))
     }
 
     pub fn add_share(&mut self, site_id: &str, email: &str, now: u64) -> Result<(), StoreError> {
@@ -6015,6 +6079,140 @@ mod tests {
 
         let site = store.site_by_name("hello").unwrap().unwrap();
         assert_eq!(site.active_version_id.as_deref(), Some("ver_2"));
+    }
+
+    #[test]
+    fn site_redirect_sets_replays_clears_and_survives_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.db");
+        let mut store = Store::open(&path).unwrap();
+        store
+            .create_site_with_claim("site_1", "claim_1", "hello", OWNER, NOW)
+            .unwrap();
+        assert_eq!(
+            store.site_by_name("hello").unwrap().unwrap().redirect_to,
+            None
+        );
+
+        let target = "https://hello.finite.place";
+        assert!(
+            store
+                .set_site_redirect("site_1", Some(target), OWNER, NOW)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_site_redirect("site_1", Some(target), OWNER, NOW + 1)
+                .unwrap()
+        );
+        assert_eq!(store.site_event_count("site_1", "redirect_set").unwrap(), 1);
+        assert!(
+            store
+                .set_site_redirect("site_1", None, OWNER, NOW + 2)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .set_site_redirect("site_1", None, OWNER, NOW + 3)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .site_event_count("site_1", "redirect_cleared")
+                .unwrap(),
+            1
+        );
+        assert!(
+            store
+                .set_site_redirect("site_1", Some(target), OWNER, NOW + 4)
+                .unwrap()
+        );
+
+        let reader = store.open_reader().unwrap();
+        assert_eq!(
+            reader
+                .site_by_name("hello")
+                .unwrap()
+                .unwrap()
+                .redirect_to
+                .as_deref(),
+            Some(target)
+        );
+        drop(reader);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .site_by_name("hello")
+                .unwrap()
+                .unwrap()
+                .redirect_to
+                .as_deref(),
+            Some(target)
+        );
+        assert_eq!(
+            reopened.site_event_count("site_1", "redirect_set").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn site_redirect_refuses_a_missing_site_and_a_non_https_value() {
+        let mut store = store_with_site("hello");
+        assert!(matches!(
+            store.set_site_redirect("site_missing", Some("https://a.example"), OWNER, NOW),
+            Err(StoreError::NotFound("site"))
+        ));
+        // The schema is a backstop for the proto validator, which decides.
+        for bad in ["http://hello.example", "https://", "ftp://a.example"] {
+            let write = store.conn.execute(
+                "UPDATE sites SET redirect_to = ?1 WHERE id = 'site_1'",
+                params![bad],
+            );
+            assert!(write.is_err(), "{bad:?} must violate the CHECK");
+        }
+        assert_eq!(
+            store.site_by_name("hello").unwrap().unwrap().redirect_to,
+            None
+        );
+    }
+
+    #[test]
+    fn site_redirect_column_is_added_to_a_registry_that_predates_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("registry.db");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store
+                .create_site_with_claim("site_1", "claim_1", "hello", OWNER, NOW)
+                .unwrap();
+        }
+        {
+            // The registry as a writer from before ADR 0030 left it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("ALTER TABLE sites DROP COLUMN redirect_to")
+                .unwrap();
+            assert!(conn.prepare("SELECT redirect_to FROM sites").is_err());
+        }
+        let mut store = Store::open(&path).unwrap();
+        let site = store.site_by_name("hello").unwrap().unwrap();
+        assert_eq!(site.redirect_to, None);
+        assert!(
+            store
+                .set_site_redirect("site_1", Some("https://hello.finite.place"), OWNER, NOW + 1)
+                .unwrap()
+        );
+        // The re-added column carries the same CHECK as a new registry's.
+        assert!(
+            store
+                .conn
+                .execute(
+                    "UPDATE sites SET redirect_to = 'http://x.example' WHERE id = 'site_1'",
+                    []
+                )
+                .is_err()
+        );
     }
 
     #[test]
