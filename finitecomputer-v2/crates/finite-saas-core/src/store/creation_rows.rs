@@ -87,6 +87,11 @@ pub(super) async fn upsert_agent_creation_request_row_with_conflict<C>(
 where
     C: GenericClient + Sync,
 {
+    if request.relocation.is_some()
+        && let Some(runtime_id) = &request.agent_runtime_id
+    {
+        refuse_a_held_start(client, runtime_id).await?;
+    }
     let placement_runner_class = request
         .placement
         .map(|placement| placement.runner_class.as_str());

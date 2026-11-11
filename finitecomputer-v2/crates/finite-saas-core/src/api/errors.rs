@@ -58,6 +58,14 @@ impl ApiError {
         }
     }
 
+    pub(super) fn locked(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::LOCKED,
+            message: message.into(),
+            correlation_id: None,
+        }
+    }
+
     pub(super) fn payment_required(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::PAYMENT_REQUIRED,
@@ -154,6 +162,9 @@ impl From<CoreError> for ApiError {
             | CoreError::FinitePrivateReservationNotFound
             | CoreError::LaunchCodeBatchNotFound => Self::not_found(error.to_string()),
             CoreError::InvalidFinitePrivateApiKey => Self::unauthorized(error.to_string()),
+            // FIN-463's hold: not an overlap a person can wait out (409), so
+            // the dashboard says the agent is moving instead.
+            CoreError::RuntimeMoving => Self::locked(error.to_string()),
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
             CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
             CoreError::AccountEmailChangeConflict
@@ -258,5 +269,20 @@ impl IntoResponse for ApiError {
             }),
         };
         (self.status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A start refused by FIN-463's hold is 423 with the words the old
+    /// dashboard shows, never the 409 of an overlap.
+    #[test]
+    fn a_held_start_is_locked_with_its_words() {
+        let error = ApiError::from(CoreError::RuntimeMoving);
+        assert_eq!(error.status, StatusCode::LOCKED);
+        assert_eq!(error.message, "This agent is moving to finite.chat.");
+        assert_eq!(error.correlation_id, None);
     }
 }

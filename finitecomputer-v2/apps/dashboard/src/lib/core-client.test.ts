@@ -31,6 +31,7 @@ import {
   coreRuntimeControlConflictMessage,
   CoreFetchError,
   isCoreRuntimeControlConflict,
+  isCoreRuntimeMoving,
   type CoreAgentCreationRequestSummary,
   type CoreAdminRuntimeOverview,
   type CorePublicRuntimeControl,
@@ -667,6 +668,14 @@ test("a Core 409 is a runtime-control conflict; other failures are not", () => {
   );
   assert.equal(isCoreRuntimeControlConflict(new Error("conflict")), false);
   assert.equal(isCoreRuntimeControlConflict("409"), false);
+});
+
+test("a Core 423 is an agent held for its move, not a conflict", () => {
+  const moving = new CoreFetchError("This agent is moving to finite.chat.", 423);
+  assert.equal(isCoreRuntimeMoving(moving), true);
+  assert.equal(isCoreRuntimeControlConflict(moving), false);
+  assert.equal(isCoreRuntimeMoving(new CoreFetchError("restart already running", 409)), false);
+  assert.equal(isCoreRuntimeMoving(new Error("moving")), false);
 });
 
 test("the runtime-control conflict message names the in-progress request", () => {

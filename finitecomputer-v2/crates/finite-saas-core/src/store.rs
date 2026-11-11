@@ -176,6 +176,8 @@ pub use key_aliases::KeyAliasError;
 mod launch_code_rows;
 use launch_code_rows::*;
 mod launch_codes;
+mod move_holds;
+use move_holds::*;
 mod offboarding;
 #[cfg(test)]
 mod trial_access_gates_tests;

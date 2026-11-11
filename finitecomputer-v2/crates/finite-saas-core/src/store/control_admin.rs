@@ -34,6 +34,8 @@ impl CoreStore {
         Ok(result)
     }
 
+    /// The mover's stop, which holds the Runtime for its move
+    /// ([`move_holds`]).
     pub async fn admin_request_runtime_stop_exact(
         &self,
         input: AdminRuntimeStopExactInput,
@@ -58,17 +60,23 @@ impl CoreStore {
             Some(&expected),
         )
         .await?;
+        hold(&*tx, &result).await?;
         self.finish(tx).await?;
         Ok(result)
     }
 
     /// Restart one exact Runtime: the Stop-exact binding, a Restart control.
+    /// The mover's restart (staff gave it back) is the one start a hold
+    /// lets through: it releases the hold first, in this transaction. A
+    /// Runtime marked moved stays held, so it is refused and nothing
+    /// changes.
     pub async fn admin_request_runtime_restart_exact(
         &self,
         input: AdminRuntimeStopExactInput,
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        release(&*tx, &input.expected_agent_runtime_id).await?;
         let expected = RuntimeControlExpectedBinding {
             agent_runtime_id: input.expected_agent_runtime_id,
             source_host_id: input.expected_source_host_id,
