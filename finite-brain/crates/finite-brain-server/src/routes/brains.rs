@@ -816,29 +816,8 @@ pub(crate) async fn create_brain_invitation_handler(
     let invitation = {
         let target = UserId::new(target_npub)?;
         let initial_folder_access = selected_folder_ids(&request.initial_folder_access)?;
-        let id = generated_link_id(
-            "invitation",
-            &[
-                brain_id.as_str(),
-                target.as_str(),
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-            ],
-            16,
-        );
-        let invite_code = generated_link_id(
-            "invite",
-            &[
-                brain_id.as_str(),
-                target.as_str(),
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-                "code",
-            ],
-            16,
-        );
+        let id = fresh_link_id("invitation")?;
+        let invite_code = fresh_link_id("invite")?;
         let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;

@@ -166,18 +166,7 @@ pub(crate) async fn create_share_link_handler(
         &created_at,
     )?;
     let actor_user_id = UserId::new(actor.clone())?;
-    let id = generated_link_id(
-        "folder-invitation",
-        &[
-            brain_id.as_str(),
-            folder_id.as_str(),
-            recipient.as_str(),
-            actor_user_id.as_str(),
-            request.expires_at.as_str(),
-            created_at.as_str(),
-        ],
-        16,
-    );
+    let id = fresh_link_id("folder-invitation")?;
     let accept_path = format!("/v1/invitations/{id}/accept");
 
     let share_link = {
@@ -410,17 +399,7 @@ pub(crate) async fn create_shared_folder_invitation_handler(
         &created_at,
     )?;
     let actor_user_id = UserId::new(actor)?;
-    let id = generated_link_id(
-        "mount-offer",
-        &[
-            source_brain_id.as_str(),
-            source_folder_id.as_str(),
-            destination_brain_id.as_str(),
-            destination_admin.as_str(),
-            created_at.as_str(),
-        ],
-        16,
-    );
+    let id = fresh_link_id("mount-offer")?;
     let accept_path = format!("/v1/mount-offers/{id}/accept");
     let invitation = {
         let mut store = state.store.lock().map_err(lock_error)?;
