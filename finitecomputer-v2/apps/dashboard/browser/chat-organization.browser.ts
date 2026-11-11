@@ -5,6 +5,7 @@ import http from "node:http";
 import { test } from "node:test";
 import { chromium, type Browser, type Locator } from "playwright";
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import { TOUCH_DRAG_EDGE_PX } from "../src/components/use-chat-touch-drag";
 
 test("sidebar direct drag, saved topic order, failures, keyboard movement, and touch dragging", { timeout: 180_000 }, async () => {
   const reservation = http.createServer().listen(0, "127.0.0.1");
@@ -251,13 +252,19 @@ test("sidebar direct drag, saved topic order, failures, keyboard movement, and t
     await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [scrollSource] });
     await touchDesign.and(touch.locator('[data-dragging="true"]')).waitFor();
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: navBounds.x + 80, y: navBounds.y + navBounds.height - 8 }] });
-    await touch.waitForFunction((topicId) => {
+    // Hold until the far header has scrolled clear of the edge zone, then
+    // move the finger off the edge: the list stops scrolling before the
+    // header's position is read, so the drop lands on that header however
+    // slowly this runner answers.
+    await touch.waitForFunction(({ topicId, edge }) => {
       const nav = document.querySelector(".finite-chat__sidebar-nav");
       const header = document.querySelector(`[data-topic-id="${topicId}"] .finite-chat__folder-header`);
-      return nav && header && nav.scrollTop > 100 && header.getBoundingClientRect().bottom <= nav.getBoundingClientRect().bottom;
-    }, farId);
+      return nav && header && nav.scrollTop > 100 && header.getBoundingClientRect().bottom <= nav.getBoundingClientRect().bottom - edge;
+    }, { topicId: farId, edge: TOUCH_DRAG_EDGE_PX });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: navBounds.x + 80, y: navBounds.y + navBounds.height / 2 }] });
     const farBounds = await farFolder.locator(".finite-chat__folder-header").boundingBox();
     assert(farBounds);
+    assert(farBounds.y > navBounds.y + TOUCH_DRAG_EDGE_PX && farBounds.y + farBounds.height < navBounds.y + navBounds.height - TOUCH_DRAG_EDGE_PX);
     await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: farBounds.x + 80, y: farBounds.y + farBounds.height / 2 }] });
     await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
     await farFolder.locator('[data-chat-id="chat_design"]').waitFor();
