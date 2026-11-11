@@ -35,6 +35,7 @@ import {
   coreProjectSupportsRetirement,
   issueCoreFinitePrivateApiKey,
   isCoreRuntimeControlConflict,
+  isCoreRuntimeMoving,
   linkCoreStripeCustomer,
   loadCoreAdminRuntimes,
   loadCoreBillingOverview,
@@ -562,10 +563,15 @@ export async function adminOpsRotateKeyAction(
  * error. Every other error class keeps the existing behavior.
  */
 function runtimeControlConflictRedirect(machineId: string, caught: unknown): never {
-  if (!isCoreRuntimeControlConflict(caught)) throw caught;
+  const result = isCoreRuntimeMoving(caught)
+    ? "moving"
+    : isCoreRuntimeControlConflict(caught)
+      ? "conflict"
+      : null;
+  if (!result) throw caught;
   revalidatePath("/dashboard");
   revalidatePath(`/dashboard/machines/${machineId}`);
   redirect(
-    `/dashboard/machines/${encodeURIComponent(machineId)}?runtimeControl=conflict`
+    `/dashboard/machines/${encodeURIComponent(machineId)}?runtimeControl=${result}`
   );
 }
