@@ -1017,6 +1017,7 @@ dependencies = [
  "finite-brain-store",
  "finite-mail",
  "finite-nostr",
+ "getrandom 0.3.4",
  "http-body-util",
  "nostr",
  "rusqlite",

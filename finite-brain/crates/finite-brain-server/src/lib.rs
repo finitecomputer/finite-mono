@@ -1926,6 +1926,16 @@ fn format_unix_timestamp(unix_seconds: u64) -> Option<String> {
         .ok()
 }
 
+/// A new invitation, invite code or offer: 16 bytes from the OS. A hash of
+/// its request would repeat when an admin re-invites the same key within the
+/// second it revoked, and the store would refuse the duplicate.
+fn fresh_link_id(prefix: &str) -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"))?;
+    Ok(format!("{prefix}-{}", hex_prefix(&bytes, bytes.len())))
+}
+
 fn generated_link_id(prefix: &str, parts: &[&str], hash_bytes: usize) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -8106,6 +8116,52 @@ mod tests {
             "invitation expiry must be between 55 minutes and thirty days from creation",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn an_admin_can_invite_again_in_the_second_it_revoked() {
+        let admin_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invite_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        // The server's clock stays at TEST_NOW; only the signed events differ.
+        let invite = |signed_at| {
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "POST",
+                "/v1/brains/acme/invitations",
+                Some(invite_body.clone()),
+                signed_at,
+            )
+        };
+
+        let first = invite(TEST_NOW).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: BrainInvitationResponse = read_json(first).await;
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            &format!("/v1/invitations/{}", first.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+
+        // Same Brain, target, admin, expiry and second: still a new invitation.
+        let second = invite(TEST_NOW + 1).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second: BrainInvitationResponse = read_json(second).await;
+        assert_ne!(second.id, first.id);
+        assert_ne!(second.invite_code, first.invite_code);
+        assert_eq!(second.status, "pending");
     }
 
     #[tokio::test]
