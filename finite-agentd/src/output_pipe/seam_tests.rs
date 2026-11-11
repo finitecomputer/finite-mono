@@ -353,20 +353,6 @@ print(json.dumps(results))
         let pipe = identity("/proc/self/fd/1");
         assert_eq!(identity(format!("/proc/{gateway_pid}/fd/1")), pipe);
         assert_eq!(identity("/proc/self/fd/0"), pipe);
-        // The observer's own copies are close-on-exec: the gateway holds the
-        // pipe through its stdout only.
-        let mut gateway_pipe_fds: Vec<String> =
-            std::fs::read_dir(format!("/proc/{gateway_pid}/fd"))
-                .unwrap()
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| {
-                    std::fs::metadata(entry.path())
-                        .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == pipe)
-                })
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect();
-        gateway_pipe_fds.sort();
-        assert_eq!(gateway_pipe_fds, ["1"]);
 
         let mut previous: Option<u64> = None;
         let full = wait_for_pipe(&output, "the pipe stays at capacity", |sample| {
@@ -379,6 +365,23 @@ print(json.dumps(results))
         })
         .await;
         assert!(full.capacity_bytes > 0);
+        // The observer's own copies are close-on-exec: the gateway holds the
+        // pipe through its stdout only. Look only now that the gateway's
+        // shell has run (its `dd` filled the pipe): on the kernels CI runs,
+        // `posix_spawn` returns as soon as the child's exec replaces its
+        // memory, before the kernel closes its close-on-exec descriptors.
+        let mut gateway_pipe_fds: Vec<String> =
+            std::fs::read_dir(format!("/proc/{gateway_pid}/fd"))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| {
+                    std::fs::metadata(entry.path())
+                        .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == pipe)
+                })
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+        gateway_pipe_fds.sort();
+        assert_eq!(gateway_pipe_fds, ["1"]);
         assert!(
             !marker.exists(),
             "the gateway must still be waiting to write"
