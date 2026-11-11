@@ -61,4 +61,6 @@ kill_timeout = 120
 [[vm]]
   cpu_kind = "shared"
   cpus = 1
-  memory = "1gb"
+  # 2 GB since the 2026-10-25 out-of-memory incident: the live machine's
+  # size. One shared CPU allows up to 2 GB.
+  memory = "2gb"
