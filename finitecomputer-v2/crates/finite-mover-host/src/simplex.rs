@@ -15,8 +15,9 @@
 //! nothing of SimpleX, and the summary says why ([`Refused`]):
 //!
 //! - Hermes approved exactly one contact, by a single decimal id;
-//! - both databases are there, plain files with one name, and plain SQLite
-//!   (their header, so not encrypted);
+//! - both databases are there, plain files with one name on the tree's
+//!   filesystem, and plain SQLite (their header, so not encrypted); the
+//!   folder and the pairing files are on it too, as the walk requires;
 //! - neither has a `-journal` or `-wal` beside it, so both are settled,
 //!   and still none at the stage's end ([`still_settled`]): the agent's
 //!   lease doesn't hold SimpleX's own writers;
@@ -166,6 +167,12 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
             }
             Err(error) => return Err(HostError::io(source.into(), error.into())),
         };
+        if !tree
+            .holds(&file)
+            .map_err(|error| HostError::io(source.clone().into(), error.into()))?
+        {
+            return Ok(Err(Refused::DatabaseUnreadable));
+        }
         let stat = rustix::fs::fstat(&file)
             .map_err(|error| HostError::io(source.clone().into(), error.into()))?;
         let mut header = [0u8; 16];
@@ -224,16 +231,19 @@ fn folder(tree: &Tree) -> Result<Option<OwnedFd>, HostError> {
     folder_at(tree, FOLDER[1])
 }
 
-/// `agent/<name>/`, if it is a folder in the tree.
+/// `agent/<name>/`, if it is a folder in the tree, on its filesystem.
 fn folder_at(tree: &Tree, name: &str) -> Result<Option<OwnedFd>, HostError> {
-    let mut directory = rustix::io::dup(tree.root())
-        .map_err(|error| HostError::io(FOLDER.join("/").into(), error.into()))?;
+    let failed = |error: Errno| HostError::io(FOLDER.join("/").into(), error.into());
+    let mut directory = rustix::io::dup(tree.root()).map_err(failed)?;
     for part in [FOLDER[0], name] {
         directory = match open_directory(&directory, &c_name(part)?) {
             Ok(next) => next,
             Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
-            Err(error) => return Err(HostError::io(FOLDER.join("/").into(), error.into())),
+            Err(error) => return Err(failed(error)),
         };
+        if !tree.holds(&directory).map_err(failed)? {
+            return Ok(None);
+        }
     }
     Ok(Some(directory))
 }
