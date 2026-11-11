@@ -62,6 +62,35 @@ impl CoreStore {
         Ok(result)
     }
 
+    /// Restart one exact Runtime: the Stop-exact binding, a Restart control.
+    pub async fn admin_request_runtime_restart_exact(
+        &self,
+        input: AdminRuntimeStopExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        let result = postgres_admin_request_runtime_control_bound(
+            &*tx,
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Restart,
+            None,
+            Some(&expected),
+        )
+        .await?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
     pub async fn admin_request_runtime_relocate_exact(
         &self,
         input: AdminRuntimeRelocateExactInput,

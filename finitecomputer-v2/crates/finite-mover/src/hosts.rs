@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::child::Watched;
+use crate::child::{Watched, run_within};
 use crate::contract::short;
 use crate::fleet::Binding;
 
@@ -53,6 +53,35 @@ impl HostCommands {
         let mut command = Command::new(program);
         command.args(prefix).args(words);
         Ok(command)
+    }
+
+    /// `sizes <durable_state_id> [--brain <id>]...`: the host reader's
+    /// summary from metadata alone (it opens no file), as the roster counts.
+    /// It answers only at its end, so it has `idle` to do so.
+    pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
+        let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
+        for brain in &binding.owned_brains {
+            words.extend(["--brain".to_string(), brain.clone()]);
+        }
+        let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
+            .map_err(|error| HostError::NotRun(error.to_string()))?;
+        if !ended.status.success() {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let last = stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("");
+            return Err(HostError::NotRun(short(&format!(
+                "{}: {}",
+                ended.status,
+                last.trim()
+            ))));
+        }
+        serde_json::from_slice(&stdout)
+            .ok()
+            .and_then(|summary| crate::sizes::sizes_of(&summary))
+            .ok_or_else(|| HostError::NotRun("the host reader's sizes could not be read".into()))
     }
 
     /// `stream <durable_state_id> --stage <stage id> [--brain <id>]...`: the

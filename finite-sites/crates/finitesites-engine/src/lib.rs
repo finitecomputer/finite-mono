@@ -18,9 +18,9 @@ use finitesites_proto::dto::{
     AuthRegisterResponse, GitAuthResponse, HostedRequesterAssertionRequest,
     HostedRequesterAssertionResponse, ProjectCollaboratorSummary, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListItem,
-    ProjectListResponse, ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSummary,
-    ProjectStatusResponse, SharingRequest, SharingResponse, SiteSummary,
-    SitesAuthorizedKeyResponse,
+    ProjectListResponse, ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteRedirectResponse,
+    ProjectSiteSummary, ProjectStatusResponse, SharingRequest, SharingResponse,
+    SiteRedirectRequest, SiteSummary, SitesAuthorizedKeyResponse,
 };
 use finitesites_proto::limits::{
     LOGIN_TOKEN_TTL_SECONDS, MAX_EMAIL_KEYS_PER_EMAIL, MAX_EMAILS_PER_SHARING_REQUEST,
@@ -28,7 +28,9 @@ use finitesites_proto::limits::{
     VIEWER_COOKIE_TTL_SECONDS,
 };
 use finitesites_proto::project_config::ProjectOutputKind;
-use finitesites_proto::{ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub};
+use finitesites_proto::{
+    ManifestFile, ProtoError, PublishManifest, hex, ids, names, npub, redirect,
+};
 use finitesites_store::{
     GitRefEventRecord, PendingSiteNotification, ProjectAccessRecord, ProjectCollaboratorApply,
     ProjectCollaboratorRecord, ProjectCollaboratorRole, ProjectCollaboratorTarget,
@@ -392,6 +394,7 @@ impl Engine {
                 spa: output.spa,
                 created: true,
                 requesting_user_shared: requesting_user_npub.is_some(),
+                redirect_to: None,
             });
         }
 
@@ -631,6 +634,7 @@ impl Engine {
             spa: record.spa,
             created,
             requesting_user_shared,
+            redirect_to: site.redirect_to,
         })
     }
 
@@ -1001,6 +1005,24 @@ impl Engine {
         request: &SharingRequest,
         now: u64,
     ) -> Result<ProjectSiteSharingOutcome, EngineError> {
+        let site = self.owned_project_site(actor_pubkey, project_slug)?;
+        let response = self.set_site_sharing(actor_pubkey, &site, request, now)?;
+        Ok(ProjectSiteSharingOutcome {
+            site_id: site.id.clone(),
+            site_name: site.name.clone(),
+            site_url: self.site_url_for_site(&site),
+            response,
+        })
+    }
+
+    /// The Project Site of `project_slug`, when `actor_pubkey` owns the
+    /// Project. Site settings (visibility, sharing, redirect) are
+    /// owner-controlled; collaborators edit content through git.
+    fn owned_project_site(
+        &self,
+        actor_pubkey: &str,
+        project_slug: &str,
+    ) -> Result<SiteRecord, EngineError> {
         assert!(hex::is_hex32(actor_pubkey));
         finitesites_proto::project_config::validate_project_slug(project_slug)?;
         let access = self
@@ -1023,13 +1045,54 @@ impl Engine {
             .ok_or(StoreError::CorruptState(
                 "project output references missing site",
             ))?;
-        let response = self.set_site_sharing(actor_pubkey, &site, request, now)?;
-        Ok(ProjectSiteSharingOutcome {
-            site_id: site.id.clone(),
+        Ok(site)
+    }
+
+    // ---- redirect ------------------------------------------------------------
+
+    /// Send every request for the Project Site to another origin, or stop
+    /// (ADR 0030). Owner-controlled like visibility; a replay changes
+    /// nothing and records nothing.
+    pub fn set_project_site_redirect(
+        &mut self,
+        actor_pubkey: &str,
+        project_slug: &str,
+        request: &SiteRedirectRequest,
+        now: u64,
+    ) -> Result<ProjectSiteRedirectResponse, EngineError> {
+        let site = self.owned_project_site(actor_pubkey, project_slug)?;
+        if !self.store.actor_can_manage_site(actor_pubkey, &site.id)? {
+            return Err(EngineError::NotAuthorized);
+        }
+        let target = match request.to.as_deref() {
+            None => None,
+            Some(raw) => {
+                let canonical = redirect::validate_redirect_target(raw)?;
+                let host = redirect::redirect_target_host(&canonical);
+                // A target on this service would loop or chain Sites.
+                if redirect::host_is_within(host, &self.config.base_domain) {
+                    return Err(EngineError::Validation(
+                        "a Site cannot redirect to a Finite Sites address",
+                    ));
+                }
+                Some(canonical)
+            }
+        };
+        self.store
+            .set_site_redirect(&site.id, target.as_deref(), actor_pubkey, now)?;
+        let response = ProjectSiteRedirectResponse {
+            project_slug: project_slug.to_string(),
             site_name: site.name.clone(),
             site_url: self.site_url_for_site(&site),
-            response,
-        })
+            redirect_to: target,
+        };
+        assert!(
+            response
+                .redirect_to
+                .as_deref()
+                .is_none_or(|t| t.starts_with("https://"))
+        );
+        Ok(response)
     }
 
     pub fn set_sharing(

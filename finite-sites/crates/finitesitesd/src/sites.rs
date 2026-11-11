@@ -12,7 +12,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{Form, Query, State};
 use axum::http::header::{
     AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE, COOKIE, ETAG, HOST, IF_NONE_MATCH, LOCATION,
-    SET_COOKIE,
+    REFERRER_POLICY, SET_COOKIE,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -242,6 +242,35 @@ fn html_response(status: StatusCode, body: String) -> Response {
     (status, [(CACHE_CONTROL, "no-store")], Html(body)).into_response()
 }
 
+/// A moved Site (ADR 0030) sends the request, with its own path and query,
+/// to the owner's origin. The target is a validated bare origin, so nothing
+/// in the request can change the host. Like every mutable Site URL it is
+/// never cached, and the old URL is not sent on as a referrer, matching the
+/// reviewed edge redirects (`infra/scripts/sites-redirects`).
+fn site_redirect_response(target: &str, uri: &Uri) -> Response {
+    assert!(target.starts_with("https://") && !target.ends_with('/'));
+    let path_and_query = uri.path_and_query().map(|v| v.as_str()).unwrap_or("/");
+    // The request target is the visitor's: `*` has no path to keep, and is
+    // answered as an unmoved Site answers it.
+    if !path_and_query.starts_with('/') {
+        return html_response(StatusCode::NOT_FOUND, pages::not_found());
+    }
+    let Ok(location) = HeaderValue::from_str(&format!("{target}{path_and_query}")) else {
+        // Unreachable: a target is ASCII and an origin-form URI is visible ASCII.
+        eprintln!("finitesitesd redirect: unrepresentable Location");
+        return internal_page();
+    };
+    (
+        StatusCode::FOUND,
+        [
+            (LOCATION, location),
+            (CACHE_CONTROL, HeaderValue::from_static("no-store")),
+            (REFERRER_POLICY, HeaderValue::from_static("no-referrer")),
+        ],
+    )
+        .into_response()
+}
+
 fn internal_page() -> Response {
     html_response(StatusCode::INTERNAL_SERVER_ERROR, pages::not_found())
 }
@@ -294,7 +323,8 @@ async fn serve_path(
     } else {
         None
     };
-    if llms_request_path.as_deref() == Some("/llms.txt") {
+    // A moved Site generates nothing: `/llms.txt` follows the redirect below.
+    if site.redirect_to.is_none() && llms_request_path.as_deref() == Some("/llms.txt") {
         let llms_site = site.clone();
         let git_base_url = state.git_base_url.clone();
         let api_url = state.api_url.clone();
@@ -386,6 +416,14 @@ async fn serve_path(
             eprintln!("finitesitesd access task error: {error}");
             return internal_page();
         }
+    }
+
+    // ADR 0030: only after the visitor may see the Site, so a private or
+    // shared Site never reveals where it went.
+    if let Some(target) = site.redirect_to.as_deref()
+        && (method == Method::GET || method == Method::HEAD)
+    {
+        return site_redirect_response(target, &uri);
     }
 
     if method != Method::GET && method != Method::HEAD {
