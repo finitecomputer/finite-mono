@@ -128,7 +128,9 @@ jobs:
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        # The selector runs `cargo metadata`; the shell's cargo keeps the
+        # runner's rustup from installing the pin for it.
+        run: nix develop .#rust-ci --command scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Check formatting
         run: nix develop .#rust-ci --command cargo fmt --all -- --check
