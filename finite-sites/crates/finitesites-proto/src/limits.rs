@@ -41,6 +41,11 @@ pub const MAX_EMAIL_KEYS_PER_EMAIL: u32 = 5;
 /// Emails are bounded at the wire boundary before validation.
 pub const MAX_EMAIL_BYTES: u32 = 254;
 
+/// A Site redirect target is `https://`, a host name of at most 253
+/// octets (RFC 1035) and an optional trailing `/`: nothing longer is an
+/// origin (ADR 0030).
+pub const MAX_REDIRECT_TARGET_BYTES: usize = "https://".len() + 253 + 1;
+
 /// NIP-98 events older or newer than this many seconds are rejected.
 /// 60s is the spec-suggested window.
 pub const NIP98_MAX_SKEW_SECONDS: u64 = 60;

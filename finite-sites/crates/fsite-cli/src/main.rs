@@ -32,6 +32,7 @@ use thiserror::Error;
 use finitesites_proto::dto::{
     ERROR_GIT_REPOSITORY_SETUP_FAILED, ERROR_GIT_UNAVAILABLE, EmailRedeemResponse, GitAuthRequest,
     GitAuthResponse, ProjectGrantRequest, ProjectInitRequest, ProjectRevokeRequest, SharingRequest,
+    SiteRedirectRequest,
 };
 use finitesites_proto::npub;
 use finitesites_proto::project_config::parse_project_config_toml;
@@ -168,6 +169,7 @@ fn usage() -> String {
      fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  \
      fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  \
      fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  \
+     fsite project redirect PROJECT (--to https://HOST | --clear) [--output json]\n  \
      fsite project status PROJECT [--output json]\n  \
      fsite project list [--output json]\n  \
      fsite auth status [--output json]\n  \
@@ -241,7 +243,7 @@ fn describe_help() -> &'static str {
 }
 
 fn project_help() -> &'static str {
-    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and an optional Project Site; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for the Project Site."
+    "usage:\n  fsite project init --config finite.toml [--requesting-user-npub NPUB] [--dry-run] [--output json]\n  fsite project grant PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--role editor] [--send-invite] [--output json]\n  fsite project revoke PROJECT (--email MAILBOX | --nip05 NAME | --npub NPUB) [--output json]\n  fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n  fsite project redirect PROJECT (--to https://HOST | --clear) [--output json]\n  fsite project status PROJECT [--output json]\n  fsite project list [--output json]\n\nProject is the source primitive: init creates the Project Repository and an optional Project Site; a [project]-only finite.toml creates a source-only repository. Git edits and publishes content; grant/revoke manage Project edit access; share manages viewer access for the Project Site; redirect sends a moved Project Site's visitors to its new home."
 }
 
 fn project_init_help() -> &'static str {
@@ -258,6 +260,10 @@ fn project_revoke_help() -> &'static str {
 
 fn project_share_help() -> &'static str {
     "usage: fsite project share PROJECT [--public --yes-public|--shared|--private] [--add-email MAILBOX]... [--remove-email MAILBOX]... [--add-nip05 NAME]... [--remove-nip05 NAME]... [--add-npub NPUB]... [--remove-npub NPUB]... [--send-invite] [--output json]\n\nManage revocable viewer Shares for the Project Site. Mailbox viewers use email proof; NIP-05 Names resolve to native npubs; npubs use bounded Sites viewer sessions without email. This is separate from Project Repository edit access. Public sharing requires --yes-public."
+}
+
+fn project_redirect_help() -> &'static str {
+    "usage: fsite project redirect PROJECT (--to https://HOST | --clear) [--output json]\n\nOwner only. Send every request for the Project Site to another origin once the Site has moved, keeping each request's path and query: https://SITE.finite.site/a?b goes to https://HOST/a?b. The target is an https origin with no path, port or query, and never a finite.site address. Visitors who may not view the Site never learn where it went. --clear serves the Site again. Safe to replay."
 }
 
 fn project_status_help() -> &'static str {
@@ -587,6 +593,7 @@ fn project_command(args: &[String]) -> Result<(), CliError> {
         "grant" => project_grant(rest),
         "revoke" => project_revoke(rest),
         "share" => project_share(rest),
+        "redirect" => project_redirect(rest),
         "status" => project_status(rest),
         "list" => project_list(rest),
         "apply" | "collaborator" => Err(CliError::Usage(removed_site_first_command_help(
@@ -1076,6 +1083,106 @@ fn project_revoke(args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ProjectRedirectOptions {
+    project: String,
+    /// The canonical target, or `None` to stop redirecting.
+    to: Option<String>,
+    output_json: bool,
+}
+
+fn project_redirect(args: &[String]) -> Result<(), CliError> {
+    if help_requested(args) {
+        return print_help(project_redirect_help());
+    }
+    let options = parse_project_redirect_args(args)?;
+    // Only the key that owns the Site can move it: never mint a new one.
+    let identity = keys::load_existing_user_key()?;
+    let client = api::Client::from_env();
+    let response = client.redirect_project_site(
+        &identity,
+        &options.project,
+        &SiteRedirectRequest { to: options.to },
+    )?;
+    if options.output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&response).expect("response serializes")
+        );
+    } else {
+        println!("project:  {}", response.project_slug);
+        println!("site:     {}", response.site_name);
+        println!("url:      {}", response.site_url);
+        match &response.redirect_to {
+            Some(target) => println!("redirect: {target}"),
+            None => println!("redirect: none (the Site serves its own content)"),
+        }
+    }
+    Ok(())
+}
+
+fn parse_project_redirect_args(args: &[String]) -> Result<ProjectRedirectOptions, CliError> {
+    let mut positionals: Vec<String> = Vec::new();
+    let mut to: Option<String> = None;
+    let mut clear = false;
+    let mut output_json = false;
+    let mut index: usize = 0;
+    // Bounded by argv length.
+    while index < args.len() {
+        match args[index].as_str() {
+            "--to" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--to needs an https origin".to_string()))?;
+                if to.is_some() {
+                    return Err(CliError::Usage("--to may be given once".to_string()));
+                }
+                let canonical = finitesites_proto::redirect::validate_redirect_target(value)
+                    .map_err(|error| CliError::Usage(format!("--to: {error}")))?;
+                to = Some(canonical);
+                index += 2;
+            }
+            "--clear" => {
+                clear = true;
+                index += 1;
+            }
+            "--output" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| CliError::Usage("--output needs a value".to_string()))?;
+                if value != "json" {
+                    return Err(CliError::Usage(
+                        "only --output json is supported".to_string(),
+                    ));
+                }
+                output_json = true;
+                index += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!("unknown flag `{other}`")));
+            }
+            value => {
+                positionals.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    if positionals.len() != 1 {
+        return Err(CliError::Usage(project_redirect_help().to_string()));
+    }
+    if clear == to.is_some() {
+        return Err(CliError::Usage(
+            "give exactly one of --to https://HOST or --clear".to_string(),
+        ));
+    }
+    let project = positionals.pop().expect("one positional");
+    Ok(ProjectRedirectOptions {
+        project,
+        to,
+        output_json,
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2778,6 +2885,53 @@ mod tests {
         assert!(text.contains("served website needs one [site] entry"));
         assert!(text.contains("automatically shares the Project Site"));
         assert!(text.contains("Do not infer identity from message text"));
+    }
+
+    #[test]
+    fn project_redirect_parser_takes_one_origin_or_clear() {
+        let set = parse_project_redirect_args(&args(&[
+            "garden",
+            "--to",
+            "HTTPS://Garden.Finite.Place/",
+            "--output",
+            "json",
+        ]))
+        .unwrap();
+        assert_eq!(
+            set,
+            ProjectRedirectOptions {
+                project: "garden".to_string(),
+                to: Some("https://garden.finite.place".to_string()),
+                output_json: true,
+            }
+        );
+        let clear = parse_project_redirect_args(&args(&["garden", "--clear"])).unwrap();
+        assert_eq!(clear.to, None);
+        assert!(!clear.output_json);
+
+        for bad in [
+            &["garden"][..],
+            &["garden", "--to", "https://a.example", "--clear"][..],
+            &[
+                "garden",
+                "--to",
+                "https://a.example",
+                "--to",
+                "https://b.example",
+            ][..],
+            &["garden", "--to"][..],
+            &["garden", "--to", "http://garden.finite.place"][..],
+            &["garden", "--to", "https://garden.finite.place/blog"][..],
+            &["--to", "https://garden.finite.place"][..],
+            &["garden", "other", "--clear"][..],
+            &["garden", "--clear", "--output", "text"][..],
+            &["garden", "--clear", "--yes"][..],
+        ] {
+            assert!(
+                parse_project_redirect_args(&args(bad)).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
     }
 
     #[test]

@@ -20,10 +20,10 @@ use finitesites_proto::dto::{
     HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectRevokeRequest,
-    ProjectRevokeResponse, ProjectSiteSharingResponse, ProjectSiteSummary, ProjectStatusResponse,
-    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
-    SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
-    VerifiedEmailViewerSessionResponse,
+    ProjectRevokeResponse, ProjectSiteRedirectResponse, ProjectSiteSharingResponse,
+    ProjectSiteSummary, ProjectStatusResponse, SharingRequest, SiteRedirectRequest,
+    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
+    VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::nip98;
 use finitesites_proto::project_config::{
@@ -4031,6 +4031,395 @@ async fn generated_llms_txt_requires_project_site_and_respects_user_file() {
             .site_get("finitechat-native-mockup", "/llms.txt", port)
             .unwrap();
         assert_eq!(custom.into_string().unwrap(), "custom project instructions");
+    });
+    task.await.unwrap();
+}
+
+/// One raw HTTP/1.1 exchange, for request targets `ureq` cannot send.
+fn raw_http(port: u16, request: &str) -> String {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    let mut response = Vec::new();
+    // A dropped connection reads as empty: the caller's assertion says so.
+    let _ = stream.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn redirect_body(to: Option<&str>) -> Vec<u8> {
+    serde_json::to_vec(&SiteRedirectRequest {
+        to: to.map(str::to_string),
+    })
+    .unwrap()
+}
+
+fn publish_redirect_fixture(server: &TestServer) {
+    let body = serde_json::to_vec(&project_init_request(false)).unwrap();
+    let created: ProjectInitResponse = json_body(
+        server
+            .signed(&user_secret(), "POST", "/api/v2/projects/init", Some(&body))
+            .unwrap(),
+    );
+    let credential = mint_skyler_git_credential(server);
+    push_project_files(
+        server,
+        &credential,
+        &created.finite_toml,
+        "main",
+        &[
+            ("index.html", "<h1>old home</h1>"),
+            ("about.html", "<h1>old about</h1>"),
+        ],
+        "Site before its move",
+    );
+    wait_for_active_version(server, "finitechat-native-mockup", Some(1));
+}
+
+/// ADR 0030: the owner sends every request for their Site to its new
+/// origin, with the request's own path and query, and can stop again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_redirects_project_site_and_serving_follows_until_cleared() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        publish_redirect_fixture(&server);
+        let public_body = serde_json::to_vec(&SharingRequest {
+            visibility: Some("public".into()),
+            confirm_public: true,
+            ..SharingRequest::default()
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v2/projects/finitechat-native/site/sharing",
+                Some(&public_body),
+            )
+            .unwrap();
+        let home = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
+        assert_eq!(home.status(), 200);
+        assert!(home.into_string().unwrap().contains("old home"));
+
+        let route = "/api/v2/projects/finitechat-native/site/redirect";
+        let target = redirect_body(Some("https://Garden.Finite.Place/"));
+
+        // Only the Project's owner, signing the exact request, may set it.
+        let stranger = server.signed(&stranger_secret(), "POST", route, Some(&target));
+        assert!(matches!(stranger, Err(ureq::Error::Status(403, _))));
+        let forged = server
+            .agent
+            .post(&format!("{}{route}", server.api_url))
+            .set("Authorization", "Nostr bm90LWFuLWV2ZW50")
+            .send_bytes(&target);
+        assert!(matches!(forged, Err(ureq::Error::Status(401, _))));
+        let unsigned = server
+            .agent
+            .post(&format!("{}{route}", server.api_url))
+            .send_bytes(&target);
+        assert!(matches!(unsigned, Err(ureq::Error::Status(401, _))));
+        let other_body = redirect_body(Some("https://evil.example"));
+        let header = nip98::build_auth_header(
+            &user_secret(),
+            &format!("{}{route}", server.api_url),
+            "POST",
+            Some(&target),
+            now_unix(),
+        )
+        .unwrap();
+        let swapped = server
+            .agent
+            .post(&format!("{}{route}", server.api_url))
+            .set("Authorization", &header)
+            .send_bytes(&other_body);
+        assert!(
+            matches!(swapped, Err(ureq::Error::Status(401, _))),
+            "a signature binds its own body"
+        );
+        assert_eq!(
+            server
+                .site_get("finitechat-native-mockup", "/", port)
+                .unwrap()
+                .status(),
+            200
+        );
+
+        let set: ProjectSiteRedirectResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", route, Some(&target))
+                .unwrap(),
+        );
+        assert_eq!(set.project_slug, "finitechat-native");
+        assert_eq!(set.site_name, "finitechat-native-mockup");
+        assert_eq!(
+            set.redirect_to.as_deref(),
+            Some("https://garden.finite.place")
+        );
+
+        let moved = server
+            .site_get(
+                "finitechat-native-mockup",
+                "/about.html?ref=old#ignored",
+                port,
+            )
+            .unwrap();
+        assert_eq!(moved.status(), 302);
+        assert_eq!(
+            moved.header("location"),
+            Some("https://garden.finite.place/about.html?ref=old")
+        );
+        assert_eq!(moved.header("cache-control"), Some("no-store"));
+        assert_eq!(moved.header("referrer-policy"), Some("no-referrer"));
+        let head = server
+            .agent
+            .head(&format!(
+                "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/"
+            ))
+            .call()
+            .unwrap();
+        assert_eq!(head.status(), 302);
+        assert_eq!(
+            head.header("location"),
+            Some("https://garden.finite.place/")
+        );
+        let llms = server
+            .site_get("finitechat-native-mockup", "/llms.txt", port)
+            .unwrap();
+        assert_eq!(llms.status(), 302);
+        assert_eq!(
+            llms.header("location"),
+            Some("https://garden.finite.place/llms.txt")
+        );
+        // Static Sites take no other method, moved or not.
+        let post = server
+            .agent
+            .post(&format!(
+                "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}/"
+            ))
+            .send_bytes(b"");
+        assert!(matches!(post, Err(ureq::Error::Status(405, _))));
+
+        // `*` has no path to keep: an ordinary 404, never a panic.
+        let star = raw_http(
+            port,
+            &format!(
+                "GET * HTTP/1.1\r\nHost: finitechat-native-mockup.{BASE_DOMAIN}:{port}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+        assert!(star.starts_with("HTTP/1.1 404"), "GET * answered {star:?}");
+
+        // A replay answers the same and changes nothing.
+        let replay: ProjectSiteRedirectResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", route, Some(&target))
+                .unwrap(),
+        );
+        assert_eq!(replay, set);
+
+        // Refused targets leave the redirect as it was.
+        for (bad, code) in [
+            (
+                redirect_body(Some("http://garden.finite.place")),
+                "validation_failed",
+            ),
+            (
+                redirect_body(Some("https://garden.finite.place/blog")),
+                "validation_failed",
+            ),
+            (
+                redirect_body(Some("https://other.sites.localhost")),
+                "validation_failed",
+            ),
+            (b"{}".to_vec(), "bad_request"),
+            (b"not json".to_vec(), "bad_request"),
+        ] {
+            let refused = server.signed(&user_secret(), "POST", route, Some(&bad));
+            match refused {
+                Err(ureq::Error::Status(400, response)) => {
+                    let error: ApiErrorBody = response.into_json().unwrap();
+                    assert_eq!(error.error, code, "{error:?}");
+                }
+                other => panic!(
+                    "{:?} must be refused: {other:?}",
+                    String::from_utf8_lossy(&bad)
+                ),
+            }
+        }
+        assert_eq!(
+            server
+                .site_get("finitechat-native-mockup", "/", port)
+                .unwrap()
+                .header("location"),
+            Some("https://garden.finite.place/")
+        );
+
+        let status: ProjectStatusResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "GET",
+                    "/api/v2/projects/finitechat-native",
+                    None,
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            status.site.unwrap().redirect_to.as_deref(),
+            Some("https://garden.finite.place")
+        );
+
+        // Another target replaces the first; serving follows at once.
+        let again: ProjectSiteRedirectResponse = json_body(
+            server
+                .signed(
+                    &user_secret(),
+                    "POST",
+                    route,
+                    Some(&redirect_body(Some("https://new-garden.finite.place"))),
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            again.redirect_to.as_deref(),
+            Some("https://new-garden.finite.place")
+        );
+        assert_eq!(
+            server
+                .site_get("finitechat-native-mockup", "/about.html", port)
+                .unwrap()
+                .header("location"),
+            Some("https://new-garden.finite.place/about.html")
+        );
+
+        let cleared: ProjectSiteRedirectResponse = json_body(
+            server
+                .signed(&user_secret(), "POST", route, Some(&redirect_body(None)))
+                .unwrap(),
+        );
+        assert_eq!(cleared.redirect_to, None);
+        let back = server
+            .site_get("finitechat-native-mockup", "/", port)
+            .unwrap();
+        assert_eq!(back.status(), 200);
+        assert!(back.into_string().unwrap().contains("old home"));
+    });
+    task.await.unwrap();
+}
+
+/// A Site only its viewers may see never tells anyone else where it went.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn private_site_redirect_is_not_revealed_before_access() {
+    let user_pubkey = finitesites_proto::event::pubkey_for_secret(&user_secret()).unwrap();
+    let server = TestServer::start(&user_pubkey).await;
+    let port = server.port();
+
+    let task = tokio::task::spawn_blocking(move || {
+        publish_redirect_fixture(&server);
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v2/projects/finitechat-native/site/redirect",
+                Some(&redirect_body(Some("https://secret-garden.finite.place"))),
+            )
+            .unwrap();
+
+        for (path, accept) in [("/", "*/*"), ("/", "text/html"), ("/llms.txt", "*/*")] {
+            let response = server
+                .agent
+                .get(&format!(
+                    "http://finitechat-native-mockup.{BASE_DOMAIN}:{port}{path}"
+                ))
+                .set("Accept", accept)
+                .call();
+            let (status, location, body) = match response {
+                Ok(response) => (
+                    response.status(),
+                    response.header("location").map(str::to_string),
+                    response.into_string().unwrap_or_default(),
+                ),
+                Err(ureq::Error::Status(status, response)) => (
+                    status,
+                    response.header("location").map(str::to_string),
+                    response.into_string().unwrap_or_default(),
+                ),
+                Err(other) => panic!("{other}"),
+            };
+            assert_ne!(status, 302, "{path} {accept}");
+            assert!(
+                !location.unwrap_or_default().contains("secret-garden")
+                    && !body.contains("secret-garden"),
+                "{path} {accept} must not reveal the target"
+            );
+        }
+
+        // A viewer the owner shared the Site with is sent on.
+        let viewer_pubkey = finitesites_proto::event::pubkey_for_secret(&viewer_secret()).unwrap();
+        let share = serde_json::to_vec(&SharingRequest {
+            visibility: Some("shared".into()),
+            add_npubs: vec![finitesites_proto::npub::encode_npub(&viewer_pubkey).unwrap()],
+            ..SharingRequest::default()
+        })
+        .unwrap();
+        server
+            .signed(
+                &user_secret(),
+                "POST",
+                "/api/v2/projects/finitechat-native/site/sharing",
+                Some(&share),
+            )
+            .unwrap();
+        let site_base = format!("http://finitechat-native-mockup.{BASE_DOMAIN}:{port}");
+        let session_body = serde_json::to_vec(&NativeViewerSessionRequest {
+            purpose: "finite_site_view_session".into(),
+            return_to: "/about.html?from=chat".into(),
+            client: "finitechat-ios".into(),
+            nonce: "moved-private-site-viewer".into(),
+        })
+        .unwrap();
+        let session_url = format!("{site_base}/_finite/auth/native-session");
+        let session_auth = nip98::build_auth_header(
+            &viewer_secret(),
+            &session_url,
+            "POST",
+            Some(&session_body),
+            now_unix(),
+        )
+        .unwrap();
+        let session = server
+            .agent
+            .post(&session_url)
+            .set("Authorization", &session_auth)
+            .send_bytes(&session_body)
+            .unwrap();
+        assert_eq!(session.status(), 303, "the session route is not redirected");
+        let cookie = session
+            .all("set-cookie")
+            .into_iter()
+            .find(|cookie| cookie.starts_with("finite_site_auth="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let moved = server
+            .agent
+            .get(&format!("{site_base}/about.html?from=chat"))
+            .set("Cookie", &cookie)
+            .call()
+            .unwrap();
+        assert_eq!(moved.status(), 302);
+        assert_eq!(
+            moved.header("location"),
+            Some("https://secret-garden.finite.place/about.html?from=chat")
+        );
     });
     task.await.unwrap();
 }
