@@ -41,8 +41,9 @@ where
 }
 
 /// Refuse to hold `runtime_id`, or mark it moved, while a start of it is
-/// queued or running: a restart, recovery or upgrade, or a relocation
-/// (a trial restore is one too).
+/// queued or running: a restart, recovery or upgrade, or a creation request
+/// that names it (a relocation, a trial restore, or its own first launch,
+/// linked before it completes).
 pub(super) async fn refuse_while_a_start_is_active<C>(
     client: &C,
     runtime_id: &str,
@@ -60,8 +61,7 @@ where
                    AND status IN ('requested', 'launching', 'compute_up', 'ready'))
              OR EXISTS (
                  SELECT 1 FROM agent_creation_requests
-                 WHERE agent_runtime_id = $1 AND relocation_spec IS NOT NULL
-                   AND status IN ('requested', 'launching'))",
+                 WHERE agent_runtime_id = $1 AND status IN ('requested', 'launching'))",
             &[&runtime_id],
         )
         .await
@@ -112,6 +112,7 @@ pub(super) async fn release<C>(client: &C, runtime_id: &str) -> CoreResult<()>
 where
     C: GenericClient + Sync,
 {
+    lock_runtime(client, runtime_id).await?;
     client
         .execute(
             "DELETE FROM agent_runtime_move_holds WHERE agent_runtime_id = $1",

@@ -404,13 +404,27 @@ async fn postgres_no_hold_or_mark_is_taken_over_a_start_already_asked() {
         ("staff relocate", "mark moved"),
         ("owner restart (dashboard)", "mark moved"),
         ("staff upgrade", "mark moved"),
+        ("creation unfinished", "stop-exact"),
+        ("creation unfinished", "mark moved"),
     ] {
         let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let into = said.clone();
         with_isolated_postgres(|store| async move {
             let (project_id, runtime_id) = launched(&store).await;
-            let asked = start(&store, start_path, &project_id, &runtime_id).await;
-            assert!(asked.starts_with("started"), "{start_path}: {asked}");
+            if start_path == "creation unfinished" {
+                // Its Runtime registered and linked, its Runner gone before
+                // completing: an expired lease a Runner may take again.
+                store
+                    .exec(&format!(
+                        "UPDATE agent_creation_requests SET status = 'launching',
+                             lease_expires_at = now() - interval '1 minute'
+                         WHERE agent_runtime_id = '{runtime_id}'"
+                    ))
+                    .await;
+            } else {
+                let asked = start(&store, start_path, &project_id, &runtime_id).await;
+                assert!(asked.starts_with("started"), "{start_path}: {asked}");
+            }
             let result = match take {
                 "stop-exact" => store
                     .admin_request_runtime_stop_exact(exact(&project_id, &runtime_id))
