@@ -14,6 +14,8 @@ use finite_mover_host::stage::SUMMARY_ENTRY;
 use serde_json::{Value, json};
 
 const ID: &str = "runtime_sx";
+/// The stage the mover names, once Core holds the runtime stopped.
+const STAGE: &str = "proj_a.p1.1";
 const SQLITE: &[u8] = b"SQLite format 3\0";
 const CHAT: &str = ".finite-stage/simplex/chat.db";
 const AGENT: &str = ".finite-stage/simplex/agent.db";
@@ -72,7 +74,7 @@ impl Tree {
 
     fn stream(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
+        let operation = parse(format!("stream {ID} --stage {STAGE}").split_whitespace()).unwrap();
         run(&self.work_root, operation, &mut out).unwrap();
         out
     }
@@ -249,7 +251,7 @@ fn a_database_unsettled_while_it_is_staged_fails_the_stage() {
         wal: tree.path("agent/simplex/identity_chat.db-wal"),
         out: Vec::new(),
     };
-    let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
+    let operation = parse(format!("stream {ID} --stage {STAGE}").split_whitespace()).unwrap();
     let result = run(&tree.work_root, operation, &mut out);
     assert!(out.wal.exists(), "the WAL appeared while it was staged");
     assert!(
@@ -271,7 +273,7 @@ fn stream_across_mounts(tree: &Tree, mounts: &str) -> Vec<u8> {
          mount -t tmpfs scratch \"$SCRATCH\"\n\
          cd \"$ROOT\"\n\
          {mounts}\n\
-         exec \"$READER\" --work-root \"$WORK\" stream {ID}"
+         exec \"$READER\" --work-root \"$WORK\" stream {ID} --stage {STAGE}"
     );
     let scratch = tempfile::Builder::new()
         .prefix("mover-scratch-")
@@ -329,4 +331,22 @@ fn nothing_on_another_filesystem_is_carried() {
         }
     }
     assert!(crossed.is_empty(), "{}", crossed.join("\n"));
+}
+
+/// The stage id is the reader's word that Core holds the runtime stopped
+/// for its move, so no SimpleX core can write meanwhile: without one, the
+/// carry is refused, however settled the tree looks.
+#[test]
+fn without_a_stage_id_nothing_is_carried() {
+    let tree = Tree::new();
+    tree.simplex();
+    let mut out = Vec::new();
+    let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
+    run(&tree.work_root, operation, &mut out).unwrap();
+    let stage = entries(&out);
+    assert!(carried_nothing(&stage), "{:?}", stage.keys());
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": false, "why": "no-stage-id"})
+    );
 }

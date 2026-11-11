@@ -24,7 +24,18 @@
 //! - together they are at most [`SIMPLEX_MAX_BYTES`].
 //!
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
-//! its relay settings. `stream` already refuses a running agent.
+//! its relay settings.
+//!
+//! ## Writers: the hold
+//!
+//! The agent's lease doesn't hold SimpleX's own writers. What excludes them
+//! is Core's hold (FIN-463): the mover streams only once Core's
+//! `runtime-stop-exact` has stopped the runtime, and from that stop Core
+//! starts it again for nothing but the mover's own restart. So no SimpleX
+//! core runs from before `stream` starts until the move is done. The reader
+//! can't see Core: the stage id is its word for that hold, since the mover
+//! names the stage only after that stop. Without one nothing is carried
+//! (`no-stage-id`), whatever the tree looks like.
 
 use std::ffi::CString;
 use std::fs::File;
@@ -78,6 +89,8 @@ pub enum Refused {
     JournalPresent,
     /// Over [`SIMPLEX_MAX_BYTES`].
     TooLarge,
+    /// No stage id: nothing says the runtime is held stopped for its move.
+    NoStageId,
 }
 
 /// The summary's record of the carry (`stream` only).
@@ -130,8 +143,8 @@ impl Carried {
     }
 }
 
-/// Decide the carry for a stopped tree.
-pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
+/// Decide the carry for a stopped tree, staged as `stage`.
+pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refused>, HostError> {
     let Some(folder) = folder(tree)? else {
         return Ok(Err(Refused::NoSimplex));
     };
@@ -145,6 +158,9 @@ pub fn decide(tree: &Tree) -> Result<Result<Carried, Refused>, HostError> {
         0 => return Ok(Err(Refused::NoSimplex)),
         1 => return Ok(Err(Refused::DatabaseMissing)),
         _ => {}
+    }
+    if stage.is_none() {
+        return Ok(Err(Refused::NoStageId));
     }
     let contact = match approved(tree, "simplex")? {
         Approved::Unreadable => return Ok(Err(Refused::PairingUnreadable)),

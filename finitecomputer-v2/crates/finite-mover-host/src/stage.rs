@@ -50,20 +50,23 @@ impl Visit for Count {
 }
 
 /// Write the stage to `out`, holding the chat store's writer lease for
-/// the whole walk. Refuses a running agent. Returns the summary it wrote.
+/// the whole walk. Refuses a running agent. `stage` names the stage, which
+/// the SimpleX carry needs ([`simplex`]). Returns the summary it wrote.
 pub fn stream(
     tree: &Tree,
     owned_brains: &BTreeSet<String>,
+    stage: Option<&str>,
     out: impl Write,
 ) -> Result<Summary, HostError> {
     let _lease = tree.take_writer_lease()?;
+    let stage_id = stage;
     let mut stage = Stage {
         zip: ZipStream::new(io::BufWriter::with_capacity(1024 * 1024, out)),
         tallies: Tallies::default(),
         copied: Vec::new(),
     };
     walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
-    let (carry, carried_from) = match simplex::decide(tree)? {
+    let (carry, carried_from) = match simplex::decide(tree, stage_id)? {
         Ok(carried) => {
             let folder = carried.folder.clone();
             stage.carry(carried)?;
