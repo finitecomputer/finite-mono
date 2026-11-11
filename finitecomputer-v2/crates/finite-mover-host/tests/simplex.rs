@@ -938,3 +938,21 @@ fn a_folder_swapped_in_before_the_seal_is_never_sealed() {
         "SimpleX not turned off"
     );
 }
+
+/// The stage id is the reader's word that Core holds the runtime stopped
+/// for its move, so no SimpleX core can write meanwhile: without one, the
+/// carry is refused, however settled the tree looks.
+#[test]
+fn without_a_stage_id_nothing_is_carried() {
+    let tree = Tree::new();
+    tree.simplex();
+    let mut out = Vec::new();
+    let operation = parse(format!("stream {ID}").split_whitespace()).unwrap();
+    run(&tree.work_root, operation, &mut out).unwrap();
+    let stage = entries(&out);
+    assert!(carried_nothing(&stage), "{:?}", stage.keys());
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": false, "why": "no-stage-id"})
+    );
+}

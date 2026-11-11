@@ -24,22 +24,23 @@
 //! Nothing else of `agent/simplex/` goes: not its address, its files or
 //! its relay settings.
 //!
-//! ## Writers: the stop, then the seal
+//! ## Writers: the hold, then the seal
 //!
 //! The agent's lease doesn't hold SimpleX's own writers. What excludes them
-//! is the stop: the mover streams only once Core has stopped the runtime
-//! (`stop_and_stage`: Core's `runtime-stop-exact`, waited until stopped),
-//! so no SimpleX core runs when `stream` starts. Nothing keeps it stopped
-//! meanwhile, though (a restart from the old dashboard), so the seal comes
-//! before the carry's last checks: a core opens the databases by
-//! `agent/simplex`'s path, and SQLite opens a database's `-wal` and
-//! `-journal` by its path too, so once the folder is renamed no core can
-//! reach them. A connection open across the rename shows its `-wal` (or a
-//! write's `-journal`) beside the database it holds. So the checks after
-//! the rename hold for good: the folder renamed is the one checked and
-//! copied, both databases are settled, and each is as it was copied.
-//! Otherwise the folder goes back where it was, unsealed, and the stage
-//! fails as a changed tree.
+//! is Core's hold (FIN-463): the mover streams only once Core's
+//! `runtime-stop-exact` has stopped the runtime, and from that stop Core
+//! starts it again for nothing but the mover's own restart. So no SimpleX
+//! core runs from before `stream` starts until the move is done. The reader
+//! can't see Core: the stage id is its word for that hold, since the mover
+//! names the stage only after that stop. Without one nothing is carried
+//! (`no-stage-id`), whatever the tree looks like.
+//!
+//! The seal keeps the old core from the databases for good: a core opens
+//! them by `agent/simplex`'s path, and SQLite opens a database's `-wal` and
+//! `-journal` by its path too. The checks after the rename then hold: the
+//! folder renamed is the one checked and copied, both databases are
+//! settled, and each is as it was copied. Otherwise the folder goes back
+//! where it was, unsealed, and the stage fails as a changed tree.
 //!
 //! ## The seal: the reader's one write in an agent's tree
 //!
