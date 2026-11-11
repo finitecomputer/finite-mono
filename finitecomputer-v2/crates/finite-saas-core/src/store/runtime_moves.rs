@@ -143,6 +143,9 @@ where
             return Err(CoreError::RuntimeMoveConflict);
         }
     }
+    // Marked moved, it is never started (FIN-463's hold): so not while a
+    // start of it is queued or running.
+    refuse_while_a_start_is_active(client, &input.expected_agent_runtime_id).await?;
     let row = client
         .query_one(
             "INSERT INTO agent_runtime_moves (agent_runtime_id, project_id, moved, moved_at, agent_npub)
