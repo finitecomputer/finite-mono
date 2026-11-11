@@ -121,9 +121,13 @@ test("moved people land on finite.chat, from the real dashboard", { timeout: 300
     // must recheck on its own (the review's repro: an in-app link).
     await t.test("an open dashboard follows the move on its next navigation", () => withPage(async (page) => {
       state.moved = false;
+      // The page checks once on load too. Mark the move only after that check
+      // has answered, or it can carry the page off before the click lands.
+      const loadCheck = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/finite-chat-move");
       await page.goto(`${phaseOne.origin}/dashboard/skills`);
       const choose = page.getByRole("link", { name: "Choose an agent" });
       await choose.waitFor();
+      assert.deepEqual(await (await loadCheck).json(), { redirect: null });
       state.moved = true;
       await choose.click();
       await page.waitForURL(finiteChat, { timeout: 20_000 });
