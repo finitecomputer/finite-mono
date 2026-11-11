@@ -9,6 +9,7 @@
 //! leaves such a command in the mailbox, done by no one.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub use crate::stage::Phase;
 
@@ -172,6 +173,74 @@ pub enum SecretKind {
     Other,
 }
 
+impl SecretKind {
+    /// Its name on fragment's wire and in the host reader's `secrets`.
+    pub fn as_str(self) -> Option<&'static str> {
+        match self {
+            SecretKind::TelegramBotToken => Some("telegram_bot_token"),
+            SecretKind::OpenrouterKey => Some("openrouter_key"),
+            SecretKind::NostrNsec => Some("nostr_nsec"),
+            SecretKind::Other => None,
+        }
+    }
+}
+
+/// A secret's value, held in memory alone: cleared when dropped, and never
+/// shown by `Debug`. It is read from the host reader's answer and written
+/// once, into the hand-off's body.
+pub struct SecretValue(Zeroizing<String>);
+
+impl SecretValue {
+    pub fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SecretValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SecretValue(..)")
+    }
+}
+
+impl Serialize for SecretValue {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer).map(SecretValue::new)
+    }
+}
+
+/// One of an old agent's secrets: what the host reader's `secrets`
+/// answers, and what a hand-off carries.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HandoffItem {
+    pub kind: SecretKind,
+    pub value: SecretValue,
+}
+
+/// `POST /api/migrations/mover/agents/{old}/secrets`: the old agent's
+/// secrets its `stop_and_stage` names, read once it is stopped, for its
+/// person's Vault on finite.chat (F11).
+#[derive(Debug, Serialize)]
+pub struct Handoff<'a> {
+    pub command: &'a str,
+    pub items: &'a [HandoffItem],
+}
+
+/// Its answer: the kinds the person's Vault took.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct HandedOff {
+    pub handed: Vec<SecretKind>,
+}
+
 /// `POST /api/migrations/mover/agents/{old}/report`, flat: its `kind` and
 /// that kind's fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,5 +343,26 @@ mod tests {
             serde_json::json!({"command": "proj_1:1:stop_and_stage", "seq": 7, "kind": "progress", "bytes": 10, "files": 2})
         );
         assert_eq!(short(&"é".repeat(400)).len(), 512);
+    }
+
+    #[test]
+    fn a_handoff_is_fragments_shape_and_never_shows_a_value() {
+        let items: Vec<HandoffItem> = serde_json::from_str(
+            r#"[{"kind":"telegram_bot_token","value":"123:SENTINEL"},{"kind":"nostr_nsec","value":"nsec1x"}]"#,
+        )
+        .unwrap();
+        let handoff = Handoff {
+            command: "proj_1:1:stop_and_stage",
+            items: &items,
+        };
+        assert_eq!(
+            serde_json::to_value(&handoff).unwrap(),
+            serde_json::json!({"command": "proj_1:1:stop_and_stage", "items": [{"kind": "telegram_bot_token", "value": "123:SENTINEL"}, {"kind": "nostr_nsec", "value": "nsec1x"}]})
+        );
+        assert!(!format!("{handoff:?}").contains("SENTINEL"));
+        let handed: HandedOff =
+            serde_json::from_str(r#"{"handed":["nostr_nsec","a_new_secret"]}"#).unwrap();
+        assert_eq!(handed.handed, [SecretKind::NostrNsec, SecretKind::Other]);
+        assert_eq!(SecretKind::Other.as_str(), None);
     }
 }
