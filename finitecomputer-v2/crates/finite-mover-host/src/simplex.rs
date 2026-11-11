@@ -15,8 +15,9 @@
 //! nothing of SimpleX, and the summary says why ([`Refused`]):
 //!
 //! - Hermes approved exactly one contact, by a single decimal id;
-//! - both databases are there, plain files with one name, and plain SQLite
-//!   (their header, so not encrypted);
+//! - both databases are there, plain files with one name on the tree's
+//!   filesystem, and plain SQLite (their header, so not encrypted); the
+//!   folder and the pairing files are on it too, as the walk requires;
 //! - neither has a `-journal` or `-wal` beside it, so both are settled,
 //!   and still none at the stage's end ([`still_settled`]): the agent's
 //!   lease doesn't hold SimpleX's own writers;
@@ -187,7 +188,7 @@ impl Carried {
 
 /// Decide the carry for a stopped tree, to be sealed by `stage`.
 pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refused>, HostError> {
-    let Some(agent) = open_in(tree.root(), AGENT)? else {
+    let Some(agent) = open_in(tree, tree.root(), AGENT)? else {
         return Ok(Err(Refused::NoSimplex));
     };
     // The conversation is in `agent/simplex`, or, after a stage, in the one
@@ -199,13 +200,13 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
     let (name, rename_to) = match (sealed.pop(), sealed.pop()) {
         (Some(_), Some(_)) => return Ok(Err(Refused::SeveralSealed)),
         (Some(one), None) => (one, None),
-        (None, _) if open_in(&agent, FOLDER)?.is_some() => {
+        (None, _) if open_in(tree, &agent, FOLDER)?.is_some() => {
             let sealed = stage.map(|stage| format!("{SEALED_PREFIX}{stage}"));
             (FOLDER.to_owned(), sealed)
         }
         (None, _) => return Ok(Err(Refused::NoSimplex)),
     };
-    let Some(folder) = open_in(&agent, &name)? else {
+    let Some(folder) = open_in(tree, &agent, &name)? else {
         return Ok(Err(Refused::NoSimplex));
     };
     let path = format!("{AGENT}/{name}");
@@ -246,6 +247,12 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
             }
             Err(error) => return Err(HostError::io(source.into(), error.into())),
         };
+        if !tree
+            .holds(&file)
+            .map_err(|error| HostError::io(source.clone().into(), error.into()))?
+        {
+            return Ok(Err(Refused::DatabaseUnreadable));
+        }
         let stat = rustix::fs::fstat(&file)
             .map_err(|error| HostError::io(source.clone().into(), error.into()))?;
         let mut header = [0u8; 16];
@@ -291,10 +298,10 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
 /// that committed meanwhile may leave the database itself as it was, its
 /// rows in a WAL the stage doesn't hold.
 pub fn still_settled(tree: &Tree, folder: &str) -> Result<bool, HostError> {
-    let Some(agent) = open_in(tree.root(), AGENT)? else {
+    let Some(agent) = open_in(tree, tree.root(), AGENT)? else {
         return Ok(false);
     };
-    let Some(folder) = open_in(&agent, folder)? else {
+    let Some(folder) = open_in(tree, &agent, folder)? else {
         return Ok(false);
     };
     for (name, _) in DATABASES {
@@ -343,15 +350,15 @@ fn write_seal(tree: &Tree, seal: &Seal) -> Result<String, HostError> {
 fn turn_off(tree: &Tree) -> Result<(), HostError> {
     let path = format!("{AGENT}/{HERMES_HOME}/{CONFIG}");
     let failed = |error: Errno| HostError::io(path.clone().into(), error.into());
-    let Some(agent) = open_in(tree.root(), AGENT)? else {
+    let Some(agent) = open_in(tree, tree.root(), AGENT)? else {
         return Ok(());
     };
-    let Some(home) = open_in(&agent, HERMES_HOME)? else {
+    let Some(home) = open_in(tree, &agent, HERMES_HOME)? else {
         return Ok(());
     };
     let file = match open_regular(&home, &c_name(CONFIG)?) {
-        Ok(Some(file)) => file,
-        Ok(None) | Err(Errno::NOENT | Errno::LOOP) => return Ok(()),
+        Ok(Some(file)) if tree.holds(&file).map_err(failed)? => file,
+        Ok(_) | Err(Errno::NOENT | Errno::LOOP) => return Ok(()),
         Err(error) => return Err(failed(error)),
     };
     let stat = rustix::fs::fstat(&file).map_err(failed)?;
@@ -500,12 +507,18 @@ fn capability_error(error: Errno) -> HostError {
     HostError::Write(format!("the seal's capabilities: {error}"))
 }
 
-/// The folder `name` in `parent`, if it is one (never through a link).
-fn open_in(parent: impl std::os::fd::AsFd, name: &str) -> Result<Option<OwnedFd>, HostError> {
+/// The folder `name` in `parent`, if it is one (never through a link) on
+/// the tree's filesystem.
+fn open_in(
+    tree: &Tree,
+    parent: impl std::os::fd::AsFd,
+    name: &str,
+) -> Result<Option<OwnedFd>, HostError> {
+    let failed = |error: Errno| HostError::io(name.into(), error.into());
     match open_directory(parent, &c_name(name)?) {
-        Ok(folder) => Ok(Some(folder)),
-        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(None),
-        Err(error) => Err(HostError::io(name.into(), error.into())),
+        Ok(folder) if tree.holds(&folder).map_err(failed)? => Ok(Some(folder)),
+        Ok(_) | Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => Ok(None),
+        Err(error) => Err(failed(error)),
     }
 }
 

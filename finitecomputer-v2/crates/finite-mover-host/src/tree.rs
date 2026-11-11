@@ -101,15 +101,27 @@ impl Tree {
         self.device
     }
 
-    /// Open a regular file with one name at `parts`, or `None` if any part
-    /// is missing.
+    /// Whether the open `fd` is on the tree's filesystem. Nothing read
+    /// beside the walk leaves it either: a folder or file mounted from
+    /// another is never read.
+    pub fn holds(&self, fd: impl AsFd) -> Result<bool, Errno> {
+        Ok(rustix::fs::fstat(fd)?.st_dev == self.device)
+    }
+
+    /// Open a regular file with one name at `parts`, on the tree's
+    /// filesystem, or `None` if any part is missing or on another.
     pub fn open_file(&self, parts: &[&str]) -> Result<Option<File>, HostError> {
         self.open_path(parts, false)
     }
 
+    /// `any_links` is for a file whose contents are never read (the
+    /// writer lease): any link count, on any filesystem.
     fn open_path(&self, parts: &[&str], any_links: bool) -> Result<Option<File>, HostError> {
         let Some((name, directories)) = parts.split_last() else {
             return Ok(None);
+        };
+        let held = |fd: BorrowedFd<'_>| -> Result<bool, HostError> {
+            Ok(any_links || self.holds(fd).map_err(|error| self.error(parts, error))?)
         };
         let mut directory =
             rustix::io::dup(&self.root).map_err(|error| self.error(parts, error))?;
@@ -120,6 +132,9 @@ impl Tree {
                 Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
                 Err(error) => return Err(self.error(parts, error)),
             };
+            if !held(directory.as_fd())? {
+                return Ok(None);
+            }
         }
         let name = CString::new(*name).map_err(|_| HostError::BadId)?;
         let opened = if any_links {
@@ -128,6 +143,7 @@ impl Tree {
             open_regular(&directory, &name)
         };
         match opened {
+            Ok(Some(file)) if !held(file.as_fd())? => Ok(None),
             Ok(file) => Ok(file),
             Err(Errno::NOENT | Errno::LOOP) => Ok(None),
             Err(error) => Err(self.error(parts, error)),
@@ -149,11 +165,13 @@ impl Tree {
     /// owner notice's pairing): nothing at all, a plain file with one name
     /// read whole (at most `max` bytes), or something else that must not
     /// be taken for nothing (a link, another kind of file, a second name,
-    /// a file over `max`, a file where a folder belongs).
+    /// a file over `max`, a file where a folder belongs, a folder or file
+    /// on another filesystem).
     pub fn read_whole(&self, parts: &[&str], max: u64) -> Result<Whole, HostError> {
         let Some((name, directories)) = parts.split_last() else {
             return Ok(Whole::Absent);
         };
+        let held = |fd: BorrowedFd<'_>| self.holds(fd).map_err(|error| self.error(parts, error));
         let mut directory =
             rustix::io::dup(&self.root).map_err(|error| self.error(parts, error))?;
         for part in directories {
@@ -164,9 +182,13 @@ impl Tree {
                 Err(Errno::NOTDIR | Errno::LOOP) => return Ok(Whole::Unreadable),
                 Err(error) => return Err(self.error(parts, error)),
             };
+            if !held(directory.as_fd())? {
+                return Ok(Whole::Unreadable);
+            }
         }
         let name = CString::new(*name).map_err(|_| HostError::BadId)?;
         let file = match open_regular(&directory, &name) {
+            Ok(Some(file)) if !held(file.as_fd())? => return Ok(Whole::Unreadable),
             Ok(Some(file)) => file,
             Ok(None) | Err(Errno::LOOP) => return Ok(Whole::Unreadable),
             Err(Errno::NOENT) => return Ok(Whole::Absent),

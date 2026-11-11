@@ -606,3 +606,73 @@ fn a_simplex_folder_made_again_after_the_seal_never_hides_the_sealed_conversatio
         );
     }
 }
+
+/// `stream`, run by the real reader in a user and mount namespace of its
+/// own, after `mounts` (a shell script, run in the tree's root) put parts
+/// of the tree on another filesystem. `$SCRATCH` is a tmpfs outside the
+/// tree.
+fn stream_across_mounts(tree: &Tree, mounts: &str) -> Vec<u8> {
+    let script = format!(
+        "set -e\n\
+         mount -t tmpfs scratch \"$SCRATCH\"\n\
+         cd \"$ROOT\"\n\
+         {mounts}\n\
+         exec \"$READER\" --work-root \"$WORK\" stream {ID} --stage {STAGE}"
+    );
+    let scratch = tempfile::Builder::new()
+        .prefix("mover-scratch-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let run = std::process::Command::new("unshare")
+        .args(["--user", "--map-root-user", "--mount", "sh", "-c", &script])
+        .env("SCRATCH", scratch.path())
+        .env("ROOT", &tree.root)
+        .env("WORK", &tree.work_root)
+        .env("READER", env!("CARGO_BIN_EXE_finite-mover-host"))
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    run.stdout
+}
+
+/// The walk never leaves the tree's filesystem, and neither does the
+/// carry: a SimpleX folder, a database or a pairing file mounted from
+/// another one is never read.
+#[test]
+#[ignore = "needs unprivileged user namespaces (unshare --user --mount)"]
+fn nothing_on_another_filesystem_is_carried() {
+    let cases = [
+        (
+            None,
+            "cp -a agent/simplex/. \"$SCRATCH\"\n\
+             mount --bind \"$SCRATCH\" agent/simplex",
+        ),
+        (
+            Some("database-unreadable"),
+            "cp agent/simplex/identity_chat.db \"$SCRATCH/chat.db\"\n\
+             mount --bind \"$SCRATCH/chat.db\" agent/simplex/identity_chat.db",
+        ),
+        (
+            Some("pairing-unreadable"),
+            "cp agent/hermes-home/platforms/pairing/simplex-approved.json \"$SCRATCH/approved\"\n\
+             mount --bind \"$SCRATCH/approved\" agent/hermes-home/platforms/pairing/simplex-approved.json",
+        ),
+    ];
+    let mut crossed = Vec::new();
+    for (why, mounts) in cases {
+        let tree = Tree::new();
+        tree.simplex();
+        let stage = entries(&stream_across_mounts(&tree, mounts));
+        let simplex = summary(&stage)["simplex"].clone();
+        let refused = simplex["carried"] == json!(false)
+            && why.is_none_or(|why| simplex["why"] == json!(why));
+        if !carried_nothing(&stage) || !refused {
+            crossed.push(format!("{mounts}\n  -> {simplex}"));
+        }
+    }
+    assert!(crossed.is_empty(), "{}", crossed.join("\n"));
+}
