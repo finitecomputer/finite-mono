@@ -362,7 +362,7 @@ fn secret_rule(parts: &[&[u8]]) -> Option<Verdict> {
         if at(1, "identity") && len > 2 {
             return secret(Why::NostrIdentity, 2);
         }
-        // `simplex.moved-<stage id>`: the old SimpleX, sealed by a stage.
+        // `simplex.moved-<stage id>.owner-<contact>`: the old SimpleX, sealed by a stage.
         if (at(1, "simplex")
             || parts
                 .get(1)

@@ -26,7 +26,8 @@ const APPROVED: &str = "agent/hermes-home/platforms/pairing/simplex-approved.jso
 const LEGACY_APPROVED: &str = "agent/hermes-home/pairing/simplex-approved.json";
 const CONFIG: &str = "agent/hermes-home/config.yaml";
 const STAGE: &str = "proj_a.p1.1";
-const SEALED: &str = "agent/simplex.moved-proj_a.p1.1";
+/// The sealed folder: its stage, and the owner it was carried for.
+const SEALED: &str = "agent/simplex.moved-proj_a.p1.1.owner-3";
 /// The Hermes config, managed SimpleX on, beside settings that must stay.
 const CONFIG_ON: &str = "model:\n  default: gpt-x\ntimezone: America/Chicago\ngateway:\n  platforms:\n    simplex:\n      enabled: true\n      extra:\n        finite_managed: true\n    telegram:\n      enabled: true\n";
 
@@ -213,7 +214,11 @@ fn a_second_stage_carries_it_again_and_seals_nothing_more() {
         summary(&stage)["simplex"],
         json!({"carried": true, "sealed": SEALED})
     );
-    assert!(!tree.path("agent/simplex.moved-proj_a.p1.2").exists());
+    assert!(
+        !tree
+            .path("agent/simplex.moved-proj_a.p1.2.owner-3")
+            .exists()
+    );
     assert!(!tree.path("agent/simplex").exists());
     assert_eq!(tree.read(CONFIG), sealed_config);
     let config_after = fs::metadata(tree.path(CONFIG)).unwrap();
@@ -465,13 +470,15 @@ fn the_uploaders_second_check_lets_the_carried_entries_through() {
 /// while the stage is written.
 struct WalAppears {
     wal: PathBuf,
+    appeared: bool,
     out: Vec<u8>,
 }
 
 impl std::io::Write for WalAppears {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if !self.wal.exists() {
+        if !self.appeared {
             fs::write(&self.wal, b"a committed row").unwrap();
+            self.appeared = true;
         }
         self.out.write(bytes)
     }
@@ -491,12 +498,13 @@ fn a_database_unsettled_while_it_is_staged_fails_the_stage() {
     tree.write("agent/simplex/identity_chat.db", &rows);
     let mut out = WalAppears {
         wal: tree.path("agent/simplex/identity_chat.db-wal"),
+        appeared: false,
         out: Vec::new(),
     };
     let operation = parse(format!("stream {ID} --stage {STAGE}").split_whitespace()).unwrap();
     let result = run(&tree.work_root, operation, &mut out);
     assert!(tree.path("agent/simplex").exists(), "nothing sealed");
-    assert!(out.wal.exists(), "the WAL appeared while it was staged");
+    assert!(out.appeared, "the WAL appeared while it was staged");
     assert!(
         matches!(
             result,
@@ -567,13 +575,24 @@ fn a_config_it_cant_edit_by_one_token_is_left_and_the_seal_still_holds() {
 fn a_simplex_folder_made_again_after_the_seal_never_hides_the_sealed_conversation() {
     // An empty folder, and a fresh identity the old dashboard could make.
     type Recreate = fn(&Tree);
-    let cases: [(&str, Recreate); 2] = [
+    let cases: [(&str, Recreate); 4] = [
         ("empty", |tree| {
             fs::create_dir_all(tree.path("agent/simplex")).unwrap()
         }),
         ("fresh identity", |tree| {
             tree.write("agent/simplex/identity_chat.db", &db(b"another chat"));
             tree.write("agent/simplex/identity_agent.db", &db(b"another agent"));
+        }),
+        // The old dashboard's Disconnect clears the pairing, and a new one
+        // can approve another contact: the sealed conversation keeps its own.
+        ("fresh identity, another contact approved", |tree| {
+            tree.write("agent/simplex/identity_chat.db", &db(b"another chat"));
+            tree.write("agent/simplex/identity_agent.db", &db(b"another agent"));
+            tree.write(APPROVED, br#"{"8": {"user_name": "Someone else"}}"#);
+        }),
+        ("pairing cleared", |tree| {
+            fs::create_dir_all(tree.path("agent/simplex")).unwrap();
+            tree.write(APPROVED, b"{}");
         }),
     ];
     for (case, recreate) in cases {
@@ -601,7 +620,9 @@ fn a_simplex_folder_made_again_after_the_seal_never_hides_the_sealed_conversatio
             .collect();
         assert_eq!(still, made_again, "{case}");
         assert!(
-            !tree.path("agent/simplex.moved-proj_a.p1.2").exists(),
+            !tree
+                .path("agent/simplex.moved-proj_a.p1.2.owner-3")
+                .exists(),
             "{case}"
         );
     }
@@ -675,4 +696,245 @@ fn nothing_on_another_filesystem_is_carried() {
         }
     }
     assert!(crossed.is_empty(), "{}", crossed.join("\n"));
+}
+
+/// A real SQLite database in WAL mode, as SimpleX keeps its own, settled:
+/// one row, and a blob past the stage's write buffer so the stage's output
+/// is written while it is carried.
+fn sqlite(path: &Path) {
+    let _ = fs::remove_file(path);
+    let made = Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            "import sqlite3, sys\n\
+             con = sqlite3.connect(sys.argv[1])\n\
+             con.execute('pragma journal_mode=wal')\n\
+             con.execute('create table rows(v)')\n\
+             con.execute('insert into rows values (?)', ('first',))\n\
+             con.execute('insert into rows values (?)', (bytes(3 * 1024 * 1024),))\n\
+             con.commit()\n\
+             con.close()",
+        ])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    assert!(!path.with_extension("db-wal").exists(), "settled");
+}
+
+/// Whether the SQLite database `bytes` holds the row `late`.
+fn holds_late_row(bytes: &[u8]) -> bool {
+    let file = tempfile::NamedTempFile::new_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    fs::write(file.path(), bytes).unwrap();
+    let count = Command::new("python3")
+        .args([
+            "-I",
+            "-c",
+            "import sqlite3, sys\n\
+             con = sqlite3.connect(sys.argv[1])\n\
+             print(con.execute(\"select count(*) from rows where v = 'late'\").fetchone()[0])",
+        ])
+        .arg(file.path())
+        .output()
+        .unwrap();
+    assert!(count.status.success());
+    String::from_utf8(count.stdout).unwrap().trim() != "0"
+}
+
+/// A SimpleX core the stop didn't stop: a real SQLite writer on
+/// `agent/simplex/identity_chat.db`, by that path as the core opens it,
+/// told what to do and when.
+struct Writer {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Writer {
+    fn new(database: &Path) -> Self {
+        let mut child = Command::new("python3")
+            .args([
+                "-I",
+                "-c",
+                "import sqlite3, sys\n\
+                 con = None\n\
+                 for line in sys.stdin:\n\
+                 \x20   try:\n\
+                 \x20       if con is None:\n\
+                 \x20           con = sqlite3.connect(sys.argv[1], isolation_level=None)\n\
+                 \x20       if line.strip() == 'read':\n\
+                 \x20           con.execute('select count(*) from rows').fetchone()\n\
+                 \x20       if line.strip() == 'commit':\n\
+                 \x20           con.execute(\"insert into rows values ('late')\")\n\
+                 \x20       print('done', flush=True)\n\
+                 \x20   except Exception as error:\n\
+                 \x20       print('refused', error, flush=True)",
+            ])
+            .arg(database)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        Self {
+            stdin: child.stdin.take().unwrap(),
+            stdout: std::io::BufReader::new(child.stdout.take().unwrap()),
+            child,
+        }
+    }
+
+    /// `connect`, `read` or `commit` (each connects first if it hasn't),
+    /// or why SQLite refused it.
+    fn tell(&mut self, what: &str) -> Result<(), String> {
+        use std::io::{BufRead, Write};
+        writeln!(self.stdin, "{what}").unwrap();
+        let mut reply = String::new();
+        self.stdout.read_line(&mut reply).unwrap();
+        match reply.trim() {
+            "done" => Ok(()),
+            refused => Err(refused.to_owned()),
+        }
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The stage's output, which lets the test act at two moments: `during`, at
+/// the stage's first write, while the chat database is copied (before any
+/// seal); and `after`, once the summary is written, after every check the
+/// stage makes.
+struct Interleaved<'a> {
+    out: Vec<u8>,
+    during: Option<Box<dyn FnMut() + 'a>>,
+    after: Option<Box<dyn FnMut() + 'a>>,
+}
+
+impl std::io::Write for Interleaved<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if let Some(mut during) = self.during.take() {
+            during();
+        }
+        self.out.extend_from_slice(bytes);
+        if self
+            .out
+            .windows(SUMMARY_ENTRY.len())
+            .any(|window| window == SUMMARY_ENTRY.as_bytes())
+            && let Some(mut after) = self.after.take()
+        {
+            after();
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn stream_interleaved(tree: &Tree, out: &mut Interleaved<'_>) -> Result<(), String> {
+    let operation = parse(format!("stream {ID} --stage {STAGE}").split_whitespace()).unwrap();
+    run(&tree.work_root, operation, &mut *out).map_err(|error| format!("{error:?}"))
+}
+
+/// A SimpleX writer that commits after the stage's last check that the
+/// chat database is settled never leaves a carried stage without its row:
+/// the seal comes before those checks, and once sealed no core can reach
+/// the databases by their path. One that was open across the seal fails
+/// the stage.
+#[test]
+fn a_commit_after_the_last_settled_check_is_never_missing_from_a_carry() {
+    use std::cell::{Cell, RefCell};
+    // What the writer does while the chat database is copied, and then
+    // after every check.
+    let cases: [(&str, &[&str], &str); 3] = [
+        ("connects after the checks", &[], "commit"),
+        ("connected before the seal, idle", &["connect"], "commit"),
+        ("open across the seal", &["read"], "commit"),
+    ];
+    let mut missing = Vec::new();
+    for (case, during, after) in cases {
+        let tree = Tree::new();
+        tree.simplex();
+        sqlite(&tree.path("agent/simplex/identity_chat.db"));
+        let writer = RefCell::new(Writer::new(&tree.path("agent/simplex/identity_chat.db")));
+        let committed = Cell::new(false);
+        let mut out = Interleaved {
+            out: Vec::new(),
+            during: Some(Box::new(|| {
+                for what in during {
+                    if let Err(refused) = writer.borrow_mut().tell(what) {
+                        panic!("{case}: {what}: {refused}");
+                    }
+                }
+            })),
+            after: Some(Box::new(|| {
+                committed.set(writer.borrow_mut().tell(after).is_ok());
+            })),
+        };
+        let result = stream_interleaved(&tree, &mut out);
+        // A failed stage writes no summary, so `after` never comes.
+        assert!(out.during.is_none(), "{case}");
+        assert_eq!(out.after.is_none(), result.is_ok(), "{case}");
+        let lost = result.is_ok() && committed.get() && {
+            let stage = entries(&out.out);
+            summary(&stage)["simplex"]["carried"] == json!(true) && !holds_late_row(&stage[CHAT])
+        };
+        if lost {
+            missing.push(format!("{case}: carried, without the row committed after"));
+        }
+        if case == "open across the seal"
+            && !(result.as_ref().is_err_and(|e| e.contains("TreeChanged"))
+                && tree.path("agent/simplex/identity_chat.db").exists())
+        {
+            missing.push(format!("{case}: {result:?}, not a changed tree, unsealed"));
+        }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+/// The folder sealed is the one whose databases were checked and copied:
+/// one put in its place before the seal is put back, unsealed, and the
+/// stage fails.
+#[test]
+fn a_folder_swapped_in_before_the_seal_is_never_sealed() {
+    let tree = Tree::new();
+    tree.simplex();
+    let mut rows = vec![b'r'; 3 * 1024 * 1024];
+    rows[..16].copy_from_slice(SQLITE);
+    tree.write("agent/simplex/identity_chat.db", &rows);
+    let mut out = Interleaved {
+        out: Vec::new(),
+        during: Some(Box::new(|| {
+            fs::rename(tree.path("agent/simplex"), tree.path("agent/simplex-aside")).unwrap();
+            tree.write("agent/simplex/identity_chat.db", &db(b"another chat"));
+            tree.write("agent/simplex/identity_agent.db", &db(b"another agent"));
+        })),
+        after: None,
+    };
+    let result = stream_interleaved(&tree, &mut out);
+    assert!(
+        result.as_ref().is_err_and(|e| e.contains("TreeChanged")),
+        "a seal of another folder was taken: {result:?}"
+    );
+    let sealed: Vec<String> = fs::read_dir(tree.path("agent"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("simplex.moved-"))
+        .collect();
+    assert!(sealed.is_empty(), "{sealed:?}");
+    assert_eq!(
+        tree.read("agent/simplex/identity_chat.db"),
+        db(b"another chat"),
+        "the folder swapped in is back where it was"
+    );
+    assert_eq!(
+        tree.read(CONFIG),
+        CONFIG_ON.as_bytes(),
+        "SimpleX not turned off"
+    );
 }
