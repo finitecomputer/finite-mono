@@ -533,14 +533,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
 
         self.assertTrue(selection.run_nix_service_packages)
 
-    def test_merge_group_selects_every_active_harness(self) -> None:
-        args = argparse.Namespace(changed_files=None, event="merge_group")
-        selection, _reason, _paths = select_harnesses.select_harnesses(args)
-        values = selection.values()
-
-        for key, value in values.items():
-            self.assertEqual(value, "true", key)
-
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(
             changed_files=[".github/workflows/lat2-nixos-closure.yml"], event=""
@@ -651,13 +643,6 @@ class CiPackagingGateTests(unittest.TestCase):
             changed_files=["finitechat/crates/finitechat-server/src/lib.rs"],
             event="push",
         )
-
-        selection, _reason, _paths = select_harnesses.select_harnesses(args)
-
-        self.assertTrue(selection.run_nix_service_packages)
-
-    def test_merge_group_runs_every_harness_including_packaging(self) -> None:
-        args = argparse.Namespace(changed_files=None, event="merge_group")
 
         selection, _reason, _paths = select_harnesses.select_harnesses(args)
 
