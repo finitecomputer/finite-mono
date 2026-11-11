@@ -105,8 +105,11 @@ impl MigrationsClient {
     }
 
     /// `POST …/agents/{old}/secrets`: the old agent's secrets for
-    /// `command`, each into its person's Vault on finite.chat. The body
-    /// is cleared once sent; a refusal keeps its status alone.
+    /// `command`, each into its person's Vault on finite.chat; a refusal
+    /// keeps its status alone. The body is held in memory alone, never on
+    /// disk or in a log; this copy of it is cleared once sent, but the
+    /// copies the signer and reqwest make are ordinary memory, freed
+    /// uncleared.
     pub fn hand_off(
         &self,
         old: &str,
