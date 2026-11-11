@@ -362,11 +362,12 @@ fn secret_rule(parts: &[&[u8]]) -> Option<Verdict> {
         if at(1, "identity") && len > 2 {
             return secret(Why::NostrIdentity, 2);
         }
-        // `simplex.moved-<stage id>.owner-<contact>`: the old SimpleX, sealed by a stage.
+        // `simplex.moved-<stage id>.owner-<contact>`: the old SimpleX, sealed
+        // by a stage; `simplex.sealing-…`, a seal under way or cut short.
         if (at(1, "simplex")
-            || parts
-                .get(1)
-                .is_some_and(|part| part.starts_with(b"simplex.moved-")))
+            || parts.get(1).is_some_and(|part| {
+                part.starts_with(b"simplex.moved-") || part.starts_with(b"simplex.sealing-")
+            }))
             && len > 2
         {
             return secret(Why::Simplex, 2);
