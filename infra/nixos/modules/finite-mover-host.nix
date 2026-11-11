@@ -74,7 +74,10 @@ in
       owner = "root";
       group = "finite-mover";
       permissions = "u+rx,g+x";
-      capabilities = "cap_dac_read_search+ep";
+      # Reads any agent's tree; and, its one exception to reading only,
+      # seals a carried SimpleX: renames `agent/simplex` aside and rewrites
+      # `config.yaml` with its owner kept (finite-mover-host src/simplex.rs).
+      capabilities = "cap_dac_read_search,cap_dac_override,cap_chown+ep";
     };
   };
 }

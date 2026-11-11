@@ -109,11 +109,18 @@ impl HostCommands {
             .map_err(|_| HostError::NotRun("the host reader's secrets could not be read".into()))
     }
 
-    /// `stream <durable_state_id> [--brain <id>]...`: the stage, as the
-    /// host reader writes it. Its failure, or its exit before the end, is a
-    /// read error at the stream's end.
-    pub fn stream(&self, binding: &Binding) -> Result<HostStream, HostError> {
-        let mut words = vec!["stream".to_string(), binding.durable_state_id.clone()];
+    /// `stream <durable_state_id> --stage <stage id> [--brain <id>]...`: the
+    /// stage, as the host reader writes it. The reader names its SimpleX
+    /// seal by the stage's id, and carries SimpleX only with one. Its
+    /// failure, or its exit before the end, is a read error at the stream's
+    /// end.
+    pub fn stream(&self, binding: &Binding, stage: &str) -> Result<HostStream, HostError> {
+        let mut words = vec![
+            "stream".to_string(),
+            binding.durable_state_id.clone(),
+            "--stage".to_string(),
+            stage.to_string(),
+        ];
         for brain in &binding.owned_brains {
             words.extend(["--brain".to_string(), brain.clone()]);
         }

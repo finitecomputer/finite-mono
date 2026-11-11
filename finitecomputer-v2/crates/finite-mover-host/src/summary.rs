@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::classify::{Class, Verdict, Why};
+use crate::simplex::Carry;
 
 pub const FORMAT: &str = "finite-mover-host/summary/1";
 /// The most `left` lines a summary lists; the rest are counted.
@@ -48,6 +49,10 @@ pub struct Summary {
     pub left: Vec<Left>,
     /// What the `left` lines past [`LEFT_MAX`] hold.
     pub left_more: Tally,
+    /// Whether the SimpleX conversation was carried, and if not why
+    /// (`stream` only: `sizes` reads no file to decide it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simplex: Option<Carry>,
 }
 
 /// The running totals of a walk.
@@ -110,6 +115,7 @@ impl Tallies {
             staged,
             left,
             left_more,
+            simplex: None,
         }
     }
 }

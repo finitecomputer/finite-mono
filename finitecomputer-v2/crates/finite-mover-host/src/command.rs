@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! sizes   <durable_state_id> [--brain <brain id>]...
-//! stream  <durable_state_id> [--brain <brain id>]...
+//! stream  <durable_state_id> [--brain <brain id>]... [--stage <stage id>]
 //! secrets <durable_state_id> <kind>[,<kind>...]
 //! owner-telegram-notice <durable_state_id> --notice <notice id>   (text on stdin)
 //! ```
@@ -40,6 +40,8 @@ pub enum Operation {
     Stream {
         id: DurableId,
         owned_brains: BTreeSet<String>,
+        /// The stage's id, which the SimpleX seal is named by.
+        stage: Option<String>,
     },
     Secrets {
         id: DurableId,
@@ -56,7 +58,7 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let mut words = words.into_iter();
     let usage = || {
         HostError::Usage(
-            "sizes|stream <id> [--brain <id>]... | secrets <id> <kind>[,<kind>...] \
+            "sizes|stream <id> [--brain <id>]... [--stage <id>] | secrets <id> <kind>[,<kind>...] \
              | owner-telegram-notice <id> --notice <notice id>"
                 .into(),
         )
@@ -69,7 +71,18 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     match op {
         "sizes" | "stream" => {
             let mut owned_brains = BTreeSet::new();
+            let mut stage = None;
             while let Some(flag) = words.next() {
+                if flag == "--stage" && op == "stream" && stage.is_none() {
+                    let id = words.next().ok_or_else(usage)?;
+                    if !brain_id(id) {
+                        return Err(HostError::Usage(
+                            "a stage id is 1 to 128 of [A-Za-z0-9_.-]".into(),
+                        ));
+                    }
+                    stage = Some(id.to_owned());
+                    continue;
+                }
                 if flag != "--brain" {
                     return Err(usage());
                 }
@@ -84,7 +97,11 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
             Ok(if op == "sizes" {
                 Operation::Sizes { id, owned_brains }
             } else {
-                Operation::Stream { id, owned_brains }
+                Operation::Stream {
+                    id,
+                    owned_brains,
+                    stage,
+                }
             })
         }
         "secrets" => {
@@ -145,14 +162,20 @@ pub fn run_with(
     input: impl Read,
     mut out: impl Write,
 ) -> Result<(), HostError> {
+    // The seal's write capabilities stay lowered but around the seal.
+    crate::simplex::lower_writes()?;
     match operation {
         Operation::Sizes { id, owned_brains } => {
             let tree = Tree::open(work_root, id)?;
             print_json(&mut out, &stage::sizes(&tree, &owned_brains)?)
         }
-        Operation::Stream { id, owned_brains } => {
+        Operation::Stream {
+            id,
+            owned_brains,
+            stage,
+        } => {
             let tree = Tree::open(work_root, id)?;
-            stage::stream(&tree, &owned_brains, out).map(drop)
+            stage::stream(&tree, &owned_brains, stage.as_deref(), out).map(drop)
         }
         Operation::Secrets { id, kinds } => {
             let tree = Tree::open(work_root, id)?;
@@ -196,6 +219,7 @@ mod tests {
             Operation::Stream {
                 id: id("runtime_1"),
                 owned_brains: ["b1".to_owned(), "b-2".to_owned()].into(),
+                stage: None,
             }
         );
         assert_eq!(
@@ -215,6 +239,18 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_may_name_its_stage() {
+        assert_eq!(
+            parse_ssh("stream runtime_1 --stage proj_a.p1.2 --brain b1").unwrap(),
+            Operation::Stream {
+                id: id("runtime_1"),
+                owned_brains: ["b1".to_owned()].into(),
+                stage: Some("proj_a.p1.2".to_owned()),
+            }
+        );
+    }
+
+    #[test]
     fn anything_else_is_refused() {
         for bad in [
             "",
@@ -224,6 +260,10 @@ mod tests {
             "sizes runtime_1 --brain",
             "sizes runtime_1 --brain a/b",
             "stream runtime_1;rm -rf /",
+            "stream runtime_1 --stage",
+            "stream runtime_1 --stage a/b",
+            "stream runtime_1 --stage s1 --stage s2",
+            "sizes runtime_1 --stage s1",
             "secrets runtime_1",
             "secrets runtime_1 google_token",
             "secrets runtime_1 nostr_nsec extra",

@@ -660,7 +660,24 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
             "runtime-stop-exact --project-id proj_a --expected-agent-runtime-id runtime_a --expected-source-host-id lat-3 --expected-source-machine-id machine_a --admin-email mover@finite.test --admin-workos-user-id user_mover --wait-timeout-seconds 60"
         ]
     );
-    assert_eq!(world.log("host.log"), ["stream runtime_a --brain brain_x"]);
+    // The stage's id goes with it: the reader names its SimpleX seal by it.
+    assert_eq!(
+        world.log("host.log"),
+        ["stream runtime_a --stage proj_a.p1.1 --brain brain_x"]
+    );
+    // And the reader's own parser takes exactly those words.
+    let streamed = &world.log("host.log")[0];
+    match parse(streamed.split_whitespace()).unwrap() {
+        finite_mover_host::command::Operation::Stream {
+            stage,
+            owned_brains,
+            ..
+        } => {
+            assert_eq!(stage.as_deref(), Some("proj_a.p1.1"));
+            assert_eq!(owned_brains, ["brain_x".to_owned()].into());
+        }
+        other => panic!("not a stream: {other:?}"),
+    }
     let kinds = world.fake.kinds();
     assert_eq!(kinds.first().map(String::as_str), Some("stopped"));
     assert_eq!(kinds.last().map(String::as_str), Some("staged"));
@@ -757,7 +774,7 @@ fn a_yes_hands_off_the_old_agents_secrets_once_it_is_stopped() {
         world.log("host.log"),
         [
             "secrets runtime_a telegram_bot_token,openrouter_key,nostr_nsec",
-            "stream runtime_a --brain brain_x"
+            "stream runtime_a --stage proj_a.p1.1 --brain brain_x"
         ],
         "read after the stop, before the stage"
     );
@@ -794,7 +811,10 @@ fn a_command_without_secrets_reads_none() {
     world.fake.tell(OLD, "asked", 1, stage_command(1));
     assert_eq!(world.work()[0].outcome, "staged");
     assert!(world.fake.platform().handoffs.is_empty());
-    assert_eq!(world.log("host.log"), ["stream runtime_a --brain brain_x"]);
+    assert_eq!(
+        world.log("host.log"),
+        ["stream runtime_a --stage proj_a.p1.1 --brain brain_x"]
+    );
 }
 
 #[test]
