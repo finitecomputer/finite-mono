@@ -284,6 +284,7 @@ mod provider_operations;
 mod relocation_absence;
 mod relocation_registration;
 mod retirement;
+mod runtime_move_holds;
 mod runtime_moves;
 mod upgrade_migration;
 

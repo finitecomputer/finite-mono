@@ -1659,6 +1659,12 @@ export function isCoreRuntimeControlConflict(error: unknown): boolean {
   return error instanceof CoreFetchError && error.status === 409;
 }
 
+/** Core holds an agent the finite.chat mover stopped for its move (423):
+ * nothing here may start it. */
+export function isCoreRuntimeMoving(error: unknown): boolean {
+  return error instanceof CoreFetchError && error.status === 423;
+}
+
 /** Inline message for a rejected-overlap runtime control, naming the request
  * currently in progress when Core reports one. */
 export function coreRuntimeControlConflictMessage(

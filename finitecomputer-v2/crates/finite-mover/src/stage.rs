@@ -206,13 +206,27 @@ pub fn upload_stage(
     part_bytes: usize,
     locks: &Path,
 ) -> Result<(Manifest, Completed), StageError> {
+    upload_stage_with_progress(sink, target, stream, part_bytes, locks, &mut |_, _| {})
+}
+
+/// `upload_stage`, telling `progress` the bytes and entries read so far
+/// after each part: Migrations holds a stage that makes no progress for 30
+/// minutes, so a long upload says so as it goes.
+pub fn upload_stage_with_progress(
+    sink: &impl StageSink,
+    target: &StageTarget,
+    stream: impl Read,
+    part_bytes: usize,
+    locks: &Path,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(Manifest, Completed), StageError> {
     assert!(
         (PART_BYTES_MIN..=PART_BYTES).contains(&part_bytes),
         "parts are 5 to 64 MiB"
     );
     let _held = lock(locks, target)?;
     let stage = target.stage_id();
-    let (sent, summary) = send_parts(sink, &stage, stream, part_bytes)?;
+    let (sent, summary) = send_parts(sink, &stage, stream, part_bytes, progress)?;
     let mut manifest = Manifest {
         format: MANIFEST_FORMAT.to_string(),
         old: target.old.clone(),
@@ -285,6 +299,7 @@ fn send_parts(
     stage: &str,
     mut stream: impl Read,
     part_bytes: usize,
+    progress: &mut dyn FnMut(u64, u64),
 ) -> Result<(Sent, CheckedSummary), StageError> {
     let taken: BTreeMap<u32, Part> = sink
         .parts(stage)?
@@ -314,6 +329,7 @@ fn send_parts(
         tail.push(body);
         hash.update(body);
         read += filled as u64;
+        progress(read, scanner.entries() as u64);
         let decided = scanner.decided();
         if waiting.is_empty() && decided >= read {
             send_part(sink, stage, &taken, n, body)?;

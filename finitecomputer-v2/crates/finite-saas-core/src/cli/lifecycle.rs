@@ -81,16 +81,50 @@ pub(crate) async fn runtime_retire_exact_command(args: RuntimeRetireExactCliArgs
         })
         .await?;
 
-    wait_until_stopped(
+    wait_until(
         &store,
         request,
         args.wait_timeout_seconds,
         "runtime retirement",
+        RuntimeControlRequestStatus::Stopped,
     )
     .await
 }
 
 pub(crate) async fn runtime_stop_exact_command(args: RuntimeStopExactCliArgs) -> Result<()> {
+    let wait_timeout_seconds = args.wait_timeout_seconds;
+    let input = exact_input(args)?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
+    let request = store.admin_request_runtime_stop_exact(input).await?;
+    wait_until(
+        &store,
+        request,
+        wait_timeout_seconds,
+        "runtime stop",
+        RuntimeControlRequestStatus::Stopped,
+    )
+    .await
+}
+
+/// Start one exact Runtime again (FIN-463: staff gave the old agent back)
+/// and wait until Core says it proved ready.
+pub(crate) async fn runtime_restart_exact_command(args: RuntimeStopExactCliArgs) -> Result<()> {
+    let wait_timeout_seconds = args.wait_timeout_seconds;
+    let input = exact_input(args)?;
+    let store = postgres_store_from_env(ImportMode::Commit).await?;
+    let request = store.admin_request_runtime_restart_exact(input).await?;
+    wait_until(
+        &store,
+        request,
+        wait_timeout_seconds,
+        "runtime restart",
+        RuntimeControlRequestStatus::Succeeded,
+    )
+    .await
+}
+
+/// The exact binding a stop or restart names.
+fn exact_input(args: RuntimeStopExactCliArgs) -> Result<AdminRuntimeStopExactInput> {
     let project_id = required_cli_value(args.project_id, "--project-id")?;
     let expected_agent_runtime_id = required_cli_value(
         args.expected_agent_runtime_id,
@@ -105,29 +139,27 @@ pub(crate) async fn runtime_stop_exact_command(args: RuntimeStopExactCliArgs) ->
     let admin_verified_email = required_cli_value(args.admin_email, "--admin-email")?;
     let admin_workos_user_id =
         required_cli_value(args.admin_workos_user_id, "--admin-workos-user-id")?;
-    let store = postgres_store_from_env(ImportMode::Commit).await?;
-    let request = store
-        .admin_request_runtime_stop_exact(AdminRuntimeStopExactInput {
-            admin_verified_email,
-            admin_workos_user_id,
-            project_id,
-            expected_agent_runtime_id,
-            expected_source_host_id,
-            expected_source_machine_id,
-            now: args.now,
-        })
-        .await?;
-    wait_until_stopped(&store, request, args.wait_timeout_seconds, "runtime stop").await
+    Ok(AdminRuntimeStopExactInput {
+        admin_verified_email,
+        admin_workos_user_id,
+        project_id,
+        expected_agent_runtime_id,
+        expected_source_host_id,
+        expected_source_machine_id,
+        now: args.now,
+    })
 }
 
-/// Poll one down-bound control request until it is terminal, print it, and
-/// succeed only if it confirmed into Stopped. Succeeded is reserved for
-/// runtimes that proved ready.
-async fn wait_until_stopped(
+/// Poll one control request until it is terminal, print it, and succeed
+/// only if it ended `expected`: Stopped for a stop or retirement (a
+/// down-bound request), Succeeded for a restart (reserved for runtimes that
+/// proved ready).
+async fn wait_until(
     store: &CoreStore,
     request: RuntimeControlRequest,
     wait_timeout_seconds: u64,
     operation: &str,
+    expected: RuntimeControlRequestStatus,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(wait_timeout_seconds);
     let mut current = request;
@@ -144,7 +176,7 @@ async fn wait_until_stopped(
         sleep(Duration::from_secs(2).min(deadline.saturating_duration_since(now))).await;
     }
     print_json(&current)?;
-    if current.status != RuntimeControlRequestStatus::Stopped {
+    if current.status != expected {
         bail!("{operation} failed; the same request remains retryable");
     }
     Ok(())

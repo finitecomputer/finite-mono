@@ -124,6 +124,26 @@ pub struct ProjectSiteSharingResponse {
     pub invited_emails: Vec<String>,
 }
 
+/// `POST /api/v2/projects/{slug}/site/redirect` (ADR 0030). `to` is
+/// required and explicit: an origin sends every request for the Project
+/// Site there; `null` stops redirecting and serves the Site again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiteRedirectRequest {
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSiteRedirectResponse {
+    pub project_slug: String,
+    pub site_name: String,
+    pub site_url: String,
+    /// The canonical target (`https://{host}`), or `null` when the Site
+    /// serves its own content.
+    pub redirect_to: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SiteSummary {
     pub site_id: String,
@@ -253,6 +273,9 @@ pub struct ProjectSiteSummary {
     pub created: bool,
     #[serde(default)]
     pub requesting_user_shared: bool,
+    /// Where the Site sends its visitors instead of serving (ADR 0030).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

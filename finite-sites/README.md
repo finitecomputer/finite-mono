@@ -222,6 +222,15 @@ fsite project share PROJECT --public --yes-public --output json
 fsite project share PROJECT --private --output json
 ```
 
+When a Site moves, its owner can send every visitor who may see it to the new
+origin, keeping each request's path and query, and stop again
+([ADR 0030](docs/adr/0030-owner-site-redirects.md)):
+
+```sh
+fsite project redirect PROJECT --to https://garden.finite.place --output json
+fsite project redirect PROJECT --clear --output json
+```
+
 When an authenticated human asks an Agent Principal to publish a Site,
 Hermes and `fsite` carry that authenticated sender through the active terminal
 tool call automatically:

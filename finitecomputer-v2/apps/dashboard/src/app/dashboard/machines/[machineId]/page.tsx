@@ -143,6 +143,14 @@ async function ImportedMachineOverview({
           This agent cannot be retired from the dashboard.
         </section>
       ) : null}
+      {runtimeControlResult === "moving" ? (
+        <section
+          className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
+          role="status"
+        >
+          This agent is moving to finite.chat.
+        </section>
+      ) : null}
       {runtimeControlResult === "conflict" ? (
         <section
           className="rounded-xl border border-amber-500/40 bg-amber-500/10 p-4 text-sm"
