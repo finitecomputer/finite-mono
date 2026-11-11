@@ -248,11 +248,6 @@ def select_harnesses(args: argparse.Namespace) -> tuple[HarnessSelection, str, l
             reason = f"{reason}; {note}"
         return selection, reason, paths
 
-    if args.event == "merge_group":
-        selection = HarnessSelection()
-        selection.select_all()
-        return selection, "merge queue runs every required harness", []
-
     try:
         paths = changed_files_for_event(args)
     except subprocess.CalledProcessError as error:
