@@ -114,49 +114,29 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
 
-      - name: Resolve pinned Rust channel
-        id: rust_pin
-        run: |
-          # Parse the channel out of rust-toolchain.toml — the single Rust
-          # pin — so the install below can never float. The dtolnay action
-          # does NOT read the toml itself: with no toolchain input it
-          # installs its branch name (floating stable), which is exactly
-          # what this repo must not do.
-          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
-          if [[ -z "$channel" ]]; then
-            echo "::error::rust-toolchain.toml declares no channel" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust
-        # Toolchain is the channel parsed from rust-toolchain.toml above —
-        # the single build pin shared with Nix shells, release builds, and
-        # dev hosts. Bump deliberately (run clippy locally first), don't
-        # float: 1.88's clippy trips uninlined_format_args on v2 crates and
-        # floating stable trips new let-chain lints. The workspace
-        # rust-version floor stays at the oldest rustc that must still build
-        # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust_pin.outputs.channel }}
-          components: clippy, rustfmt
-
+      # Rust comes from the rust-ci Nix shell, built from rust-toolchain.toml
+      # (the single pin, rustfmt and clippy included) and served by the Nix
+      # caches; nothing downloads it from static.rust-lang.org. rust-cache
+      # asks the same shell for rustc and cargo, so the runner's rustup never
+      # installs the pin on its behalf.
       - uses: Swatinem/rust-cache@v2
         with:
           # Cached build scripts link to the Nix closure used by Clippy/tests.
           # Do not restore artifacts from a different flake or the old host build.
           prefix-key: v2-rust-nix-${{ hashFiles('flake.lock') }}
+          cmd-format: nix develop .#rust-ci --command {0}
 
       - name: Select Rust package scope
         id: rust_scope
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        # The selector runs `cargo metadata`; the shell's cargo keeps the
+        # runner's rustup from installing the pin for it.
+        run: nix develop .#rust-ci --command scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: nix develop .#rust-ci --command cargo fmt --all -- --check
 
       - name: Clippy
         env:
@@ -253,29 +233,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve pinned Rust channel
-        id: rust_pin
-        run: |
-          # Same contract as the Rust workspace job: parse the channel from
-          # rust-toolchain.toml rather than letting the action default to
-          # its floating stable branch name. This job's run working-directory
-          # is finitechat/, so anchor the path at the checkout root.
-          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
-          if [[ -z "$channel" ]]; then
-            echo "::error::rust-toolchain.toml declares no channel" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust
-        # Toolchain is the channel parsed from rust-toolchain.toml — the
-        # same pin the Rust workspace job and release builds use.
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust_pin.outputs.channel }}
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -332,6 +289,21 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
+
+      - name: Put the Nix Rust toolchain on PATH
+        # The smoke script and the platform adapter tests run bare `cargo`.
+        # Take it from the rust-ci Nix shell (built from rust-toolchain.toml,
+        # served by the Nix caches) instead of downloading Rust from
+        # static.rust-lang.org. Only the toolchain's bin directory joins
+        # PATH; the job keeps the runner's Python and C toolchain as before.
+        run: |
+          nix develop "$GITHUB_WORKSPACE#rust-ci" --command bash -euo pipefail -c '
+            dirname "$(command -v cargo)" >> "$GITHUB_PATH"
+            cargo --version
+            rustc --version
+          '
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Hermes CLI round-trip smoke
         run: scripts/hermes-sidecar-smoke.sh
