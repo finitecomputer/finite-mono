@@ -16,36 +16,40 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        // Share reserve_trial's campaign lock: capacity and reservations cannot race.
-        let row = tx
-            .query_opt(
-                "SELECT seat_limit,active FROM trial_campaigns WHERE id=$1 FOR UPDATE",
-                &[&id],
+        let result: CoreResult<_> = async {
+            // Share reserve_trial's campaign lock: capacity and reservations cannot race.
+            let row = tx
+                .query_opt(
+                    "SELECT seat_limit,active FROM trial_campaigns WHERE id=$1 FOR UPDATE",
+                    &[&id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(CoreError::TrialUnavailable("Trial campaign not found."))?;
+            let current: i32 = row.get(0);
+            if !row.get::<_, bool>(1) {
+                return Err(CoreError::TrialUnavailable("This campaign is inactive."));
+            }
+            if current != input.expected_seat_limit {
+                return Err(CoreError::TrialUnavailable(
+                    "The signup limit changed. Refresh before increasing it.",
+                ));
+            }
+            if input.seat_limit <= current {
+                return Err(CoreError::TrialUnavailable(
+                    "New total signup limit must exceed the current limit.",
+                ));
+            }
+            tx.execute(
+                "UPDATE trial_campaigns SET seat_limit=$2 WHERE id=$1",
+                &[&id, &input.seat_limit],
             )
             .await
-            .map_err(store_error)?
-            .ok_or(CoreError::TrialUnavailable("Trial campaign not found."))?;
-        let current: i32 = row.get(0);
-        if !row.get::<_, bool>(1) {
-            return Err(CoreError::TrialUnavailable("This campaign is inactive."));
+            .map_err(store_error)?;
+            Ok(())
         }
-        if current != input.expected_seat_limit {
-            return Err(CoreError::TrialUnavailable(
-                "The signup limit changed. Refresh before increasing it.",
-            ));
-        }
-        if input.seat_limit <= current {
-            return Err(CoreError::TrialUnavailable(
-                "New total signup limit must exceed the current limit.",
-            ));
-        }
-        tx.execute(
-            "UPDATE trial_campaigns SET seat_limit=$2 WHERE id=$1",
-            &[&id, &input.seat_limit],
-        )
-        .await
-        .map_err(store_error)?;
-        self.finish(tx).await
+        .await;
+        self.finish(tx, result).await
     }
 
     #[tracing::instrument(skip_all, fields(operator = actor))]
@@ -70,10 +74,13 @@ impl CoreStore {
         let hash = hash_trial_code(&code)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         tx.execute("INSERT INTO trial_campaigns(id,name,code_hash,seat_limit,trial_days,created_by_workos_user_id,code) VALUES($1,$2,$3,$4,$5,$6,$7)",
             &[&id,&input.name.trim(),&hash,&input.seat_limit,&input.trial_days,&actor,&code]).await.map_err(store_error)?;
-        self.finish(tx).await?;
         Ok(IssuedTrialCampaign { id, code })
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn trial_offer(&self, code: &str) -> CoreResult<TrialOffer> {
@@ -109,6 +116,7 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         tx.execute("INSERT INTO trial_checkout_sessions(stripe_session_id,stripe_customer_id) VALUES($1,$2) ON CONFLICT(stripe_session_id) DO NOTHING", &[&input.stripe_session_id,&input.stripe_customer_id]).await.map_err(store_error)?;
         let session = tx.query_one("SELECT expired,stripe_customer_id FROM trial_checkout_sessions WHERE stripe_session_id=$1 FOR UPDATE", &[&input.stripe_session_id]).await.map_err(store_error)?;
         if session.get::<_, bool>(0) || session.get::<_, String>(1) != input.stripe_customer_id {
@@ -137,7 +145,8 @@ impl CoreStore {
             if existing.get::<_, String>(0) != id || existing.get::<_, String>(2) != "reserved" {
                 return Err(CoreError::TrialUnavailable("This account has already used a trial."));
             }
-            return Ok(TrialReservation { stripe_session_id: existing.get(1) });
+            // A replay keeps nothing this call wrote (the session row above).
+            return Ok((TrialReservation { stripe_session_id: existing.get(1) }, false));
         }
         let count: i64 = tx.query_one("SELECT count(*) FROM trial_redemptions WHERE campaign_id=$1 AND state <> 'expired'", &[&id]).await.map_err(store_error)?.get(0);
         if count >= i64::from(campaign.get::<_, i32>(1)) {
@@ -161,16 +170,28 @@ impl CoreStore {
         let redemption_id = crate::generate_surrogate_id("trial_seat")?;
         tx.execute("INSERT INTO trial_redemptions(id,campaign_id,customer_org_id,attempt_id,stripe_session_id,state,checkout_expires_at)
             VALUES($1,$2,$3,$4,$5,'reserved',to_timestamp($6::bigint::double precision))", &[&redemption_id,&id,&input.customer_org_id,&input.attempt_id,&input.stripe_session_id,&input.checkout_expires_at]).await.map_err(store_error)?;
-        self.finish(tx).await?;
-        Ok(TrialReservation {
+        Ok((TrialReservation {
             stripe_session_id: input.stripe_session_id,
-        })
+        }, true))
+        }
+        .await;
+        match result {
+            Ok((reservation, false)) => {
+                tx.rollback().await.map_err(store_error)?;
+                Ok(reservation)
+            }
+            result => {
+                self.finish(tx, result.map(|(reservation, _)| reservation))
+                    .await
+            }
+        }
     }
 
     #[tracing::instrument(skip_all, fields(session = input.stripe_session_id))]
     pub async fn expire_trial(&self, input: ExpireTrial) -> CoreResult<()> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         tx.execute("INSERT INTO trial_checkout_sessions(stripe_session_id,stripe_customer_id,expired) VALUES($1,$2,TRUE)
             ON CONFLICT(stripe_session_id) DO UPDATE SET expired=TRUE WHERE trial_checkout_sessions.stripe_customer_id=EXCLUDED.stripe_customer_id", &[&input.stripe_session_id,&input.stripe_customer_id]).await.map_err(store_error)?;
         // Only verified Stripe session.expired may release a reservation. A
@@ -178,12 +199,16 @@ impl CoreStore {
         tx.execute("UPDATE trial_redemptions r SET state='expired' FROM customer_billing_accounts b
             WHERE r.stripe_session_id=$1 AND r.state='reserved' AND b.customer_org_id=r.customer_org_id AND b.stripe_customer_id=$2",
             &[&input.stripe_session_id,&input.stripe_customer_id]).await.map_err(store_error)?;
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn list_trial_campaigns(&self) -> CoreResult<Vec<TrialCampaign>> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         tx.batch_execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .await
             .map_err(store_error)?;
@@ -207,8 +232,10 @@ impl CoreStore {
             let seat_limit: i32 = row.get(2);
             result.push(TrialCampaign { id,name:row.get(1),code:row.get(5),code_revision:row.get(6),seat_limit,trial_days:row.get(3),active:row.get(4),reserved_seats,redeemed_seats,seats_remaining:i64::from(seat_limit)-reserved_seats-redeemed_seats,redemptions });
         }
-        tx.commit().await.map_err(store_error)?;
         Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

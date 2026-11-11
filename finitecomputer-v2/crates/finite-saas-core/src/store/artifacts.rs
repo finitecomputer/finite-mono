@@ -13,9 +13,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeArtifact> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let artifact = postgres_upsert_runtime_artifact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(artifact)
+        let artifact = postgres_upsert_runtime_artifact(&*tx, input).await;
+        self.finish(tx, artifact).await
     }
 }
 

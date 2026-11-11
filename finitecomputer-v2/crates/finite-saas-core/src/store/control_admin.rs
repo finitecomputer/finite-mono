@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_upgrade(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_upgrade_exact(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_retire_exact(
@@ -29,9 +27,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     /// The mover's stop, which holds the Runtime for its move
@@ -42,27 +39,30 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let expected = RuntimeControlExpectedBinding {
-            agent_runtime_id: input.expected_agent_runtime_id,
-            source_host_id: input.expected_source_host_id,
-            source_machine_id: input.expected_source_machine_id,
-        };
-        let result = postgres_admin_request_runtime_control_holding(
-            &*tx,
-            AdminRuntimeControlInput {
-                admin_verified_email: input.admin_verified_email,
-                admin_workos_user_id: input.admin_workos_user_id,
-                project_id: input.project_id,
-                now: input.now,
-            },
-            RuntimeControlKind::Stop,
-            None,
-            Some(&expected),
-            MoveHold::Take,
-        )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let expected = RuntimeControlExpectedBinding {
+                agent_runtime_id: input.expected_agent_runtime_id,
+                source_host_id: input.expected_source_host_id,
+                source_machine_id: input.expected_source_machine_id,
+            };
+            let result = postgres_admin_request_runtime_control_holding(
+                &*tx,
+                AdminRuntimeControlInput {
+                    admin_verified_email: input.admin_verified_email,
+                    admin_workos_user_id: input.admin_workos_user_id,
+                    project_id: input.project_id,
+                    now: input.now,
+                },
+                RuntimeControlKind::Stop,
+                None,
+                Some(&expected),
+                MoveHold::Take,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Restart one exact Runtime: the Stop-exact binding, a Restart control.
@@ -76,27 +76,30 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let expected = RuntimeControlExpectedBinding {
-            agent_runtime_id: input.expected_agent_runtime_id,
-            source_host_id: input.expected_source_host_id,
-            source_machine_id: input.expected_source_machine_id,
-        };
-        let result = postgres_admin_request_runtime_control_holding(
-            &*tx,
-            AdminRuntimeControlInput {
-                admin_verified_email: input.admin_verified_email,
-                admin_workos_user_id: input.admin_workos_user_id,
-                project_id: input.project_id,
-                now: input.now,
-            },
-            RuntimeControlKind::Restart,
-            None,
-            Some(&expected),
-            MoveHold::Release,
-        )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let expected = RuntimeControlExpectedBinding {
+                agent_runtime_id: input.expected_agent_runtime_id,
+                source_host_id: input.expected_source_host_id,
+                source_machine_id: input.expected_source_machine_id,
+            };
+            let result = postgres_admin_request_runtime_control_holding(
+                &*tx,
+                AdminRuntimeControlInput {
+                    admin_verified_email: input.admin_verified_email,
+                    admin_workos_user_id: input.admin_workos_user_id,
+                    project_id: input.project_id,
+                    now: input.now,
+                },
+                RuntimeControlKind::Restart,
+                None,
+                Some(&expected),
+                MoveHold::Release,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_relocate_exact(
@@ -105,9 +108,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_restart(
@@ -116,11 +118,18 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_admin_request_runtime_control(&*tx, input, RuntimeControlKind::Restart, None)
-                .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result = postgres_admin_request_runtime_control(
+                &*tx,
+                input,
+                RuntimeControlKind::Restart,
+                None,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_recover_known_good_chat(
@@ -135,9 +144,8 @@ impl CoreStore {
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
             None,
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 }
 

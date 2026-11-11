@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateUsageDecision> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let decision = postgres_reserve_finite_private_usage(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(decision)
+        let decision = postgres_reserve_finite_private_usage(&*tx, input).await;
+        self.finish(tx, decision).await
     }
 
     pub async fn settle_finite_private_reservation(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<SettleFinitePrivateReservationResult> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_settle_finite_private_reservation(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_settle_finite_private_reservation(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

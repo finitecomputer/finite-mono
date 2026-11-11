@@ -289,16 +289,34 @@ impl CoreStore {
         })
     }
 
-    /// Commit, or roll back when this store is in dry-run mode.
+    /// End `tx` before the call returns: commit an `Ok` (roll it back when this
+    /// store is in dry-run mode) and roll back an `Err`.
     ///
-    /// Every write path in this impl ends here, so `--dry-run` cannot silently
-    /// miss a mutation that a later method introduces.
-    async fn finish(&self, tx: Transaction<'_>) -> CoreResult<()> {
+    /// Every transaction in this impl ends here, so `--dry-run` cannot silently
+    /// miss a mutation that a later method introduces. A dropped tokio-postgres
+    /// transaction only queues its ROLLBACK, so a method that returned early
+    /// kept its row locks after it returned: the next call, on another pooled
+    /// connection, could still meet them (a `SKIP LOCKED` lease skipped the row).
+    async fn finish<T, E: From<CoreError>>(
+        &self,
+        tx: Transaction<'_>,
+        result: Result<T, E>,
+    ) -> Result<T, E> {
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                // The caller's error wins. A rollback that fails here means the
+                // connection is gone, and its transaction with it.
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         if self.dry_run {
-            tx.rollback().await.map_err(store_error)
+            tx.rollback().await.map_err(store_error)?;
         } else {
-            tx.commit().await.map_err(store_error)
+            tx.commit().await.map_err(store_error)?;
         }
+        Ok(value)
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {

@@ -16,9 +16,8 @@ impl CoreStore {
     ) -> CoreResult<RequestAgentCreationResult> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_request_agent_creation(&*tx, input, configuration).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_request_agent_creation(&*tx, input, configuration).await;
+        self.finish(tx, result).await
     }
 }
 

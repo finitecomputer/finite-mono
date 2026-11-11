@@ -48,6 +48,7 @@ impl CoreStore {
     pub(super) async fn reconcile_trial_org(&self, org: &str, now: &str) -> CoreResult<()> {
         let mut client = self.connection().await?;
         let mut tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         // Serialize with accepted billing updates and other Core replicas. We
         // always derive desired access from persisted billing, never the event
         // payload that happened to wake this reconciliation.
@@ -90,7 +91,10 @@ impl CoreStore {
                 }
             }
         }
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

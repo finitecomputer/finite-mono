@@ -67,73 +67,76 @@ impl CoreStore {
             .start()
             .await
             .map_err(store_error)?;
-        tx.batch_execute(&format!(
-            "SET LOCAL statement_timeout = '{}ms'",
-            DESCRIPTION_BUDGET.as_millis()
-        ))
-        .await
-        .map_err(store_error)?;
-        let records = tx
-            .query(
-                &format!(
-                    "{RECORD_SELECT}
+        let result: CoreResult<_> = async {
+            tx.batch_execute(&format!(
+                "SET LOCAL statement_timeout = '{}ms'",
+                DESCRIPTION_BUDGET.as_millis()
+            ))
+            .await
+            .map_err(store_error)?;
+            let records = tx
+                .query(
+                    &format!(
+                        "{RECORD_SELECT}
             WHERE brain_server = $1 AND brain_id = $2 AND public_key_hex = ANY($3)
               AND retired_at IS NULL ORDER BY public_key_hex"
-                ),
-                &[
-                    &request.brain_server,
-                    &request.brain_id,
-                    &request.public_keys_hex,
-                ],
+                    ),
+                    &[
+                        &request.brain_server,
+                        &request.brain_id,
+                        &request.public_keys_hex,
+                    ],
+                )
+                .await
+                .map_err(store_error)?
+                .iter()
+                .map(read_record)
+                .collect::<CoreResult<Vec<_>>>()?;
+            let participating: BTreeSet<_> = request
+                .participating_public_keys_hex
+                .iter()
+                .cloned()
+                .collect();
+            let mut eligible = participating.clone();
+            eligible.extend(records.iter().map(|row| row.record.public_key_hex.clone()));
+            let eligible: Vec<_> = eligible.into_iter().collect();
+            let accounts: Vec<_> = records
+                .iter()
+                .filter_map(|r| r.record.account_id.clone())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let snapshot = IdentitySnapshot::load(
+                &*tx,
+                &request.legacy_scope(),
+                &eligible,
+                &accounts,
+                Some(&request.participating_public_keys_hex),
             )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(read_record)
-            .collect::<CoreResult<Vec<_>>>()?;
-        let participating: BTreeSet<_> = request
-            .participating_public_keys_hex
-            .iter()
-            .cloned()
-            .collect();
-        let mut eligible = participating.clone();
-        eligible.extend(records.iter().map(|row| row.record.public_key_hex.clone()));
-        let eligible: Vec<_> = eligible.into_iter().collect();
-        let accounts: Vec<_> = records
-            .iter()
-            .filter_map(|r| r.record.account_id.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let snapshot = IdentitySnapshot::load(
-            &*tx,
-            &request.legacy_scope(),
-            &eligible,
-            &accounts,
-            Some(&request.participating_public_keys_hex),
-        )
-        .await?;
-        let by_key: BTreeMap<_, _> = records
-            .iter()
-            .map(|r| (r.record.public_key_hex.as_str(), r))
-            .collect();
-        let result = request
-            .public_keys_hex
-            .iter()
-            .map(|key| {
-                let normal = if participating.contains(key) {
-                    snapshot.describe(key)
-                } else {
-                    IdentityDescription::bare(key, DescriptionState::NotShared)
-                };
-                match by_key.get(key.as_str()) {
-                    Some(record) => overlay(normal, record, &snapshot),
-                    None => normal.into(),
-                }
-            })
-            .collect();
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
+            .await?;
+            let by_key: BTreeMap<_, _> = records
+                .iter()
+                .map(|r| (r.record.public_key_hex.as_str(), r))
+                .collect();
+            let result = request
+                .public_keys_hex
+                .iter()
+                .map(|key| {
+                    let normal = if participating.contains(key) {
+                        snapshot.describe(key)
+                    } else {
+                        IdentityDescription::bare(key, DescriptionState::NotShared)
+                    };
+                    match by_key.get(key.as_str()) {
+                        Some(record) => overlay(normal, record, &snapshot),
+                        None => normal.into(),
+                    }
+                })
+                .collect();
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

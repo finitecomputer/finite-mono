@@ -13,9 +13,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeMoveReceipt> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_mark_runtime_moved_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_mark_runtime_moved_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     /// Whether this person's agents have all moved to finite.chat, so the

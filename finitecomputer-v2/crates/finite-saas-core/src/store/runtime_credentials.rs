@@ -89,6 +89,7 @@ impl CoreStore {
     ) -> CoreResult<RuntimeBootstrapCredential> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let request = locked_runtime_control_request(&*tx, &input.request_id).await?;
         verify_runtime_control_lease(&request, &input.runner_id, &input.lease_token)?;
         if request.kind != RuntimeControlKind::Upgrade
@@ -211,11 +212,13 @@ impl CoreStore {
         };
         let expected_previous_credential_sha256 =
             recovery::replacement_authorization(&tx, &request, &owner).await?;
-        self.finish(tx).await?;
         Ok(RuntimeBootstrapCredential {
             secret,
             expected_previous_credential_sha256,
         })
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Core returns the same secret for retries of this creation, including a
@@ -227,6 +230,7 @@ impl CoreStore {
     ) -> CoreResult<RuntimeBootstrapCredential> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let request = locked_agent_creation_request(&*tx, &input.creation_request_id).await?;
         verify_agent_creation_lease_active(&*tx, &request, &input.runner_id, &input.lease_token)
             .await?;
@@ -282,11 +286,13 @@ impl CoreStore {
         };
         // If provisioning is retried after runtime registration, bind it now.
         bind_bootstrap(&*tx, &request.id).await?;
-        self.finish(tx).await?;
         Ok(RuntimeBootstrapCredential {
             secret,
             expected_previous_credential_sha256: None,
         })
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Observational reader. Mutation consumers use the transactional method below.
@@ -308,9 +314,12 @@ impl CoreStore {
     ) -> CoreResult<bool> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let changed = tx.execute("UPDATE runtime_core_credentials SET revoked=TRUE WHERE agent_runtime_id=$1 AND creation_request_id=$2 AND NOT revoked", &[&runtime_id,&expected_creation_request_id]).await.map_err(store_error)?;
-        self.finish(tx).await?;
         Ok(changed == 1)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

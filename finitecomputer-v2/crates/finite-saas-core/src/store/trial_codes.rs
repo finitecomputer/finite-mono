@@ -16,40 +16,43 @@ impl CoreStore {
         let hash = hash_trial_code(&code)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        // Same lock as reservations and capacity edits. Existing reservations
-        // and redemptions belong to the campaign ID, independent of its code.
-        let row = tx
-            .query_opt(
-                "SELECT code_revision FROM trial_campaigns WHERE id=$1 FOR UPDATE",
-                &[&id],
+        let result: CoreResult<_> = async {
+            // Same lock as reservations and capacity edits. Existing reservations
+            // and redemptions belong to the campaign ID, independent of its code.
+            let row = tx
+                .query_opt(
+                    "SELECT code_revision FROM trial_campaigns WHERE id=$1 FOR UPDATE",
+                    &[&id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(CoreError::TrialUnavailable("Trial campaign not found."))?;
+            let revision: i32 = row.get(0);
+            if revision != input.expected_code_revision {
+                return Err(CoreError::TrialUnavailable(
+                    "The code changed. Refresh before editing it.",
+                ));
+            }
+            let next_revision = revision.checked_add(1).ok_or(CoreError::TrialUnavailable(
+                "This code cannot be edited again.",
+            ))?;
+            tx.execute(
+                "UPDATE trial_campaigns SET code=$2,code_hash=$3,code_revision=$4 WHERE id=$1",
+                &[&id, &code, &hash, &next_revision],
             )
             .await
-            .map_err(store_error)?
-            .ok_or(CoreError::TrialUnavailable("Trial campaign not found."))?;
-        let revision: i32 = row.get(0);
-        if revision != input.expected_code_revision {
-            return Err(CoreError::TrialUnavailable(
-                "The code changed. Refresh before editing it.",
-            ));
+            .map_err(|error| {
+                if error.as_db_error().is_some_and(|db| {
+                    db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION
+                }) {
+                    CoreError::TrialUnavailable("Another campaign already uses this code.")
+                } else {
+                    store_error(error)
+                }
+            })?;
+            Ok(())
         }
-        let next_revision = revision.checked_add(1).ok_or(CoreError::TrialUnavailable(
-            "This code cannot be edited again.",
-        ))?;
-        tx.execute(
-            "UPDATE trial_campaigns SET code=$2,code_hash=$3,code_revision=$4 WHERE id=$1",
-            &[&id, &code, &hash, &next_revision],
-        )
-        .await
-        .map_err(|error| {
-            if error
-                .as_db_error()
-                .is_some_and(|db| db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
-            {
-                CoreError::TrialUnavailable("Another campaign already uses this code.")
-            } else {
-                store_error(error)
-            }
-        })?;
-        self.finish(tx).await
+        .await;
+        self.finish(tx, result).await
     }
 }

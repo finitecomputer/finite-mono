@@ -73,6 +73,7 @@ impl CoreStore {
         let payload_sha256 = request.payload_sha256;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: Result<_, BrainObservationError> = async {
         tx.batch_execute("SET LOCAL statement_timeout = '5s'")
             .await
             .map_err(store_error)?;
@@ -103,7 +104,6 @@ impl CoreStore {
             .await
             .map_err(store_error)?
         {
-            tx.rollback().await.map_err(store_error)?;
             let stored_issuer: String = receipt.get("issuer");
             let stored_payload: String = receipt.get("payload_sha256");
             if stored_issuer != issuer || stored_payload != payload_sha256 {
@@ -244,7 +244,9 @@ impl CoreStore {
         )
         .await
         .map_err(store_error)?;
-        self.finish(tx).await?;
         Ok(outcome)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }

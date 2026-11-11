@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationLease> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_complete_agent_creation_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_complete_agent_creation_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn register_agent_creation_runtime(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationLease> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_register_agent_creation_runtime(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_register_agent_creation_runtime(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

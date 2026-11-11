@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<AdminIssuedFinitePrivateKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_issue_finite_private_friend_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_issue_finite_private_friend_key(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_rotate_finite_private_api_key(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateApiKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_rotate_finite_private_api_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_rotate_finite_private_api_key(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_revoke_finite_private_api_key(
@@ -29,9 +27,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateApiKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_revoke_finite_private_api_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_revoke_finite_private_api_key(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_reset_finite_private_usage_window(
@@ -40,9 +37,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateGrant> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_reset_finite_private_usage_window(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_assign_finite_private_limit_profile(
@@ -51,9 +47,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateGrant> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_assign_finite_private_limit_profile(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_assign_finite_private_limit_profile(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn finite_private_admin_audit_events(

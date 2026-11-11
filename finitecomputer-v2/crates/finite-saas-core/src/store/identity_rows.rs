@@ -34,27 +34,30 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let user = ensure_linked_user_row(
-            &*tx,
-            &verified_email,
-            &workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )
-        .await?;
-        if let Some(display_name) = display_name {
-            tx.execute(
-                "UPDATE users
+        let result: CoreResult<_> = async {
+            let user = ensure_linked_user_row(
+                &*tx,
+                &verified_email,
+                &workos_user_id,
+                BillingClass::Standard,
+                &now,
+            )
+            .await?;
+            if let Some(display_name) = display_name {
+                tx.execute(
+                    "UPDATE users
                  SET workos_display_name = $2,
                      workos_display_name_updated_at = $3::text::timestamptz
                  WHERE id = $1 AND workos_display_name IS DISTINCT FROM $2",
-                &[&user.id, &display_name, &now],
-            )
-            .await
-            .map_err(store_error)?;
+                    &[&user.id, &display_name, &now],
+                )
+                .await
+                .map_err(store_error)?;
+            }
+            Ok(user)
         }
-        self.finish(tx).await?;
-        Ok(user)
+        .await;
+        self.finish(tx, result).await
     }
 }
 

@@ -409,3 +409,57 @@ async fn trial_restore_proposal_cannot_take_over_an_existing_key() {
         assert!(store.query_json("SELECT to_jsonb(a) FROM trial_runtime_archives a WHERE restore_private_key_id IS NOT NULL", &[]).await.is_empty());
     }).await;
 }
+
+/// Whether a separate connection can lock the request row right now. It runs
+/// on its own thread and blocks this test's runtime until it answers, so the
+/// store's connection tasks cannot finish anything a returned call left queued.
+fn lockable_elsewhere(url: &str, request_id: &str) -> bool {
+    let (url, request_id) = (url.to_owned(), request_id.to_owned());
+    std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let (mut client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                    .await
+                    .unwrap();
+                tokio::spawn(connection);
+                let tx = client.transaction().await.unwrap();
+                let rows = tx
+                    .query(
+                        "SELECT id FROM agent_creation_requests WHERE id=$1 FOR UPDATE SKIP LOCKED",
+                        &[&request_id],
+                    )
+                    .await
+                    .unwrap();
+                tx.rollback().await.unwrap();
+                !rows.is_empty()
+            })
+    })
+    .join()
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_refused_cancel_releases_its_row_lock_before_it_returns() {
+    with_isolated_postgres(|store| async move {
+        let id = queued_restore(&store).await;
+        // The refusal comes after the request row was locked FOR UPDATE.
+        let refused = store
+            .cancel_agent_creation_request(crate::CancelAgentCreationRequestInput {
+                request_id: id.clone(),
+                now: None,
+            })
+            .await;
+        assert!(matches!(
+            refused,
+            Err(CoreError::AgentCreationRequestNotCancellable)
+        ));
+        assert!(
+            lockable_elsewhere(&store.url, &id),
+            "a runner's SKIP LOCKED lease would skip the request"
+        );
+    })
+    .await;
+}
