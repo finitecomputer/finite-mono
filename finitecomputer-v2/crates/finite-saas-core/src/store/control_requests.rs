@@ -113,6 +113,14 @@ where
     }) {
         return Err(CoreError::RuntimeSpecMismatch);
     }
+    if matches!(
+        kind,
+        RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade
+    ) {
+        refuse_a_held_start(client, &runtime.id).await?;
+    }
     if kind == RuntimeControlKind::Destroy
         && let Some(phase) = postgres_offboarding_phase(client, &runtime.id).await?
         && phase.reached(OffboardingPhase::ReceiptVerified)

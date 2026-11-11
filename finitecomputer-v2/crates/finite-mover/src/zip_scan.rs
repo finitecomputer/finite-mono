@@ -223,6 +223,11 @@ impl Scanner {
     /// and so is everything from the central directory on, which the
     /// scanner doesn't read: it waits for the directory's check against the
     /// entries that streamed past.
+    /// The entries read so far.
+    pub fn entries(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn decided(&self) -> u64 {
         match self.state {
             State::Directory => self.directory_offset.unwrap_or(self.offset),

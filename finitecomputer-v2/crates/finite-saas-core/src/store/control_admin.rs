@@ -34,6 +34,8 @@ impl CoreStore {
         Ok(result)
     }
 
+    /// The mover's stop, which holds the Runtime for its move
+    /// ([`move_holds`]).
     pub async fn admin_request_runtime_stop_exact(
         &self,
         input: AdminRuntimeStopExactInput,
@@ -45,7 +47,7 @@ impl CoreStore {
             source_host_id: input.expected_source_host_id,
             source_machine_id: input.expected_source_machine_id,
         };
-        let result = postgres_admin_request_runtime_control_bound(
+        let result = postgres_admin_request_runtime_control_holding(
             &*tx,
             AdminRuntimeControlInput {
                 admin_verified_email: input.admin_verified_email,
@@ -56,6 +58,41 @@ impl CoreStore {
             RuntimeControlKind::Stop,
             None,
             Some(&expected),
+            MoveHold::Take,
+        )
+        .await?;
+        self.finish(tx).await?;
+        Ok(result)
+    }
+
+    /// Restart one exact Runtime: the Stop-exact binding, a Restart control.
+    /// The mover's restart (staff gave it back) is the one start a hold
+    /// lets through: it releases the hold first, in this transaction. A
+    /// Runtime marked moved stays held, so it is refused and nothing
+    /// changes.
+    pub async fn admin_request_runtime_restart_exact(
+        &self,
+        input: AdminRuntimeStopExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let expected = RuntimeControlExpectedBinding {
+            agent_runtime_id: input.expected_agent_runtime_id,
+            source_host_id: input.expected_source_host_id,
+            source_machine_id: input.expected_source_machine_id,
+        };
+        let result = postgres_admin_request_runtime_control_holding(
+            &*tx,
+            AdminRuntimeControlInput {
+                admin_verified_email: input.admin_verified_email,
+                admin_workos_user_id: input.admin_workos_user_id,
+                project_id: input.project_id,
+                now: input.now,
+            },
+            RuntimeControlKind::Restart,
+            None,
+            Some(&expected),
+            MoveHold::Release,
         )
         .await?;
         self.finish(tx).await?;
@@ -114,6 +151,39 @@ pub(super) async fn postgres_admin_request_runtime_control_bound<C>(
 where
     C: GenericClient + Sync,
 {
+    postgres_admin_request_runtime_control_holding(
+        client,
+        input,
+        kind,
+        target_runtime_artifact_id,
+        expected,
+        MoveHold::Keep,
+    )
+    .await
+}
+
+/// What an admin control does to FIN-463's hold ([`move_holds`]): the
+/// mover's stop takes it, its restart releases it. Both happen after the
+/// admin user is ensured, so every path locks the user, then the Runtime,
+/// then the hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MoveHold {
+    Keep,
+    Take,
+    Release,
+}
+
+async fn postgres_admin_request_runtime_control_holding<C>(
+    client: &C,
+    input: AdminRuntimeControlInput,
+    kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
+    expected: Option<&RuntimeControlExpectedBinding>,
+    move_hold: MoveHold,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
     let now = input.now.unwrap_or(current_time_iso()?);
     let admin_email = normalize_owner_email(Some(&input.admin_verified_email))
         .ok_or(CoreError::MissingVerifiedEmail)?;
@@ -126,6 +196,11 @@ where
     let project = select_project(client, &input.project_id)
         .await?
         .ok_or(CoreError::ProjectNotFound)?;
+    if move_hold == MoveHold::Release
+        && let Some(expected) = expected
+    {
+        release(client, &expected.agent_runtime_id).await?;
+    }
     let request = postgres_enqueue_runtime_control_request_bound(
         client,
         &project,
@@ -136,6 +211,10 @@ where
         expected,
     )
     .await?;
+    if move_hold == MoveHold::Take {
+        refuse_while_a_start_is_active(client, &request.agent_runtime_id).await?;
+        hold(client, &request).await?;
+    }
     record_explicit_trial_runtime_intent(client, &request).await?;
     let action = match kind {
         RuntimeControlKind::Restart => "runtime.admin_restart",

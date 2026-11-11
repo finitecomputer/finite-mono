@@ -520,6 +520,11 @@
         production = lat5;
       };
 
+      checks.x86_64-linux.finite-mover = import ./infra/nixos/tests/finite-mover.nix {
+        nixpkgs = nixpkgs-lat3;
+        finitePackages = finitePackagesLinux;
+      };
+
       checks.x86_64-linux.lat7-storage-boot = import ./infra/nixos/tests/lat7-storage-boot.nix {
         nixpkgs = nixpkgs-lat3;
         inherit disko;

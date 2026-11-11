@@ -86,6 +86,7 @@ in
     ../../modules/backups.nix
     ../../modules/monitoring.nix
     ../../modules/finite-litestream.nix
+    ../../modules/finite-mover.nix
     ../../modules/ssh-flood-limits.nix
     ../../modules/tcp-ip-options-guard.nix
   ];
@@ -117,6 +118,13 @@ in
     enable = false;
     units = importModeUnits;
   };
+
+  # FIN-463's mover (../../modules/finite-mover.nix). It needs the app
+  # release that carries finite-mover and Core's runtime-mark-moved-exact:
+  # turn it on in the commit that advances lat2-app-source to one, with the
+  # admin identity and each Runner host. Its timers wait for finite.chat to
+  # know its npub (timers.enable).
+  finite.mover.enable = false;
 
   # Reuse the existing finitecomputer rsync.net destination account, with a
   # repository dedicated to lat-2 so lat-1's frozen archives are never

@@ -17,6 +17,7 @@ pub mod names;
 pub mod nip98;
 pub mod npub;
 pub mod project_config;
+pub mod redirect;
 
 pub use manifest::{ManifestFile, PublishManifest};
 
@@ -46,4 +47,6 @@ pub enum ProtoError {
     InvalidManifest(&'static str),
     #[error("invalid project config: {0}")]
     InvalidProjectConfig(&'static str),
+    #[error("invalid redirect target: {0}")]
+    InvalidRedirectTarget(&'static str),
 }

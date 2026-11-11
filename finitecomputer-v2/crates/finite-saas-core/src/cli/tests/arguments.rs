@@ -271,6 +271,39 @@ fn artifact_upsert_accepts_explicit_unpromoted_canary_without_changing_legacy_fl
 }
 
 #[test]
+fn exact_restart_cli_takes_the_stops_binding() {
+    let restart = [
+        "finite-saas-core",
+        "runtime-restart-exact",
+        "--project-id",
+        "project-a",
+        "--expected-agent-runtime-id",
+        "runtime-a",
+        "--expected-source-host-id",
+        "lat3",
+        "--expected-source-machine-id",
+        "finite-kata-a",
+        "--admin-email",
+        "admin@finite.vip",
+        "--admin-workos-user-id",
+        "workos-admin",
+        "--wait-timeout-seconds",
+        "900",
+    ];
+    assert!(matches!(
+        Args::try_parse_from(restart).unwrap().command,
+        Some(Command::RuntimeRestartExact(RuntimeStopExactCliArgs {
+            wait_timeout_seconds: 900,
+            ..
+        }))
+    ));
+    assert!(
+        Args::try_parse_from(&restart[..12]).is_err(),
+        "the binding is whole"
+    );
+}
+
+#[test]
 fn exact_stop_cli_requires_the_complete_binding_and_bounded_timeout() {
     let common = [
         "finite-saas-core",

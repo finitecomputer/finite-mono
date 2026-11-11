@@ -184,6 +184,10 @@ pub enum CoreError {
     InvalidRuntimeMoveNpub,
     #[error("the runtime is already marked moved differently")]
     RuntimeMoveConflict,
+    /// FIN-463's hold: stopped for a move, or moved. The old dashboard
+    /// shows these words.
+    #[error("This agent is moving to finite.chat.")]
+    RuntimeMoving,
     #[error("runtime control request was not found")]
     RuntimeControlRequestNotFound,
     #[error("runtime control request is not in the launching phase")]
