@@ -144,7 +144,7 @@ pub enum Refused {
     JournalPresent,
     /// Over [`SIMPLEX_MAX_BYTES`].
     TooLarge,
-    /// No stage id to seal by, and it isn't sealed yet.
+    /// No stage id: nothing says the runtime is held stopped for its move.
     NoStageId,
     /// More than one sealed folder and no `agent/simplex`: which is it?
     SeveralSealed,
@@ -266,7 +266,9 @@ pub fn decide(tree: &Tree, stage: Option<&str>) -> Result<Result<Carried, Refuse
         1 => return Ok(Err(Refused::DatabaseMissing)),
         _ => {}
     }
-    if name == FOLDER && stage.is_none() {
+    // The stage id is the reader's word for Core's hold, a sealed retry's
+    // too (the module's "Writers").
+    if stage.is_none() {
         return Ok(Err(Refused::NoStageId));
     }
     // Once sealed, the owner is the one it was sealed with, never the live

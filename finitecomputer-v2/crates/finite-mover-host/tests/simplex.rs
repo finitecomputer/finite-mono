@@ -1089,3 +1089,19 @@ fn a_seal_cut_short_is_left_for_a_person() {
         "SimpleX not turned off"
     );
 }
+
+/// A sealed retry needs the stage id as much as the first stage does: it is
+/// the reader's word that Core holds the runtime stopped.
+#[test]
+fn a_sealed_retry_without_a_stage_id_carries_nothing() {
+    let tree = Tree::new();
+    tree.simplex();
+    assert!(entries(&tree.stream()).contains_key(CHAT));
+    let stage = entries(&tree.stream_for(None));
+    assert!(carried_nothing(&stage), "{:?}", stage.keys());
+    assert_eq!(
+        summary(&stage)["simplex"],
+        json!({"carried": false, "why": "no-stage-id"})
+    );
+    assert!(tree.path(&format!("{SEALED}/identity_chat.db")).exists());
+}
