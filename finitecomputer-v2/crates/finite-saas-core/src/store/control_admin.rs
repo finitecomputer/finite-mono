@@ -42,6 +42,7 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        refuse_while_a_start_is_active(&*tx, &input.expected_agent_runtime_id).await?;
         let expected = RuntimeControlExpectedBinding {
             agent_runtime_id: input.expected_agent_runtime_id,
             source_host_id: input.expected_source_host_id,

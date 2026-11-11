@@ -378,3 +378,92 @@ async fn postgres_a_runtime_marked_moved_is_started_by_nothing() {
     let started = not_refused(moved).await;
     assert!(started.is_empty(), "moved, yet:\n{}", started.join("\n"));
 }
+
+fn mark(project_id: &str, runtime_id: &str) -> AdminMarkRuntimeMovedExactInput {
+    AdminMarkRuntimeMovedExactInput {
+        admin_verified_email: format!("{RUN}-admin@finite.vip"),
+        admin_workos_user_id: format!("workos_{RUN}_admin"),
+        project_id: project_id.to_string(),
+        expected_agent_runtime_id: runtime_id.to_string(),
+        expected_source_host_id: HOST.to_string(),
+        expected_source_machine_id: format!("{RUN}-agent-001"),
+        moved: RuntimeMoved::Migrated,
+        agent_npub: None,
+        now: None,
+    }
+}
+
+/// A hold or a moved mark is taken only when no start is queued or running,
+/// so a held Runtime never has one a Runner could lease: a relocation, or a
+/// restart, recovery or upgrade asked before.
+#[tokio::test]
+async fn postgres_no_hold_or_mark_is_taken_over_a_start_already_asked() {
+    let mut taken = Vec::new();
+    for (start_path, take) in [
+        ("staff relocate", "stop-exact"),
+        ("staff relocate", "mark moved"),
+        ("owner restart (dashboard)", "mark moved"),
+        ("staff upgrade", "mark moved"),
+    ] {
+        let said = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let into = said.clone();
+        with_isolated_postgres(|store| async move {
+            let (project_id, runtime_id) = launched(&store).await;
+            let asked = start(&store, start_path, &project_id, &runtime_id).await;
+            assert!(asked.starts_with("started"), "{start_path}: {asked}");
+            let result = match take {
+                "stop-exact" => store
+                    .admin_request_runtime_stop_exact(exact(&project_id, &runtime_id))
+                    .await
+                    .map(drop),
+                _ => store
+                    .admin_mark_runtime_moved_exact(mark(&project_id, &runtime_id))
+                    .await
+                    .map(drop),
+            };
+            let holds = store
+                .query_json("SELECT to_jsonb(h) FROM agent_runtime_move_holds h", &[])
+                .await
+                .len();
+            let moves = store
+                .query_json("SELECT to_jsonb(m) FROM agent_runtime_moves m", &[])
+                .await
+                .len();
+            *into.lock().unwrap() = format!("{result:?}, holds {holds}, moves {moves}");
+        })
+        .await;
+        let said = said.lock().unwrap().clone();
+        if said != "Err(RuntimeControlOperationConflict), holds 0, moves 0" {
+            taken.push(format!("{start_path} then {take}: {said}"));
+        }
+    }
+    assert!(
+        taken.is_empty(),
+        "taken over a start:\n{}",
+        taken.join("\n")
+    );
+}
+
+/// The moved Runtime's refused restart leaves its hold where it was.
+#[tokio::test]
+async fn postgres_a_refused_restart_keeps_the_hold() {
+    with_isolated_postgres(|store| async move {
+        let (project_id, runtime_id) = stopped_for_a_move(&store).await;
+        store
+            .admin_mark_runtime_moved_exact(mark(&project_id, &runtime_id))
+            .await
+            .unwrap();
+        let restart = store
+            .admin_request_runtime_restart_exact(exact(&project_id, &runtime_id))
+            .await;
+        assert!(held(&restart), "{restart:?}");
+        assert_eq!(
+            store
+                .query_json("SELECT to_jsonb(h) FROM agent_runtime_move_holds h", &[])
+                .await
+                .len(),
+            1
+        );
+    })
+    .await;
+}
