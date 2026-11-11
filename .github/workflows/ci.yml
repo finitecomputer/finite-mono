@@ -11,9 +11,14 @@ on:
       - main
       - migration-integration
 
+# A newer push cancels a pull request's running CI. On `main` (and other
+# pushed branches) a started run always finishes, so an operator can find a
+# finished CI at the exact SHA they deploy: the group keeps one run going per
+# ref, and the newest push waits behind it (a newer push replaces a waiting
+# one, never a running one).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
