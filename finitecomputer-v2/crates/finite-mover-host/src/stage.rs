@@ -67,10 +67,7 @@ pub fn stream(
     };
     walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
     let carried = match simplex::decide(tree, stage_id)? {
-        Ok(carried) => {
-            let folder = carried.folder.clone();
-            Ok((folder, stage.carry(carried)?))
-        }
+        Ok(carried) => Ok(stage.carry(carried)?),
         Err(why) => Err(why),
     };
     let Stage {
@@ -78,15 +75,6 @@ pub fn stream(
         tallies,
         copied,
     } = stage;
-    // The carried SimpleX databases must still be settled: no WAL holding
-    // rows the stage doesn't. Checked before the files are re-stat'ed below,
-    // so a WAL checkpointed into its database and removed at any moment
-    // shows either here, still there, or below, the database changed.
-    if let Ok((folder, _)) = &carried
-        && !simplex::still_settled(tree, folder)?
-    {
-        return Err(HostError::TreeChanged(format!("agent/{folder}").into()));
-    }
     // A runtime started while the walk ran (a restart from the old
     // dashboard) would leave files copied before it wrote them stale: a
     // session store without its newest log. Every staged file must still be
@@ -100,10 +88,12 @@ pub fn stream(
             return Err(HostError::TreeChanged(name.into()));
         }
     }
-    // Staged, settled and checked, the agent still stopped and its lease
-    // held: seal the old SimpleX where every later start sees it.
+    // Staged and checked, the agent still stopped and its lease held: seal
+    // the old SimpleX where every later start sees it. The carried
+    // databases' own last checks come after the seal, which keeps every
+    // SimpleX writer from them ([`simplex`]'s "Writers").
     let carry = match carried {
-        Ok((_, seal)) => Carry::carried(simplex::seal(tree, seal)?),
+        Ok(seal) => Carry::carried(simplex::seal(tree, seal)?),
         Err(why) => Carry::refused(why),
     };
     let mut summary = tallies.summary(tree.id().as_str());
@@ -123,10 +113,11 @@ struct Stage<W: Write> {
 }
 
 impl<W: Write> Stage<W> {
-    /// Stage the SimpleX conversation. Its databases are checked again at
-    /// the end with every other copied file. Returns the seal to make.
+    /// Stage the SimpleX conversation. Its databases are checked again by
+    /// the seal, once sealed. Returns the seal to make.
     fn carry(&mut self, carried: Carried) -> Result<Seal, HostError> {
         let owner = carried.owner();
+        let mut seal = carried.seal;
         for database in carried.databases {
             let bytes = u64::try_from(database.stat.st_size).unwrap_or(0);
             match self.zip.entry(
@@ -146,7 +137,7 @@ impl<W: Write> Stage<W> {
             if !same_file(&database.stat, &after) {
                 return Err(HostError::TreeChanged(database.source.into()));
             }
-            self.copied.push((database.source, after));
+            seal.copied(&database, after);
             self.tallies.staged(Class::Simplex, bytes);
         }
         self.zip
@@ -159,7 +150,7 @@ impl<W: Write> Stage<W> {
             )
             .map_err(write_error)?;
         self.tallies.staged(Class::Simplex, owner.len() as u64);
-        Ok(carried.seal)
+        Ok(seal)
     }
 }
 
