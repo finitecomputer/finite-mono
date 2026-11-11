@@ -10,6 +10,17 @@ on:
       - '.github/workflows/lat5-nixos-closure.yml'
       - 'flake.nix'
       - 'flake.lock'
+  # Main warms the finite Cachix cache with what qualify must build, so PR runs
+  # substitute the pinned kernel instead of compiling it. Any infra/nixos change
+  # may move the kernel; warm-cache's dry-run decides whether anything is new.
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/nixos/**'
+      - '.github/workflows/lat5-nixos-closure.yml'
+      - 'flake.nix'
+      - 'flake.lock'
   workflow_dispatch:
     inputs:
       rev:
@@ -39,7 +50,9 @@ jobs:
   qualify:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    # Warm: minutes. Cold (a kernel main has not built yet): ~3 h, as the
+    # pinned kernel alone takes ~2 h 40 min on this runner.
+    timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
       - name: Require hardware virtualization for storage qualification
@@ -55,6 +68,70 @@ jobs:
         run: python3 -m unittest scripts.tests.test_lat5_closure_artifact scripts.tests.test_lat5_bootstrap
       - name: Qualify storage and both EFI boot paths on synthetic disks
         run: nix build --option builders '' --print-build-logs .#checks.x86_64-linux.lat5-storage-boot
+  warm-cache:
+    # Only main pushes to Cachix; PR runs, forks included, stay read-only.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      CHECK_ATTR: .#checks.x86_64-linux.lat5-storage-boot
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require hardware virtualization for storage qualification
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Require Cachix token for trusted cache push
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo "::error::set CACHIX_AUTH_TOKEN as a repository or organization Actions secret"
+            exit 1
+          fi
+      - name: Configure Cachix trusted cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+      - name: Build what qualify would have to build
+        id: inputs
+        env:
+          BUILD_PLAN: ${{ runner.temp }}/qualify-build-plan
+          INPUT_DRVS: ${{ runner.temp }}/qualify-input-drvs
+        run: |
+          set -euo pipefail
+
+          # The check itself stays unpushed, so every PR still runs the VM test.
+          check_drv="$(nix eval --raw --option builders '' "$CHECK_ATTR.drvPath")"
+          nix build --dry-run --option builders '' "$CHECK_ATTR" 2>&1 | tee "$BUILD_PLAN"
+          sed -nE 's#^[[:space:]]+(/nix/store/[^[:space:]]+\.drv)$#\1#p' "$BUILD_PLAN" \
+            | { grep -vxF "$check_drv" || true; } > "$INPUT_DRVS"
+          count="$(wc -l < "$INPUT_DRVS" | tr -d '[:space:]')"
+          if [[ "$count" == 0 ]]; then
+            echo "Every input of $CHECK_ATTR is already substitutable; nothing to warm."
+            echo "drvs=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Building $count input derivations of $CHECK_ATTR"
+          sed 's/$/^*/' "$INPUT_DRVS" | xargs -r -d '\n' \
+            nix build --no-link --print-build-logs --option builders ''
+          echo "drvs=$INPUT_DRVS" >> "$GITHUB_OUTPUT"
+      - name: Push built inputs to Cachix
+        if: steps.inputs.outputs.drvs != ''
+        env:
+          INPUT_DRVS: ${{ steps.inputs.outputs.drvs }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          outputs="$RUNNER_TEMP/qualify-input-outputs"
+          xargs -r -d '\n' nix-store --query --outputs < "$INPUT_DRVS" > "$outputs"
+          echo "Pushing $(wc -l < "$outputs" | tr -d '[:space:]') outputs (and their closures) to $CACHIX_CACHE_NAME"
+          xargs -r -d '\n' cachix push "$CACHIX_CACHE_NAME" < "$outputs"
   build:
     if: github.event_name == 'workflow_dispatch'
     runs-on: ${{ fromJSON(inputs.runs_on_json) }}
