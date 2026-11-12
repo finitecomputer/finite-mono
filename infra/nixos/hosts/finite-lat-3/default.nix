@@ -45,6 +45,12 @@ in
     allowedOrigins = [ "https://finite.computer" ];
   };
 
+  # FIN-463 mover on finite-lat-2 (key made by finite-mover-keys.service at
+  # the FIN-492 lat2 activation). Forced to finite-mover-host only.
+  finite.moverHost.authorizedKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZpeECJfJCT0sEDsYokkQaOPlCA9fdz2HycMCKLhPp7 finite-mover@finite-lat-2"
+  ];
+
   # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
   # differences are declared here. Core is remote, so sandboxes are reached
   # through this host's private WireGuard overlay address.
