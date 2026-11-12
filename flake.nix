@@ -147,11 +147,33 @@
         modules = lat3Modules ++ [ ./infra/nixos/hosts/finite-lat-3/esp-guard.nix ];
       };
 
+      # tzdata 2026b's `now.ck` self-check (its `check` target) compares
+      # every zone from the build's own clock forward against zonenow.tab.
+      # From 2026-11, America/Vancouver and America/Phoenix agree from now on
+      # and zonenow.tab does not yet say so, so every fresh build fails
+      # ("make: *** now.ck Error 1"). Only the installers' static set builds
+      # tzdata from source, so skip its checks there. The host systems'
+      # packages are untouched; drop this with the next tzdata release.
+      kexecTzdataNowCheck = {
+        nixpkgs.overlays = [
+          (final: prev: {
+            tzdata =
+              if prev.stdenv.hostPlatform.isStatic then
+                prev.tzdata.overrideAttrs (_: {
+                  doCheck = false;
+                })
+              else
+                prev.tzdata;
+          })
+        ];
+      };
+
       lat3Kexec = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-3-installer";
             system.kexec-installer.name = "finite-lat-3-nixos-26.05-kexec";
@@ -196,6 +218,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-2-installer";
             system.kexec-installer.name = "finite-lat-2-nixos-26.05-kexec";
@@ -234,6 +257,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-4-installer";
             system.kexec-installer.name = "finite-lat-4-nixos-26.05-kexec";
@@ -269,6 +293,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-5-installer";
             system.kexec-installer.name = "finite-lat-5-nixos-26.05-kexec";
@@ -304,6 +329,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-7-installer";
             system.kexec-installer.name = "finite-lat-7-nixos-26.05-kexec";
