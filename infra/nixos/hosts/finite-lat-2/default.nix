@@ -127,6 +127,11 @@ in
   # (timers.enable).
   finite.mover = {
     enable = true;
+    # FIN-492 step 6, the one test move: preview's mailbox, timers still off.
+    # Run only finite-mover-mailbox by hand for the hand-pushed test row;
+    # never finite-mover-roster, which would push the production roster to
+    # preview. Delete this line (back to https://finite.chat) in step 7.
+    finiteChat = "https://preview.finite.build";
     core = {
       adminEmail = "austin@finite.vip";
       adminWorkosUserId = "user_01KSNFQE5SSD07EMMKN9GV1H2S";
