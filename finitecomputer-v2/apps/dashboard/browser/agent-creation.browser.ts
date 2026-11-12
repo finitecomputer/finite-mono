@@ -6,7 +6,7 @@ import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
 import { sealData } from "iron-session";
 
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
@@ -1063,6 +1063,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await skillsLink.click();
       await page.waitForURL(/\/dashboard\/skills\?machine=runtime_completed-oslo-bot$/u);
       await page.getByRole("heading", { name: "Skills", exact: true }).waitFor({ state: "visible" });
+      // FIN-495: from this page load on, the page itself logs the switcher's
+      // life (see `logSwitcherInPage`), for the report below.
+      // tsx names inner functions through an `__name` helper the page lacks.
+      await page.addInitScript("globalThis.__name ??= (target) => target;");
+      await page.addInitScript(logSwitcherInPage);
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot`
       );
@@ -1085,12 +1090,26 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         async () =>
           `agent switcher did not hydrate after returning from Skills\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
-      await machineSwitcher.click();
+      // FIN-495 / FIN-188: this menu has failed to open in CI and never here.
+      // Record what the page does around the click (listeners only, so the
+      // click's timing is unchanged) and report it if the item never shows.
+      const aroundClick = recordPageEvents(page);
       const secondAgentItem = page.getByRole("menuitem", {
         name: "Second Oslo Bot",
         exact: true,
       });
-      await secondAgentItem.waitFor({ state: "visible" });
+      try {
+        await machineSwitcher.click();
+        aroundClick.mark("clicked");
+        await secondAgentItem.waitFor({ state: "visible" }).catch(async (error: Error) => {
+          throw new Error(
+            `${error.message}\n${await switcherState(page)}\n${aroundClick.report()}\n`
+              + `dashboard output (tail):\n${dashboardOutput().slice(-3_000)}`
+          );
+        });
+      } finally {
+        aroundClick.stop();
+      }
       await secondAgentItem.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
@@ -3670,6 +3689,107 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(await timeoutMessage());
+}
+
+/** Timestamped main-frame navigations, loads, page errors and console
+ * errors or warnings, from now until `stop`. */
+function recordPageEvents(page: Page) {
+  const start = Date.now();
+  const events: string[] = [];
+  const mark = (what: string) => events.push(`+${Date.now() - start}ms ${what}`);
+  const navigated = (frame: Frame) => {
+    if (frame === page.mainFrame()) mark(`navigated ${frame.url()}`);
+  };
+  const loaded = () => mark("load");
+  const failed = (error: Error) => mark(`pageerror ${error.message.slice(0, 300)}`);
+  const logged = (message: ConsoleMessage) => {
+    if (
+      (message.type() === "error" || message.type() === "warning")
+      && !message.text().includes("was preloaded using link preload")
+    ) {
+      mark(`console.${message.type()} ${message.text().slice(0, 300)}`);
+    }
+  };
+  page.on("framenavigated", navigated);
+  page.on("load", loaded);
+  page.on("pageerror", failed);
+  page.on("console", logged);
+  const stop = () => {
+    page.off("framenavigated", navigated);
+    page.off("load", loaded);
+    page.off("pageerror", failed);
+    page.off("console", logged);
+  };
+  return {
+    mark,
+    stop,
+    report: () => {
+      stop();
+      return `page events since just before the click:\n${events.join("\n") || "(none)"}`;
+    },
+  };
+}
+
+/** Runs in the page (an init script). Logs, with page timestamps: each
+ * pointerdown or click on an agent switcher and whether React had hydrated
+ * that button then, each `aria-expanded` change, and switchers or menus
+ * added or removed (a remount). Each switcher button gets a number, so a
+ * replaced button shows up as a new one. */
+function logSwitcherInPage() {
+  const log: string[] = [];
+  (window as unknown as { __switcherLog: string[] }).__switcherLog = log;
+  const ids = new WeakMap<Element, number>();
+  let next = 0;
+  const id = (element: Element) => {
+    if (!ids.has(element)) ids.set(element, ++next);
+    return ids.get(element);
+  };
+  const at = (what: string) => log.push(`${Math.round(performance.now())}ms ${what}`);
+  const hydrated = (element: Element) => Object.keys(element).some((key) => key.startsWith("__reactProps$"));
+  for (const type of ["pointerdown", "click"]) {
+    window.addEventListener(type, (event) => {
+      const button = (event.target as Element | null)?.closest?.(".ocean-machine-switcher__button");
+      if (button) at(`${type} on switcher #${id(button)} hydrated=${hydrated(button)}`);
+    }, true);
+  }
+  // `document` exists before its root element does, so this sees the parse too.
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === "attributes" && record.target instanceof Element
+        && record.target.matches(".ocean-machine-switcher__button")) {
+        at(`switcher #${id(record.target)} aria-expanded=${record.target.getAttribute("aria-expanded")}`);
+      }
+      for (const [nodes, verb] of [[record.addedNodes, "added"], [record.removedNodes, "removed"]] as const) {
+        for (const node of Array.from(nodes)) {
+          if (!(node instanceof Element)) continue;
+          for (const found of [node, ...Array.from(node.querySelectorAll(".ocean-machine-switcher__button, [role=menu]"))]) {
+            if (found.matches(".ocean-machine-switcher__button")) at(`switcher #${id(found)} ${verb}`);
+            else if (found.matches("[role=menu]")) at(`menu ${verb}`);
+          }
+        }
+      }
+    }
+  }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-expanded"] });
+}
+
+/** The agent switchers as the page has them now: hydrated or not, open or
+ * not, and the menu's items, plus the page's own switcher log. */
+async function switcherState(page: Page) {
+  const state = await page
+    .evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      switchers: Array.from(document.querySelectorAll(".ocean-machine-switcher__button")).map((button) => ({
+        label: button.getAttribute("aria-label"),
+        expanded: button.getAttribute("aria-expanded"),
+        hydrated: Object.keys(button).some((key) => key.startsWith("__reactProps$")),
+      })),
+      menus: Array.from(document.querySelectorAll('[role="menu"]')).map((menu) =>
+        Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent?.trim())),
+      log: (window as unknown as { __switcherLog?: string[] }).__switcherLog?.slice(-60) ?? null,
+    }))
+    .catch((error: unknown) => ({ evaluateFailed: String(error) }));
+  return `switcher state: ${JSON.stringify(state)}`;
 }
 
 async function pageText(page: Page) {
