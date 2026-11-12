@@ -368,8 +368,8 @@ print(json.dumps(results))
         // The observer's own copies are close-on-exec: the gateway holds the
         // pipe through its stdout only. Look only now that the gateway's
         // shell has run (its `dd` filled the pipe): on the kernels CI runs,
-        // `posix_spawn` returns as soon as the child's exec replaces its
-        // memory, before the kernel closes its close-on-exec descriptors.
+        // the child's exec wakes `posix_spawn`'s vfork parent before the
+        // kernel closes the child's close-on-exec descriptors.
         let mut gateway_pipe_fds: Vec<String> =
             std::fs::read_dir(format!("/proc/{gateway_pid}/fd"))
                 .unwrap()
