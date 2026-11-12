@@ -1083,12 +1083,14 @@ name = "finite-mover"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "finite-brain-store",
  "finite-mover-host",
  "finite-nostr",
  "finite-saas-core",
  "hex",
  "nostr",
  "reqwest",
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",

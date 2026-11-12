@@ -10,7 +10,9 @@
 GRANT SELECT (id, normalized_email, workos_user_id) ON users TO finite_mover;
 GRANT SELECT (id, owner_user_id, display_name, import_candidate_id) ON projects TO finite_mover;
 GRANT SELECT (project_id, agent_runtime_id, active) ON project_runtime_links TO finite_mover;
-GRANT SELECT (id, project_id, source_host_id, source_machine_id, placement_runner_class, created_at) ON agent_runtimes TO finite_mover;
+-- health_reporting_npub: the key the agent signs with, which finite-brain
+-- knows as its brains' owner (FIN-499).
+GRANT SELECT (id, project_id, source_host_id, source_machine_id, placement_runner_class, created_at, health_reporting_npub) ON agent_runtimes TO finite_mover;
 -- The runtime spec names the durable tree and the runtime it belongs to.
 -- It also holds the runtime's non-secret environment; secrets are only
 -- named there, never held.

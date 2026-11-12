@@ -3,7 +3,9 @@
 # finitecomputer-v2/crates). It reads Core's database through a read-only
 # role, changes Core only through four exact subcommands of Core's own CLI,
 # and reads each agent's tree on its Runner host over ssh, where
-# finite-mover-host.nix forces the reader.
+# finite-mover-host.nix forces the reader. Which brains each agent's
+# person owns it reads from finite-brain's database, only through one
+# fixed command run as finite-brain's own user (FIN-499).
 #
 # Two keys are made once, here on the host, and never leave it: the mover's
 # Nostr key (`mover.key`, which finite.chat knows by its npub) and its ssh
@@ -74,6 +76,31 @@ let
       -- ${cfg.corePackage}/bin/finite-saas-core "$@"
   '';
 
+  # finite-brain's database, read for the mover by `finite-mover-brains`
+  # as finite-brain's own dynamic user, never by the mover's: a file of the
+  # database another user makes (its `-shm`) is one finite-brain can't
+  # open (finite-litestream.nix). Its folder is bound in by systemd, which
+  # alone passes /var/lib/private; the reader opens the database
+  # read-only, refuses one another user owns, and has no network.
+  brainMount = "/run/finite-mover-brain";
+  brainsWrapper = pkgs.writeShellScript "finite-mover-brains" ''
+    set -eu
+    if [ "$#" -ne 0 ]; then
+      echo "finite-mover-brains: takes no arguments" >&2
+      exit 64
+    fi
+    exec ${config.systemd.package}/bin/systemd-run \
+      --quiet --wait --pipe --collect \
+      --service-type=exec \
+      --description="finite-brain's owned brains, read for the finite.chat mover" \
+      --property=DynamicUser=yes \
+      --property=User=${cfg.brain.user} \
+      --property=BindPaths=${dirOf cfg.brain.database}:${brainMount} \
+      --property=PrivateNetwork=yes \
+      --property=RuntimeMaxSec=120 \
+      -- ${cfg.package}/bin/finite-mover-brains ${brainMount}/${baseNameOf cfg.brain.database}
+  '';
+
   ssh = [
     "${pkgs.openssh}/bin/ssh"
     "-i"
@@ -97,6 +124,11 @@ let
     fleet.postgres = {
       conninfo = "host=/run/postgresql user=finite_mover dbname=${cfg.postgres.database}";
       sizes_file = "${stateDir}/sizes.json";
+      brains = [
+        "${config.security.wrapperDir}/sudo"
+        "-n"
+        "${brainsWrapper}"
+      ];
     };
     core = {
       inherit (cfg.core) program;
@@ -228,6 +260,18 @@ in
         description = "The command that runs Core's CLI; the subcommand follows.";
       };
     };
+    brain = {
+      user = lib.mkOption {
+        type = lib.types.str;
+        default = "finite-brain-app";
+        description = "finite-brain's dynamic user (its unit's name), which owns its database and as which the owned brains are read.";
+      };
+      database = lib.mkOption {
+        type = lib.types.str;
+        default = "/var/lib/private/finitebrain/finite-brain.sqlite3";
+        description = "finite-brain's database, at its real path under /var/lib/private (finite-brain.nix's FINITE_BRAIN_DB).";
+      };
+    };
     hosts = lib.mkOption {
       type = lib.types.attrsOf (
         lib.types.submodule {
@@ -353,10 +397,18 @@ in
       {
         users = [ "finite-mover" ];
         runAs = "root";
-        commands = map (subcommand: {
-          command = "${coreWrapper} ${subcommand} *";
-          options = [ "NOPASSWD" ];
-        }) subcommands;
+        commands =
+          map (subcommand: {
+            command = "${coreWrapper} ${subcommand} *";
+            options = [ "NOPASSWD" ];
+          }) subcommands
+          # `""`: no arguments at all.
+          ++ [
+            {
+              command = ''${brainsWrapper} ""'';
+              options = [ "NOPASSWD" ];
+            }
+          ];
       }
     ];
 

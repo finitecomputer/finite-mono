@@ -9,7 +9,7 @@
 //! `stream` stages. It never follows a link, never leaves the tree's
 //! filesystem and never opens anything for writing.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -33,6 +33,21 @@ pub const DEPTH_MAX: usize = 128;
 const BRAIN_DIRECTORY_MAX_BYTES: u64 = 1024 * 1024;
 /// `config.yaml`, whose allow-listed copy the walk makes.
 const HERMES_CONFIG: [&str; 3] = ["agent", "hermes-home", "config.yaml"];
+
+/// The brains the mover named as owned by this agent's person: each id,
+/// with its display name when the mover sent one.
+pub type OwnedBrains = BTreeMap<String, Option<String>>;
+
+/// Where `fbrain open` puts a brain's working tree (`FBRAIN_WORKING_TREE_ROOT`,
+/// `/data/workspace/finitebrain`), and beside it each owned brain's name
+/// file, `<id>.json`, which the stage writes (phase 0's export.py did the
+/// same; fragment's `finite-computer` import profile reads it).
+pub const BRAIN_ROOT: [&str; 2] = ["workspace", "finitebrain"];
+
+/// The name file of brain `id`, as its path in the tree and the stage.
+pub fn brain_name_path(id: &str) -> String {
+    format!("{}/{id}.json", BRAIN_ROOT.join("/"))
+}
 
 /// How the walk treats a tree that changes under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,10 +96,11 @@ pub trait Visit {
 }
 
 /// Walk `tree`, staging only the brain working trees whose ids are in
-/// `owned_brains`.
+/// `owned_brains`. A file where a named owned brain's name file goes is
+/// left behind, replaced by the stage's own.
 pub fn walk(
     tree: &Tree,
-    owned_brains: &BTreeSet<String>,
+    owned_brains: &OwnedBrains,
     mode: Mode,
     visit: &mut impl Visit,
 ) -> Result<(), HostError> {
@@ -99,7 +115,7 @@ pub fn walk(
 
 struct Walk<'a> {
     tree: &'a Tree,
-    owned_brains: &'a BTreeSet<String>,
+    owned_brains: &'a OwnedBrains,
     mode: Mode,
 }
 
@@ -189,6 +205,14 @@ impl Walk<'_> {
             EntryKind::Other
         };
         let parts: Vec<&[u8]> = path.iter().map(Vec::as_slice).collect();
+        if self.replaced_by_name_file(&parts) {
+            let replaced = Verdict {
+                class: Class::Runtime,
+                why: Why::ReplacedByCopy,
+                depth: parts.len(),
+            };
+            return visit.left(&parts, replaced, file_bytes(&stat));
+        }
         let verdict = classify::classify(&parts, kind, scope);
         if verdict.class.staged() {
             if self.mode == Mode::Measure {
@@ -295,6 +319,20 @@ impl Walk<'_> {
         }
     }
 
+    /// A file at the path of a named owned brain's name file, which the
+    /// stage writes in its place.
+    fn replaced_by_name_file(&self, parts: &[&[u8]]) -> bool {
+        let [workspace, root, file] = parts else {
+            return false;
+        };
+        [*workspace, *root] == BRAIN_ROOT.map(str::as_bytes)
+            && file
+                .strip_suffix(b".json")
+                .and_then(|id| std::str::from_utf8(id).ok())
+                .and_then(|id| self.owned_brains.get(id))
+                .is_some_and(Option::is_some)
+    }
+
     /// Entering a directory that holds `.finitebrain/`: a brain working
     /// tree, wherever `fbrain open` put it, owned only if the mover named
     /// its id. An unowned tree's whole subtree stays unowned.
@@ -310,8 +348,10 @@ impl Walk<'_> {
         let owned = match self.mode {
             // Measuring reads no file, not even the manifest.
             Mode::Measure => std::str::from_utf8(&path[path.len() - 1])
-                .is_ok_and(|name| self.owned_brains.contains(name)),
-            Mode::Stage => brain_id(directory).is_some_and(|id| self.owned_brains.contains(&id)),
+                .is_ok_and(|name| self.owned_brains.contains_key(name)),
+            Mode::Stage => {
+                brain_id(directory).is_some_and(|id| self.owned_brains.contains_key(&id))
+            }
         };
         BrainScope::Brain {
             depth: path.len(),

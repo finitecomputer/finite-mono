@@ -6,6 +6,7 @@
 //!
 //! Delete it with the rest of the move (FIN-463's removal plan).
 
+pub mod brains;
 pub mod child;
 pub mod config;
 pub mod contract;

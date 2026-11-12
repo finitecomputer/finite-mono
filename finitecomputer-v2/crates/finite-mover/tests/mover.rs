@@ -14,9 +14,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use finite_mover::brains::OwnedBrain;
 use finite_mover::contract::{Has, Roster, RosterAgent, RosterPerson, Sizes};
 use finite_mover::core_cli::CoreCli;
-use finite_mover::fleet::{Binding, FileFleet, FleetFile};
+use finite_mover::fleet::{Binding, FileFleet, Fleet, FleetError, FleetFile};
 use finite_mover::hosts::HostCommands;
 use finite_mover::migrations::MigrationsClient;
 use finite_mover::mover::{Mover, SeqClock, Worked};
@@ -33,6 +34,9 @@ use zeroize::Zeroizing;
 const MIB: usize = 1024 * 1024;
 const MOVER_KEY: [u8; 32] = [0x21; 32];
 const OLD: &str = "proj_a";
+/// The brain `proj_a`'s person owns, and its name.
+const BRAIN: &str = "brain_x";
+const BRAIN_NAME: &str = "Old notes: été";
 
 fn public_key(secret: &[u8; 32]) -> NostrPublicKey {
     let keys = nostr::Keys::new(nostr::SecretKey::from_slice(secret).unwrap());
@@ -388,7 +392,8 @@ fn write(root: &Path, path: &str, bytes: &[u8]) {
     std::fs::write(path, bytes).unwrap();
 }
 
-/// The host reader's real `stream` of a stopped tree (about 12 MiB).
+/// The host reader's real `stream` of a stopped tree (about 12 MiB), with
+/// its person's brain and that brain's name file.
 fn host_stage(dir: &Path) -> Vec<u8> {
     let work_root = dir.join("work");
     let root = work_root.join("kata/runtime_a");
@@ -401,10 +406,21 @@ fn host_stage(dir: &Path) -> Vec<u8> {
     write(&root, "workspace/notes.md", b"notes\n");
     let photo: Vec<u8> = (0..12 * MIB).map(|index| (index % 251) as u8).collect();
     write(&root, "workspace/photos/cat.jpg", &photo);
+    write(
+        &root,
+        &format!("workspace/finitebrain/{BRAIN}/.finitebrain/brain-directory.json"),
+        format!(r#"{{"version":"1","brain":{{"id":"{BRAIN}","kind":"personal","name":"{BRAIN}","owner_npub":null}}}}"#).as_bytes(),
+    );
+    write(
+        &root,
+        &format!("workspace/finitebrain/{BRAIN}/wiki/page.md"),
+        b"a page\n",
+    );
+    let brain = format!("{BRAIN}:{}", hex::encode(BRAIN_NAME));
     let mut out = Vec::new();
     run(
         &work_root,
-        parse(["stream", "runtime_a"]).unwrap(),
+        parse(["stream", "runtime_a", "--brain", &brain]).unwrap(),
         &mut out,
     )
     .unwrap();
@@ -554,7 +570,11 @@ impl World {
                     source_host_id: "lat-3".into(),
                     source_machine_id: "machine_a".into(),
                     durable_state_id: "runtime_a".into(),
-                    owned_brains: vec!["brain_x".into()],
+                    agent_npub: Some("npub1agent".into()),
+                    owned_brains: vec![OwnedBrain {
+                        id: BRAIN.into(),
+                        name: BRAIN_NAME.into(),
+                    }],
                     retired_receipt: receipt.map(str::to_string),
                 },
             )]),
@@ -625,6 +645,27 @@ if [ -e "$dir/stray-held-stream" ]; then head -c 100 "$dir/stage.zip"; (trap '' 
 cat "$dir/stage.zip"
 "#;
 
+/// Every entry of a stage, by name.
+fn zip_entries(stage: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(stage)).unwrap();
+    (0..archive.len())
+        .map(|index| {
+            let mut entry = archive.by_index(index).unwrap();
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes).unwrap();
+            (entry.name().to_owned(), bytes)
+        })
+        .collect()
+}
+
+/// The host reader's words for attempt `attempt`'s stream.
+fn stream_words(attempt: u32) -> String {
+    format!(
+        "stream runtime_a --stage proj_a.p1.{attempt} --brain {BRAIN}:{}",
+        hex::encode(BRAIN_NAME)
+    )
+}
+
 fn stage_command(attempt: u32) -> Value {
     json!({"id": format!("{OLD}:{attempt}:stop_and_stage"), "old": OLD, "attempt": attempt, "kind": "stop_and_stage", "phase": "p1", "stage": format!("{OLD}.p1.{attempt}")})
 }
@@ -660,11 +701,9 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
             "runtime-stop-exact --project-id proj_a --expected-agent-runtime-id runtime_a --expected-source-host-id lat-3 --expected-source-machine-id machine_a --admin-email mover@finite.test --admin-workos-user-id user_mover --wait-timeout-seconds 60"
         ]
     );
-    // The stage's id goes with it: the reader names its SimpleX seal by it.
-    assert_eq!(
-        world.log("host.log"),
-        ["stream runtime_a --stage proj_a.p1.1 --brain brain_x"]
-    );
+    // The stage's id goes with it: the reader names its SimpleX seal by
+    // it. Each owned brain goes with its name, for its name file.
+    assert_eq!(world.log("host.log"), [stream_words(1)]);
     // And the reader's own parser takes exactly those words.
     let streamed = &world.log("host.log")[0];
     match parse(streamed.split_whitespace()).unwrap() {
@@ -674,7 +713,10 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
             ..
         } => {
             assert_eq!(stage.as_deref(), Some("proj_a.p1.1"));
-            assert_eq!(owned_brains, ["brain_x".to_owned()].into());
+            assert_eq!(
+                owned_brains,
+                [(BRAIN.to_owned(), Some(BRAIN_NAME.to_owned()))].into()
+            );
         }
         other => panic!("not a stream: {other:?}"),
     }
@@ -691,7 +733,14 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
         assert_eq!(zip, &world.stage, "the stage is the host reader's stream");
         let staged = &platform.reports.last().unwrap().0;
         assert_eq!(staged["manifest_sha256"], sha_hex(manifest));
-        assert_eq!(staged["files"], 3);
+        // SOUL.md, two workspace files, the brain's page and its name
+        // file: each passed the uploader's second check.
+        assert_eq!(staged["files"], 5);
+        let named = &zip_entries(zip)[&format!("workspace/finitebrain/{BRAIN}.json")];
+        assert_eq!(
+            serde_json::from_slice::<Value>(named).unwrap(),
+            json!({ "name": BRAIN_NAME })
+        );
         let seqs: Vec<u64> = platform
             .reports
             .iter()
@@ -773,8 +822,8 @@ fn a_yes_hands_off_the_old_agents_secrets_once_it_is_stopped() {
     assert_eq!(
         world.log("host.log"),
         [
-            "secrets runtime_a telegram_bot_token,openrouter_key,nostr_nsec",
-            "stream runtime_a --stage proj_a.p1.1 --brain brain_x"
+            "secrets runtime_a telegram_bot_token,openrouter_key,nostr_nsec".to_string(),
+            stream_words(1)
         ],
         "read after the stop, before the stage"
     );
@@ -811,10 +860,7 @@ fn a_command_without_secrets_reads_none() {
     world.fake.tell(OLD, "asked", 1, stage_command(1));
     assert_eq!(world.work()[0].outcome, "staged");
     assert!(world.fake.platform().handoffs.is_empty());
-    assert_eq!(
-        world.log("host.log"),
-        ["stream runtime_a --stage proj_a.p1.1 --brain brain_x"]
-    );
+    assert_eq!(world.log("host.log"), [stream_words(1)]);
 }
 
 #[test]
@@ -854,6 +900,45 @@ fn a_hand_off_finite_chat_cannot_take_now_leaves_the_command() {
     world.fake.platform().refuse_handoff = None;
     assert_eq!(world.work()[0].outcome, "staged");
     assert_eq!(world.fake.platform().handoffs.len(), 1);
+}
+
+/// The file fleet, but finite-brain can't be read.
+struct BrainsDown<'a>(&'a FileFleet);
+
+impl Fleet for BrainsDown<'_> {
+    fn roster(&self) -> Result<Roster, FleetError> {
+        self.0.roster()
+    }
+
+    fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError> {
+        self.0.binding(old)
+    }
+
+    fn with_owned_brains(&self, _binding: Binding) -> Result<Binding, FleetError> {
+        Err(FleetError::Unreadable("finite-brain: down".into()))
+    }
+}
+
+/// FIN-499: brains that can't be listed now never leave a stage without
+/// them: the agent isn't stopped, and the command waits for the next run.
+#[test]
+fn brains_that_cannot_be_listed_hold_the_stage_before_the_stop() {
+    let world = World::new();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    let down = BrainsDown(&world.fleet);
+    let mover = Mover::new(
+        &world.platform,
+        &down,
+        &world.core,
+        &world.hosts,
+        &world.locks,
+    );
+    let error = mover.work_mailbox().unwrap_err().to_string();
+    assert!(error.contains("finite-brain"), "{error}");
+    assert!(world.log("core.log").is_empty(), "not stopped");
+    assert!(world.log("host.log").is_empty(), "nothing read");
+    assert!(world.fake.kinds().is_empty(), "nothing reported");
+    assert_eq!(world.work()[0].outcome, "staged", "the next run stages it");
 }
 
 #[test]

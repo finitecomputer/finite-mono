@@ -117,6 +117,7 @@ mod tests {
             source_host_id: "lat-a".into(),
             source_machine_id: "machine_a".into(),
             durable_state_id: "rt_a".into(),
+            agent_npub: None,
             owned_brains: Vec::new(),
             retired_receipt: None,
         };
@@ -182,6 +183,7 @@ mod tests {
                 source_host_id: "lat-a".into(),
                 source_machine_id: "machine_a".into(),
                 durable_state_id: "rt_a".into(),
+                agent_npub: None,
                 owned_brains: Vec::new(),
                 retired_receipt: None,
             };
