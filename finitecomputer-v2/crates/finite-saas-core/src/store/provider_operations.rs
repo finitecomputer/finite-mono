@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<ProviderOperationEnvelope> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_record_provider_operation_transition(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_record_provider_operation_transition(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

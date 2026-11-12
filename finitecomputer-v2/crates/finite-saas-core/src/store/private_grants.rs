@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateGrant> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_approve_finite_private_grant(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(grant)
+        let grant = postgres_approve_finite_private_grant(&*tx, input).await;
+        self.finish(tx, grant).await
     }
 
     pub async fn revoke_finite_private_grant(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateGrant> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_revoke_finite_private_grant(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(grant)
+        let grant = postgres_revoke_finite_private_grant(&*tx, input).await;
+        self.finish(tx, grant).await
     }
 
     pub async fn reset_finite_private_usage_window(
@@ -29,9 +27,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateGrant> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let grant = postgres_reset_finite_private_usage_window(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(grant)
+        let grant = postgres_reset_finite_private_usage_window(&*tx, input).await;
+        self.finish(tx, grant).await
     }
 }
 

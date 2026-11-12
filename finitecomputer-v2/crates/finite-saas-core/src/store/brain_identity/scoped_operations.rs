@@ -25,98 +25,103 @@ impl CoreStore {
         let digest = manifest.digest();
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        tx.batch_execute("SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '3s'")
-            .await
-            .map_err(store_error)?;
-        let operator = locks::lock_accounts(&*tx, manifest).await?;
-        let now_text = now
-            .format(&Rfc3339)
-            .map_err(|_| CoreError::InvalidTimestamp)?;
-        let operation_id = generate_surrogate_id("brain_scope_op")?;
-        // UNIQUE(operation_id) serializes exact retries even when different
-        // operators race. A failed transaction leaves no placeholder receipt.
-        let inserted = tx
-            .execute(
-                "INSERT INTO brain_scoped_record_operations
+        let result: CoreResult<_> = async {
+            tx.batch_execute("SET LOCAL statement_timeout = '5s'; SET LOCAL lock_timeout = '3s'")
+                .await
+                .map_err(store_error)?;
+            let operator = locks::lock_accounts(&*tx, manifest).await?;
+            let now_text = now
+                .format(&Rfc3339)
+                .map_err(|_| CoreError::InvalidTimestamp)?;
+            let operation_id = generate_surrogate_id("brain_scope_op")?;
+            // UNIQUE(operation_id) serializes exact retries even when different
+            // operators race. A failed transaction leaves no placeholder receipt.
+            let inserted = tx
+                .execute(
+                    "INSERT INTO brain_scoped_record_operations
             (id, operation_id, manifest_sha256, action, brain_server, brain_id,
              operator_account_id, operator_workos_subject, operator_email,
              target_operation_id, recorded_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::text::timestamptz)
             ON CONFLICT (operation_id) DO NOTHING",
+                    &[
+                        &operation_id,
+                        &manifest.operation_id,
+                        &digest,
+                        &manifest.action.as_str(),
+                        &manifest.brain_server,
+                        &manifest.brain_id,
+                        &operator,
+                        &manifest.operator.workos_subject,
+                        &manifest.operator.email,
+                        &manifest.target_operation_id,
+                        &now_text,
+                    ],
+                )
+                .await
+                .map_err(store_error)?;
+            if inserted == 0 {
+                let row = tx
+                    .query_one(
+                        "SELECT manifest_sha256, receipt FROM brain_scoped_record_operations
+                WHERE operation_id = $1 FOR UPDATE",
+                        &[&manifest.operation_id],
+                    )
+                    .await
+                    .map_err(store_error)?;
+                if row.get::<_, String>("manifest_sha256") != digest {
+                    return Err(refused(
+                        "scoped operation id reused with different manifest",
+                    ));
+                }
+                let receipt: Option<Value> = row.get("receipt");
+                let receipt: ScopedReceipt = serde_json::from_value(
+                    receipt.ok_or_else(|| refused("incomplete scoped operation receipt"))?,
+                )
+                .map_err(json_error)?;
+                return Ok((receipt, false));
+            }
+            if !manifest.fresh(now) {
+                return Err(refused(
+                    "scoped manifest is outside its evidence/application window",
+                ));
+            }
+            let records = match manifest.action {
+                ScopedAction::Apply => apply(&*tx, manifest, &now_text).await?,
+                ScopedAction::Retire => retirement::retire(&*tx, manifest, &now_text).await?,
+            };
+            let receipt = ScopedReceipt {
+                operation_id: manifest.operation_id.clone(),
+                manifest_sha256: digest,
+                operator_account_id: operator,
+                action: manifest.action,
+                brain_server: manifest.brain_server.clone(),
+                brain_id: manifest.brain_id.clone(),
+                target_operation_id: manifest.target_operation_id.clone(),
+                recorded_at: now_text,
+                records,
+            };
+            tx.execute(
+                "UPDATE brain_scoped_record_operations SET receipt = $2 WHERE operation_id = $1",
                 &[
-                    &operation_id,
                     &manifest.operation_id,
-                    &digest,
-                    &manifest.action.as_str(),
-                    &manifest.brain_server,
-                    &manifest.brain_id,
-                    &operator,
-                    &manifest.operator.workos_subject,
-                    &manifest.operator.email,
-                    &manifest.target_operation_id,
-                    &now_text,
+                    &serde_json::to_value(&receipt).map_err(json_error)?,
                 ],
             )
             .await
             .map_err(store_error)?;
-        if inserted == 0 {
-            let row = tx
-                .query_one(
-                    "SELECT manifest_sha256, receipt FROM brain_scoped_record_operations
-                WHERE operation_id = $1 FOR UPDATE",
-                    &[&manifest.operation_id],
-                )
-                .await
-                .map_err(store_error)?;
-            if row.get::<_, String>("manifest_sha256") != digest {
-                return Err(refused(
-                    "scoped operation id reused with different manifest",
-                ));
-            }
-            let receipt: Option<Value> = row.get("receipt");
-            let receipt: ScopedReceipt = serde_json::from_value(
-                receipt.ok_or_else(|| refused("incomplete scoped operation receipt"))?,
-            )
-            .map_err(json_error)?;
-            self.finish(tx).await?;
-            return Ok(receipt);
+            Ok((receipt, true))
         }
-        if !manifest.fresh(now) {
-            return Err(refused(
-                "scoped manifest is outside its evidence/application window",
-            ));
+        .await;
+        let (receipt, applied) = self.finish(tx, result).await?;
+        if applied {
+            tracing::info!(
+                operation = "brain_scoped_records",
+                action = manifest.action.as_str(),
+                records = receipt.records.len(),
+                "scoped description operation finished"
+            );
         }
-        let records = match manifest.action {
-            ScopedAction::Apply => apply(&*tx, manifest, &now_text).await?,
-            ScopedAction::Retire => retirement::retire(&*tx, manifest, &now_text).await?,
-        };
-        let receipt = ScopedReceipt {
-            operation_id: manifest.operation_id.clone(),
-            manifest_sha256: digest,
-            operator_account_id: operator,
-            action: manifest.action,
-            brain_server: manifest.brain_server.clone(),
-            brain_id: manifest.brain_id.clone(),
-            target_operation_id: manifest.target_operation_id.clone(),
-            recorded_at: now_text,
-            records,
-        };
-        tx.execute(
-            "UPDATE brain_scoped_record_operations SET receipt = $2 WHERE operation_id = $1",
-            &[
-                &manifest.operation_id,
-                &serde_json::to_value(&receipt).map_err(json_error)?,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-        self.finish(tx).await?;
-        tracing::info!(
-            operation = "brain_scoped_records",
-            action = manifest.action.as_str(),
-            records = receipt.records.len(),
-            "scoped description operation finished"
-        );
         Ok(receipt)
     }
 }

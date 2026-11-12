@@ -13,9 +13,8 @@ impl CoreStore {
             self.runtime_environment.as_ref(),
             self.runtime_secret_references.as_ref(),
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 }
 

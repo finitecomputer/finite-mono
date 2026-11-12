@@ -10,12 +10,15 @@ impl CoreStore {
         // SELECTs inside a READ ONLY transaction.
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        tx.execute("SET TRANSACTION READ ONLY", &[])
-            .await
-            .map_err(store_error)?;
-        let overview = postgres_billing_overview(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(overview)
+        let result: CoreResult<_> = async {
+            tx.execute("SET TRANSACTION READ ONLY", &[])
+                .await
+                .map_err(store_error)?;
+            let overview = postgres_billing_overview(&*tx, input).await?;
+            Ok(overview)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn link_stripe_customer(
@@ -24,9 +27,8 @@ impl CoreStore {
     ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let account = billing::link_stripe_customer(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(account)
+        let account = billing::link_stripe_customer(&*tx, input).await;
+        self.finish(tx, account).await
     }
 
     pub async fn sync_stripe_subscription(
@@ -43,15 +45,19 @@ impl CoreStore {
     ) -> CoreResult<CustomerBillingAccount> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let now = input.now.clone().unwrap_or(current_time_iso()?);
-        let subscription = input.stripe_subscription_id.clone();
-        let account = billing::sync_stripe_subscription(&*tx, input).await?;
-        if account.stripe_subscription_id.as_deref() == Some(&subscription)
-            && let Some(attempt) = trial_attempt
-        {
-            trials::redeem(&*tx, attempt, &account).await?;
+        let result: CoreResult<_> = async {
+            let now = input.now.clone().unwrap_or(current_time_iso()?);
+            let subscription = input.stripe_subscription_id.clone();
+            let account = billing::sync_stripe_subscription(&*tx, input).await?;
+            if account.stripe_subscription_id.as_deref() == Some(&subscription)
+                && let Some(attempt) = trial_attempt
+            {
+                trials::redeem(&*tx, attempt, &account).await?;
+            }
+            Ok((account, now))
         }
-        self.finish(tx).await?;
+        .await;
+        let (account, now) = self.finish(tx, result).await?;
         // Billing is durable even if a Runner capability or another control
         // prevents an immediate stop. The background reconciliation retries.
         drop(client);

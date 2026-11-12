@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateApiKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_issue_finite_private_api_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(key)
+        let key = postgres_issue_finite_private_api_key(&*tx, input).await;
+        self.finish(tx, key).await
     }
 
     pub async fn provision_finite_private_runtime_key(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<ProvisionFinitePrivateRuntimeKeyResult> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_provision_finite_private_runtime_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_provision_finite_private_runtime_key(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn revoke_finite_private_api_key(
@@ -29,9 +27,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateApiKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_revoke_finite_private_api_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(key)
+        let key = postgres_revoke_finite_private_api_key(&*tx, input).await;
+        self.finish(tx, key).await
     }
 
     pub async fn rotate_finite_private_api_key(
@@ -40,9 +37,8 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateApiKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let key = postgres_rotate_finite_private_api_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(key)
+        let key = postgres_rotate_finite_private_api_key(&*tx, input).await;
+        self.finish(tx, key).await
     }
 
     pub async fn issue_finite_private_friend_key(
@@ -51,9 +47,8 @@ impl CoreStore {
     ) -> CoreResult<IssuedFinitePrivateFriendKey> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_issue_finite_private_friend_key(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_issue_finite_private_friend_key(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

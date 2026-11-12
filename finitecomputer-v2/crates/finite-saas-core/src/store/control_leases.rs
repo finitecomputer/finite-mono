@@ -13,9 +13,8 @@ impl CoreStore {
             self.runtime_environment.as_ref(),
             self.runtime_secret_references.as_ref(),
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn fail_runtime_control_request(
@@ -24,9 +23,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_fail_runtime_control_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_fail_runtime_control_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn renew_runtime_control_request(
@@ -35,9 +33,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_renew_runtime_control_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_renew_runtime_control_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn retry_runtime_control_request(
@@ -46,9 +43,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_retry_runtime_control_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_retry_runtime_control_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

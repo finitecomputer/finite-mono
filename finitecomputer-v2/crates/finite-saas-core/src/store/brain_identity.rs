@@ -256,26 +256,34 @@ impl CoreStore {
             .start()
             .await
             .map_err(store_error)?;
-        // Bound the SQL itself; dropping a timed-out future would leave the
-        // query running on a pooled connection.
-        tx.batch_execute(&format!(
-            "SET LOCAL statement_timeout = '{}ms'",
-            DESCRIPTION_BUDGET.as_millis()
-        ))
-        .await
-        .map_err(store_error)?;
+        let result: CoreResult<_> = async {
+            // Bound the SQL itself; dropping a timed-out future would leave the
+            // query running on a pooled connection.
+            tx.batch_execute(&format!(
+                "SET LOCAL statement_timeout = '{}ms'",
+                DESCRIPTION_BUDGET.as_millis()
+            ))
+            .await
+            .map_err(store_error)?;
 
-        let hints =
-            (!request.requires_sharing_scope()).then_some(request.public_keys_hex.as_slice());
-        let snapshot =
-            snapshot::IdentitySnapshot::load(&*tx, request, &request.public_keys_hex, &[], hints)
-                .await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(request
-            .public_keys_hex
-            .iter()
-            .map(|key| snapshot.describe(key))
-            .collect())
+            let hints =
+                (!request.requires_sharing_scope()).then_some(request.public_keys_hex.as_slice());
+            let snapshot = snapshot::IdentitySnapshot::load(
+                &*tx,
+                request,
+                &request.public_keys_hex,
+                &[],
+                hints,
+            )
+            .await?;
+            Ok(request
+                .public_keys_hex
+                .iter()
+                .map(|key| snapshot.describe(key))
+                .collect())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

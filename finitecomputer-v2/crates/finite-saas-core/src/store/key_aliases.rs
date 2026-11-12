@@ -38,21 +38,24 @@ impl CoreStore {
             .start()
             .await
             .map_err(store_error)?;
-        let rows = tx
-            .query(
-                "SELECT alias.public_key_hex, alias.alias,
+        let result: CoreResult<_> = async {
+            let rows = tx
+                .query(
+                    "SELECT alias.public_key_hex, alias.alias,
                         core_rfc3339(alias.updated_at) AS updated_at
                  FROM account_key_aliases AS alias
                  JOIN users AS viewer ON viewer.id = alias.viewer_user_id
                  WHERE viewer.workos_user_id = $1 AND viewer.link_status = 'linked'
                    AND alias.public_key_hex = ANY($2)
                  ORDER BY alias.public_key_hex",
-                &[&workos_user_id, &public_keys_hex],
-            )
-            .await
-            .map_err(store_error)?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(rows.iter().map(key_alias_from_row).collect())
+                    &[&workos_user_id, &public_keys_hex],
+                )
+                .await
+                .map_err(store_error)?;
+            Ok(rows.iter().map(key_alias_from_row).collect())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Create or replace the viewer's alias for one canonical key. Inputs are
@@ -67,28 +70,29 @@ impl CoreStore {
     ) -> Result<KeyAlias, KeyAliasError> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        // Row lock on the viewer only: serializes this account's alias
-        // writes so the count limit holds under concurrency.
-        let viewer_id: String = tx
-            .query_opt(
-                format!("{LINKED_VIEWER_SQL} FOR NO KEY UPDATE").as_str(),
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?
-            .ok_or(KeyAliasError::AccountNotLinked)?
-            .get("id");
-        let existing = tx
-            .query_opt(
-                "SELECT 1 FROM account_key_aliases
+        let result: Result<_, KeyAliasError> = async {
+            // Row lock on the viewer only: serializes this account's alias
+            // writes so the count limit holds under concurrency.
+            let viewer_id: String = tx
+                .query_opt(
+                    format!("{LINKED_VIEWER_SQL} FOR NO KEY UPDATE").as_str(),
+                    &[&workos_user_id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(KeyAliasError::AccountNotLinked)?
+                .get("id");
+            let existing = tx
+                .query_opt(
+                    "SELECT 1 FROM account_key_aliases
                  WHERE viewer_user_id = $1 AND public_key_hex = $2",
-                &[&viewer_id, &public_key_hex],
-            )
-            .await
-            .map_err(store_error)?
-            .is_some();
-        if !existing {
-            let count: i64 = tx
+                    &[&viewer_id, &public_key_hex],
+                )
+                .await
+                .map_err(store_error)?
+                .is_some();
+            if !existing {
+                let count: i64 = tx
                 .query_one(
                     "SELECT count(*) AS count FROM account_key_aliases WHERE viewer_user_id = $1",
                     &[&viewer_id],
@@ -96,25 +100,27 @@ impl CoreStore {
                 .await
                 .map_err(store_error)?
                 .get("count");
-            if count >= MAX_ALIASES_PER_ACCOUNT {
-                return Err(KeyAliasError::LimitReached);
+                if count >= MAX_ALIASES_PER_ACCOUNT {
+                    return Err(KeyAliasError::LimitReached);
+                }
             }
-        }
-        let row = tx
-            .query_one(
-                "INSERT INTO account_key_aliases
+            let row = tx
+                .query_one(
+                    "INSERT INTO account_key_aliases
                    (viewer_user_id, public_key_hex, alias, created_at, updated_at)
                  VALUES ($1, $2, $3, $4::text::timestamptz, $4::text::timestamptz)
                  ON CONFLICT (viewer_user_id, public_key_hex) DO UPDATE SET
                    alias = EXCLUDED.alias,
                    updated_at = EXCLUDED.updated_at
                  RETURNING public_key_hex, alias, core_rfc3339(updated_at) AS updated_at",
-                &[&viewer_id, &public_key_hex, &alias, &now],
-            )
-            .await
-            .map_err(store_error)?;
-        self.finish(tx).await?;
-        Ok(key_alias_from_row(&row))
+                    &[&viewer_id, &public_key_hex, &alias, &now],
+                )
+                .await
+                .map_err(store_error)?;
+            Ok(key_alias_from_row(&row))
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Remove the viewer's alias for one key. Returns whether one existed.
@@ -126,25 +132,28 @@ impl CoreStore {
     ) -> Result<bool, KeyAliasError> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let viewer_id: String = tx
-            .query_opt(
-                format!("{LINKED_VIEWER_SQL} FOR NO KEY UPDATE").as_str(),
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?
-            .ok_or(KeyAliasError::AccountNotLinked)?
-            .get("id");
-        let removed = tx
-            .execute(
-                "DELETE FROM account_key_aliases
+        let result: Result<_, KeyAliasError> = async {
+            let viewer_id: String = tx
+                .query_opt(
+                    format!("{LINKED_VIEWER_SQL} FOR NO KEY UPDATE").as_str(),
+                    &[&workos_user_id],
+                )
+                .await
+                .map_err(store_error)?
+                .ok_or(KeyAliasError::AccountNotLinked)?
+                .get("id");
+            let removed = tx
+                .execute(
+                    "DELETE FROM account_key_aliases
                  WHERE viewer_user_id = $1 AND public_key_hex = $2",
-                &[&viewer_id, &public_key_hex],
-            )
-            .await
-            .map_err(store_error)?;
-        self.finish(tx).await?;
-        Ok(removed == 1)
+                    &[&viewer_id, &public_key_hex],
+                )
+                .await
+                .map_err(store_error)?;
+            Ok(removed == 1)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 
