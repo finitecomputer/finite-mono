@@ -77,11 +77,14 @@ let
   '';
 
   # finite-brain's database, read for the mover by `finite-mover-brains`
-  # as finite-brain's own dynamic user, never by the mover's: a file of the
-  # database another user makes (its `-shm`) is one finite-brain can't
-  # open (finite-litestream.nix). Its folder is bound in by systemd, which
-  # alone passes /var/lib/private; the reader opens the database
-  # read-only, refuses one another user owns, and has no network.
+  # as the database's own owner (finite-brain's dynamic user), never as the
+  # mover: a file of the database another user makes (its `-shm`) is one
+  # finite-brain can't open (finite-litestream.nix). The owner is read off
+  # the database each time (a dynamic uid isn't fixed, and a transient
+  # DynamicUser unit doesn't share it); a root-owned database is refused.
+  # Its folder is bound in by systemd, which alone passes
+  # /var/lib/private; the reader opens it read-only, refuses one another
+  # user owns, and has no network.
   brainMount = "/run/finite-mover-brain";
   brainsWrapper = pkgs.writeShellScript "finite-mover-brains" ''
     set -eu
@@ -89,14 +92,24 @@ let
       echo "finite-mover-brains: takes no arguments" >&2
       exit 64
     fi
+    database=${lib.escapeShellArg cfg.brain.database}
+    owner=$(${pkgs.coreutils}/bin/stat -c %u "$database")
+    group=$(${pkgs.coreutils}/bin/stat -c %g "$database")
+    if [ "$owner" = 0 ] || [ "$group" = 0 ]; then
+      echo "finite-mover-brains: $database is root's; refusing" >&2
+      exit 1
+    fi
     exec ${config.systemd.package}/bin/systemd-run \
       --quiet --wait --pipe --collect \
       --service-type=exec \
       --description="finite-brain's owned brains, read for the finite.chat mover" \
-      --property=DynamicUser=yes \
-      --property=User=${cfg.brain.user} \
+      --uid="$owner" --gid="$group" \
       --property=BindPaths=${dirOf cfg.brain.database}:${brainMount} \
       --property=PrivateNetwork=yes \
+      --property=PrivateTmp=yes \
+      --property=ProtectSystem=strict \
+      --property=ProtectHome=yes \
+      --property=NoNewPrivileges=yes \
       --property=RuntimeMaxSec=120 \
       -- ${cfg.package}/bin/finite-mover-brains ${brainMount}/${baseNameOf cfg.brain.database}
   '';
@@ -261,15 +274,10 @@ in
       };
     };
     brain = {
-      user = lib.mkOption {
-        type = lib.types.str;
-        default = "finite-brain-app";
-        description = "finite-brain's dynamic user (its unit's name), which owns its database and as which the owned brains are read.";
-      };
       database = lib.mkOption {
         type = lib.types.str;
         default = "/var/lib/private/finitebrain/finite-brain.sqlite3";
-        description = "finite-brain's database, at its real path under /var/lib/private (finite-brain.nix's FINITE_BRAIN_DB).";
+        description = "finite-brain's database, at its real path under /var/lib/private (finite-brain.nix's FINITE_BRAIN_DB). Its owner reads it for the mover.";
       };
     };
     hosts = lib.mkOption {
