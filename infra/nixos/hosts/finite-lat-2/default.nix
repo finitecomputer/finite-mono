@@ -121,7 +121,7 @@ in
 
   # FIN-463's mover (../../modules/finite-mover.nix), on with the app
   # release that carries finite-mover and Core's runtime-mark-moved-exact
-  # (lat2-app-source cd53ad6c, FIN-492). Each Runner host is reached over
+  # (lat2-app-source 500109e4, FIN-492). Each Runner host is reached over
   # wg-finite, its host key read off the box on 2026-11-11 and matched over
   # the overlay. Its timers wait for finite.chat to know its npub
   # (timers.enable).
