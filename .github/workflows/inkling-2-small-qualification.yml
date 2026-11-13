@@ -1,0 +1,99 @@
+name: Inkling 2 Small qualification preparation
+on:
+  pull_request:
+    paths:
+      - .github/workflows/inkling-2-small-qualification.yml
+      - infra/images/inkling-2-small-sglang*
+      - infra/tinfoil/confidential-finite-private/tinfoil-config.*.candidate.yml
+      - scripts/check_finite_private_inkling*.py
+      - scripts/check_finite_private_glm53_protocol.py
+      - scripts/tests/test_finite_private_inkling*.py
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  offline:
+    name: Offline preparation and synthetic protocol checks
+    runs-on: depot-ubuntu-24.04
+    env:
+      NIX_CONFIG: access-tokens = github.com=${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: finite
+          skipPush: true
+      - run: nix develop --command just finite-private-inkling-contract
+      - run: |
+          nix develop --command ruff format --check scripts/check_finite_private_inkling*.py scripts/tests/test_finite_private_inkling*.py
+          nix develop --command ruff check scripts/check_finite_private_inkling*.py scripts/tests/test_finite_private_inkling*.py
+  canary-image:
+    name: Build an explicitly pinned canary image
+    if: github.event_name == 'workflow_dispatch'
+    needs: offline
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the immutable upstream selection
+        run: |
+          base="$(sed -n 's/^FROM //p' infra/images/inkling-2-small-sglang.Dockerfile)"
+          if [[ ! "$base" =~ ^lmsysorg/sglang:dev-inkling-2-small@sha256:[0-9a-f]{64}$ ]]; then
+            echo '::error::An immutable upstream SHA256 digest is required'
+            exit 1
+          fi
+          echo "SGLANG_BASE=$base" >> "$GITHUB_ENV"
+      - uses: depot/setup-action@v1
+        with:
+          oidc: true
+      - name: Log in for canary publication
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
+      - name: Build and save the source-labelled wrapper
+        id: build
+        uses: depot/build-push-action@v1
+        with:
+          project: ${{ vars.DEPOT_PROJECT_ID || secrets.DEPOT_PROJECT_ID }}
+          context: .
+          file: infra/images/inkling-2-small-sglang.Dockerfile
+          platforms: linux/amd64
+          build-args: |
+            FINITE_MONO_REV=${{ github.sha }}
+          provenance: true
+          save: true
+      - name: Publish and verify the saved canary
+        env:
+          IMAGE: ghcr.io/finitecomputer/inkling-2-small-sglang
+          BUILD_ID: ${{ steps.build.outputs.build-id }}
+          SOURCE_DIGEST: ${{ steps.build.outputs.digest }}
+          DEPOT_PROJECT_ID: ${{ steps.build.outputs.project-id }}
+        run: |
+          test -n "$BUILD_ID"
+          test -n "$SOURCE_DIGEST"
+          canary_ref="$IMAGE:canary-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          depot push --project "$DEPOT_PROJECT_ID" --tag "$canary_ref" "$BUILD_ID"
+          docker pull "$canary_ref" >/dev/null
+          destination_digest="$(docker image inspect "$canary_ref" --format '{{range .RepoDigests}}{{println .}}{{end}}' | sed -n "s#^$IMAGE@##p" | head -n 1)"
+          python3 scripts/delivery.py verify-image-promotion --source-digest "$SOURCE_DIGEST" --destination-digest "$destination_digest"
+          pinned="$IMAGE@$destination_digest"
+          docker buildx imagetools inspect --raw "$pinned" > image-index.json
+          python3 scripts/delivery.py verify-image-index --manifest image-index.json --platform linux/amd64 --require-attestation
+          test "$(docker image inspect "$pinned" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$pinned" --format '{{index .Config.Labels "org.opencontainers.image.base.name"}}')" = "$SGLANG_BASE"
+          test "$(docker image inspect "$pinned" --format '{{json .Config.Entrypoint}}')" = '["/opt/nvidia/nvidia_entrypoint.sh","/usr/local/bin/finite-inkling-sglang-entrypoint"]'
+          if docker run --rm "$pinned" --help > without-key.log 2>&1; then
+            echo '::error::Inkling wrapper started without VLLM_API_KEY'
+            exit 1
+          fi
+          grep -F 'VLLM_API_KEY is required' without-key.log
+          docker logout ghcr.io
+          docker image rm "$pinned" >/dev/null 2>&1 || true
+          docker pull "$pinned" >/dev/null
+          echo "Verified anonymous canary: \`$pinned\`" >> "$GITHUB_STEP_SUMMARY"
+          echo 'No measured release or deployment was performed.' >> "$GITHUB_STEP_SUMMARY"

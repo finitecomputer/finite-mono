@@ -108,6 +108,14 @@ finite-private-glm53-contract:
 finite-private-glm53-release-contract:
     just computer finite-private-glm53-release-contract
 
+# Offline Inkling preparation; sends no inference traffic and deploys nothing.
+finite-private-inkling-contract:
+    just infra finite-private-inkling-contract
+
+# Requires immutable image + modelwrap pins; runtime evidence is a separate gate.
+finite-private-inkling-artifacts-ready:
+    scripts/with-dev-env python3 scripts/check_finite_private_inkling_candidate.py --artifacts-ready
+
 finite-status-contract:
     just infra finite-status-contract
 

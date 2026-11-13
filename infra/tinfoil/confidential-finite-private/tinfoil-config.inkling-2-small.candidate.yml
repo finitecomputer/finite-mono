@@ -1,0 +1,113 @@
+# PREPARATION ONLY. Unresolved image and MPK deliberately prevent release.
+# See ../../runbooks/inkling-2-small-qualification.md before building or trialing.
+# No deployment authorization is conveyed by this file.
+cvm-version: 0.14.17
+cpus: 32
+memory: 524288
+gpus: 8
+security:
+  allow-unencrypted-nvlink: true
+models:
+- name: inkling-2-small
+  repo: thinkingmachines/Inkling-2-Small@8361e7a31ae7e9966a49a91d3994fde618936c2b
+  mpk: REPLACE_WITH_TINFOIL_MODELWRAP_MPK
+networks:
+  model-net: {}
+  core-api:
+    egress: allowlist
+    allow:
+    - finite.computer
+containers:
+- name: inkling-2-small
+  image: REPLACE_WITH_VERIFIED_INKLING_SGLANG_IMAGE
+  runtime: nvidia
+  gpus: all
+  ipc: private
+  shm_size: 256g
+  restart: always
+  command:
+  - --model-path
+  - /tinfoil/mpk/mpk-REPLACE_WITH_TINFOIL_ROOT_HASH
+  - --served-model-name
+  - inkling-2-small
+  - --tp
+  - '8'
+  - --ep
+  - '8'
+  - --attention-backend
+  - fa4
+  - --dtype
+  - bfloat16
+  - --kv-cache-dtype
+  - bfloat16
+  - --page-size
+  - '128'
+  - --grammar-backend
+  - xgrammar
+  - --enable-multimodal
+  - --reasoning-parser
+  - inkling
+  - --tool-call-parser
+  - inkling2
+  - --context-length
+  - '393216'
+  - --host
+  - 0.0.0.0
+  - --port
+  - '8001'
+  tmpfs:
+    /tmp: size=512m,mode=1777,exec
+    /root: size=20g,mode=0700,exec
+  networks:
+  - model-net
+  secrets:
+  - VLLM_API_KEY
+  healthcheck:
+    test:
+    - CMD
+    - curl
+    - -sf
+    - http://localhost:8001/health
+    interval: 30s
+    timeout: 5s
+    start_period: 45m
+- name: finite-private-limiter
+  image: ghcr.io/finitecomputer/private-limiter@sha256:a0138304201310299b948827ac21ce1d5ada124330624e405f897e98a60f5f5e
+  restart: always
+  env:
+  - LISTEN_ADDR: 0.0.0.0:8002
+  - FINITE_USAGE_API_URL: https://finite.computer
+  - UPSTREAM_BASE_URL: http://inkling-2-small:8001
+  - FINITE_PRIVATE_MODEL: inkling-2-small
+  - FINITE_PRIVATE_UPSTREAM_MODEL: inkling-2-small
+  - FINITE_PRIVATE_MODEL_ALIASES: glm-5-3-flash,deepseek-v4-flash-0731,glm-5-2,glm-5.3-flash
+  - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: high
+  - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: 'true'
+  - DASHBOARD_URL: https://finite.computer/dashboard
+  - READINESS_TIMEOUT_SECS: '5'
+  - FINITE_USAGE_API_TIMEOUT_SECS: '15'
+  - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: '120'
+  - UPSTREAM_BODY_TIMEOUT_SECS: '600'
+  - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: '600'
+  secrets:
+  - FINITE_PRIVATE_METRICS_TOKEN
+  - FINITE_USAGE_API_SERVICE_KEY
+  - VLLM_INTERNAL_API_KEY
+  networks:
+  - model-net
+  - core-api
+  healthcheck:
+    test:
+    - CMD
+    - curl
+    - -sf
+    - http://localhost:8002/live
+    interval: 30s
+    timeout: 5s
+    start_period: 45m
+shim:
+  upstream-container: finite-private-limiter
+  upstream-port: 8002
+  authenticated: false
+  paths:
+  - /*
