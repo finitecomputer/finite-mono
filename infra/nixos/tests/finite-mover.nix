@@ -1,7 +1,9 @@
 # The lat-2 mover module (modules/finite-mover.nix) on a VM beside a Runner
 # VM that carries finite-mover-host.nix. The mover is the real binary; Core's
 # CLI is a stand-in that says who ran it, with what. Postgres holds Core's
-# real schema and one live agent, whose tree is on the Runner.
+# real schema and one live agent, whose tree is on the Runner. finite-brain
+# is a stand-in too: a dynamic user keeping a WAL database of brains open,
+# one of them the live agent's own (FIN-499).
 {
   nixpkgs,
   finitePackages,
@@ -21,6 +23,36 @@ let
       )
     )
   );
+  # NIP-19's example npub: the key the live agent signs with.
+  agentNpub = "npub10elfcs4fr0l0r8af98jlmgdh9c8tcxjvz9qkw038js35mp4dma8qzvjptg";
+
+  # finite-brain, standing in: its unit's dynamic user keeps its database
+  # open in WAL mode, as the server does. Its `brains` table is
+  # finite-brain-store's.
+  brainStandIn = pkgs.writeText "finite-brain-stand-in.py" ''
+    import sqlite3, time
+    db = sqlite3.connect("/var/lib/finitebrain/finite-brain.sqlite3", isolation_level=None)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.executescript("""
+    CREATE TABLE IF NOT EXISTS brains (
+      id TEXT PRIMARY KEY NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('personal', 'organization')),
+      name TEXT NOT NULL,
+      owner_user_id TEXT,
+      created_at TEXT NOT NULL,
+      CHECK ((kind = 'personal' AND owner_user_id IS NOT NULL) OR
+             (kind = 'organization' AND owner_user_id IS NULL))
+    );
+    INSERT OR REPLACE INTO brains VALUES
+      ('brain-live', 'personal', 'Live notes', '${agentNpub}', '2026-11-01T00:00:00Z'),
+      ('brain-other', 'personal', 'Not theirs', 'npub1someoneelse', '2026-11-01T00:00:00Z'),
+      ('brain-team', 'organization', 'Team', NULL, '2026-11-01T00:00:00Z');
+    """)
+    print("finite-brain stand-in ready", flush=True)
+    while True:
+        time.sleep(3600)
+  '';
+
   # One live agent on the Runner, as Core records it.
   liveAgent = pkgs.writeText "live-agent.sql" ''
     INSERT INTO users (id, normalized_email, link_status, workos_user_id, created_at, updated_at)
@@ -31,6 +63,7 @@ let
       VALUES ('proj_live', 'org_one', 'u_one', 'Agent', now(), now());
     INSERT INTO agent_runtimes (id, project_id, source_host_id, source_machine_id, source_import_key, placement_runner_class, runtime_resource_class, host_facts, created_at, updated_at)
       VALUES ('rt_live', 'proj_live', 'runner', 'machine_live', 'key_live', 'kata', 'vcpu2_memory4_gib', '{}', now(), now());
+    UPDATE agent_runtimes SET health_reporting_npub = '${agentNpub}' WHERE id = 'rt_live';
     INSERT INTO project_runtime_links (id, project_id, agent_runtime_id, active, created_at)
       VALUES ('link_live', 'proj_live', 'rt_live', true, now());
     INSERT INTO agent_creation_requests (id, customer_org_id, owner_user_id, project_id, idempotency_key, display_name, runner_class, status, agent_runtime_id, runtime_spec, created_at, updated_at)
@@ -79,6 +112,15 @@ pkgs.testers.runNixOSTest {
       mode = "0600";
     };
 
+    systemd.services.finite-brain-app = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        DynamicUser = true;
+        StateDirectory = "finitebrain";
+        ExecStart = "${pkgs.python3}/bin/python3 ${brainStandIn}";
+      };
+    };
+
     finite.mover = {
       enable = true;
       core = {
@@ -124,6 +166,11 @@ pkgs.testers.runNixOSTest {
     systemd.tmpfiles.rules = [
       "d /srv/work/kata/tree_live/work 0700 root root -"
       "f /srv/work/kata/tree_live/work/notes.md 0600 root root - hello"
+      # The live agent's own brain, and another's, opened where fbrain puts them.
+      "d /srv/work/kata/tree_live/workspace/finitebrain/brain-live/.finitebrain 0700 root root -"
+      "f /srv/work/kata/tree_live/workspace/finitebrain/brain-live/page.md 0600 root root - brainpage"
+      "d /srv/work/kata/tree_live/workspace/finitebrain/brain-other/.finitebrain 0700 root root -"
+      "f /srv/work/kata/tree_live/workspace/finitebrain/brain-other/page.md 0600 root root - not-theirs"
     ];
   };
 
@@ -190,11 +237,37 @@ pkgs.testers.runNixOSTest {
         app.fail(f"{as_mover} \"UPDATE projects SET display_name = 'x'\"")
         app.fail(f"runuser -u nobody -- psql {conninfo} -c 'SELECT 1'")
 
-    with subtest("sizes reads Core's database and the Runner's tree over ssh"):
+    brains_program = json.loads(app.succeed(f"cat {config}"))["fleet"]["postgres"]["brains"]
+    brains = " ".join(shlex.quote(word) for word in brains_program)
+
+    with subtest("the owned brains are read as finite-brain's own user, read-only, by one fixed command"):
+        app.wait_until_succeeds("journalctl -u finite-brain-app -o cat | grep -q 'stand-in ready'")
+        db = "/var/lib/private/finitebrain/finite-brain.sqlite3"
+        brain_uid = app.succeed(f"stat -c %u {db}").strip()
+        assert brain_uid != "0", brain_uid
+        app.succeed(f"test -e {db}-wal && test -e {db}-shm")
+        unchanged = f"stat -c '%n %s %Y %u' {db} {db}-wal"
+        before = app.succeed(unchanged)
+        listed = json.loads(app.succeed(f"runuser -u finite-mover -- {brains}"))
+        assert listed == {"brains": [
+            {"id": "brain-live", "name": "Live notes", "owner": "${agentNpub}"},
+            {"id": "brain-other", "name": "Not theirs", "owner": "npub1someoneelse"},
+        ]}, listed
+        assert app.succeed(unchanged) == before, "the reader changed the database"
+        owners = app.succeed(f"stat -c %u {db}*").split()
+        assert owners and all(uid == brain_uid for uid in owners), owners
+        app.fail(f"runuser -u finite-mover -- cat {db}")
+        status, out = app.execute(f"runuser -u finite-mover -- {brains} extra 2>&1")
+        assert status == 1 and "a password is required" in out, (status, out)
+
+    with subtest("sizes reads Core's database, finite-brain's owners and the Runner's tree over ssh"):
         app.succeed("systemctl start finite-mover-sizes.service")
         out = app.succeed("journalctl -u finite-mover-sizes -o cat")
         assert '"measured":1' in out and '"failed":0' in out, out
         app.succeed(f"jq -e 'length > 0' {state}/sizes.json")
+        # Only the agent's own brain counts in its move: "brainpage".
+        moved = app.succeed(f"jq -e '.agents.proj_live.move' {state}/sizes.json").strip()
+        assert moved == "9", moved
 
     program = json.loads(app.succeed(f"cat {config}"))["core"]["program"]
     core = " ".join(shlex.quote(word) for word in program)

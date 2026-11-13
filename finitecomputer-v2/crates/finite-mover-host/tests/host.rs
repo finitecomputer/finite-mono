@@ -282,6 +282,118 @@ fn only_brains_named_as_owned_are_staged() {
     );
 }
 
+/// The `left` lines of a stage's summary, as (path, why).
+fn left_of(stage: &[u8]) -> BTreeSet<(String, String)> {
+    let embedded: Value = serde_json::from_slice(&entries(stage)[SUMMARY_ENTRY]).unwrap();
+    embedded["left"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|line| {
+            (
+                line["path"].as_str().unwrap().to_owned(),
+                line["why"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// FIN-499: an owned brain comes whole, but for its `.finitebrain/`
+/// control folder, with the name file fragment's import reads; a brain
+/// the person doesn't own stays, and so does an old file where the name
+/// file goes.
+#[test]
+fn an_owned_brain_comes_whole_with_its_name_file_and_no_control_folder() {
+    let fixture = fixture::build();
+    let brains = fixture.tree.join("workspace/finitebrain");
+    std::fs::create_dir_all(brains.join("brain-owned/wiki")).unwrap();
+    std::fs::write(brains.join("brain-owned/wiki/topic.md"), "# Topic\n").unwrap();
+    std::fs::write(brains.join("brain-owned/.finitebrain/state.json"), "{}").unwrap();
+    std::fs::write(brains.join("brain-owned.json"), r#"{"name":"stale"}"#).unwrap();
+    let name = "Owned notes: ünïcode & spaces";
+    let stage = run_bytes(
+        &fixture,
+        &format!(
+            "stream {ID} --brain {OWNED_BRAIN}:{}",
+            hex::encode(name.as_bytes())
+        ),
+    )
+    .unwrap();
+    let files = entries(&stage);
+    let brain_entries: Vec<&str> = files
+        .keys()
+        .filter(|name| name.starts_with("workspace/finitebrain/"))
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        brain_entries,
+        [
+            "workspace/finitebrain/brain-owned.json",
+            "workspace/finitebrain/brain-owned/page.md",
+            "workspace/finitebrain/brain-owned/wiki/topic.md",
+        ],
+        "the owned brain without .finitebrain/, its name file, and no other brain"
+    );
+    let named: Value =
+        serde_json::from_slice(&files["workspace/finitebrain/brain-owned.json"]).unwrap();
+    assert_eq!(named, serde_json::json!({ "name": name }));
+    let left = left_of(&stage);
+    for (path, why) in [
+        (
+            "workspace/finitebrain/brain-owned/.finitebrain",
+            "cache-dir",
+        ),
+        ("workspace/finitebrain/brain-org", "not-owned-brain"),
+        ("workspace/finitebrain/broken", "not-owned-brain"),
+        ("workspace/finitebrain/brain-owned.json", "replaced-by-copy"),
+    ] {
+        assert!(
+            left.contains(&(path.to_owned(), why.to_owned())),
+            "left lists {path} ({why}): {left:?}"
+        );
+    }
+    // The summary counts the name file with the work it came with.
+    let embedded: Value = serde_json::from_slice(&files[SUMMARY_ENTRY]).unwrap();
+    let staged: u64 = files
+        .iter()
+        .filter(|(name, _)| name.as_str() != SUMMARY_ENTRY)
+        .map(|(_, bytes)| bytes.len() as u64)
+        .sum();
+    assert_eq!(embedded["staged"]["bytes"].as_u64(), Some(staged));
+
+    // Named but not sent a name: the brain comes, and the old file at
+    // its name file's path is the brain's work as before.
+    let unnamed =
+        entries(&run_bytes(&fixture, &format!("stream {ID} --brain {OWNED_BRAIN}")).unwrap());
+    assert_eq!(
+        unnamed["workspace/finitebrain/brain-owned.json"],
+        br#"{"name":"stale"}"#
+    );
+}
+
+/// A brain id whose name file would be named like a credential gets no
+/// name file, and the stage still goes (the uploader would refuse it).
+#[test]
+fn a_name_file_never_takes_a_credentials_name() {
+    let fixture = fixture::build();
+    let brain = fixture.tree.join("workspace/finitebrain/identity");
+    std::fs::create_dir_all(brain.join(".finitebrain")).unwrap();
+    std::fs::write(
+        brain.join(".finitebrain/brain-directory.json"),
+        r#"{"version":"1","brain":{"id":"identity","kind":"personal","name":"identity","owner_npub":null}}"#,
+    )
+    .unwrap();
+    std::fs::write(brain.join("page.md"), "a page\n").unwrap();
+    let stage = run_bytes(
+        &fixture,
+        &format!("stream {ID} --brain identity:{}", hex::encode("Mine")),
+    )
+    .unwrap();
+    let entries = entries(&stage);
+    assert!(entries.contains_key("workspace/finitebrain/identity/page.md"));
+    assert!(!entries.contains_key("workspace/finitebrain/identity.json"));
+}
+
 #[test]
 fn a_running_agent_is_measured_but_never_staged_or_read_for_secrets() {
     let fixture = fixture::build();

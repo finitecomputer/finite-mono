@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::brains::OwnedBrain;
 use crate::contract::Roster;
 
 /// One old agent's exact binding, as Core's `*-exact` commands check it.
@@ -22,9 +23,13 @@ pub struct Binding {
     pub source_machine_id: String,
     /// `<work root>/kata/<durable_state_id>` on its runner host.
     pub durable_state_id: String,
-    /// Brains its person owns, staged with it.
+    /// The npub its runtime signs with, as Core pinned it: the key
+    /// finite-brain knows the agent by.
     #[serde(default)]
-    pub owned_brains: Vec<String>,
+    pub agent_npub: Option<String>,
+    /// Brains its person owns, staged with it ([`Fleet::with_owned_brains`]).
+    #[serde(default)]
+    pub owned_brains: Vec<OwnedBrain>,
     /// Its retirement's receipt, once Core retired it: a retire command
     /// asked again marks it without retiring it twice.
     #[serde(default)]
@@ -42,6 +47,11 @@ pub trait Fleet {
     fn roster(&self) -> Result<Roster, FleetError>;
     /// `old`'s binding, or `None` if Core has no runtime for it.
     fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError>;
+    /// `binding` with the brains its person owns, read now. Only a stage
+    /// needs them; a file's bindings name them already.
+    fn with_owned_brains(&self, binding: Binding) -> Result<Binding, FleetError> {
+        Ok(binding)
+    }
 }
 
 /// A fleet written out by hand or by a test: `{roster, bindings: {old: …}}`.

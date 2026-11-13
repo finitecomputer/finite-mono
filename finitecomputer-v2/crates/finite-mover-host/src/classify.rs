@@ -117,7 +117,8 @@ pub enum Why {
     UncheckableText,
     /// The allow-listed copy of `config.yaml`.
     ConfigCopy,
-    /// A source file at the path the allow-listed copy takes.
+    /// A source file at the path the allow-listed copy, or an owned
+    /// brain's name file, takes.
     ReplacedByCopy,
     /// Dependencies, caches and version control (`SKIP_DIRS`,
     /// export.py:66-84). They stay in the Borg backup.

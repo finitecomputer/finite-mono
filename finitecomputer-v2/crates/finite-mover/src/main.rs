@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use finite_mover::brains::BrainsReader;
 use finite_mover::config::{Config, FleetConfig, npub};
 use finite_mover::fleet::{FileFleet, Fleet};
 use finite_mover::fleet_pg::PgFleet;
@@ -60,7 +61,12 @@ fn run() -> Result<(), String> {
         FleetConfig::Postgres {
             conninfo,
             sizes_file,
-        } => Box::new(PgFleet::new(conninfo, sizes_file)),
+            brains,
+        } => Box::new(PgFleet::new(
+            conninfo,
+            sizes_file,
+            BrainsReader::new(brains),
+        )),
     };
     let core = config.core();
     let hosts = config.hosts();
@@ -95,6 +101,7 @@ fn sizes(config: &Config) -> Result<(), String> {
     let FleetConfig::Postgres {
         conninfo,
         sizes_file,
+        brains,
     } = &config.fleet
     else {
         return Err("sizes reads Core's database: the fleet must be postgres".into());
@@ -102,7 +109,7 @@ fn sizes(config: &Config) -> Result<(), String> {
     let Some(_held) = lock(config, "sizes.lock")? else {
         return Ok(());
     };
-    let live = PgFleet::new(conninfo, sizes_file)
+    let live = PgFleet::new(conninfo, sizes_file, BrainsReader::new(brains))
         .live()
         .map_err(|error| error.to_string())?;
     let now_ms = SystemTime::now()

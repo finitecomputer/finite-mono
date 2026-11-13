@@ -3,16 +3,19 @@
 //! and is parsed here, word by word, with no shell:
 //!
 //! ```text
-//! sizes   <durable_state_id> [--brain <brain id>]...
-//! stream  <durable_state_id> [--brain <brain id>]... [--stage <stage id>]
+//! sizes   <durable_state_id> [--brain <brain id>[:<name>]]...
+//! stream  <durable_state_id> [--brain <brain id>[:<name>]]... [--stage <stage id>]
 //! secrets <durable_state_id> <kind>[,<kind>...]
 //! owner-telegram-notice <durable_state_id> --notice <notice id>   (text on stdin)
 //! ```
 //!
+//! A brain's `<name>` is its display name's UTF-8 in hex, so a name of any
+//! words is one word here; `stream` writes it as the brain's name file
+//! ([`stage`]).
+//!
 //! The work root is never part of it: it comes from the forced command's
 //! own arguments, which only the host's configuration sets.
 
-use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -24,22 +27,26 @@ use crate::notice::{self, NoticeId};
 use crate::secrets::{self, Kind};
 use crate::stage;
 use crate::tree::{DurableId, Tree};
+use crate::walk::OwnedBrains;
 
 /// The longest operation accepted.
 const COMMAND_MAX_BYTES: usize = 8192;
 /// The most brains one operation may name.
 const BRAINS_MAX: usize = 256;
 const BRAIN_ID_MAX: usize = 128;
+/// The longest brain name, in bytes (finite-brain's display names are at
+/// most 128).
+const BRAIN_NAME_MAX: usize = 256;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Operation {
     Sizes {
         id: DurableId,
-        owned_brains: BTreeSet<String>,
+        owned_brains: OwnedBrains,
     },
     Stream {
         id: DurableId,
-        owned_brains: BTreeSet<String>,
+        owned_brains: OwnedBrains,
         /// The stage's id, which the SimpleX seal is named by.
         stage: Option<String>,
     },
@@ -58,7 +65,7 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let mut words = words.into_iter();
     let usage = || {
         HostError::Usage(
-            "sizes|stream <id> [--brain <id>]... [--stage <id>] | secrets <id> <kind>[,<kind>...] \
+            "sizes|stream <id> [--brain <id>[:<hex name>]]... [--stage <id>] | secrets <id> <kind>[,<kind>...] \
              | owner-telegram-notice <id> --notice <notice id>"
                 .into(),
         )
@@ -70,7 +77,7 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let id = DurableId::parse(words.next().ok_or_else(usage)?)?;
     match op {
         "sizes" | "stream" => {
-            let mut owned_brains = BTreeSet::new();
+            let mut owned_brains = OwnedBrains::new();
             let mut stage = None;
             while let Some(flag) = words.next() {
                 if flag == "--stage" && op == "stream" && stage.is_none() {
@@ -86,13 +93,17 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
                 if flag != "--brain" {
                     return Err(usage());
                 }
-                let brain = words.next().ok_or_else(usage)?;
+                let word = words.next().ok_or_else(usage)?;
+                let (brain, name) = match word.split_once(':') {
+                    Some((brain, name)) => (brain, Some(brain_name(name)?)),
+                    None => (word, None),
+                };
                 if !brain_id(brain) || owned_brains.len() >= BRAINS_MAX {
                     return Err(HostError::Usage(
                         "a brain id is 1 to 128 of [A-Za-z0-9_.-]".into(),
                     ));
                 }
-                owned_brains.insert(brain.to_owned());
+                owned_brains.insert(brain.to_owned(), name);
             }
             Ok(if op == "sizes" {
                 Operation::Sizes { id, owned_brains }
@@ -137,6 +148,25 @@ pub fn parse_ssh(original: &str) -> Result<Operation, HostError> {
         return Err(HostError::Usage("the command is too long".into()));
     }
     parse(original.split_ascii_whitespace())
+}
+
+/// A brain's display name from its hex: UTF-8, at most `BRAIN_NAME_MAX`
+/// bytes, with no control character.
+fn brain_name(hex_name: &str) -> Result<String, HostError> {
+    let refused = || {
+        HostError::Usage(format!(
+            "a brain's name is the hex of 1 to {BRAIN_NAME_MAX} bytes of UTF-8 text"
+        ))
+    };
+    if hex_name.is_empty() || hex_name.len() > 2 * BRAIN_NAME_MAX {
+        return Err(refused());
+    }
+    let bytes = hex::decode(hex_name).map_err(|_| refused())?;
+    let name = String::from_utf8(bytes).map_err(|_| refused())?;
+    if name.chars().any(char::is_control) {
+        return Err(refused());
+    }
+    Ok(name)
 }
 
 fn brain_id(value: &str) -> bool {
@@ -218,7 +248,7 @@ mod tests {
             parse_ssh("stream runtime_1 --brain b1 --brain b-2").unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
-                owned_brains: ["b1".to_owned(), "b-2".to_owned()].into(),
+                owned_brains: [("b1".to_owned(), None), ("b-2".to_owned(), None)].into(),
                 stage: None,
             }
         );
@@ -233,7 +263,7 @@ mod tests {
             parse_ssh("sizes runtime_1").unwrap(),
             Operation::Sizes {
                 id: id("runtime_1"),
-                owned_brains: BTreeSet::new()
+                owned_brains: OwnedBrains::new()
             }
         );
     }
@@ -244,10 +274,45 @@ mod tests {
             parse_ssh("stream runtime_1 --stage proj_a.p1.2 --brain b1").unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
-                owned_brains: ["b1".to_owned()].into(),
+                owned_brains: [("b1".to_owned(), None)].into(),
                 stage: Some("proj_a.p1.2".to_owned()),
             }
         );
+    }
+
+    #[test]
+    fn a_brain_may_carry_its_name_in_hex() {
+        let name = "Notes & plans: été";
+        assert_eq!(
+            parse_ssh(&format!(
+                "stream runtime_1 --brain b1:{} --brain b2",
+                hex::encode(name)
+            ))
+            .unwrap(),
+            Operation::Stream {
+                id: id("runtime_1"),
+                owned_brains: [
+                    ("b1".to_owned(), Some(name.to_owned())),
+                    ("b2".to_owned(), None)
+                ]
+                .into(),
+                stage: None,
+            }
+        );
+        for bad in [
+            "b1:".to_owned(),
+            "b1:zz".to_owned(),
+            "b1:abc".to_owned(),
+            format!("b1:{}", hex::encode([0xff, 0xfe])),
+            format!("b1:{}", hex::encode("a\nb")),
+            format!("b1:{}", hex::encode("x".repeat(BRAIN_NAME_MAX + 1))),
+            format!("a/b:{}", hex::encode("n")),
+        ] {
+            assert!(
+                parse_ssh(&format!("stream runtime_1 --brain {bad}")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

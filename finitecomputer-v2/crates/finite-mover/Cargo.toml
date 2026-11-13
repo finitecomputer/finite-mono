@@ -16,8 +16,10 @@ hex.workspace = true
 # The mover key's npub (`finite-mover npub`).
 nostr.workspace = true
 reqwest.workspace = true
+# finite-brain's database, opened read-only by `finite-mover-brains` (FIN-499).
+rusqlite.workspace = true
 # Stops a stuck child's whole process group (src/child.rs).
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -29,6 +31,8 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1"] }
 zeroize.workspace = true
 
 [dev-dependencies]
+# finite-brain's own schema, for the owned brains reader's tests.
+finite-brain-store.workspace = true
 # Core's own schema, for the fleet's database tests.
 finite-saas-core = { path = "../finite-saas-core" }
 tempfile.workspace = true

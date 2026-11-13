@@ -12,7 +12,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use finite_mover::contract::{Has, Sizes};
+use finite_mover::brains::{BrainsReader, OwnedBrain};
+use finite_mover::contract::{Has, OldBrain, Sizes};
 use finite_mover::fleet::Fleet;
 use finite_mover::fleet_pg::PgFleet;
 use finite_mover::sizes::SizesCache;
@@ -20,6 +21,32 @@ use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
 static DATABASES: AtomicU32 = AtomicU32::new(0);
+
+/// A key's npub, as Core pins it and finite-brain names an owner.
+fn npub(byte: u8) -> String {
+    use nostr::ToBech32;
+    let keys = nostr::Keys::new(nostr::SecretKey::from_slice(&[byte; 32]).unwrap());
+    keys.public_key().to_bech32().unwrap()
+}
+
+/// finite-brain's owned brains, as `finite-mover-brains` prints them:
+/// `proj_live`'s key owns one; a key no live agent signs with owns
+/// another. `proj_two`'s key owns none.
+fn brains_answer() -> String {
+    json!({ "brains": [
+        { "id": "brain-live", "name": "Live's notes", "owner": npub(1) },
+        { "id": "brain-elsewhere", "name": "Not theirs", "owner": npub(9) },
+    ]})
+    .to_string()
+}
+
+fn brains_program() -> Vec<String> {
+    vec!["printf".into(), "%s".into(), brains_answer()]
+}
+
+fn brains() -> BrainsReader {
+    BrainsReader::new(&brains_program())
+}
 
 /// A fresh database with Core's schema, a role granted `core-role.sql`
 /// there, and the URL that connects as that role. Both are dropped after.
@@ -185,6 +212,13 @@ fn fleet_fixture() -> String {
         true,
         Some(&spec("rt_two", "tree_two")),
     );
+    // Each signs with its own key, which Core pinned from its reports.
+    sql += &format!(
+        "UPDATE agent_runtimes SET health_reporting_npub = '{}' WHERE id = 'rt_live';
+         UPDATE agent_runtimes SET health_reporting_npub = '{}' WHERE id = 'rt_two';",
+        npub(1),
+        npub(2)
+    );
     // Listed: launched before runtime specs; Core synthesizes its spec with
     // the runtime's own id.
     sql += &agent("org_one", "u_one", "proj_legacy", "rt_legacy", true, None);
@@ -295,10 +329,11 @@ fn fleet_fixture() -> String {
     sql
 }
 
-/// The host reader: `sizes tree_live` prints its summary; anything else fails.
+/// The host reader: `sizes tree_live`, told of its brain, prints its
+/// summary; anything else fails.
 const HOST: &str = r#"
-case "$1 $2" in
-  "sizes tree_live") printf '{"format":"x","id":"tree_live","classes":{"secret":{"files":1,"bytes":7},"config":{"files":0,"bytes":0},"cache":{"files":1,"bytes":100},"runtime":{"files":0,"bytes":0},"history":{"files":2,"bytes":20},"work":{"files":3,"bytes":3}},"staged":{"files":5,"bytes":23},"left":[],"left_more":0}' ;;
+case "$*" in
+  "sizes tree_live --brain brain-live") printf '{"format":"x","id":"tree_live","classes":{"secret":{"files":1,"bytes":7},"config":{"files":0,"bytes":0},"cache":{"files":1,"bytes":100},"runtime":{"files":0,"bytes":0},"history":{"files":2,"bytes":20},"work":{"files":3,"bytes":3}},"staged":{"files":5,"bytes":23},"left":[],"left_more":0}' ;;
   *) echo "no such tree $2" >&2; exit 3 ;;
 esac
 "#;
@@ -312,7 +347,7 @@ fn write_config(dir: &Path, conninfo: &str) -> std::path::PathBuf {
         "finite_chat": "http://127.0.0.1:9",
         "key_file": key,
         "locks": dir.join("locks"),
-        "fleet": { "postgres": { "conninfo": conninfo, "sizes_file": dir.join("sizes.json") } },
+        "fleet": { "postgres": { "conninfo": conninfo, "sizes_file": dir.join("sizes.json"), "brains": brains_program() } },
         "core": { "program": ["false"], "admin_email": "mover@example.test", "admin_workos_user_id": "user_mover", "wait_seconds": 1 },
         "hosts": { "lat-a": ["sh", "-c", HOST, "host"] },
     });
@@ -397,7 +432,7 @@ fn the_roster_lists_each_live_agent_of_a_signed_in_owner_once_with_its_daily_siz
         .into()
     );
 
-    let fleet = PgFleet::new(&db.as_role, &sizes_file);
+    let fleet = PgFleet::new(&db.as_role, &sizes_file, brains());
     let roster = fleet.roster().unwrap();
     let listed: Vec<(String, String, Vec<Listed>)> = roster
         .people
@@ -449,13 +484,34 @@ fn the_roster_lists_each_live_agent_of_a_signed_in_owner_once_with_its_daily_siz
             ),
         ]
     );
+    // Each agent lists the brains its own key owns (FIN-499): proj_live
+    // its one; proj_two, whose key owns none, and the agents Core has no
+    // key for, none; and no agent the brain of a key it doesn't sign with.
+    let brains_of: Vec<(&str, &[OldBrain])> = roster
+        .people
+        .iter()
+        .flat_map(|person| &person.agents)
+        .map(|agent| (agent.old.as_str(), agent.brains.as_slice()))
+        .collect();
+    let live_brain = [OldBrain {
+        id: "brain-live".into(),
+        title: "Live's notes".into(),
+        bytes: 0,
+    }];
+    assert_eq!(
+        brains_of,
+        [
+            ("proj_legacy", &[][..]),
+            ("proj_live", &live_brain[..]),
+            ("proj_machine", &[][..]),
+            ("proj_relocated", &[][..]),
+            ("proj_two", &[][..]),
+        ]
+    );
     // What Core doesn't hold yet is listed empty, never guessed.
     let first = &roster.people[0].agents[0];
     assert!(
-        first.brains.is_empty()
-            && first.sites.is_empty()
-            && first.last_active_ms.is_none()
-            && first.has == Has::default()
+        first.sites.is_empty() && first.last_active_ms.is_none() && first.has == Has::default()
     );
     assert!(roster.snapshot.starts_with("core-") && roster.observed_ms > 0);
 }
@@ -465,7 +521,7 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
     let db = CoreDb::new();
     block_on(execute(&db.url, &fleet_fixture()));
     let dir = tempfile::tempdir().unwrap();
-    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"));
+    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"), brains());
 
     let live = fleet.binding("proj_live").unwrap().unwrap();
     assert_eq!(
@@ -484,7 +540,46 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
             "tree_live"
         )
     );
-    assert_eq!((live.owned_brains.len(), live.retired_receipt), (0, None));
+    assert_eq!(
+        (live.owned_brains.len(), live.retired_receipt.as_deref()),
+        (0, None)
+    );
+    assert_eq!(live.agent_npub, Some(npub(1)), "the key Core pinned");
+    // A stage reads its brains, by that key, only when it needs them.
+    let live = fleet.with_owned_brains(live).unwrap();
+    assert_eq!(
+        live.owned_brains,
+        [OwnedBrain {
+            id: "brain-live".into(),
+            name: "Live's notes".into()
+        }]
+    );
+    let two = fleet.binding("proj_two").unwrap().unwrap();
+    assert!(
+        fleet
+            .with_owned_brains(two)
+            .unwrap()
+            .owned_brains
+            .is_empty()
+    );
+    let legacy = fleet.binding("proj_legacy").unwrap().unwrap();
+    assert_eq!(legacy.agent_npub, None);
+    assert!(
+        fleet
+            .with_owned_brains(legacy)
+            .unwrap()
+            .owned_brains
+            .is_empty()
+    );
+    // finite-brain down: an error, never no brains.
+    let down = PgFleet::new(
+        &db.as_role,
+        &dir.path().join("sizes.json"),
+        BrainsReader::new(&["false".to_string()]),
+    );
+    let binding = down.binding("proj_live").unwrap().unwrap();
+    assert!(down.with_owned_brains(binding).is_err());
+    assert!(down.roster().is_err() && down.live().is_err());
 
     // Retired: its link is gone, its runtime and receipt remain, so a
     // retry of the retire step marks it moved without retiring it again.
@@ -525,12 +620,22 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
         assert_eq!(fleet.binding(old).unwrap(), None, "{old}");
     }
 
-    // The live list the sizes run measures is the roster's agents.
+    // The live list the sizes run measures is the roster's agents, each
+    // with its brains.
     let mut measured: Vec<String> = fleet
         .live()
         .unwrap()
         .into_iter()
-        .map(|binding| binding.old)
+        .map(|binding| {
+            let ids: Vec<String> = binding.owned_brains.into_iter().map(|b| b.id).collect();
+            let expected = if binding.old == "proj_live" {
+                vec!["brain-live".to_string()]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(ids, expected, "{}", binding.old);
+            binding.old
+        })
         .collect();
     measured.sort();
     assert_eq!(
@@ -579,6 +684,10 @@ fn the_mover_role_reads_only_what_core_role_sql_grants() {
     }
     assert_eq!(
         denied("SELECT id, workos_user_id, normalized_email FROM users"),
+        None
+    );
+    assert_eq!(
+        denied("SELECT id, health_reporting_npub FROM agent_runtimes"),
         None
     );
 }

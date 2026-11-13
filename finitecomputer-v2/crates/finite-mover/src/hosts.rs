@@ -63,7 +63,7 @@ impl HostCommands {
     pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
         let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
         for brain in &binding.owned_brains {
-            words.extend(["--brain".to_string(), brain.clone()]);
+            words.extend(["--brain".to_string(), brain.id.clone()]);
         }
         let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
@@ -109,8 +109,9 @@ impl HostCommands {
             .map_err(|_| HostError::NotRun("the host reader's secrets could not be read".into()))
     }
 
-    /// `stream <durable_state_id> --stage <stage id> [--brain <id>]...`: the
-    /// stage, as the host reader writes it. The reader names its SimpleX
+    /// `stream <durable_state_id> --stage <stage id> [--brain <id>:<hex
+    /// name>]...`: the stage, as the host reader writes it, with each owned
+    /// brain's name file. The reader names its SimpleX
     /// seal by the stage's id, and carries SimpleX only with one. Its
     /// failure, or its exit before the end, is a read error at the stream's
     /// end.
@@ -122,7 +123,10 @@ impl HostCommands {
             stage.to_string(),
         ];
         for brain in &binding.owned_brains {
-            words.extend(["--brain".to_string(), brain.clone()]);
+            words.extend([
+                "--brain".to_string(),
+                format!("{}:{}", brain.id, hex::encode(&brain.name)),
+            ]);
         }
         let mut watched = Watched::spawn(
             self.command(binding, &words)?
