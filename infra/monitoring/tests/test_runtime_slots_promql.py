@@ -64,6 +64,7 @@ def main():
         runtime("finite-lat-7", "new", 1),
     ]
     counts = {"finite-lat-3": 17, "finite-lat-4": 32, "finite-lat-5": 1, "finite-lat-7": 1}
+    lat7_ceiling = int(CAPACITY["finite-lat-7"])
     cases = [
         ("fresh mixed artifacts", 900, active, counts),
         ("just before expiry", 601, active, counts),
@@ -73,8 +74,8 @@ def main():
         ("empty host", 900, [], {}),
         ("one host missing", 900, active[2:], {"finite-lat-4": 32, "finite-lat-5": 1, "finite-lat-7": 1}),
         ("lat5 and lat7 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 32}),
-        ("lat7 at qualified ceiling", 900, [runtime("finite-lat-7", "new", 8)], {"finite-lat-7": 8}),
-        ("lat7 over qualified ceiling", 900, [runtime("finite-lat-7", "new", 9)], {"finite-lat-7": 9}),
+        ("lat7 at declared ceiling", 900, [runtime("finite-lat-7", "new", lat7_ceiling)], {"finite-lat-7": lat7_ceiling}),
+        ("lat7 over declared ceiling", 900, [runtime("finite-lat-7", "new", lat7_ceiling + 1)], {"finite-lat-7": lat7_ceiling + 1}),
         (
             "over ceiling",
             900,
