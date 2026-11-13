@@ -83,11 +83,17 @@ impl StreamUsage {
             return;
         };
         let data = data.trim();
+        if self.done {
+            self.invalid = true;
+            return;
+        }
         if data == "[DONE]" {
             self.done = true;
             return;
         }
-        if self.done {
+        // include_usage requests one final usage event. Any subsequent data
+        // other than [DONE] makes these counts nonfinal or ambiguous.
+        if self.usage.is_some() {
             self.invalid = true;
             return;
         }
@@ -106,12 +112,8 @@ impl StreamUsage {
         }
     }
 
-    pub(super) fn done(&self) -> bool {
-        self.done
-    }
-
     pub(super) fn finish(self) -> Option<Usage> {
-        if self.done && !self.invalid {
+        if self.done && !self.invalid && self.pending.is_empty() {
             self.usage
         } else {
             None

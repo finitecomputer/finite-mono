@@ -67,11 +67,18 @@ adds `finite_private_numes_max_concurrent` and `finite_private_numes_in_flight`.
 
 ## Relay and accounting contract
 
-The draft contract requires these headers on every Numes inference request:
+Numes's Tinfoil adapter requires these headers on every inference request:
 
 - `Authorization: Bearer <dedicated Numes relay credential>`
 - `X-Tinfoil-Model: glm-5-3-flash`, exactly matching the decrypted body's model
 - `X-Tinfoil-Request-Usage-Metrics: true`
+
+On the public endpoint, the adapter also sends `Content-Type: application/json`,
+`Ehbp-Encapsulated-Key` (64 lowercase hexadecimal characters), and `TE: trailers`.
+Despite the content type, the public request body is EHBP ciphertext. The shim
+decrypts it before this limiter receives JSON. `X-Tinfoil-Enclave-Url` is Numes
+routing metadata and is not forwarded to the limiter. Serve the configured URL
+directly over TLS 1.3; the relay does not follow redirects.
 
 `X-Request-Id` is optional. When omitted, the adapter generates a correlation ID;
 when supplied, it must be a single opaque 1–128 character ASCII identifier using
@@ -85,6 +92,11 @@ omits it; `X-Tinfoil-Max-Output-Tokens` can further reduce that limit and
 request engine usage. Reasoning/tool behavior otherwise follows the configured
 model and existing thinking defaults.
 
+The client may omit `stream`, `n`, and both optional output/count headers.
+`user_cache_secret` remains inside the encrypted body and is forwarded unchanged
+to the engine; verify that the deployed engine accepts or safely ignores it.
+Its presence does not enable cache billing.
+
 Successful non-streaming responses carry `X-Tinfoil-Usage-Metrics` as a header.
 Successful streams declare it with `Trailer` and emit it as an HTTP trailer:
 
@@ -94,13 +106,16 @@ prompt=10,completion=2,total=12,model=glm-5-3-flash
 
 Counts must be nonnegative exact integers, total must match their sum, completion
 must respect the admitted output limit, and the upstream model must match the
-listed model. Streaming also requires terminal `[DONE]`. Missing, inconsistent,
+listed model. Streaming requires one final usage event, terminal `[DONE]`, and
+normal upstream HTTP EOF. Data after final usage (other than `[DONE]`), repeated
+usage, or data after `[DONE]` invalidates the receipt. Missing, inconsistent,
 malformed or interrupted usage produces **no billable usage header/trailer**;
 there are no estimated marketplace charges. Cache discounts and `cost_usd` are
 not reported. Numes calculates cost using its approved marketplace rates.
 
-The HTTP response and returned request identifier associate the usage with its
-request; this is not a signed receipt, durable usage ledger or retry-deduplication
+The same HTTP request/response exchange binds usage to the attempt; Numes does
+not require a request identifier in the usage value. This is not a signed
+receipt, durable usage ledger or retry-deduplication
 API. A retry is a new inference request. Counts remain visible outside EHBP;
 request and response content do not.
 
@@ -114,30 +129,96 @@ For Numes to receive usage after a customer disconnects, its relay must keep its
 own upstream response open and drain it. A disconnected relay cannot receive a
 trailer; no out-of-band settlement is implemented here.
 
-## Qualification before activation
+## Temporary Numes attestation policy
 
-Merging this code does not activate an offer. Publish and review the new serving
-image and measured configuration, provision the dedicated credentials, deploy
-with authorization, and explicitly raise the live cap from zero. Numes's listing
-must reflect the configured output limit and deadline (defaults: 4096 tokens and
-120 seconds) and the engine's actual context window. `/v1/models` discovery is
-not implemented; supply those facts to Numes explicitly.
+For the initial integration agreed with Numes, its adapter automatically uses
+**provider-managed encryption with attestation marked skipped**. There is no
+provider CLI/GUI opt-in. EHBP remains enabled, but customers cannot
+cryptographically verify that the encryption key belongs to the approved TDX
+workload. Numes must label this mode accurately and exclude it from routes that
+require verified enclaves. There is no plaintext fallback.
 
-The JavaScript SDK/ATC path is a separate activation blocker: this endpoint
-reports `tdx-guest/v2`, and ATC rejects its custom-container attestation request
-with HTTP 501 because it supports only `sev-snp-guest/v2`. The
-[Tinfoil JavaScript verifier](https://docs.tinfoil.sh/sdk/javascript-sdk#what-the-verifier-checks)
-also lacks Intel TDX checks. Supporting this deployment requires both a compatible
-attestation bundle service and a TDX-capable customer-side verifier, or a separately
-qualified deployment on supported hardware. Updating this adapter cannot resolve
-that gap. Never bypass verification or substitute relay-side verification for
-customer-side verification; prove the approved workload verifies before activation.
+This exception is specific to Numes's initial listing. It does not change Finite
+client verification or the operator's deployment/attestation checks in the
+[serving runbook](README.md). A fully client-attested listing is a later, separate
+qualification: prove that the selected SDK/service verifies the actual deployed
+TDX format and binds the EHBP key to the approved workload. Relay verification
+alone does not establish customer-side verification.
 
-Synthetic tests cover local cap races, live pause/raise/lower, client drops during
-prefill/streaming, deadlines, valid HTTP/1 streaming trailers, invalid usage and
-continued Finite subscription admission/settlement at marketplace saturation.
-Still qualify EHBP/trailer transport through the deployed Tinfoil shim and Numes
-relay, mismatched encrypted model rejection, actual engine limits/cancellation,
-and Finite-user latency under the chosen marketplace cap. Confirm the usage format
-and configured listing limits with Numes. Do not enable the offer on the strength
-of local tests alone.
+## Prepare and qualify a release
+
+Merging this code does not activate an offer. Use Numes's
+[integration PR](https://git.numes.ai/numes/numes/pulls/1269) and its November 12
+integration requirements for joint qualification. Numes owns its endpoint
+profile, compatible agent/client builds, prices, policy labels and marketplace
+settlement. Its provider agent is needed to prove the complete encrypted path.
+
+1. Record the current instance, measured tag, image digests and credential
+   custody using `scripts/finite-status` and the serving runbook. Preserve the
+   current configuration and exact rollback tag. Eight-GPU replacement incurs
+   downtime; publishing a release and replacing the instance are separate steps.
+2. Build the reviewed commit through `service-images.yml` (`private-limiter`).
+   Review its image identity and pin the resulting immutable digest in the
+   intended measured configuration. Preserve the current model, aliases,
+   admission mode, CVM/security settings, networks and existing secret names.
+3. Provision fresh sealed `NUMES_API_KEY` and `NUMES_CONTROL_API_KEY` secrets and
+   add both names to the **limiter's** secrets list. Add the following limiter
+   environment entries. Neither credential belongs to the model container.
+
+   ```yaml
+   - NUMES_MAX_CONCURRENT: "0"
+   - NUMES_MAX_OUTPUT_TOKENS: "4096"
+   - NUMES_REQUEST_TIMEOUT_SECS: "120"
+   ```
+
+4. Publish the measured release and complete both release workflow phases.
+   Review the exact current-to-target configuration and rollback before an
+   authorized deployment. Verify the running tag/measurement, ordinary Finite
+   chat, retained aliases and subscription accounting before testing Numes.
+5. Keep the Numes offer disabled. Check the control endpoint reports cap zero;
+   a correctly authenticated Numes request must get 429 without model dispatch.
+   For an authorized qualification window, raise the cap to **1** with the
+   control command above and run the acceptance cases below. Start small and
+   measure Finite-user latency before selecting the serving cap.
+6. Give Numes the deployed commit, limiter digest, measured release, confirmed
+   limits and a fresh relay credential through the agreed secure channel. Never
+   share the control or internal engine credentials. Activate the listing only
+   after both parties have the passing evidence and agreed prices/capabilities.
+
+The initial inventory candidate is `glm-5-3-flash`, text input/output, a combined
+393216-token context and 4096-token maximum output including reasoning. Confirm
+these against the deployed engine and limiter. The whole-request deadline is
+120 seconds with the configuration above; Numes's 11-minute source timeout does
+not extend it. Advertise `max_tokens`; reasoning controls and tools require
+separate qualification before advertising. `/v1/models` discovery is optional
+for this initial listing because Numes has a reviewed static inventory. Prices
+are a separate agreement, not facts supplied by this adapter.
+
+| Live acceptance case | Required evidence |
+| --- | --- |
+| Buffered encrypted chat | HTTP 200, 64-lowercase-hex response nonce, decryptable body, exact final usage header |
+| Streamed encrypted chat | Incremental ciphertext/decryption, `[DONE]`, normal EOF and actual final HTTP usage trailer |
+| Minimal client request | Success without request ID or optional output/count headers; `user_cache_secret` accepted |
+| Model and limits | Canonical model throughout; model mismatch rejected; actual context/output bounds enforced |
+| Failure paths | Missing/invalid usage, truncation, upstream error and deadline cannot settle as successful billing |
+| Customer disconnect | After ciphertext delivery starts, Numes drains upstream and can collect final usage; no delivery means no charge |
+| Pause, saturation and drain | New work gets 429; admitted work retains capacity through EOF/deadline; engine cancels acceptably on timeout |
+| Finite continuity and policy | Ordinary Finite chat/accounting remain healthy; Numes is labeled attestation-skipped and excluded from verified routes |
+
+Verify headers and trailers across **engine → limiter → shim → ingress → Numes
+agent**. If initial and trailer usage both appear, they must agree exactly. Use
+the official EHBP implementation; do not infer encrypted transport success from
+plaintext limiter tests or rewrite the shim without a reproduced forwarding
+defect. Keep evidence to identities, statuses, usage counts and timings, without
+credentials, prompts, cache secrets or generated content.
+
+If qualification fails or Finite latency degrades, set the live cap to zero and
+disable the Numes offer. Observe `in_flight` draining before a replacement. A
+restart returns to the configured zero cap. Follow the serving runbook for an
+authorized rollback to the preserved measured release; do not use the outdated
+degraded candidate as an automatic fallback.
+
+Synthetic tests cover cap races, pause/raise/lower, client drops during
+prefill/streaming, deadlines, HTTP/1 trailers, invalid/nonfinal usage and existing
+Finite subscription admission/settlement at saturation. They do not qualify
+the live shim, engine, Numes agent or marketplace settlement.

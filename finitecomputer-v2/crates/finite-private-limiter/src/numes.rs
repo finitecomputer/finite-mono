@@ -419,7 +419,21 @@ async fn generate(
         return;
     }
     let (tx, mut rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(8);
-    let frames = async_stream::stream! { while let Some(frame) = rx.recv().await { yield frame; } };
+    let frames = async_stream::stream! {
+        while let Some(frame) = rx.recv().await {
+            let terminal = match &frame {
+                Ok(frame) => frame.is_trailers(),
+                Err(_) => true,
+            };
+            yield frame;
+            if terminal {
+                return;
+            }
+        }
+        // A deadline drops the worker and sender. Expose that as an incomplete
+        // HTTP body, not a normal EOF that an encrypting proxy could finalize.
+        yield Err(std::io::Error::other("Numes stream ended without final usage"));
+    };
     let response = Response::builder()
         .header("content-type", "text/event-stream")
         .header("x-request-id", request_id)
@@ -440,9 +454,8 @@ async fn generate(
         // Closed receiver means customer delivery ended. Keep draining upstream
         // to obtain final counts, holding the slot until completion/deadline.
         let _ = tx.send(Ok(Frame::data(chunk))).await;
-        if usage.done() {
-            break;
-        }
+        // Drain through HTTP EOF, even after [DONE]. A later transport failure
+        // or contradictory event must prevent issuing a successful receipt.
     }
     if let Some(usage) = usage.finish() {
         let mut trailers = HeaderMap::new();

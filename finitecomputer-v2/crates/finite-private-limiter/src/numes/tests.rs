@@ -15,6 +15,9 @@ struct Engine {
     prefill: bool,
     final_usage: bool,
     fail: bool,
+    after_done: Option<Arc<Semaphore>>,
+    fail_after_done: bool,
+    last_request: Arc<Mutex<Option<Value>>>,
 }
 
 impl Engine {
@@ -25,6 +28,9 @@ impl Engine {
             prefill: false,
             final_usage: true,
             fail: false,
+            after_done: None,
+            fail_after_done: false,
+            last_request: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -36,6 +42,7 @@ async fn engine(
 ) -> Response {
     assert_eq!(headers["authorization"], "Bearer synthetic-engine-key");
     engine.calls.fetch_add(1, Ordering::SeqCst);
+    *engine.last_request.lock().unwrap() = Some(body.clone());
     if engine.fail {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     }
@@ -60,6 +67,12 @@ async fn engine(
             yield Ok(Bytes::from(format!("data: {{\"model\":\"{MODEL}\",\"choices\":[],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}}}\n\n")));
         }
         yield Ok(Bytes::from_static(b"data: [DONE]\n\n"));
+        if let Some(gate) = engine.after_done {
+            gate.acquire().await.unwrap().forget();
+        }
+        if engine.fail_after_done {
+            yield Err(std::io::Error::other("synthetic failure after DONE"));
+        }
     };
     (
         [("content-type", "text/event-stream")],
@@ -512,8 +525,7 @@ async fn finite_requests_and_invalid_marketplace_credentials_still_use_core() {
 async fn deadline_releases_stalled_generation_without_fabricated_usage() {
     let h = harness(Engine::new(), Duration::from_millis(100)).await;
     let response = h.app.clone().oneshot(request(KEY, true)).await.unwrap();
-    let collected = response.into_body().collect().await.unwrap();
-    assert!(collected.trailers().is_none());
+    assert!(response.into_body().collect().await.is_err());
     wait_for(async || inflight(&h.app).await == 0).await;
     assert_eq!(
         h.app
@@ -633,3 +645,5 @@ fn configuration_is_opt_in_and_credentials_are_dedicated_and_redacted() {
     cfg.numes = None;
     assert!(app(cfg).is_ok());
 }
+
+mod transport;
