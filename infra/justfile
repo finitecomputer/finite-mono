@@ -6,6 +6,12 @@ mod secrets 'secret/justfile'
 default:
     just --list-submodules --list
 
+# Preparation only: static contract, synthetic HTTP/SSE fixtures and auth wrapper.
+finite-private-inkling-contract:
+    cd .. && python3 scripts/check_finite_private_inkling_candidate.py
+    cd .. && python3 -m unittest discover -s scripts/tests -p 'test_finite_private_inkling*.py'
+    cd .. && sh -n infra/images/inkling-2-small-sglang-entrypoint.sh
+
 # Canonical read-only platform status: Nix-name contract plus Aug-1 fleet math.
 finite-status-contract:
     cd .. && python3 scripts/check_finite_status_contract.py

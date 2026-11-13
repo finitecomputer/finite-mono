@@ -6,6 +6,12 @@ checkpoint, MPK, images and serving command for usage-api admission. The
 separate degraded-allowlist configuration is an explicit operational override,
 not evidence of current production state.
 
+The separate `tinfoil-config.inkling-2-small.candidate.yml` is preparation only,
+with deliberate image and MPK stop markers. Follow the
+[Inkling qualification procedure](../../runbooks/inkling-2-small-qualification.md)
+for offline checks, old-client controls, H200 measurements and maintenance-window
+rollback bounds. It does not select a new default or authorize a replacement.
+
 Inspect the live measured tag and configuration with `scripts/finite-status`
 and `infra/runbooks/finite-private-ops.sh status` before a deployment. Preserve
 the exact previous tag, container identity, configuration and credential custody

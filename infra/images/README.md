@@ -20,6 +20,7 @@ Tinfoil surface; the Agent Runtime image has its own rollout lifecycle.
 | `private-limiter` | `private-limiter.Dockerfile` (context: repo root) | `service-images.yml` | Finite Private Tinfoil CVM (digest pinned in confidential-finite-private) |
 | `finite-sites` | `sites.Dockerfile` (context: repo root; Rust pin from `rust-toolchain.toml`) | `service-images.yml` (`sites`) | [Sites deployment](../runbooks/deploy-sites.md#fly); production at `finite.site`. |
 | `glm-5-3-flash-sglang` | `glm-5.3-flash-sglang.Dockerfile` (context: repo root; wraps the exact upstream amd64 manifest with source labels and fail-closed internal auth) | `glm-5.3-flash-sglang-image.yml` | Live Finite Private GLM-5.3-Flash Tinfoil container |
+| `inkling-2-small-sglang` | `inkling-2-small-sglang.Dockerfile` (pins the upstream linux/amd64 digest) | manual canary job in `inkling-2-small-qualification.yml` | Preparation only; see [qualification](../runbooks/inkling-2-small-qualification.md) |
 | `agent-runtime` | `finitecomputer-v2/deploy/finite-computer/images/runtime.Dockerfile` via `finitecomputer-v2/scripts/build_runtime_image.py` (one staged monorepo + root lockfile) | `runtime-image.yml`, whose build-once smoke proves the exact local image ID before push; `hermes-runtime-smoke.yml` is optional source preflight | local Docker, Kata, Phala, and agent canary lanes |
 
 Legacy package names (`finite-private-limiter`, `finite-agent-runtime`,
