@@ -351,6 +351,9 @@
                 rm -rf "$plugins"
                 mv "$out/share/hermes-agent/plugins-products" "$plugins"
                 chmod -R u+w "$plugins"
+                # Same opt-in Telegram cold-start patch as the sealed venv.
+                ${hermesPkgs.patch}/bin/patch --fuzz=0 -d "$plugins" -p2 < ${./infra/images/patches/hermes-telegram-preserve-pending.patch}
+                rm -f "$plugins/platforms/telegram/__pycache__/adapter."*.pyc
                 cp -R ${./finite-brain/integrations/hermes/finite-brain} "$plugins/finite-brain"
                 cp -R ${./finite-sites/integrations/hermes/finite-sites} "$plugins/finite-sites"
                 chmod -R u+w "$plugins"

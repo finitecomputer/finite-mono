@@ -33,6 +33,13 @@ upstream.override {
             mv "$site/gateway-patched" "$site/gateway"
             chmod -R u+w "$site/gateway"
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-stop-generation.patch}
+            test -L "$site/plugins"
+            cp -RL "$site/plugins" "$site/plugins-patched"
+            rm "$site/plugins"
+            mv "$site/plugins-patched" "$site/plugins"
+            chmod -R u+w "$site/plugins"
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-telegram-preserve-pending.patch}
+            rm -f "$site/plugins/platforms/telegram/__pycache__/adapter."*.pyc
             rm -f "$site/gateway/__pycache__/run."*.pyc
           '';
         });
