@@ -53,17 +53,23 @@ Notes:
   Runtime release and rollback use the usual digest-pinned image procedure;
   there is no data migration or manual lock cleanup for this fix.
 
-- The Telegram cold-start patch (`hermes-telegram-preserve-pending.patch`)
+- The Telegram pending-update patch (`hermes-telegram-preserve-pending.patch`)
   changes nothing by default. When `gateway.platforms.telegram.extra.preserve_pending_updates`
-  is true, a cold gateway start keeps the Bot API update queue instead of
-  dropping it, so messages sent while a bot was offline are still answered.
-  The legacy importer's full-fidelity mode sets the key and refuses a target
-  image without the patch. It is applied to both the sealed venv's `plugins/`
-  and the package's bundled `share/hermes-agent/plugins` (the image reads the
+  is true, the cold start, the webhook start and the 409 conflict retry keep
+  the Bot API update queue instead of dropping it, so messages sent while a
+  bot was offline are still answered; when every conflict retry fails,
+  polling stops with the queue kept. The patch carries a versioned capability
+  marker (`FINITE_TELEGRAM_PRESERVE_PENDING`) and each patched call site
+  records itself when it runs. The legacy importer's full-fidelity mode sets
+  the key and qualifies the image by behavior
+  (`scripts/legacy_hermes_telegram_gate.py`, `legacy_hermes_migration.py
+  telegram-qualify`). It is applied to both the sealed venv's `plugins/` and
+  the package's bundled `share/hermes-agent/plugins` (the image reads the
   latter through `HERMES_BUNDLED_PLUGINS`). Proof:
-  `finitechat/tests/hermes/test_legacy_hermes_full_fidelity.py` queues an
-  update before the real gateway starts. Remove the patch when upstream keeps
-  the queue on an opt-in cold start.
+  `finitechat/tests/hermes/test_legacy_hermes_full_fidelity.py` (cold start,
+  409 at start, repeated 409s, network reconnect) and the gate tests in
+  `scripts/tests/test_legacy_hermes_full_fidelity.py`. Remove the patch when
+  upstream keeps the queue on an opt-in cold start and conflict retry.
 
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.

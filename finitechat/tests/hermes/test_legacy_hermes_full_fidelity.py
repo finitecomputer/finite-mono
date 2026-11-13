@@ -56,7 +56,12 @@ FIXTURE_BUILDER_SPEC = importlib.util.spec_from_file_location(
 assert FIXTURE_BUILDER_SPEC is not None and FIXTURE_BUILDER_SPEC.loader is not None
 fx = importlib.util.module_from_spec(FIXTURE_BUILDER_SPEC)
 FIXTURE_BUILDER_SPEC.loader.exec_module(fx)
-import legacy_hermes_telegram_gate as gate  # noqa: E402
+GATE_SPEC = importlib.util.spec_from_file_location(
+    "legacy_hermes_telegram_gate", SCRIPTS / "legacy_hermes_telegram_gate.py"
+)
+assert GATE_SPEC is not None and GATE_SPEC.loader is not None
+gate = importlib.util.module_from_spec(GATE_SPEC)
+GATE_SPEC.loader.exec_module(gate)
 from legacy_telegram_fakes import FakeTelegramBotApi, StubModel  # noqa: E402
 
 FIXTURE = Path(__file__).with_name("fixtures") / "legacy_v014"
@@ -356,7 +361,7 @@ class LegacyHermesFullFidelityLiveTest(unittest.TestCase):
                 self.assertEqual(owner, [STUB_REPLY], self.gateway_log())
                 # Continuity: the first turns continue the active conversation.
                 history = model.conversation_for(during_move)
-                self.assertIsNotNone(history, self.gateway_log())
+                assert history is not None, self.gateway_log()
                 self.assertIn(fx.ACTIVE_USER_TEXT, history)
                 self.assertIn(fx.ACTIVE_ASSISTANT_TEXT, history)
                 follow_up = "Use the second version please"
@@ -367,7 +372,7 @@ class LegacyHermesFullFidelityLiveTest(unittest.TestCase):
                     self.gateway_log(),
                 )
                 history = model.conversation_for(follow_up)
-                self.assertIsNotNone(history)
+                assert history is not None
                 self.assertIn("B-GREEN-8834", history)
                 telegram.queue_message(fx.SECOND_ID, "Hi, it's me", "Second")
                 self.assertEqual(
@@ -470,24 +475,31 @@ class LegacyHermesFullFidelityLiveTest(unittest.TestCase):
     def test_rehearsal_copy_holds_no_token_and_passes_the_offline_telegram_check(
         self,
     ) -> None:
-        target, hermes, receipt, _ = self.install(telegram_mode="rehearsal")
+        _, hermes, receipt, _ = self.install(telegram_mode="rehearsal")
         self.assertNotIn(fx.TOKEN, (hermes / "config.yaml").read_text())
         self.assertEqual(receipt["fidelity"]["installed"]["telegram"]["mode"], "rehearsal")
-        # The runbook's offline check: a copy of the rehearsal home against the
-        # fake Bot API with the fake's own token, never the real one.
-        rehearsal_token = "4242424242:AArehearsalOnlyTokenForTheFakeBotApi_00"
-        with FakeTelegramBotApi(rehearsal_token) as telegram, StubModel(STUB_REPLY) as model:
-            self.point_at_fakes(target, hermes, telegram, model)
-            telegram.queue_message(fx.OWNER_ID, "Rehearsal hello", "Owner")
-            with self.gateway(target, hermes, "gateway-rehearsal"):
-                self.assertEqual(
-                    telegram.wait_for_message(fx.OWNER_ID, 180), [STUB_REPLY], self.gateway_log()
-                )
-                telegram.queue_message(202, "Who are you?", "Stranger")
-                stranger = telegram.wait_for_message(202, 120)
-                self.assertTrue(stranger and "pairing code" in stranger[0], stranger)
-            self.assertEqual(telegram.dropped_updates, 0)
-            self.assertIn(fx.ACTIVE_ASSISTANT_TEXT, model.conversation_for("Rehearsal hello") or "")
+        # The runbook's offline check runs on a copy of the rehearsal home.
+        import shutil
+
+        import legacy_rehearsal_telegram_check as rehearsal_check
+
+        copy = self.root / "rehearsal-copy/hermes-home"
+        shutil.copytree(hermes, copy, symlinks=True)
+        summary = rehearsal_check.run_check(copy, self.root / "rehearsal-check")
+        self.assertTrue(summary["ok"], summary)
+        self.assertEqual(summary["approved_users_checked"], 2)
+        self.assertEqual(summary["answered"], 2)
+        self.assertNotIn(str(fx.OWNER_ID), json.dumps(summary))
+        # The check refuses a home that holds a token (a live install).
+        live_copy = self.root / "live-copy/hermes-home"
+        shutil.copytree(hermes, live_copy, symlinks=True)
+        import yaml
+
+        config = yaml.safe_load((live_copy / "config.yaml").read_text())
+        config["gateway"]["platforms"]["telegram"]["token"] = fx.TOKEN
+        (live_copy / "config.yaml").write_text(yaml.safe_dump(config))
+        with self.assertRaisesRegex(SystemExit, "holds a Telegram token"):
+            rehearsal_check.run_check(live_copy, self.root / "live-check")
 
 
 if __name__ == "__main__":
