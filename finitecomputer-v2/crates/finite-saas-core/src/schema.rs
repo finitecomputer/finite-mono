@@ -81,7 +81,17 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0040_trial_restore_private_key.sql"),
     "\n",
-    include_str!("../migrations/0041_trial_campaign_codes.sql")
+    include_str!("../migrations/0041_trial_campaign_codes.sql"),
+    "\n",
+    include_str!("../migrations/0042_brain_scoped_records.sql"),
+    "\n",
+    include_str!("../migrations/0043_account_names_and_key_aliases.sql"),
+    "\n",
+    include_str!("../migrations/0044_runtime_moves.sql"),
+    "\n",
+    include_str!("../migrations/0045_runtime_moves_npub_optional.sql"),
+    "\n",
+    include_str!("../migrations/0046_runtime_move_holds.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =

@@ -14,6 +14,10 @@ pub struct CreateBrainRequest {
     pub personal_agent_email: Option<String>,
     #[serde(default)]
     pub personal_agent_npub: Option<String>,
+    /// The Personal Agent's signed `finite-brain-personal-agent-consent-v1`
+    /// event naming the signing owner.
+    #[serde(default)]
+    pub personal_agent_consent: Option<serde_json::Value>,
     #[serde(default)]
     pub initial_agent_email: Option<String>,
     #[serde(default)]
@@ -220,6 +224,19 @@ pub struct FolderDeleteRequest {
     pub expected_object_count: usize,
 }
 
+/// Server-computed scope of a permanent Folder deletion, read without object
+/// payloads. The confirming client echoes `folderIds` and `objectCount` back as
+/// `FolderDeleteRequest.expectedFolderIds`/`expectedObjectCount`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderDeletionPreviewResponse {
+    pub brain_id: String,
+    pub folder_id: String,
+    pub folder_ids: Vec<String>,
+    pub object_count: usize,
+    pub current_key_version: u32,
+}
+
 /// Counts and sync cursor returned after permanent Folder deletion.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -229,6 +246,97 @@ pub struct FolderDeleteResponse {
     pub folder_count: usize,
     pub object_count: usize,
     pub deleted_folder_ids: Vec<String>,
+}
+
+/// Server-computed scope of permanently deleting an Organization Brain. The
+/// confirming admin signs `stateDigest` into the `delete-brain` event note;
+/// the deletion transaction recomputes it and refuses any change, including
+/// one that leaves every count the same.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeletionPreviewResponse {
+    /// This Brain server's public identity.
+    pub server: String,
+    pub brain_id: String,
+    pub name: String,
+    pub kind: String,
+    pub folder_count: usize,
+    /// Live Folder objects: pages, plus any legacy assets.
+    pub page_count: usize,
+    pub member_count: usize,
+    pub admin_count: usize,
+    pub guest_count: usize,
+    /// Pending Brain and Folder invitations that deletion revokes.
+    pub pending_invitation_count: usize,
+    /// Invite Tokens neither redeemed nor revoked that deletion invalidates.
+    pub open_invite_token_count: usize,
+    /// Active cross-Brain Mounts to revoke first; deletion refuses while any remain.
+    pub blocking_mounts: Vec<BlockingMountResponse>,
+    /// Pending Mount Offers and revoked Mount records naming this Brain in
+    /// either direction, removed with it.
+    pub retired_mount_record_count: usize,
+    pub deletable: bool,
+    pub state_digest: String,
+    /// How long a signed confirmation of this preview stays acceptable.
+    pub confirmation_max_age_seconds: u64,
+}
+
+/// One active cross-Brain Mount that blocks deletion.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BlockingMountResponse {
+    pub connection_id: String,
+    /// `outgoing` when this Brain shares the Folder, `incoming` when it mounts one.
+    pub direction: String,
+    pub source_brain_id: String,
+    pub source_folder_id: String,
+    pub destination_brain_id: String,
+}
+
+/// Request body for `DELETE /v1/brains/{brain_id}`: a signed `delete-brain`
+/// admin access-change event whose note is the confirmed preview `stateDigest`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeleteRequest {
+    pub deletion_event: serde_json::Value,
+}
+
+/// Permanent receipt of an accepted Brain deletion. An exact retry of the
+/// same signed deletion answers the same receipt with `duplicate: true`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeleteResponse {
+    pub receipt: BrainDeletionReceiptResponse,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainDeletionReceiptResponse {
+    pub brain_id: String,
+    pub deletion_event_id: String,
+    pub actor_npub: String,
+    pub deleted_at: String,
+    pub state_digest: String,
+    pub folder_count: usize,
+    pub page_count: usize,
+}
+
+/// `410 Gone` body for a principal that held access to a deleted Brain.
+/// Anyone else gets the unknown-Brain answer.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedBrainResponse {
+    pub error: String,
+    pub code: String,
+    pub brain_deleted: DeletedBrainNoticeResponse,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedBrainNoticeResponse {
+    pub brain_id: String,
+    pub deleted_at: String,
 }
 
 /// Object write response.
@@ -446,7 +554,8 @@ pub struct MemberMountRotationRequest {
     pub reencrypted_records: Vec<RotationObjectRequest>,
 }
 
-/// Remove a Member and rotate every Folder the Member could read.
+/// Remove a Member and rotate every Folder the Member could read or still
+/// holds the current key for (`GET .../members/{target}/removal-plan`).
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveMemberRequest {
@@ -454,6 +563,34 @@ pub struct RemoveMemberRequest {
     pub rotations: Vec<MemberFolderRotationRequest>,
     #[serde(default)]
     pub mount_rotations: Vec<MemberMountRotationRequest>,
+}
+
+/// The native Folder rotations a Member removal must carry, computed by the
+/// same store rule the removal enforces. Admin only; metadata, no key material.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemovalPlanResponse {
+    pub brain_id: String,
+    pub target_npub: String,
+    pub folder_rotations: Vec<MemberRemovalFolderRotationResponse>,
+}
+
+/// One native Folder whose key a Member removal must rotate.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemovalFolderRotationResponse {
+    pub folder_id: String,
+    pub current_key_version: u32,
+    pub reason: MemberRemovalRotationReasonResponse,
+}
+
+/// Why the Folder is in the plan: the Member reads it, or holds its current
+/// key without entitlement (the access report's `revocationIncomplete`).
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MemberRemovalRotationReasonResponse {
+    Readable,
+    StaleCurrentGrant,
 }
 
 /// Create Folder request.
@@ -494,6 +631,37 @@ pub struct GrantFolderAccessResponse {
     #[serde(flatten)]
     pub metadata: BrainMetadataResponse,
     pub outcome: GrantFolderAccessResponseOutcome,
+}
+
+/// Open one Restricted Folder to every Organization Brain Member.
+///
+/// `grants` wrap the current Folder Key at `keyVersion` for the opened
+/// Folder's readers; the signed `set-folder-access-mode` event carries the
+/// same key version and the note `all_members`.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFolderToAllMembersRequest {
+    pub key_version: u32,
+    pub grants: Vec<FolderKeyGrantRequest>,
+    pub access_change_event: serde_json::Value,
+}
+
+/// Result of opening a Folder to all Members.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenFolderToAllMembersResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub outcome: OpenFolderToAllMembersResponseOutcome,
+    pub granted_recipients: Vec<String>,
+}
+
+/// Stable machine-readable outcome for opening a Folder to all Members.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OpenFolderToAllMembersResponseOutcome {
+    Opened,
+    AlreadyOpen,
 }
 
 /// One Folder/key-version entry in an Organization Brain collaboration snapshot.
@@ -661,14 +829,68 @@ pub struct RotationObjectRequest {
     pub revision_event: serde_json::Value,
 }
 
-/// Remove Folder access with required Folder Key rotation material.
+/// Client-prepared Folder Key rotation material. Body of both Folder access
+/// removal (`DELETE .../access/{target}`) and standalone Folder Key rotation
+/// (`POST .../key-rotations`); the signed access-change event names which.
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RemoveFolderAccessRequest {
+pub struct FolderKeyRotationMaterialRequest {
     pub new_key_version: u32,
     pub grants: Vec<FolderKeyGrantRequest>,
     pub reencrypted_records: Vec<RotationObjectRequest>,
     pub access_change_event: serde_json::Value,
+}
+
+/// Authoritative result of one committed Folder Key rotation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderKeyRotationReceipt {
+    pub folder_id: String,
+    pub previous_key_version: u32,
+    pub new_key_version: u32,
+    /// Keys wrapped for the new version: exactly the required recipients.
+    pub recipient_npubs: Vec<String>,
+    /// Keys that held the previous current wrap and received no new one.
+    pub cut_off_npubs: Vec<String>,
+}
+
+/// Standalone Folder Key rotation response: Brain metadata plus the receipt.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RotateFolderKeyResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub rotation: FolderKeyRotationReceipt,
+}
+
+/// One Folder Key rotation inside an admin demotion: the standalone rotation
+/// material plus the Folder it rotates. Its signed access-change event is a
+/// `rotate-folder-key` for that Folder and new key version.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminRotationRequest {
+    pub folder_id: String,
+    #[serde(flatten)]
+    pub material: FolderKeyRotationMaterialRequest,
+}
+
+/// Body of `POST /v1/admin/brains/{brain}/roles/admin/{target}/demotion`: the
+/// signed `remove-admin` event and one rotation per Folder the demoted key
+/// reaches only through the admin role (empty when there are none).
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminRequest {
+    pub access_change_event: serde_json::Value,
+    pub rotations: Vec<DemoteAdminRotationRequest>,
+}
+
+/// Admin demotion response: Brain metadata plus one receipt per rotation.
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DemoteAdminResponse {
+    #[serde(flatten)]
+    pub metadata: BrainMetadataResponse,
+    pub rotations: Vec<FolderKeyRotationReceipt>,
 }
 
 /// Create Brain Invitation request.

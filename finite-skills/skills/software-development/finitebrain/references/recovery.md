@@ -36,5 +36,11 @@ Coordinated tampering, an invalid scalar, a missing identity/database pair, an
 ambiguous account binding, or a partial restore fails closed. Name the backup
 and rollback boundary before any authorized production mutation.
 
+A deleted Organization Brain stays deleted on its live server, which keeps a
+small deletion record that retires the Brain ID. Bringing it back is the same
+operator restore of a backup taken before the deletion, onto an empty target;
+nothing in `fbrain` undoes a deletion. Deletion never erases backups, exports
+or other offline copies.
+
 If every completion condition has not been observed, report exactly which
 evidence is missing and describe recovery as unproven rather than durable.

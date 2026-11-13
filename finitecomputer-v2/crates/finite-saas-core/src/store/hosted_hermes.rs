@@ -126,11 +126,14 @@ impl CoreStore {
     pub async fn hosted_access(&self, runtime: &str, user: &str) -> CoreResult<HostedAccess> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        lock_owner(&*tx, runtime, user).await?;
-        let row = hosted_row(&*tx, runtime).await?;
-        let result = access(runtime, row.as_ref());
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            lock_owner(&*tx, runtime, user).await?;
+            let row = hosted_row(&*tx, runtime).await?;
+            let result = access(runtime, row.as_ref());
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn set_hosted_access(
@@ -141,6 +144,7 @@ impl CoreStore {
     ) -> CoreResult<HostedAccess> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         lock_owner(&*tx, runtime, user).await?;
         let row = hosted_row(&*tx, runtime)
             .await?
@@ -166,8 +170,10 @@ impl CoreStore {
                 WHERE agent_runtime_id=$1", &[&runtime,&input.enabled,&username,&password,&signing]).await.map_err(store_error)?;
         }
         let result = access(runtime, hosted_row(&*tx, runtime).await?.as_ref());
-        self.finish(tx).await?;
         Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn hosted_desired(
@@ -177,44 +183,48 @@ impl CoreStore {
     ) -> CoreResult<Option<HostedDesired>> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let Some(runtime) = authenticated(&*tx, secret).await? else {
-            return Ok(None);
-        };
-        // Same lock order as account mutations; authenticate again after locks.
-        lock_runtime(&*tx, &runtime.agent_runtime_id).await?;
-        let Some(row) = hosted_row(&*tx, &runtime.agent_runtime_id).await? else {
-            return Ok(None);
-        };
-        if authenticated(&*tx, secret).await? != Some(runtime.clone()) {
-            return Ok(None);
+        let result: CoreResult<_> = async {
+            let Some(runtime) = authenticated(&*tx, secret).await? else {
+                return Ok(None);
+            };
+            // Same lock order as account mutations; authenticate again after locks.
+            lock_runtime(&*tx, &runtime.agent_runtime_id).await?;
+            let Some(row) = hosted_row(&*tx, &runtime.agent_runtime_id).await? else {
+                return Ok(None);
+            };
+            if authenticated(&*tx, secret).await? != Some(runtime.clone()) {
+                return Ok(None);
+            }
+            let enabled = row.get("hosted_enabled");
+            let base = origins
+                .location(
+                    &row.get::<_, String>("source_host_id"),
+                    &runtime.agent_runtime_id,
+                )
+                .base_url;
+            if enabled && base.is_none() {
+                return Err(CoreError::ProviderOperationTransitionConflict);
+            }
+            let result = HostedDesired {
+                runtime_id: runtime.agent_runtime_id,
+                generation: row.get("hosted_generation"),
+                enabled,
+                public_url: if enabled { base } else { None },
+                username: row.get("hosted_username"),
+                password: row.get("hosted_password"),
+                signing_secret: row.get("hosted_signing_secret"),
+                access_ttl_seconds: 60,
+            };
+            Ok(Some(result))
         }
-        let enabled = row.get("hosted_enabled");
-        let base = origins
-            .location(
-                &row.get::<_, String>("source_host_id"),
-                &runtime.agent_runtime_id,
-            )
-            .base_url;
-        if enabled && base.is_none() {
-            return Err(CoreError::ProviderOperationTransitionConflict);
-        }
-        let result = HostedDesired {
-            runtime_id: runtime.agent_runtime_id,
-            generation: row.get("hosted_generation"),
-            enabled,
-            public_url: if enabled { base } else { None },
-            username: row.get("hosted_username"),
-            password: row.get("hosted_password"),
-            signing_secret: row.get("hosted_signing_secret"),
-            access_ttl_seconds: 60,
-        };
-        tx.commit().await.map_err(store_error)?;
-        Ok(Some(result))
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn report_hosted(&self, secret: &str, input: HostedReport) -> CoreResult<bool> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let Some(runtime) = authenticated(&*tx, secret).await? else {
             return Ok(false);
         };
@@ -233,8 +243,10 @@ impl CoreStore {
             ApplyStatus::Error => "error",
         };
         tx.execute("UPDATE runtime_core_credentials SET hosted_applied_generation=$2, hosted_apply_status=$3 WHERE agent_runtime_id=$1", &[&runtime.agent_runtime_id,&input.generation,&status]).await.map_err(store_error)?;
-        self.finish(tx).await?;
         Ok(true)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn hosted_login(
@@ -245,37 +257,40 @@ impl CoreStore {
     ) -> CoreResult<HostedLogin> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        lock_owner(&*tx, runtime, user).await?;
-        let row = hosted_row(&*tx, runtime)
-            .await?
-            .ok_or(CoreError::ProviderOperationTransitionConflict)?;
-        let generation: i64 = row.get("hosted_generation");
-        if !row.get::<_, bool>("hosted_enabled")
-            || row.get::<_, String>("hosted_apply_status") != "applied"
-            || row.get::<_, Option<i64>>("hosted_applied_generation") != Some(generation)
-            || authenticated(&*tx, &row.get::<_, String>("bootstrap_secret"))
+        let result: CoreResult<_> = async {
+            lock_owner(&*tx, runtime, user).await?;
+            let row = hosted_row(&*tx, runtime)
                 .await?
-                .is_none()
-        {
-            return Err(CoreError::ProviderOperationTransitionConflict);
+                .ok_or(CoreError::ProviderOperationTransitionConflict)?;
+            let generation: i64 = row.get("hosted_generation");
+            if !row.get::<_, bool>("hosted_enabled")
+                || row.get::<_, String>("hosted_apply_status") != "applied"
+                || row.get::<_, Option<i64>>("hosted_applied_generation") != Some(generation)
+                || authenticated(&*tx, &row.get::<_, String>("bootstrap_secret"))
+                    .await?
+                    .is_none()
+            {
+                return Err(CoreError::ProviderOperationTransitionConflict);
+            }
+            let result = HostedLogin {
+                runtime_id: runtime.into(),
+                creation_request_id: row.get("creation_request_id"),
+                generation,
+                base_url: origins
+                    .location(&row.get::<_, String>("source_host_id"), runtime)
+                    .base_url
+                    .ok_or(CoreError::ProviderOperationTransitionConflict)?,
+                username: row
+                    .get::<_, Option<String>>("hosted_username")
+                    .ok_or(CoreError::ProviderOperationTransitionConflict)?,
+                password: row
+                    .get::<_, Option<String>>("hosted_password")
+                    .ok_or(CoreError::ProviderOperationTransitionConflict)?,
+            };
+            Ok(result)
         }
-        let result = HostedLogin {
-            runtime_id: runtime.into(),
-            creation_request_id: row.get("creation_request_id"),
-            generation,
-            base_url: origins
-                .location(&row.get::<_, String>("source_host_id"), runtime)
-                .base_url
-                .ok_or(CoreError::ProviderOperationTransitionConflict)?,
-            username: row
-                .get::<_, Option<String>>("hosted_username")
-                .ok_or(CoreError::ProviderOperationTransitionConflict)?,
-            password: row
-                .get::<_, Option<String>>("hosted_password")
-                .ok_or(CoreError::ProviderOperationTransitionConflict)?,
-        };
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 }
 

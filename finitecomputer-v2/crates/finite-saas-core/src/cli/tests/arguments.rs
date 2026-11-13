@@ -1,6 +1,36 @@
 use super::*;
 
 #[test]
+fn scoped_records_preview_is_default_and_execute_requires_reviewed_digest() {
+    let args = [
+        "finite-saas-core",
+        "brain-scoped-records",
+        "--manifest",
+        "private.json",
+    ];
+    assert!(matches!(
+        Args::try_parse_from(args).unwrap().command,
+        Some(Command::BrainScopedRecords {
+            execute: false,
+            expected_manifest_sha256: None,
+            ..
+        })
+    ));
+    assert!(Args::try_parse_from(args.into_iter().chain(["--execute"])).is_err());
+    assert!(Args::try_parse_from(["finite-saas-core", "brain-scoped-records"]).is_err());
+    assert!(matches!(
+        Args::try_parse_from(args.into_iter().chain([
+            "--execute",
+            "--expected-manifest-sha256",
+            &"a".repeat(64)
+        ]))
+        .unwrap()
+        .command,
+        Some(Command::BrainScopedRecords { execute: true, .. })
+    ));
+}
+
+#[test]
 fn canary_retry_requires_exact_ids_and_defaults_to_preview() {
     let args = [
         "finite-saas-core",
@@ -238,4 +268,116 @@ fn artifact_upsert_accepts_explicit_unpromoted_canary_without_changing_legacy_fl
         "--promoted", "false", "--canary-runtime-id", "runtime-exact",
     ])).unwrap().command,
         Some(Command::RuntimeArtifactUpsert { promoted: false, canary_runtime_id: Some(id), .. }) if id == "runtime-exact"));
+}
+
+#[test]
+fn exact_restart_cli_takes_the_stops_binding() {
+    let restart = [
+        "finite-saas-core",
+        "runtime-restart-exact",
+        "--project-id",
+        "project-a",
+        "--expected-agent-runtime-id",
+        "runtime-a",
+        "--expected-source-host-id",
+        "lat3",
+        "--expected-source-machine-id",
+        "finite-kata-a",
+        "--admin-email",
+        "admin@finite.vip",
+        "--admin-workos-user-id",
+        "workos-admin",
+        "--wait-timeout-seconds",
+        "900",
+    ];
+    assert!(matches!(
+        Args::try_parse_from(restart).unwrap().command,
+        Some(Command::RuntimeRestartExact(RuntimeStopExactCliArgs {
+            wait_timeout_seconds: 900,
+            ..
+        }))
+    ));
+    assert!(
+        Args::try_parse_from(&restart[..12]).is_err(),
+        "the binding is whole"
+    );
+}
+
+#[test]
+fn exact_stop_cli_requires_the_complete_binding_and_bounded_timeout() {
+    let common = [
+        "finite-saas-core",
+        "runtime-stop-exact",
+        "--project-id",
+        "project-a",
+        "--expected-agent-runtime-id",
+        "runtime-a",
+        "--expected-source-host-id",
+        "lat3",
+        "--expected-source-machine-id",
+        "finite-kata-a",
+        "--admin-email",
+        "admin@finite.vip",
+        "--admin-workos-user-id",
+        "workos-admin",
+    ];
+    assert!(matches!(
+        Args::try_parse_from(common).unwrap().command,
+        Some(Command::RuntimeStopExact(RuntimeStopExactCliArgs {
+            wait_timeout_seconds: 600,
+            ..
+        }))
+    ));
+    for missing in [2, 4, 6, 8] {
+        let partial: Vec<&str> = common
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != missing && *index != missing + 1)
+            .map(|(_, arg)| *arg)
+            .collect();
+        assert!(
+            Args::try_parse_from(partial).is_err(),
+            "binding flag {missing}"
+        );
+    }
+    for timeout in ["59", "3601"] {
+        assert!(
+            Args::try_parse_from(
+                common
+                    .into_iter()
+                    .chain(["--wait-timeout-seconds", timeout])
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn mark_moved_cli_takes_only_migrated_or_archived() {
+    let common = [
+        "finite-saas-core",
+        "runtime-mark-moved-exact",
+        "--project-id",
+        "project-a",
+        "--expected-agent-runtime-id",
+        "runtime-a",
+        "--expected-source-host-id",
+        "lat3",
+        "--expected-source-machine-id",
+        "finite-kata-a",
+        "--admin-email",
+        "admin@finite.vip",
+        "--admin-workos-user-id",
+        "workos-admin",
+    ];
+    assert!(Args::try_parse_from(common).is_err(), "--moved is required");
+    assert!(matches!(
+        Args::try_parse_from(common.into_iter().chain(["--moved", "migrated", "--agent-npub", "npub1x"]))
+            .unwrap()
+            .command,
+        Some(Command::RuntimeMarkMovedExact(RuntimeMarkMovedExactCliArgs { moved, agent_npub: Some(npub), .. }))
+            if moved == "migrated" && npub == "npub1x"
+    ));
+    assert!(Args::try_parse_from(common.into_iter().chain(["--moved", "archived"])).is_ok());
+    assert!(Args::try_parse_from(common.into_iter().chain(["--moved", "deleted"])).is_err());
 }

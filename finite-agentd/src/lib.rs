@@ -1,6 +1,7 @@
 mod config;
 mod connections;
 mod daemon;
+mod google_scopes;
 mod hosted_hermes;
 mod hosted_hermes_pull;
 mod ledger;

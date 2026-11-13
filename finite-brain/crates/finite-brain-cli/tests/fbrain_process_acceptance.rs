@@ -12,10 +12,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use finite_brain_core::{
-    BrainId, FolderId, FolderKey, FolderKeyGrantPayload, FolderObjectAad, ObjectId,
-    encrypt_folder_object,
+    BrainId, CryptoRecordError, EncryptedFolderObjectEnvelope, FolderId, FolderKey,
+    FolderKeyGrantPayload, FolderObjectAad, ObjectId, decode_sync_payload, encrypt_folder_object,
+    open_folder_object,
 };
-use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
+use finite_nostr::{GiftWrapValidation, NostrPublicKey, build_rumor, open_gift_wrap, wrap_rumor};
 use nostr::{Keys, Kind};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -317,6 +318,95 @@ fn spawn_brain_updates_404_proxy(
         }
     });
     (url, notification_requests, stop, handle)
+}
+
+/// Demote an admin the way Brain servers did before demotion rotated Folder
+/// Keys: delete the role row and keep every wrap. Production Brains still hold
+/// state written this way; current servers refuse to create it.
+fn legacy_demote_keeping_wraps(database: &Path, brain_id: &str, npub: &str) {
+    let conn = rusqlite::Connection::open(database).unwrap();
+    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+    let removed = conn
+        .execute(
+            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+            rusqlite::params![brain_id, npub],
+        )
+        .unwrap();
+    assert_eq!(removed, 1, "legacy demotion target must be an admin");
+}
+
+/// Import a fresh signing key into `home`; returns it and its npub.
+fn import_signer(home: &Path) -> (Keys, String) {
+    fs::create_dir_all(home).unwrap();
+    let keys = Keys::generate();
+    let secret = home.join("import-key");
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    let imported = run(
+        home,
+        home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    fs::remove_file(secret).unwrap();
+    let npub = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    (keys, npub)
+}
+
+/// The encrypted envelope of one live object in a `brain export --json`.
+fn folder_object_envelope(export: &Value, object_id: &str) -> EncryptedFolderObjectEnvelope {
+    let object = export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|object| object["objectId"] == object_id && object["deleted"] == false)
+        .unwrap_or_else(|| panic!("no live object {object_id}"));
+    let payload = object["payloadJson"].as_str().unwrap();
+    EncryptedFolderObjectEnvelope::from_json(
+        &decode_sync_payload(payload).ciphertext_or_raw(payload),
+    )
+    .unwrap()
+}
+
+/// The id of the live object in `folder_id` whose plaintext, decrypted with
+/// `key` at `key_version`, contains `marker`.
+fn object_decrypting_to(
+    export: &Value,
+    brain_id: &str,
+    folder_id: &str,
+    key_version: u32,
+    key: &FolderKey,
+    marker: &str,
+) -> String {
+    export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["folderId"] == folder_id && object["deleted"] == false)
+        .map(|object| object["objectId"].as_str().unwrap().to_owned())
+        .find(|object_id| {
+            let envelope = folder_object_envelope(export, object_id);
+            let aad = FolderObjectAad {
+                brain_id: BrainId::new(brain_id).unwrap(),
+                folder_id: FolderId::new(folder_id).unwrap(),
+                object_id: ObjectId::new(object_id.as_str()).unwrap(),
+                key_version,
+            };
+            open_folder_object(key, &aad, &envelope)
+                .is_ok_and(|plaintext| String::from_utf8_lossy(&plaintext).contains(marker))
+        })
+        .unwrap_or_else(|| panic!("no {folder_id} object decrypts to {marker}"))
 }
 
 fn fbrain() -> PathBuf {
@@ -1609,13 +1699,702 @@ fn built_fbrain_invite_brain_create_accepts_one_hour_from_a_lagging_client() {
     server.join().unwrap();
 }
 
+/// Admin demotion rotates, in the same server transaction, every Folder Key
+/// the demoted key held only through the role: the access report shows a
+/// plain Member with nothing pending removal, the demoted key keeps its
+/// All-Members Folder, cannot open the restricted Folder's new key version,
+/// and the remaining admin still can. Restoring access later wraps the new key.
 #[test]
-fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key() {
+fn built_fbrain_process_admin_demotion_rotates_role_only_folder_keys() {
     let scratch = TempDir::new().unwrap();
     let owner_home = scratch.path().join("owner");
     let member_home = scratch.path().join("member");
+    let (owner_keys, owner_npub) = import_signer(&owner_home);
+    let (member_keys, member_npub) = import_signer(&member_home);
+    let owner = &owner_npub;
+    let member = &member_npub;
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(member, member, owner, owner);
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    let access_row = |key: &str| -> Value {
+        let report = run_json(
+            &owner_home,
+            &owner_home,
+            &["access", "list", "--brain", "demotion"],
+        );
+        report["identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["npub"] == key)
+            .unwrap_or_else(|| panic!("no access row for {key}: {report}"))
+            .clone()
+    };
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["brain", "create", "organization", "Demotion"],
+    );
+    let owner_tree = owner_home.join("tree");
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["open", "demotion", owner_tree.to_str().unwrap()],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "member", "add", "--target", member],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "role", "grant", "admin", "--target", member],
+    );
+    // Created while the member is an admin: the restricted Folders reach it
+    // by role only, the All-Members Folder also by membership.
+    for name in ["Shared", "Unrelated"] {
+        run_json(&owner_home, &owner_tree, &["folder", "create", name]);
+    }
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["folder", "create", "Team", "--access", "all_members"],
+    );
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    fs::write(owner_tree.join("Shared/note.md"), "# Shared before\n").unwrap();
+    fs::write(owner_tree.join("Unrelated/private.md"), "# Unrelated\n").unwrap();
+    fs::write(owner_tree.join("Team/plan.md"), "# Team before\n").unwrap();
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    let member_tree = member_home.join("tree");
+    run_json(
+        &member_home,
+        &member_home,
+        &["open", "demotion", member_tree.to_str().unwrap()],
+    );
+    run_json(&member_home, &member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
+        "# Shared before\n"
+    );
+    let folders = run_json(&owner_home, &owner_tree, &["folder", "list"]);
+    let folder_id = |path: &str| -> String {
+        folders["folders"]
+            .as_array()
+            .or_else(|| folders.as_array())
+            .unwrap()
+            .iter()
+            .find(|folder| folder["path"] == path)
+            .unwrap_or_else(|| panic!("no folder {path}: {folders}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let (shared, unrelated, team) = (
+        folder_id("Shared"),
+        folder_id("Unrelated"),
+        folder_id("Team"),
+    );
+
+    // B's working v1 Shared key, opened from its own grant, decrypts the page.
+    let member_before = run_json(&member_home, &member_tree, &["brain", "export"]);
+    let retained_v1 = open_grant(&member_keys, &member_before, &shared, 1)
+        .expect("B holds the v1 Shared key before the demotion");
+    let note_id = object_decrypting_to(
+        &member_before,
+        "demotion",
+        &shared,
+        1,
+        &retained_v1,
+        "# Shared before",
+    );
+
+    let demoted = run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "role", "revoke", "admin", "--target", member],
+    );
+    assert_eq!(demoted["state"], "complete");
+    assert_eq!(demoted["admins"], json!([owner]));
+    let mut rotated = demoted["rotations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|rotation| {
+            assert_eq!(rotation["previousKeyVersion"], 1);
+            assert_eq!(rotation["newKeyVersion"], 2);
+            assert_eq!(rotation["recipientNpubs"], json!([owner]));
+            assert_eq!(rotation["cutOffNpubs"], json!([member]));
+            rotation["folderId"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    rotated.sort();
+    let mut expected = vec![shared.clone(), unrelated.clone()];
+    expected.sort();
+    assert_eq!(rotated, expected, "only role-only Folders rotate");
+    let row = access_row(member);
+    assert_eq!(row["brainRole"], "member", "{row}");
+    assert_eq!(row["revocationIncomplete"], json!([]), "{row}");
+    let report = run_json(
+        &owner_home,
+        &owner_home,
+        &["access", "list", "--brain", "demotion"],
+    );
+    assert_eq!(report["totals"]["revocationIncomplete"], 0, "{report}");
+    let activity = run_json(&owner_home, &owner_tree, &["activity"]);
+    for kind in ["admin.role.revoked", "admin.folder_key.rotated"] {
+        assert!(
+            activity
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["kind"] == kind),
+            "{kind}: {activity}"
+        );
+    }
+
+    // New writes after the demotion: the remaining admin still holds every
+    // key. The rotation re-encrypted the page as a new revision, so this
+    // tree pulls it before editing (an edit on the old base is a conflict).
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    fs::write(owner_tree.join("Shared/note.md"), "# Shared after\n").unwrap();
+    fs::write(owner_tree.join("Team/plan.md"), "# Team after\n").unwrap();
+    let pushed = run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    assert_eq!(pushed["status"], "pushed-local-changes", "{pushed}");
+    let owner_view = run_json(&owner_home, &owner_tree, &["brain", "export"]);
+    let member_view = run_json(&member_home, &member_tree, &["brain", "export"]);
+    // Cryptographic cut-off, independent of server authorization: the v2
+    // ciphertext fetched through A's export fails authenticated decryption
+    // under B's retained v1 key, while A's v2 grant opens the same bytes.
+    let v2_envelope = folder_object_envelope(&owner_view, &note_id);
+    assert_eq!(v2_envelope.key_version, 2);
+    let v2_aad = FolderObjectAad {
+        brain_id: BrainId::new("demotion").unwrap(),
+        folder_id: FolderId::new(shared.as_str()).unwrap(),
+        object_id: ObjectId::new(note_id.as_str()).unwrap(),
+        key_version: 2,
+    };
+    assert!(matches!(
+        open_folder_object(&retained_v1, &v2_aad, &v2_envelope),
+        Err(CryptoRecordError::AadMismatch)
+    ));
+    let owner_v2 =
+        open_grant(&owner_keys, &owner_view, &shared, 2).expect("A holds the v2 Shared key");
+    assert_ne!(owner_v2.to_base64(), retained_v1.to_base64());
+    let opened = open_folder_object(&owner_v2, &v2_aad, &v2_envelope).unwrap();
+    assert!(String::from_utf8_lossy(&opened).contains("# Shared after"));
+    // The v2 keys are wrapped for A alone; B's view holds only its v1 wraps.
+    let grants_for = |view: &Value, folder: &str| -> Vec<(u64, String)> {
+        let mut grants = view["keyGrants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|grant| grant["folderId"] == folder)
+            .map(|grant| {
+                (
+                    grant["keyVersion"].as_u64().unwrap(),
+                    grant["recipientNpub"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        grants.sort();
+        grants
+    };
+    for folder in [&shared, &unrelated] {
+        let owner_v2 = grants_for(&owner_view, folder)
+            .into_iter()
+            .filter(|(version, _)| *version == 2)
+            .collect::<Vec<_>>();
+        assert_eq!(owner_v2, vec![(2, owner.clone())], "{folder}");
+        let member_grants = grants_for(&member_view, folder);
+        assert!(
+            !member_grants.is_empty() && member_grants.iter().all(|(version, _)| *version == 1),
+            "{folder}: {member_grants:?}"
+        );
+    }
+    for (id, version, member_reads) in [
+        (&shared, 2, false),
+        (&unrelated, 2, false),
+        (&team, 1, true),
+    ] {
+        for (view, accessible) in [(&owner_view, true), (&member_view, member_reads)] {
+            let folder = view["folders"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|folder| folder["id"] == id.as_str())
+                .unwrap();
+            assert_eq!(folder["currentKeyVersion"], version, "{folder}");
+            assert_eq!(folder["accessible"], accessible, "{folder}");
+        }
+    }
+    run_json(&member_home, &member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(member_tree.join("Team/plan.md")).unwrap(),
+        "# Team after\n"
+    );
+    let fresh_member_tree = member_home.join("fresh-tree");
+    run_json(
+        &member_home,
+        &member_home,
+        &["open", "demotion", fresh_member_tree.to_str().unwrap()],
+    );
+    run_json(&member_home, &fresh_member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_member_tree.join("Team/plan.md")).unwrap(),
+        "# Team after\n"
+    );
+    assert!(!fresh_member_tree.join("Shared/note.md").exists());
+    assert!(!fresh_member_tree.join("Unrelated/private.md").exists());
+    let fresh_owner_tree = owner_home.join("fresh-tree");
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["open", "demotion", fresh_owner_tree.to_str().unwrap()],
+    );
+    run_json(&owner_home, &fresh_owner_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_owner_tree.join("Shared/note.md")).unwrap(),
+        "# Shared after\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fresh_owner_tree.join("Unrelated/private.md")).unwrap(),
+        "# Unrelated\n"
+    );
+
+    // Restoring one Folder grants the new key version, not the old wrap.
+    let restored = run_json(
+        &owner_home,
+        &owner_tree,
+        &[
+            "admin",
+            "folder-access",
+            "grant",
+            "--folder",
+            &shared,
+            "--target",
+            member,
+        ],
+    );
+    assert_eq!(restored["outcome"], "granted");
+    run_json(&member_home, &fresh_member_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_member_tree.join("Shared/note.md")).unwrap(),
+        "# Shared after\n"
+    );
+    assert!(!fresh_member_tree.join("Unrelated/private.md").exists());
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+/// Folder deletion used to download the whole sync bootstrap to count live
+/// objects, which fails the CLI's 10 MiB JSON response cap on a real Brain
+/// before the DELETE is sent. The deletion preview carries no ciphertext.
+#[test]
+fn built_fbrain_folder_delete_succeeds_on_a_brain_over_the_json_response_cap() {
+    const PAYLOAD_PAGES: usize = 30;
+    const PAGE_BYTES: usize = 400 * 1024;
+    const JSON_RESPONSE_CAP_BYTES: usize = 10 * 1024 * 1024;
+
+    let scratch = TempDir::new().unwrap();
+    let home = scratch.path().join("owner");
+    fs::create_dir_all(&home).unwrap();
+    let keys = Keys::generate();
+    let secret = home.join("import-key");
+    fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+    let imported = run(
+        &home,
+        &home,
+        &[
+            "auth",
+            "import",
+            "--file",
+            secret.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    assert!(
+        imported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&imported.stderr)
+    );
+    fs::remove_file(secret).unwrap();
+    let owner = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    // The fixture's unrelated Personal Brain needs a distinct agent key.
+    let fixture_agent = NostrPublicKey::from_protocol(Keys::generate().public_key())
+        .to_npub()
+        .unwrap();
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(&owner, &fixture_agent, &owner, &owner);
+    let invoke = |cwd: &Path, args: &[&str]| -> Output {
+        command(&home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run_json = |cwd: &Path, args: &[&str]| -> Value {
+        let output = invoke(cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+
+    run_json(&home, &["brain", "create", "organization", "Bulk"]);
+    let tree = home.join("tree");
+    run_json(&home, &["open", "bulk", tree.to_str().unwrap()]);
+    for name in ["Payload", "Empty", "Notes"] {
+        run_json(&tree, &["folder", "create", name]);
+    }
+    run_json(
+        &tree,
+        &[
+            "folder",
+            "create",
+            "inner",
+            "--name",
+            "Inner",
+            "--parent",
+            "notes",
+            "--path",
+            "Notes/Inner",
+        ],
+    );
+    run_json(&tree, &["sync", "now"]);
+    let page = |index: usize| -> String {
+        let mut body = format!("# Payload page {index}\n\n");
+        let mut line = 0_usize;
+        while body.len() < PAGE_BYTES {
+            body.push_str(&format!(
+                "payload {index} line {line:08} {}\n",
+                "x".repeat(40)
+            ));
+            line += 1;
+        }
+        body
+    };
+    for index in 0..PAYLOAD_PAGES {
+        fs::write(
+            tree.join(format!("Payload/page-{index:02}.md")),
+            page(index),
+        )
+        .unwrap();
+    }
+    fs::write(tree.join("Notes/Inner/kept-until-delete.md"), "# Inner\n").unwrap();
+    run_json(&tree, &["sync", "now"]);
+
+    // An empty sibling Folder.
+    let deleted = run_json(&tree, &["folder", "delete", "empty"]);
+    assert_eq!(deleted["deletedFolderIds"], json!(["empty"]));
+    assert_eq!(deleted["folderCount"], 1);
+    assert_eq!(deleted["objectCount"], 0);
+    // A subtree with live objects: the server-side count must match the
+    // objects this Working Tree synced into it.
+    let state: Value = serde_json::from_slice(
+        &fs::read(tree.join(".finitebrain/working-tree-state.json")).unwrap(),
+    )
+    .unwrap();
+    let synced_paths = state["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| matches!(object["folderId"].as_str(), Some("notes" | "inner")))
+        .map(|object| object["path"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        synced_paths.contains(&"kept-until-delete.md".to_owned()),
+        "{synced_paths:?}"
+    );
+    let deleted = run_json(&tree, &["folder", "delete", "notes"]);
+    let mut deleted_ids = deleted["deletedFolderIds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    deleted_ids.sort();
+    assert_eq!(deleted_ids, ["inner", "notes"]);
+    assert_eq!(deleted["folderCount"], 2);
+    assert_eq!(
+        deleted["objectCount"],
+        synced_paths.len(),
+        "{synced_paths:?}"
+    );
+    assert!(!tree.join("Empty").exists());
+    assert!(!tree.join("Notes").exists());
+
+    let folders = run_json(&tree, &["folder", "list"]);
+    let folder_ids = folders
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(folder_ids.contains(&"payload"), "{folder_ids:?}");
+    for gone in ["empty", "notes", "inner"] {
+        assert!(!folder_ids.contains(&gone), "{gone}: {folder_ids:?}");
+    }
+    let retry = invoke(&tree, &["folder", "delete", "empty"]);
+    assert!(!retry.status.success());
+
+    // A fresh Working Tree proves the other Folder is intact, and its cached
+    // bootstrap proves the Brain's ciphertext is over the old 10 MiB cap.
+    let fresh = home.join("fresh-tree");
+    run_json(&home, &["open", "bulk", fresh.to_str().unwrap()]);
+    run_json(&fresh, &["sync", "now"]);
+    for index in 0..PAYLOAD_PAGES {
+        assert_eq!(
+            fs::read_to_string(fresh.join(format!("Payload/page-{index:02}.md"))).unwrap(),
+            page(index),
+            "page {index}"
+        );
+    }
+    assert!(!fresh.join("Empty").exists());
+    assert!(!fresh.join("Notes").exists());
+    let bootstrap: Value = serde_json::from_slice(
+        &fs::read(fresh.join(".finitebrain/encrypted-sync/bootstrap.json")).unwrap(),
+    )
+    .unwrap();
+    let ciphertext_bytes: usize = bootstrap["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|object| object["ciphertext"].as_str().map_or(0, str::len))
+        .sum();
+    assert!(
+        ciphertext_bytes > JSON_RESPONSE_CAP_BYTES,
+        "bootstrap ciphertext is only {ciphertext_bytes} bytes"
+    );
+
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+/// Open the grant in `export` addressed to `keys` for one Folder version.
+fn open_grant(keys: &Keys, export: &Value, folder_id: &str, key_version: u32) -> Option<FolderKey> {
+    let npub = NostrPublicKey::from_protocol(keys.public_key())
+        .to_npub()
+        .unwrap();
+    let grant = export["keyGrants"].as_array()?.iter().find(|grant| {
+        grant["folderId"] == folder_id
+            && grant["keyVersion"] == key_version
+            && grant["recipientNpub"] == npub.as_str()
+    })?;
+    let event = nostr::Event::from_json(grant["wrappedEventJson"].as_str()?).ok()?;
+    let validation = GiftWrapValidation::new(NostrPublicKey::parse(&npub).unwrap());
+    let opened = open_gift_wrap(keys, &event, &validation).ok()?;
+    let payload: Value = serde_json::from_str(&opened.rumor.content).ok()?;
+    FolderKey::from_base64(payload["folderKey"].as_str()?).ok()
+}
+
+/// Whether `keys` can open one exported grant, whoever it names.
+fn grant_opens(keys: &Keys, grant: &Value) -> bool {
+    let recipient = NostrPublicKey::from_protocol(keys.public_key());
+    let Some(event) = grant["wrappedEventJson"]
+        .as_str()
+        .and_then(|json| nostr::Event::from_json(json).ok())
+    else {
+        return false;
+    };
+    open_gift_wrap(keys, &event, &GiftWrapValidation::new(recipient)).is_ok()
+}
+
+/// The single live page of one Folder in an export, as its object id and
+/// encrypted envelope.
+fn live_page(export: &Value, folder_id: &str) -> (String, EncryptedFolderObjectEnvelope) {
+    let pages = export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["folderId"] == folder_id && object["deleted"] == false)
+        .collect::<Vec<_>>();
+    assert_eq!(pages.len(), 1, "{folder_id}: {pages:?}");
+    let payload = pages[0]["payloadJson"].as_str().unwrap();
+    let envelope_json = decode_sync_payload(payload).ciphertext_or_raw(payload);
+    (
+        pages[0]["objectId"].as_str().unwrap().to_owned(),
+        EncryptedFolderObjectEnvelope::from_json(&envelope_json).unwrap(),
+    )
+}
+
+/// Decrypt one page under the AAD of `key_version` and return its Markdown;
+/// `None` when decryption fails.
+fn open_page(
+    key: &FolderKey,
+    brain_id: &str,
+    folder_id: &str,
+    object_id: &str,
+    key_version: u32,
+    envelope: &EncryptedFolderObjectEnvelope,
+) -> Option<String> {
+    let aad = FolderObjectAad {
+        brain_id: BrainId::new(brain_id).unwrap(),
+        folder_id: FolderId::new(folder_id).unwrap(),
+        object_id: ObjectId::new(object_id).unwrap(),
+        key_version,
+    };
+    let plaintext = open_folder_object(key, &aad, envelope).ok()?;
+    let page: Value = serde_json::from_slice(&plaintext).unwrap();
+    Some(page["markdown"].as_str().unwrap().to_owned())
+}
+
+/// An admin may demote itself: the built binary signs the rotations as the
+/// admin it still is, wraps the new key only for the remaining admin, and the
+/// self-demoted key is cut off from the role-only Folder.
+#[test]
+fn built_fbrain_process_admin_demotes_itself() {
+    let scratch = TempDir::new().unwrap();
+    let owner_home = scratch.path().join("owner");
+    let leaving_home = scratch.path().join("leaving");
+    let (owner_keys, owner) = import_signer(&owner_home);
+    let (_, leaving) = import_signer(&leaving_home);
+    let (server_url, shutdown, server_thread) =
+        spawn_real_brain_server(&leaving, &leaving, &owner, &owner);
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["brain", "create", "organization", "Leaving"],
+    );
+    let owner_tree = owner_home.join("tree");
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["open", "leaving", owner_tree.to_str().unwrap()],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "member", "add", "--target", &leaving],
+    );
+    run_json(
+        &owner_home,
+        &owner_tree,
+        &["admin", "role", "grant", "admin", "--target", &leaving],
+    );
+    run_json(&owner_home, &owner_tree, &["folder", "create", "Board"]);
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    fs::write(owner_tree.join("Board/minutes.md"), "# Minutes\n").unwrap();
+    run_json(&owner_home, &owner_tree, &["sync", "now"]);
+    let leaving_tree = leaving_home.join("tree");
+    run_json(
+        &leaving_home,
+        &leaving_home,
+        &["open", "leaving", leaving_tree.to_str().unwrap()],
+    );
+    run_json(&leaving_home, &leaving_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(leaving_tree.join("Board/minutes.md")).unwrap(),
+        "# Minutes\n"
+    );
+
+    let demoted = run_json(
+        &leaving_home,
+        &leaving_tree,
+        &["admin", "role", "revoke", "admin", "--target", &leaving],
+    );
+    assert_eq!(demoted["state"], "complete");
+    assert_eq!(demoted["admins"], json!([owner]));
+    let rotations = demoted["rotations"].as_array().unwrap();
+    assert_eq!(rotations.len(), 1, "{demoted}");
+    assert_eq!(rotations[0]["newKeyVersion"], 2);
+    assert_eq!(rotations[0]["recipientNpubs"], json!([owner]));
+    assert_eq!(rotations[0]["cutOffNpubs"], json!([leaving]));
+    let board = rotations[0]["folderId"].as_str().unwrap().to_owned();
+
+    let owner_view = run_json(&owner_home, &owner_tree, &["brain", "export"]);
+    let grant = owner_view["keyGrants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|grant| grant["folderId"] == board.as_str() && grant["keyVersion"] == 2)
+        .unwrap();
+    assert_eq!(grant["recipientNpub"], owner.as_str());
+    assert_eq!(grant["issuerNpub"], leaving.as_str());
+    assert!(open_grant(&owner_keys, &owner_view, &board, 2).is_some());
+    let fresh_owner_tree = owner_home.join("fresh-tree");
+    run_json(
+        &owner_home,
+        &owner_home,
+        &["open", "leaving", fresh_owner_tree.to_str().unwrap()],
+    );
+    run_json(&owner_home, &fresh_owner_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_owner_tree.join("Board/minutes.md")).unwrap(),
+        "# Minutes\n"
+    );
+    let fresh_leaving_tree = leaving_home.join("fresh-tree");
+    run_json(
+        &leaving_home,
+        &leaving_home,
+        &["open", "leaving", fresh_leaving_tree.to_str().unwrap()],
+    );
+    run_json(&leaving_home, &fresh_leaving_tree, &["sync", "now"]);
+    assert!(!fresh_leaving_tree.join("Board/minutes.md").exists());
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+/// Production shape from 2026-10-19: a demoted admin keeps current Folder Key
+/// wraps on restricted and admin_only Folders (`revocationIncomplete`). The
+/// built binary revokes that stale holder on one Folder and rotates two others
+/// against a real Brain server; the demoted key can no longer open any of them
+/// while the remaining admin still decrypts every page at the new version.
+#[test]
+fn built_fbrain_process_cuts_off_a_demoted_admin_by_revoke_and_rotate() {
+    let scratch = TempDir::new().unwrap();
+    let admin_home = scratch.path().join("admin");
+    let demoted_home = scratch.path().join("demoted");
     let mut npubs = Vec::new();
-    for home in [&owner_home, &member_home] {
+    let mut identities = Vec::new();
+    for home in [&admin_home, &demoted_home] {
         fs::create_dir_all(home).unwrap();
         let keys = Keys::generate();
         let secret = home.join("import-key");
@@ -1642,13 +2421,18 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
                 .to_npub()
                 .unwrap(),
         );
+        identities.push(keys);
     }
-    let owner = &npubs[0];
-    let member = &npubs[1];
+    let admin = &npubs[0];
+    let demoted = &npubs[1];
+    let (admin_keys, demoted_keys) = (&identities[0], &identities[1]);
+    // File-backed, so the demotion below can reproduce the state an older
+    // server left in production.
+    let database = scratch.path().join("brain.sqlite3");
     let (server_url, shutdown, server_thread) =
-        spawn_real_brain_server(member, member, owner, owner);
-    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
-        let output = command(home, cwd)
+        spawn_file_backed_brain_server(admin, database.clone());
+    let run_raw = |home: &Path, cwd: &Path, args: &[&str]| -> Output {
+        command(home, cwd)
             .env(
                 "FBRAIN_NOW",
                 OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
@@ -1658,7 +2442,10 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
             .args(args)
             .arg("--json")
             .output()
-            .unwrap();
+            .unwrap()
+    };
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = run_raw(home, cwd, args);
         assert!(
             output.status.success(),
             "{args:?}: {}",
@@ -1666,119 +2453,713 @@ fn built_fbrain_process_restores_demoted_admin_folder_access_with_retained_key()
         );
         serde_json::from_slice(&output.stdout).unwrap()
     };
-    run_json(
-        &owner_home,
-        &owner_home,
-        &["brain", "create", "organization", "Repair"],
-    );
-    let owner_tree = owner_home.join("tree");
-    run_json(
-        &owner_home,
-        &owner_home,
-        &["open", "repair", owner_tree.to_str().unwrap()],
-    );
-    run_json(
-        &owner_home,
-        &owner_tree,
-        &["admin", "member", "add", "--target", member],
-    );
-    run_json(
-        &owner_home,
-        &owner_tree,
-        &["admin", "role", "grant", "admin", "--target", member],
-    );
-    // Creating the folders while the recipient is an admin gives them a key
-    // through native access, without a direct folder permission.
-    for name in ["Shared", "Unrelated"] {
-        run_json(&owner_home, &owner_tree, &["folder", "create", name]);
-    }
-    run_json(&owner_home, &owner_tree, &["sync", "now"]);
-    fs::write(owner_tree.join("Shared/note.md"), "# Retained key proof\n").unwrap();
-    fs::write(owner_tree.join("Unrelated/private.md"), "# Unrelated\n").unwrap();
-    run_json(&owner_home, &owner_tree, &["sync", "now"]);
-    let member_tree = member_home.join("tree");
-    run_json(
-        &member_home,
-        &member_home,
-        &["open", "repair", member_tree.to_str().unwrap()],
-    );
-    run_json(&member_home, &member_tree, &["sync", "now"]);
-    assert_eq!(
-        fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
-        "# Retained key proof\n"
-    );
+    let revocation_incomplete = |key: &str| -> Vec<String> {
+        let report = run_json(
+            &admin_home,
+            &admin_home,
+            &["access", "list", "--brain", "rotation"],
+        );
+        let row = report["identities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["npub"] == key)
+            .unwrap_or_else(|| panic!("no access row for {key}: {report}"));
+        row["revocationIncomplete"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|folder| folder.as_str().unwrap().to_owned())
+            .collect()
+    };
 
     run_json(
-        &owner_home,
-        &owner_tree,
-        &["admin", "role", "revoke", "admin", "--target", member],
+        &admin_home,
+        &admin_home,
+        &["brain", "create", "organization", "Rotation"],
     );
-    run_json(&member_home, &member_tree, &["sync", "now"]);
-    // The client preserves old downloaded bytes after access loss. Check the
-    // server's authority, then require a new revision to prove restored reads.
-    let denied = run_json(&member_home, &member_tree, &["brain", "export"]);
-    for folder_id in ["shared", "unrelated"] {
+    let admin_tree = admin_home.join("tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "rotation", admin_tree.to_str().unwrap()],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["admin", "member", "add", "--target", demoted],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["admin", "role", "grant", "admin", "--target", demoted],
+    );
+    // Created while the demoted key is an admin, so it holds every wrap by
+    // role and never gets an explicit Folder access row.
+    run_json(&admin_home, &admin_tree, &["folder", "create", "Revoked"]);
+    run_json(&admin_home, &admin_tree, &["folder", "create", "Rotated"]);
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &["folder", "create", "Admins", "--access", "admin_only"],
+    );
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let folders = run_json(&admin_home, &admin_tree, &["folder", "list"]);
+    let folder_id = |path: &str| -> String {
+        folders["folders"]
+            .as_array()
+            .or_else(|| folders.as_array())
+            .unwrap()
+            .iter()
+            .find(|folder| folder["path"] == path)
+            .unwrap_or_else(|| panic!("no folder {path}: {folders}"))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let pages = [
+        ("Revoked", folder_id("Revoked")),
+        ("Rotated", folder_id("Rotated")),
+        ("Admins", folder_id("Admins")),
+    ];
+    for (path, _) in &pages {
+        fs::write(
+            admin_tree.join(path).join("page.md"),
+            format!("# {path} before rotation\n"),
+        )
+        .unwrap();
+    }
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let demoted_tree = demoted_home.join("tree");
+    run_json(
+        &demoted_home,
+        &demoted_home,
+        &["open", "rotation", demoted_tree.to_str().unwrap()],
+    );
+    run_json(&demoted_home, &demoted_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert_eq!(
+            fs::read_to_string(demoted_tree.join(path).join("page.md")).unwrap(),
+            format!("# {path} before rotation\n")
+        );
+    }
+    // Keep the demoted key's own version 1 Folder Keys, opened from its own
+    // grants, and prove they really decrypt the version 1 pages.
+    let before_demotion = run_json(&demoted_home, &demoted_tree, &["brain", "export"]);
+    let retained_keys = pages
+        .iter()
+        .map(|(path, id)| {
+            let key = open_grant(demoted_keys, &before_demotion, id, 1)
+                .unwrap_or_else(|| panic!("demoted key holds no v1 grant for {path}"));
+            let (object_id, envelope) = live_page(&before_demotion, id);
+            assert_eq!(
+                open_page(&key, "rotation", id, &object_id, 1, &envelope).as_deref(),
+                Some(format!("# {path} before rotation\n").as_str())
+            );
+            key
+        })
+        .collect::<Vec<_>>();
+
+    // Servers before demotion rotated Folder Keys dropped the role and kept
+    // every wrap; `fbrain admin role revoke admin` now rotates instead.
+    legacy_demote_keeping_wraps(&database, "rotation", demoted);
+    let mut stale = revocation_incomplete(demoted);
+    stale.sort();
+    let mut expected = pages.iter().map(|(_, id)| id.clone()).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(stale, expected, "demotion leaves every wrap in place");
+
+    // (a) Revoke the stale holder, which has no explicit access row.
+    let revoked_id = &pages[0].1;
+    let revoked = run_json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            revoked_id,
+            "--target",
+            demoted,
+        ],
+    );
+    assert_eq!(revoked["state"], "complete");
+    assert_eq!(revoked["newKeyVersion"], 2);
+    assert!(!revocation_incomplete(demoted).contains(revoked_id));
+    let again = run_raw(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            revoked_id,
+            "--target",
+            demoted,
+        ],
+    );
+    assert!(!again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains("does not currently have access"),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    // The remaining admin holds its key by role: revoke points at the role.
+    let entitled = run_raw(
+        &admin_home,
+        &admin_tree,
+        &[
+            "admin",
+            "folder-access",
+            "revoke",
+            "--folder",
+            &pages[1].1,
+            "--target",
+            admin,
+        ],
+    );
+    assert!(!entitled.status.success());
+    assert!(
+        String::from_utf8_lossy(&entitled.stderr).contains("through its Brain role"),
+        "{}",
+        String::from_utf8_lossy(&entitled.stderr)
+    );
+
+    // (b) Rotate a restricted Folder and (c) an admin_only Folder.
+    for (_, rotated_id) in &pages[1..] {
+        let rotated = run_json(
+            &admin_home,
+            &admin_tree,
+            &["admin", "folder-access", "rotate", "--folder", rotated_id],
+        );
+        assert_eq!(rotated["state"], "complete");
+        assert_eq!(rotated["previousKeyVersion"], 1);
+        assert_eq!(rotated["newKeyVersion"], 2);
+        assert_eq!(rotated["recipientNpubs"], json!([admin]));
+        assert_eq!(rotated["cutOffNpubs"], json!([demoted]));
+    }
+    assert!(revocation_incomplete(demoted).is_empty());
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "rotation"],
+    );
+    assert_eq!(report["totals"]["revocationIncomplete"], 0, "{report}");
+    let activity = run_json(&admin_home, &admin_tree, &["activity"]);
+    assert!(
+        activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["kind"] == "admin.folder_key.rotated"),
+        "{activity}"
+    );
+
+    // The remaining admin decrypts every re-encrypted page at version 2 from
+    // a fresh tree, then publishes a new revision under the new key.
+    let fresh_admin_tree = admin_home.join("fresh-tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "rotation", fresh_admin_tree.to_str().unwrap()],
+    );
+    run_json(&admin_home, &fresh_admin_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert_eq!(
+            fs::read_to_string(fresh_admin_tree.join(path).join("page.md")).unwrap(),
+            format!("# {path} before rotation\n")
+        );
+        fs::write(
+            fresh_admin_tree.join(path).join("page.md"),
+            format!("# {path} after rotation\n"),
+        )
+        .unwrap();
+    }
+    run_json(&admin_home, &fresh_admin_tree, &["sync", "now"]);
+    let export = run_json(&admin_home, &fresh_admin_tree, &["brain", "export"]);
+    for (_, id) in &pages {
+        let folder = export["folders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|folder| folder["id"] == id.as_str())
+            .unwrap();
+        assert_eq!(folder["currentKeyVersion"], 2);
+        assert_eq!(folder["accessible"], true);
+    }
+
+    // Cryptographic denial, for the revoked Folder and both rotated ones: the
+    // version 2 ciphertext from the remaining admin's export opens with the
+    // admin's new key and not with the demoted key's retained version 1 key,
+    // and no version 2 grant opens for the demoted key.
+    for ((path, id), retained) in pages.iter().zip(&retained_keys) {
+        let (object_id, envelope) = live_page(&export, id);
+        let new_key = open_grant(admin_keys, &export, id, 2)
+            .unwrap_or_else(|| panic!("admin holds no v2 grant for {path}"));
+        assert_eq!(
+            open_page(&new_key, "rotation", id, &object_id, 2, &envelope).as_deref(),
+            Some(format!("# {path} after rotation\n").as_str())
+        );
+        assert_eq!(
+            open_page(retained, "rotation", id, &object_id, 2, &envelope),
+            None,
+            "{path}: the retained v1 key must not open v2 ciphertext"
+        );
+        let v2_grants = export["keyGrants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|grant| grant["folderId"] == id.as_str() && grant["keyVersion"] == 2)
+            .collect::<Vec<_>>();
+        assert!(!v2_grants.is_empty());
+        for grant in v2_grants {
+            assert_ne!(grant["recipientNpub"], demoted.as_str());
+            assert!(!grant_opens(demoted_keys, grant), "{path}: v2 grant opened");
+        }
+    }
+
+    // The demoted key cannot open the new version of any of the three.
+    let denied = run_json(&demoted_home, &demoted_tree, &["brain", "export"]);
+    for (_, id) in &pages {
         let folder = denied["folders"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|folder| folder["id"] == folder_id)
+            .find(|folder| folder["id"] == id.as_str())
             .unwrap();
-        assert_eq!(folder["accessible"], false);
+        assert_eq!(folder["currentKeyVersion"], 2);
+        assert_eq!(folder["accessible"], false, "{folder}");
+        assert!(open_grant(demoted_keys, &denied, id, 2).is_none());
     }
-    fs::write(
-        owner_tree.join("Shared/note.md"),
-        "# Written after demotion\n",
-    )
-    .unwrap();
-    fs::write(
-        owner_tree.join("Unrelated/private.md"),
-        "# Still private after demotion\n",
-    )
-    .unwrap();
-    run_json(&owner_home, &owner_tree, &["sync", "now"]);
-    let before = run_json(&owner_home, &owner_tree, &["brain", "export"]);
-    let repair = [
-        "admin",
-        "folder-access",
-        "grant",
-        "--folder",
-        "shared",
-        "--target",
-        member,
-    ];
-    let restored = run_json(&owner_home, &owner_tree, &repair);
-    assert_eq!(restored["outcome"], "granted");
-    assert_eq!(restored["admins"], json!([owner]));
-    let retry = run_json(&owner_home, &owner_tree, &repair);
-    assert_eq!(retry["outcome"], "alreadyHasAccess");
-    let after = run_json(&owner_home, &owner_tree, &["brain", "export"]);
-    assert_eq!(after["keyGrants"], before["keyGrants"]);
-    run_json(&member_home, &member_tree, &["sync", "now"]);
-    assert_eq!(
-        fs::read_to_string(member_tree.join("Shared/note.md")).unwrap(),
-        "# Written after demotion\n"
-    );
-    assert_eq!(
-        fs::read_to_string(member_tree.join("Unrelated/private.md")).unwrap(),
-        "# Unrelated\n"
-    );
-
-    // A fresh local tree must also bootstrap and decrypt the retained grant.
-    let fresh_tree = member_home.join("fresh-tree");
+    let fresh_demoted_tree = demoted_home.join("fresh-tree");
     run_json(
-        &member_home,
-        &member_home,
-        &["open", "repair", fresh_tree.to_str().unwrap()],
+        &demoted_home,
+        &demoted_home,
+        &["open", "rotation", fresh_demoted_tree.to_str().unwrap()],
     );
-    run_json(&member_home, &fresh_tree, &["sync", "now"]);
-    assert_eq!(
-        fs::read_to_string(fresh_tree.join("Shared/note.md")).unwrap(),
-        "# Written after demotion\n"
-    );
-    assert!(!fresh_tree.join("Unrelated/private.md").exists());
+    run_json(&demoted_home, &fresh_demoted_tree, &["sync", "now"]);
+    for (path, _) in &pages {
+        assert!(
+            !fresh_demoted_tree.join(path).join("page.md").exists(),
+            "{path} must stay unreadable to the demoted key"
+        );
+    }
     shutdown.send(()).unwrap();
     server_thread.join().unwrap();
+}
+
+/// Production on 2026-10-19: keys demoted from admin kept the current wrap of
+/// restricted Folders (`revocationIncomplete`). Removing such a Member must
+/// rotate those Folders too, or the removed key still opens them.
+///
+/// The demotion is reproduced at the store level (the role row deleted, wrap
+/// kept), exactly what `admin role revoke admin` did before it rotated, so
+/// this proof does not depend on how demotion behaves today.
+#[test]
+fn built_fbrain_process_member_removal_rotates_folders_a_demoted_key_still_holds() {
+    let scratch = TempDir::new().unwrap();
+    let admin_home = scratch.path().join("admin");
+    let demoted_home = scratch.path().join("demoted");
+    let mut npubs = Vec::new();
+    let mut identities = Vec::new();
+    for home in [&admin_home, &demoted_home] {
+        fs::create_dir_all(home).unwrap();
+        let keys = Keys::generate();
+        identities.push(keys.clone());
+        let secret = home.join("import-key");
+        fs::write(&secret, keys.secret_key().to_secret_hex()).unwrap();
+        let imported = run(
+            home,
+            home,
+            &[
+                "auth",
+                "import",
+                "--file",
+                secret.to_str().unwrap(),
+                "--json",
+            ],
+        );
+        assert!(
+            imported.status.success(),
+            "{}",
+            String::from_utf8_lossy(&imported.stderr)
+        );
+        fs::remove_file(secret).unwrap();
+        npubs.push(
+            NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+        );
+    }
+    let admin = &npubs[0];
+    let demoted = &npubs[1];
+    let (admin_keys, demoted_keys) = (&identities[0], &identities[1]);
+    let database_path = scratch.path().join("state").join("brain.sqlite3");
+    fs::create_dir_all(database_path.parent().unwrap()).unwrap();
+    let (server_url, shutdown, server_thread) =
+        spawn_file_backed_brain_server(admin, database_path.clone());
+    let fbrain_at = |home: &Path, cwd: &Path, args: &[&str]| -> Output {
+        command(home, cwd)
+            .env(
+                "FBRAIN_NOW",
+                OffsetDateTime::now_utc().format(&Rfc3339).unwrap(),
+            )
+            .env("FINITE_BRAIN_SERVER_URL", &server_url)
+            .env("FINITE_BRAIN_PUBLIC_BASE_URL", &server_url)
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap()
+    };
+    let run_json = |home: &Path, cwd: &Path, args: &[&str]| -> Value {
+        let output = fbrain_at(home, cwd, args);
+        assert!(
+            output.status.success(),
+            "{args:?}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    for args in [
+        vec![
+            "admin",
+            "member",
+            "add",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+        vec![
+            "admin",
+            "role",
+            "grant",
+            "admin",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+    ] {
+        run_json(&admin_home, &admin_home, &args);
+    }
+    // Created while the second key is an admin, so it receives the current
+    // wrap through its role, with no explicit Folder access row.
+    let admin_tree = admin_home.join("tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "roundtrip-org", admin_tree.to_str().unwrap()],
+    );
+    run_json(
+        &admin_home,
+        &admin_tree,
+        &[
+            "folder",
+            "create",
+            "research",
+            "--access",
+            "restricted",
+            "--name",
+            "Research",
+            "--path",
+            "Research",
+        ],
+    );
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    fs::write(admin_tree.join("Research/plan.md"), "# Plan v1\n").unwrap();
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let demoted_tree = demoted_home.join("tree");
+    run_json(
+        &demoted_home,
+        &demoted_home,
+        &["open", "roundtrip-org", demoted_tree.to_str().unwrap()],
+    );
+    run_json(&demoted_home, &demoted_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(demoted_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v1\n",
+        "the second admin decrypts the restricted Folder before demotion"
+    );
+    // Keep the version-1 Folder Key the second key opens from its own wrap,
+    // and prove it really decrypts the Folder's current ciphertext.
+    let demoted_v1_key = stored_folder_key(&database_path, demoted_keys, "research", 1);
+    let before = run_json(&admin_home, &admin_tree, &["brain", "export"]);
+    let plaintexts = live_folder_objects(&before, "research")
+        .iter()
+        .map(|(object_id, payload)| {
+            open_stored_object(&demoted_v1_key, "research", object_id, 1, payload)
+                .expect("the version-1 key opens version-1 ciphertext")
+        })
+        .collect::<Vec<_>>();
+    assert!(plaintexts.iter().any(|plain| plain.contains("Plan v1")));
+
+    // Legacy demotion: drop the role row, keep every wrap.
+    let changed = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .execute(
+            "DELETE FROM brain_admins WHERE brain_id = 'roundtrip-org' AND user_id = ?1",
+            [demoted.as_str()],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "roundtrip-org"],
+    );
+    let demoted_row = report["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["npub"] == demoted.as_str())
+        .expect("demoted key in the access report");
+    assert_eq!(demoted_row["brainRole"], "member");
+    assert_eq!(demoted_row["revocationIncomplete"], json!(["research"]));
+    let versions_before = folder_key_versions(&run_json(
+        &admin_home,
+        &admin_home,
+        &["brain", "metadata", "--brain", "roundtrip-org"],
+    ));
+    assert_eq!(versions_before["research"], 1);
+
+    let removed = run_json(
+        &admin_home,
+        &admin_home,
+        &[
+            "admin",
+            "member",
+            "remove",
+            "--target",
+            demoted,
+            "--brain",
+            "roundtrip-org",
+        ],
+    );
+    let rotated = removed["rotatedFolders"].as_array().unwrap();
+    let research = rotated
+        .iter()
+        .find(|folder| folder["folderId"] == "research")
+        .expect("research rotated by member removal");
+    assert_eq!(research["reason"], "staleCurrentGrant");
+    assert_eq!(research["previousKeyVersion"], 1);
+    assert_eq!(research["newKeyVersion"], 2);
+    assert!(
+        rotated
+            .iter()
+            .filter(|folder| folder["folderId"] != "research")
+            .all(|folder| folder["reason"] == "readable"),
+        "{rotated:?}"
+    );
+    assert!(
+        !removed["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|member| member == demoted.as_str())
+    );
+    let versions_after = folder_key_versions(&removed);
+    for (folder_id, version) in &versions_before {
+        let expected = if rotated
+            .iter()
+            .any(|folder| folder["folderId"] == *folder_id)
+        {
+            version + 1
+        } else {
+            *version
+        };
+        assert_eq!(versions_after[folder_id], expected, "{folder_id}");
+    }
+
+    // Nobody holds a current wrap without entitlement any more.
+    let report = run_json(
+        &admin_home,
+        &admin_home,
+        &["access", "list", "--brain", "roundtrip-org"],
+    );
+    assert_eq!(report["totals"]["revocationIncomplete"], 0, "{report}");
+    if let Some(row) = report["identities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["npub"] == demoted.as_str())
+    {
+        assert_eq!(row["revocationIncomplete"], json!([]), "{row}");
+    }
+    // Authoritative store state: the removed key holds only the version-1
+    // wrap, which opens nothing now that every object moved to version 2.
+    let demoted_research_versions = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .prepare(
+            "SELECT key_version FROM folder_key_grants
+             WHERE brain_id = 'roundtrip-org' AND folder_id = 'research' AND recipient_npub = ?1
+             ORDER BY key_version",
+        )
+        .unwrap()
+        .query_map([demoted.as_str()], |row| row.get::<_, u32>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(demoted_research_versions, vec![1]);
+
+    // The remaining admin's open tree pulls the re-encrypted revision, then
+    // publishes a new one under the new key; a fresh tree decrypts it.
+    run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(admin_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v1\n"
+    );
+    fs::write(admin_tree.join("Research/plan.md"), "# Plan v2\n").unwrap();
+    let pushed = run_json(&admin_home, &admin_tree, &["sync", "now"]);
+    let fresh_tree = admin_home.join("fresh-tree");
+    run_json(
+        &admin_home,
+        &admin_home,
+        &["open", "roundtrip-org", fresh_tree.to_str().unwrap()],
+    );
+    run_json(&admin_home, &fresh_tree, &["sync", "now"]);
+    assert_eq!(
+        fs::read_to_string(fresh_tree.join("Research/plan.md")).unwrap(),
+        "# Plan v2\n",
+        "{pushed}"
+    );
+    // Every live object now sits at version 2. The removed key's retained
+    // version-1 Folder Key fails AES-GCM authentication on each of them,
+    // while the remaining admin's version-2 key opens them.
+    let after = run_json(&admin_home, &admin_tree, &["brain", "export"]);
+    let rotated_objects = live_folder_objects(&after, "research");
+    assert!(!rotated_objects.is_empty());
+    // The store's current object rows are exactly these, all at version 2.
+    let stored_rows = rusqlite::Connection::open(&database_path)
+        .unwrap()
+        .prepare(
+            "SELECT object_id, payload_json FROM current_encrypted_brain_objects
+             WHERE brain_id = 'roundtrip-org' AND folder_id = 'research' AND deleted = 0
+             ORDER BY object_id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut exported = rotated_objects.clone();
+    exported.sort();
+    assert_eq!(stored_rows, exported);
+    for (object_id, payload) in &stored_rows {
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload["keyVersion"], 2, "{object_id}: {payload}");
+    }
+    let admin_v2_key = stored_folder_key(&database_path, admin_keys, "research", 2);
+    let mut admin_plaintexts = Vec::new();
+    for (object_id, payload) in &rotated_objects {
+        assert_eq!(
+            open_stored_object(&demoted_v1_key, "research", object_id, 2, payload),
+            Err(CryptoRecordError::AadMismatch),
+            "{object_id}"
+        );
+        admin_plaintexts
+            .push(open_stored_object(&admin_v2_key, "research", object_id, 2, payload).unwrap());
+    }
+    assert!(
+        admin_plaintexts
+            .iter()
+            .any(|plain| plain.contains("Plan v2"))
+    );
+    // The removed key's client is refused by the server.
+    let refused = fbrain_at(&demoted_home, &demoted_tree, &["sync", "now"]);
+    let refusal = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(1), "{refusal}");
+    assert!(
+        refusal.contains("403") && refusal.contains("brain access required"),
+        "{refusal}"
+    );
+    shutdown.send(()).unwrap();
+    server_thread.join().unwrap();
+}
+
+/// Open `recipient`'s wrap of the Folder Key at `key_version` straight from
+/// the server's store, the way that key's own client would.
+fn stored_folder_key(
+    database_path: &Path,
+    recipient: &Keys,
+    folder_id: &str,
+    key_version: u32,
+) -> FolderKey {
+    let recipient_key = NostrPublicKey::from_protocol(recipient.public_key());
+    let wrapped: String = rusqlite::Connection::open(database_path)
+        .unwrap()
+        .query_row(
+            "SELECT wrapped_event_json FROM folder_key_grants
+             WHERE brain_id = 'roundtrip-org' AND folder_id = ?1 AND key_version = ?2
+               AND recipient_npub = ?3
+             LIMIT 1",
+            rusqlite::params![folder_id, key_version, recipient_key.to_npub().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let event = nostr::Event::from_json(wrapped).unwrap();
+    let opened =
+        open_gift_wrap(recipient, &event, &GiftWrapValidation::new(recipient_key)).unwrap();
+    let grant: Value = serde_json::from_str(&opened.rumor.content).unwrap();
+    assert_eq!(grant["folderId"], folder_id);
+    assert_eq!(grant["keyVersion"], key_version);
+    FolderKey::from_base64(grant["folderKey"].as_str().unwrap()).unwrap()
+}
+
+/// `(objectId, payloadJson)` for every live object of one Folder in an export.
+fn live_folder_objects(export: &Value, folder_id: &str) -> Vec<(String, String)> {
+    export["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|object| object["folderId"] == folder_id && object["deleted"] != true)
+        .map(|object| {
+            (
+                object["objectId"].as_str().unwrap().to_owned(),
+                object["payloadJson"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+/// Decrypt one exported object under the AAD for `key_version`.
+fn open_stored_object(
+    key: &FolderKey,
+    folder_id: &str,
+    object_id: &str,
+    key_version: u32,
+    payload_json: &str,
+) -> Result<String, CryptoRecordError> {
+    let envelope = EncryptedFolderObjectEnvelope::from_json(
+        &decode_sync_payload(payload_json).ciphertext_or_raw(payload_json),
+    )?;
+    let aad = FolderObjectAad {
+        brain_id: BrainId::new("roundtrip-org").unwrap(),
+        folder_id: FolderId::new(folder_id).unwrap(),
+        object_id: ObjectId::new(object_id).unwrap(),
+        key_version,
+    };
+    open_folder_object(key, &aad, &envelope)
+        .map(|plain| String::from_utf8_lossy(&plain).into_owned())
+}
+
+fn folder_key_versions(metadata: &Value) -> std::collections::BTreeMap<String, u64> {
+    metadata["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| {
+            (
+                folder["id"].as_str().unwrap().to_owned(),
+                folder["currentKeyVersion"].as_u64().unwrap(),
+            )
+        })
+        .collect()
 }
 
 #[test]

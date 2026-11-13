@@ -11,6 +11,14 @@ const DEVICE_TOKEN = "web-design-hosted-device-token";
 const WORKOS_USER_ID = "user_web_design";
 const FIXTURE_EMAIL = "fixture-user@example.test";
 const DEFAULT_PORT = 13002;
+// Opt-in real Brain signing for browser proofs: Brain identity-provider calls
+// go to a real hosted device (started with DEVICE_TOKEN) and the dashboard
+// talks to a real Brain server. Everything else stays synthetic.
+const BRAIN_IDENTITY_PROVIDER_URL = process.env.FC_WEB_DESIGN_BRAIN_IDENTITY_PROVIDER_URL?.trim();
+const BRAIN_URL = process.env.FC_WEB_DESIGN_BRAIN_URL?.trim();
+// A test's stand-in for the agents' native Hermes origin (ending in "/"), for
+// requests the dashboard server makes with a Core-issued grant.
+const HOSTED_HERMES_URL = process.env.FC_WEB_DESIGN_HOSTED_HERMES_URL?.trim();
 const VALID_SCENARIOS = new Set(["healthy", "unavailable", "recovering"]);
 
 type Scenario = "healthy" | "unavailable" | "recovering";
@@ -62,6 +70,7 @@ function localChildEnvironment(): NodeJS.ProcessEnv {
     "TZ",
     "SSL_CERT_FILE",
     "NIX_SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
     "NIX_PATH",
     "NIX_PROFILES",
     "IN_NIX_SHELL",
@@ -182,6 +191,18 @@ async function serve() {
       return;
     }
 
+    const hostedHermesSession = request.url?.match(
+      /^\/api\/core\/v1\/me\/runtimes\/([^/]+)\/hosted-hermes-session$/u
+    );
+    if (request.method === "POST" && hostedHermesSession?.[1] && HOSTED_HERMES_URL) {
+      writeJson(response, 200, {
+        baseUrl: `${HOSTED_HERMES_URL}${hostedHermesSession[1]}/`,
+        accessToken: "synthetic-test",
+        expiresAt: Math.floor(Date.now() / 1000) + 60,
+      });
+      return;
+    }
+
     const runtimeControl = request.url?.match(
       /^\/api\/core\/v1\/me\/projects\/([^/]+)\/runtime\/(restart|recover-known-good-chat)$/u
     );
@@ -251,6 +272,7 @@ async function serve() {
         NEXT_DIST_DIR: ".next-web-design",
         NEXT_PUBLIC_FC_DESIGN_PREVIEWS: process.env.FC_WEB_DESIGN_PREVIEWS === "0" ? "0" : "1",
         NEXT_TELEMETRY_DISABLED: "1",
+        ...(BRAIN_URL ? { FC_BRAIN_UPSTREAM_URL: BRAIN_URL, FC_BRAIN_PUBLIC_ORIGIN: BRAIN_URL } : {}),
         NODE_OPTIONS:
           process.env.FC_WEB_DESIGN_NODE_OPTIONS ?? "--max-old-space-size=2048",
       },
@@ -282,6 +304,23 @@ async function serve() {
 
 async function handleHostedRequest(request: IncomingMessage, response: ServerResponse) {
   const requestPath = new URL(request.url ?? "/", "http://fixture").pathname;
+  if (BRAIN_IDENTITY_PROVIDER_URL && request.method === "POST" && requestPath === "/v1/brain/identity-provider") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk as Buffer);
+    const headers = new Headers();
+    for (const name of ["authorization", "content-type", "x-finite-workos-user-id", "x-finite-brain-public-origin"]) {
+      const value = request.headers[name];
+      if (typeof value === "string") headers.set(name, value);
+    }
+    const forwarded = await fetch(`${BRAIN_IDENTITY_PROVIDER_URL}${requestPath}`, {
+      method: "POST",
+      headers,
+      body: Buffer.concat(chunks),
+    });
+    response.writeHead(forwarded.status, { "content-type": forwarded.headers.get("content-type") ?? "application/json" });
+    response.end(Buffer.from(await forwarded.arrayBuffer()));
+    return;
+  }
   if (request.method === "GET" && requestPath === "/runtime-status") {
     writeJson(response, 200, { agent_npub: "npub1webdesignfixture" });
     return;

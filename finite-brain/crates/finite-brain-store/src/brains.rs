@@ -78,7 +78,7 @@ impl BrainStore {
             .optional()?;
         if let Some(existing_brain_id) = existing_brain_id {
             if existing_brain_id != output.brain.id.as_str() {
-                return Err(StoreError::BrokenInvariant {
+                return Err(StoreError::PersonalBrainConflict {
                     reason: "user already has a personal brain".to_owned(),
                 });
             }
@@ -91,13 +91,27 @@ impl BrainStore {
                 .optional()?;
             return match existing_agent {
                 Some(existing_agent) if existing_agent == agent_npub.as_str() => Ok(()),
-                Some(_) => Err(StoreError::BrokenInvariant {
+                Some(_) => Err(StoreError::PersonalBrainConflict {
                     reason: "personal brain already has a different personal agent".to_owned(),
                 }),
-                None => Err(StoreError::BrokenInvariant {
+                None => Err(StoreError::PersonalBrainConflict {
                     reason: "personal brain already exists without a personal agent".to_owned(),
                 }),
             };
+        }
+        // One Agent serves one Personal Brain; personal_agents.agent_npub is
+        // also UNIQUE as the final guard.
+        let agent_brain_id = tx
+            .query_row(
+                "SELECT brain_id FROM personal_agents WHERE agent_npub = ?1",
+                params![agent_npub.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        if agent_brain_id.is_some() {
+            return Err(StoreError::PersonalBrainConflict {
+                reason: "agent is already the personal agent of another personal brain".to_owned(),
+            });
         }
 
         let audit_id = format!("{}-personal-agent-established", output.brain.id);
@@ -359,45 +373,6 @@ impl BrainStore {
         let tx = self.conn.transaction()?;
         tx.execute(
             "INSERT INTO brain_admins (brain_id, user_id) VALUES (?1, ?2)",
-            params![brain_id.as_str(), user_id.as_str()],
-        )?;
-        sync_records::append_sync_records(&tx, brain_id, control_records)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Remove an Organization Brain Admin while preserving at least one admin.
-    pub fn remove_admin(&mut self, brain_id: &BrainId, user_id: &UserId) -> Result<(), StoreError> {
-        self.remove_admin_with_control_records(brain_id, user_id, &[])
-    }
-
-    /// Remove an Organization Brain Admin and append its signed record atomically.
-    pub fn remove_admin_with_control_records(
-        &mut self,
-        brain_id: &BrainId,
-        user_id: &UserId,
-        control_records: &[SyncRecordInput],
-    ) -> Result<(), StoreError> {
-        let brain = self.load_core_brain(brain_id)?;
-        if brain.kind != BrainKind::Organization {
-            return Err(StoreError::BrokenInvariant {
-                reason: "member/admin mutation requires an organization brain".to_owned(),
-            });
-        }
-        if !brain.admins.contains(user_id) {
-            return Err(StoreError::BrokenInvariant {
-                reason: "brain admin does not exist".to_owned(),
-            });
-        }
-        if brain.admins.len() == 1 {
-            return Err(StoreError::BrokenInvariant {
-                reason: "organization brain must keep at least one admin".to_owned(),
-            });
-        }
-
-        let tx = self.conn.transaction()?;
-        tx.execute(
-            "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
             params![brain_id.as_str(), user_id.as_str()],
         )?;
         sync_records::append_sync_records(&tx, brain_id, control_records)?;

@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-app"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "axum",
  "finite-brain-server",
@@ -967,7 +967,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-cli"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "axum",
  "backon",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-core"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-server"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1017,6 +1017,7 @@ dependencies = [
  "finite-brain-store",
  "finite-mail",
  "finite-nostr",
+ "getrandom 0.3.4",
  "http-body-util",
  "nostr",
  "rusqlite",
@@ -1032,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "finite-brain-store"
-version = "0.7.0"
+version = "0.9.0"
 dependencies = [
  "finite-brain-core",
  "rusqlite",
@@ -1075,6 +1076,46 @@ dependencies = [
  "tempfile",
  "thiserror",
  "ureq",
+]
+
+[[package]]
+name = "finite-mover"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "finite-mover-host",
+ "finite-nostr",
+ "finite-saas-core",
+ "hex",
+ "nostr",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-postgres",
+ "zeroize",
+ "zip",
+]
+
+[[package]]
+name = "finite-mover-host"
+version = "0.1.0"
+dependencies = [
+ "bech32",
+ "crc32fast",
+ "hex",
+ "rustix",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror",
+ "zeroize",
+ "zip",
 ]
 
 [[package]]
@@ -1124,6 +1165,8 @@ dependencies = [
  "rand 0.8.5",
  "reqwest",
  "rsa",
+ "rustix",
+ "secp256k1",
  "serde",
  "serde_json",
  "sha2 0.10.9",

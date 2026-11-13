@@ -2,15 +2,17 @@
 //! and the account-authenticated observation → scoped description path.
 
 use super::*;
+mod hosted;
+use crate::brain_identity::hosted::HOSTED_OBSERVATION_PATH;
 use crate::brain_identity::{
     BrainIdentityConfig, BrainIdentityConfigError, DESCRIPTION_CREDENTIAL_HEADER,
-    DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION, OBSERVATION_CREDENTIAL_HEADER, OBSERVATION_PATH,
-    OBSERVATION_VERSION,
+    DESCRIPTIONS_PATH, DESCRIPTIONS_VERSION, DESCRIPTIONS_VERSION_V2,
+    OBSERVATION_CREDENTIAL_HEADER, OBSERVATION_PATH, OBSERVATION_VERSION,
 };
 
-const SERVER: &str = "https://brain.test";
-const OBSERVATION_TOKEN: &str = "brain-observation-test-token";
-const DESCRIPTION_TOKEN: &str = "brain-description-test-token";
+pub(super) const SERVER: &str = "https://brain.test";
+pub(super) const OBSERVATION_TOKEN: &str = "brain-observation-test-token";
+pub(super) const DESCRIPTION_TOKEN: &str = "brain-description-test-token";
 
 fn config(auth: &CoreAuth) -> BrainIdentityConfig {
     BrainIdentityConfig::from_values(
@@ -24,17 +26,17 @@ fn config(auth: &CoreAuth) -> BrainIdentityConfig {
     .unwrap()
 }
 
-fn identity_app(store: CoreStore) -> Router {
+pub(super) fn identity_app(store: CoreStore) -> Router {
     let auth = scoped_test_auth();
     let config = config(&auth);
     brain_identity_router(store, auth, config)
 }
 
-fn key(n: u8) -> String {
+pub(super) fn key(n: u8) -> String {
     format!("{n:02x}").repeat(32)
 }
 
-fn observation_body(operation: &str, human: &str) -> serde_json::Value {
+pub(super) fn observation_body(operation: &str, human: &str) -> serde_json::Value {
     serde_json::json!({
         "version": OBSERVATION_VERSION,
         "operationId": format!("operation_{operation}_0000"),
@@ -47,7 +49,7 @@ fn observation_body(operation: &str, human: &str) -> serde_json::Value {
     })
 }
 
-fn description_body(keys: &[String]) -> serde_json::Value {
+pub(super) fn description_body(keys: &[String]) -> serde_json::Value {
     serde_json::json!({
         "version": DESCRIPTIONS_VERSION,
         "brainServer": SERVER,
@@ -57,7 +59,7 @@ fn description_body(keys: &[String]) -> serde_json::Value {
     })
 }
 
-async fn post(
+pub(super) async fn post(
     app: &Router,
     path: &str,
     headers: &[(&str, String)],
@@ -146,7 +148,7 @@ async fn routes_exist_only_on_the_private_identity_router() {
         let runtime = runtime_router(db.store.clone(), Default::default());
         let description = serde_json::to_vec(&description_body(&[key(1)])).unwrap();
         for app in [&account_router, &runtime] {
-            for path in [OBSERVATION_PATH, DESCRIPTIONS_PATH] {
+            for path in [OBSERVATION_PATH, HOSTED_OBSERVATION_PATH, DESCRIPTIONS_PATH] {
                 let (status, _) = post(
                     app,
                     path,
@@ -260,6 +262,33 @@ async fn account_observation_then_scoped_description_over_http() {
             response["results"][1],
             serde_json::json!({"publicKeyHex": key(2), "state": "notShared"})
         );
+        // v2 answers in v2. An unknown version gets the exact error Brain
+        // treats as "fall back to v1"; nothing else downgrades.
+        let mut v2 = description_body(&[key(1)]);
+        v2["version"] = serde_json::json!(DESCRIPTIONS_VERSION_V2);
+        let (status, response) = post(
+            &app,
+            DESCRIPTIONS_PATH,
+            &describe,
+            serde_json::to_vec(&v2).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["version"], DESCRIPTIONS_VERSION_V2);
+        assert_eq!(response["results"][0]["accountEmail"], "dana@acme.example");
+        v2["version"] = serde_json::json!("finite-core-brain-identity-descriptions-v3");
+        let (status, response) = post(
+            &app,
+            DESCRIPTIONS_PATH,
+            &describe,
+            serde_json::to_vec(&v2).unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response,
+            serde_json::json!({"error": "unsupported descriptions version"})
+        );
 
         // A browser-style claim of another key for the same account in a
         // human action is refused before any write.
@@ -319,3 +348,5 @@ async fn description_inputs_are_bounded_and_strict() {
     })
     .await;
 }
+
+mod scoped;

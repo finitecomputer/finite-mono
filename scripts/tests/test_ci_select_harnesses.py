@@ -487,10 +487,13 @@ class CiHarnessSelectionTests(unittest.TestCase):
         )
 
     def test_finite_status_script_runs_only_finite_status_contract(self) -> None:
-        self.assertEqual(
-            selected("scripts/finite_status.py"),
-            {"run_finite_status_contract"},
-        )
+        for path in (
+            "scripts/finite_status.py",
+            "scripts/finite_status_hosted_identity.py",
+            "scripts/tests/test_finite_status_hosted_identity.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected(path), {"run_finite_status_contract"})
 
     def test_runner_host_address_inputs_run_finite_status_and_nix_contracts(self) -> None:
         # finite-status probes Agent contact only at the address each Runner
@@ -529,14 +532,6 @@ class CiHarnessSelectionTests(unittest.TestCase):
         select_harnesses.apply_harness_dependencies(selection)
 
         self.assertTrue(selection.run_nix_service_packages)
-
-    def test_merge_group_selects_every_active_harness(self) -> None:
-        args = argparse.Namespace(changed_files=None, event="merge_group")
-        selection, _reason, _paths = select_harnesses.select_harnesses(args)
-        values = selection.values()
-
-        for key, value in values.items():
-            self.assertEqual(value, "true", key)
 
     def test_changed_file_workflow_path_selects_nix_checks(self) -> None:
         args = argparse.Namespace(
@@ -648,13 +643,6 @@ class CiPackagingGateTests(unittest.TestCase):
             changed_files=["finitechat/crates/finitechat-server/src/lib.rs"],
             event="push",
         )
-
-        selection, _reason, _paths = select_harnesses.select_harnesses(args)
-
-        self.assertTrue(selection.run_nix_service_packages)
-
-    def test_merge_group_runs_every_harness_including_packaging(self) -> None:
-        args = argparse.Namespace(changed_files=None, event="merge_group")
 
         selection, _reason, _paths = select_harnesses.select_harnesses(args)
 

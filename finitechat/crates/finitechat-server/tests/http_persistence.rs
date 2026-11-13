@@ -7920,6 +7920,92 @@ async fn sqlite_sync_stream_does_not_replay_old_activity_after_reconnect() {
 }
 
 #[tokio::test]
+async fn sqlite_sync_stream_heartbeats_on_schedule_while_other_rooms_wake_the_server() {
+    // Every accepted write wakes every open stream. Clients bound a stream
+    // read by the negotiated heartbeat, so a quiet stream must still
+    // heartbeat on schedule while unrelated rooms keep the server busy.
+    // Otherwise the client errors with `SSE hint stream read failed`
+    // (Runtime image Chat smoke, 2026-09-23 and 2026-10-30).
+    let temp = TempDir::new().expect("tempdir");
+    let db_path = temp.path().join("delivery.sqlite3");
+    let alice = DeviceRef::new("alice", "alice-laptop");
+    let bob = DeviceRef::new("bob", "bob-agent");
+    let quiet_room = "room-heartbeat-quiet".to_owned();
+    let busy_room = "room-heartbeat-busy".to_owned();
+    let busy_group = "mls-heartbeat-busy".to_owned();
+    let app = persistent_app(&db_path);
+    for (room_id, mls_group_id, creator) in [
+        (&quiet_room, "mls-heartbeat-quiet", &alice),
+        (&busy_room, busy_group.as_str(), &bob),
+    ] {
+        let response = post_json(
+            app.clone(),
+            "/account-rooms/bootstrap",
+            &BootstrapAccountRoomRequest {
+                room_id: room_id.clone(),
+                mls_group_id: mls_group_id.to_owned(),
+                creator: creator.clone(),
+                protocol: RoomProtocol::default(),
+            },
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let heartbeat = std::time::Duration::from_millis(1_000);
+    let response = post_json(
+        app.clone(),
+        "/sync/stream",
+        &SyncStreamRequest {
+            rooms: vec![SyncWaitRoom {
+                room_id: quiet_room.clone(),
+                after_seq: 0,
+            }],
+            inbox: None,
+            heartbeat_ms: Some(1_000),
+        },
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = response.into_body().into_data_stream();
+
+    // Another account writes to its own room ten times per heartbeat.
+    let noise_app = app.clone();
+    let noise = tokio::spawn(async move {
+        for index in 1_u64.. {
+            let request =
+                ephemeral_activity_request(&busy_room, &busy_group, &bob, 0, None, index * 1_000);
+            let response = post_json(noise_app.clone(), "/activities", &request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    });
+
+    // Two heartbeats, each one interval after the previous event: on
+    // schedule despite the wakes, and not repeated early once one is due.
+    let mut previous = tokio::time::Instant::now();
+    for _ in 0..2 {
+        let hint = tokio::time::timeout(heartbeat * 3, read_next_sync_hint(&mut stream)).await;
+        let arrived = tokio::time::Instant::now();
+        assert!(
+            !noise.is_finished(),
+            "the unrelated writer must keep running"
+        );
+        assert_eq!(
+            hint.expect("a quiet stream must heartbeat while other rooms wake the server"),
+            SyncHintEvent::Heartbeat
+        );
+        assert!(
+            arrived - previous >= heartbeat * 8 / 10,
+            "heartbeat came {:?} after the previous event; expected about {heartbeat:?}",
+            arrived - previous
+        );
+        previous = arrived;
+    }
+    noise.abort();
+}
+
+#[tokio::test]
 async fn sqlite_sync_stream_wakes_zero_room_device_for_persisted_welcome() {
     let temp = TempDir::new().expect("tempdir");
     let db_path = temp.path().join("delivery.sqlite3");

@@ -4,21 +4,31 @@ on:
   pull_request:
     branches:
       - main
-  merge_group:
-    types: [checks_requested]
   push:
     branches:
       - main
       - migration-integration
 
+# A newer push cancels a pull request's running CI. On `main` (and other
+# pushed branches) a started run always finishes, so an operator can find a
+# finished CI at the exact SHA they deploy: the group keeps one run going per
+# ref, and the newest push waits behind it (a newer push replaces a waiting
+# one, never a running one).
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 env:
+  # nix-installer-action@v16 checks in with install.determinate.systems with a
+  # 1s timeout in both its main and post steps. A slow response fails the main
+  # step outright, and in the post step the HTTP client's retry crashes the
+  # action, failing jobs whose work already passed. A discovery name that
+  # cannot resolve skips the check-in; installers still download from
+  # install.determinate.systems.
+  IDS_LOOKUP: _detsys_ids._tcp.invalid.
   CACHIX_CACHE_NAME: finite
   # Authenticate Nix `github:` flake fetches so shared runner egress does not
   # burn the unauthenticated GitHub API quota. Hermes itself is pinned to a
@@ -104,49 +114,29 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           skipPush: true
 
-      - name: Resolve pinned Rust channel
-        id: rust_pin
-        run: |
-          # Parse the channel out of rust-toolchain.toml — the single Rust
-          # pin — so the install below can never float. The dtolnay action
-          # does NOT read the toml itself: with no toolchain input it
-          # installs its branch name (floating stable), which is exactly
-          # what this repo must not do.
-          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
-          if [[ -z "$channel" ]]; then
-            echo "::error::rust-toolchain.toml declares no channel" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust
-        # Toolchain is the channel parsed from rust-toolchain.toml above —
-        # the single build pin shared with Nix shells, release builds, and
-        # dev hosts. Bump deliberately (run clippy locally first), don't
-        # float: 1.88's clippy trips uninlined_format_args on v2 crates and
-        # floating stable trips new let-chain lints. The workspace
-        # rust-version floor stays at the oldest rustc that must still build
-        # the tree (nixpkgs-25.11's 1.91.1, used by the devfinity package).
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust_pin.outputs.channel }}
-          components: clippy, rustfmt
-
+      # Rust comes from the rust-ci Nix shell, built from rust-toolchain.toml
+      # (the single pin, rustfmt and clippy included) and served by the Nix
+      # caches; nothing downloads it from static.rust-lang.org. rust-cache
+      # asks the same shell for rustc and cargo, so the runner's rustup never
+      # installs the pin on its behalf.
       - uses: Swatinem/rust-cache@v2
         with:
           # Cached build scripts link to the Nix closure used by Clippy/tests.
           # Do not restore artifacts from a different flake or the old host build.
           prefix-key: v2-rust-nix-${{ hashFiles('flake.lock') }}
+          cmd-format: nix develop .#rust-ci --command {0}
 
       - name: Select Rust package scope
         id: rust_scope
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
+        # The selector runs `cargo metadata`; the shell's cargo keeps the
+        # runner's rustup from installing the pin for it.
+        run: nix develop .#rust-ci --command scripts/ci/affected-rust-packages --github-output "$GITHUB_OUTPUT" --summary "$GITHUB_STEP_SUMMARY"
 
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: nix develop .#rust-ci --command cargo fmt --all -- --check
 
       - name: Clippy
         env:
@@ -243,29 +233,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Resolve pinned Rust channel
-        id: rust_pin
-        run: |
-          # Same contract as the Rust workspace job: parse the channel from
-          # rust-toolchain.toml rather than letting the action default to
-          # its floating stable branch name. This job's run working-directory
-          # is finitechat/, so anchor the path at the checkout root.
-          channel="$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\(.*\)"/\1/p' "$GITHUB_WORKSPACE/rust-toolchain.toml")"
-          if [[ -z "$channel" ]]; then
-            echo "::error::rust-toolchain.toml declares no channel" >&2
-            exit 1
-          fi
-          echo "channel=$channel" >> "$GITHUB_OUTPUT"
-
-      - name: Install Rust
-        # Toolchain is the channel parsed from rust-toolchain.toml — the
-        # same pin the Rust workspace job and release builds use.
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ steps.rust_pin.outputs.channel }}
-
-      - uses: Swatinem/rust-cache@v2
-
       - name: Install Python
         uses: actions/setup-python@v5
         with:
@@ -285,7 +252,7 @@ jobs:
 
           push_enabled=false
           case "$GITHUB_EVENT_NAME" in
-            push|merge_group)
+            push)
               push_enabled=true
               ;;
             pull_request)
@@ -322,6 +289,21 @@ jobs:
           name: ${{ env.CACHIX_CACHE_NAME }}
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           skipPush: true
+
+      - name: Put the Nix Rust toolchain on PATH
+        # The smoke script and the platform adapter tests run bare `cargo`.
+        # Take it from the rust-ci Nix shell (built from rust-toolchain.toml,
+        # served by the Nix caches) instead of downloading Rust from
+        # static.rust-lang.org. Only the toolchain's bin directory joins
+        # PATH; the job keeps the runner's Python and C toolchain as before.
+        run: |
+          nix develop "$GITHUB_WORKSPACE#rust-ci" --command bash -euo pipefail -c '
+            dirname "$(command -v cargo)" >> "$GITHUB_PATH"
+            cargo --version
+            rustc --version
+          '
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Hermes CLI round-trip smoke
         run: scripts/hermes-sidecar-smoke.sh
@@ -438,18 +420,36 @@ jobs:
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_stop_generation.py"
           "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_stop_generation.py'
 
+      - name: Packaged Hermes session inference contract
+        run: |
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check "$GITHUB_WORKSPACE/infra/images/test_hermes_finite_inference.py"
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check "$GITHUB_WORKSPACE/infra/images/test_hermes_finite_inference.py"
+          "${{ steps.hermes_agent_runtime.outputs.python }}" -m unittest discover -s "$GITHUB_WORKSPACE/infra/images" -p 'test_hermes_finite_inference.py'
+
       - name: Packaged Brain and Sites inventory contracts
         working-directory: ${{ github.workspace }}
         env:
           FBRAIN_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/fbrain
+          FBRAIN_SERVER_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/finite-brain
           FSITE_TEST_BINARY: ${{ github.workspace }}/finitechat/target/debug/fsite
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
           HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
         run: |
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
           nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_product_inventory.py finite-brain/integrations/hermes finite-sites/integrations/hermes
-          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p fsite-cli --bins
+          nix develop "$GITHUB_WORKSPACE#rust-ci" --command cargo build --locked -p finite-brain-cli -p finite-brain-app -p fsite-cli --bins
           "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_product_inventory.py'
+
+      - name: Packaged Agent export contract
+        working-directory: ${{ github.workspace }}
+        env:
+          HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
+          HERMES_BUNDLED_PLUGINS: ${{ steps.hermes_agent_runtime.outputs.path }}/share/hermes-agent/plugins
+        run: |
+          # The plugin itself is formatted and linted with the rest of finite-agentd/.
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff format --check infra/images/test_hermes_agent_export.py
+          nix develop "$GITHUB_WORKSPACE#hermes-bridge-ci" --command ruff check infra/images/test_hermes_agent_export.py
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s infra/images -p 'test_hermes_agent_export.py'
 
       - name: Legacy Hermes migration safety tests
         env:
@@ -577,6 +577,11 @@ jobs:
           nix develop --command just lat5-runner-rollout-contract
           nix eval --raw .#nixosConfigurations.finite-lat-5.config.system.build.toplevel.drvPath
           nix eval --raw .#nixosConfigurations.finite-lat-5.config.system.build.diskoScript.drvPath
+      - name: lat7 Runner-only closure rollout contract
+        run: |
+          nix develop --command just lat7-runner-rollout-contract
+          nix eval --raw .#nixosConfigurations.finite-lat-7.config.system.build.toplevel.drvPath
+          nix eval --raw .#nixosConfigurations.finite-lat-7.config.system.build.diskoScript.drvPath
       - name: lat1 healthcheck activation contract
         run: nix develop --command just lat1-healthcheck-contract
       - name: Kata Runner host anti-drift contract
@@ -654,7 +659,7 @@ jobs:
 
   # Landing gate: builds the 15 scoped service packages through crane and
   # repopulates Cachix. select-harnesses defers this to landing events
-  # (push / merge_group) except when a PR changes the package derivations
+  # (pushes) except when a PR changes the package derivations
   # themselves: the workspace manifests / Cargo.lock / .cargo config that
   # scope cargoArtifacts, rust-toolchain.toml, the flake graph, or
   # infra/nixos/. A cold cargoArtifacts build here costs ~30 minutes and
@@ -684,7 +689,7 @@ jobs:
 
           push_enabled=false
           case "$GITHUB_EVENT_NAME" in
-            push|merge_group)
+            push)
               push_enabled=true
               ;;
             pull_request)

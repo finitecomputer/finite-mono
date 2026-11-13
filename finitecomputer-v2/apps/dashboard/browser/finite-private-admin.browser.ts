@@ -4,9 +4,15 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { test } from "node:test";
 
-import { chromium, type Browser } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
+import {
+  createAdminAgentFixture,
+  exerciseAgentDialogMutations,
+  handleAdminAgentRequest,
+  type AdminAgentFixture,
+} from "./admin-agent-fixture";
 
 const CORE_TOKEN = "browser-core-token";
 const OPERATOR_ORG_ID = "workos_org_browser_operator";
@@ -91,13 +97,39 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     });
 
     await page.goto(`http://127.0.0.1:${dashboardPort}/dashboard/admin`);
-    await page.getByRole("heading", { name: "Users" }).waitFor({ state: "visible" });
+    const usersTable = page.getByRole("table", { name: "Users and agents" });
+    await usersTable.waitFor({ state: "visible" });
+    await page.getByRole("row", { name: "Open controls for Private Agent" }).click();
+    await page.getByRole("button", { name: "Reset usage", exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).getByRole("button", { name: "Close", exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    const scrollRegion = page.getByRole("region", { name: "Users table, scroll for more columns" });
+    assert.equal(await scrollRegion.evaluate((element) => element.scrollWidth > element.clientWidth), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true);
+    await assertAdminTabsStayInShell(page);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.getByLabel("Filter agents").fill("PRIVATE@FINITE.VIP 84");
+    assert.equal(await usersTable.locator("tbody > tr").count(), 1);
+    await page.getByLabel("Filter agents").fill("no-such-agent");
+    await page.getByText("No agents match that filter.").waitFor({ state: "visible" });
+    await page.getByLabel("Filter agents").fill("private@finite.vip");
+    assert.equal(await page.getByRole("group", { name: "Users view" }).count(), 0);
+    assert.equal(await usersTable.locator("tbody > tr").count(), 1);
+    assert.equal(await page.getByLabel("Filter agents").inputValue(), "private@finite.vip");
+
     await page.getByRole("progressbar", {
       name: "Finite Private weighted token usage",
     }).waitFor({ state: "visible" });
     await page.getByText("84 of 200,000,000 weighted tokens").waitFor({ state: "visible" });
+    await page.getByRole("row", { name: "Open controls for Private Agent" }).click();
     await page.getByRole("button", { name: "Reset usage" }).waitFor({ state: "visible" });
-    await page.getByText("fp_key_1", { exact: true }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).locator("span").filter({ hasText: /^fp_key_1$/u }).waitFor({ state: "visible" });
+    await page.getByRole("dialog", { name: "Private Agent" }).getByRole("button", { name: "Close", exact: true }).click();
+    await page.getByLabel("Filter agents").fill("");
+    await exerciseAgentDialogMutations(page, core.state.adminAgents);
+    await page.getByRole("tab", { name: "Email", exact: true }).click();
+    await page.getByRole("heading", { name: "Change sign-in email" }).waitFor({ state: "visible" });
+    assert.equal(await page.getByLabel("Filter agents").count(), 0);
     await page.getByRole("tab", { name: "Finite Private" }).click();
     await page.getByRole("heading", { name: "Finite Private" }).waitFor({ state: "visible" });
     await page.getByRole("tab", { name: "Invites" }).click();
@@ -136,6 +168,44 @@ test("admins issue Standard or Confidential Launch Codes", { timeout: 120_000 },
     await stopChildProcess(dashboard);
   }
 });
+
+/**
+ * Keyboard tab navigation must not scroll the dashboard shell sideways: the
+ * document can fit while the inner `.ocean-app-scroll` overflows. Users also
+ * portals a fixed-width search field into the tab row, which must shrink on
+ * the narrowest phones.
+ */
+async function assertAdminTabsStayInShell(page: Page) {
+  const tabs = ["Users", "Invites", "Free trials", "Finite Private", "Email"];
+  const steps = [["End", "Email"], ["Home", "Users"], ["End", "Email"], ...tabs.slice(0, -1).reverse().map((name) => ["ArrowLeft", name])];
+  for (const width of [320, 360, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole("tab", { name: "Users", exact: true }).focus();
+    for (const [key, expected] of steps) {
+      await page.keyboard.press(key);
+      const tab = page.getByRole("tab", { name: expected, exact: true });
+      await waitFor(async () => (await tab.getAttribute("aria-selected")) === "true");
+      await assertShellContained(page, width, `${width}px ${expected}`);
+    }
+    await page.getByLabel("Filter agents").fill("private");
+    await assertShellContained(page, width, `${width}px Users search`);
+    await page.getByLabel("Filter agents").fill("");
+  }
+}
+
+async function assertShellContained(page: Page, width: number, label: string) {
+  const shell = await page.locator(".ocean-app-scroll").evaluate((element) => ({
+    clientWidth: element.clientWidth,
+    scrollWidth: element.scrollWidth,
+    scrollLeft: element.scrollLeft,
+  }));
+  assert.ok(shell.scrollWidth <= shell.clientWidth, `${label}: shell overflows ${JSON.stringify(shell)}`);
+  assert.equal(shell.scrollLeft, 0, `${label}: shell scrolled sideways`);
+  const heading = await page.getByRole("heading", { name: "Ministry of Operations" }).boundingBox();
+  assert.ok(heading && heading.x >= 0, `${label}: heading moved to x=${heading?.x}`);
+  const strip = await page.getByRole("tablist", { name: "Admin sections" }).boundingBox();
+  assert.ok(strip && strip.x >= 0 && strip.x + strip.width <= width, `${label}: tab strip clipped ${JSON.stringify(strip)}`);
+}
 
 async function stopChildProcess(process: ChildProcessWithoutNullStreams) {
   if (process.exitCode !== null || process.signalCode !== null) return;
@@ -179,9 +249,10 @@ function startDashboard(port: number, coreUrl: string) {
 }
 
 async function startFakeCore() {
-  const state = {
-    issuancePosts: [] as Array<Record<string, unknown>>,
+  const state: FakeCoreState = {
+    issuancePosts: [],
     resetPosts: 0,
+    adminAgents: createAdminAgentFixture(),
   };
   const server = http.createServer(async (request, response) => {
     try {
@@ -203,10 +274,16 @@ async function startFakeCore() {
   };
 }
 
+type FakeCoreState = {
+  issuancePosts: Array<Record<string, unknown>>;
+  resetPosts: number;
+  adminAgents: AdminAgentFixture;
+};
+
 async function handleCoreRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  state: { issuancePosts: Array<Record<string, unknown>>; resetPosts: number }
+  state: FakeCoreState
 ) {
   if (
     request.headers.authorization !== `Bearer ${CORE_TOKEN}` &&
@@ -216,36 +293,7 @@ async function handleCoreRequest(
     return;
   }
 
-  if (request.method === "GET" && request.url === "/api/core/v1/finite-private/admin-state") {
-    writeJson(response, 200, finitePrivateAdminState());
-    return;
-  }
-
-  if (request.method === "GET" && request.url === "/api/core/v1/admin/runtimes") {
-    writeJson(response, 200, [
-      {
-        project_display_name: "Private Agent",
-        owner_email: "private@finite.vip",
-        project_id: "project_private",
-        agent_runtime_id: "runtime_private",
-        source_host_id: "finite-host-browser",
-        source_machine_id: "finite-kata-browser",
-        runtime_artifact_id: "artifact_browser",
-        runtime_artifact_version_label: "browser-test",
-        runtime_status: "online",
-        last_heartbeat_at: "2026-05-28T12:00:00Z",
-        runtime_updated_at: "2026-05-28T12:01:00Z",
-        hermes_available: true,
-        published_app_urls: [],
-        active_finite_private_key_count: 1,
-        runtime_link_active: true,
-        runtime_capabilities: {
-          restart: true,
-          recover_known_good_chat: true,
-          runtime_upgrade: false,
-        },
-      },
-    ]);
+  if (await handleAdminAgentRequest(request, response, state.adminAgents)) {
     return;
   }
 
@@ -424,101 +472,6 @@ function usageProject() {
       created_at: "2026-05-28T12:00:00Z",
       updated_at: "2026-05-28T12:01:00Z",
     },
-  };
-}
-
-function finitePrivateAdminState() {
-  return {
-    accounts: [
-      {
-        userId: "user_private",
-        email: "private@finite.vip",
-        grant: {
-          id: "fp_grant_1",
-          user_id: "user_private",
-          limit_profile_id: "finite-private-generous-v2",
-          status: "active",
-          current_window_started_at: "2026-05-28T12:00:00Z",
-          current_window_used_units: 84,
-          created_at: "2026-05-28T12:00:00Z",
-          updated_at: "2026-05-28T12:01:00Z",
-        },
-        apiKeys: [
-          {
-            id: "fp_key_1",
-            grant_id: "fp_grant_1",
-            project_id: "project_private",
-            agent_runtime_id: "runtime_private",
-            key_hash: "hash-only",
-            status: "active",
-            created_at: "2026-05-28T12:00:00Z",
-            updated_at: "2026-05-28T12:01:00Z",
-          },
-        ],
-        projects: [
-          {
-            id: "project_private",
-            displayName: "Private Agent",
-            agentRuntimeId: "runtime_private",
-          },
-        ],
-      },
-    ],
-    profiles: [
-      {
-        id: "finite-private-generous-v2",
-        burst_window_seconds: 18_000,
-        burst_limit_units: 200_000_000,
-        weekly_limit_units: null,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-      {
-        id: "finite-private-generous-5x-v1",
-        burst_window_seconds: 18_000,
-        burst_limit_units: 500_000_000,
-        weekly_limit_units: null,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    grants: [
-      {
-        id: "fp_grant_1",
-        user_id: "user_private",
-        limit_profile_id: "finite-private-generous-v2",
-        status: "active",
-        current_window_started_at: "2026-05-28T12:00:00Z",
-        current_window_used_units: 84,
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    apiKeys: [
-      {
-        id: "fp_key_1",
-        grant_id: "fp_grant_1",
-        project_id: "project_private",
-        agent_runtime_id: "runtime_private",
-        key_hash: "hash-only",
-        status: "active",
-        created_at: "2026-05-28T12:00:00Z",
-        updated_at: "2026-05-28T12:01:00Z",
-      },
-    ],
-    adminAuditEvents: [
-      {
-        id: "fp_event_1",
-        action: "finite_private.grant.approve",
-        target_type: "grant",
-        target_id: "fp_grant_1",
-        grant_id: "fp_grant_1",
-        api_key_id: null,
-        actor: "core-service",
-        metadata: {},
-        created_at: "2026-05-28T12:00:00Z",
-      },
-    ],
   };
 }
 

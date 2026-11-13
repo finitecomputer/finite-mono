@@ -6,6 +6,15 @@ pub(super) async fn create_agent_request(
     Json(input): Json<CreateAgentRequest>,
 ) -> Result<Json<RequestAgentCreationResult>, ApiError> {
     let identity = require_verified_identity(&state, &headers).await?;
+    // A launch code grants its own tier. Preserve the Standard default for
+    // ordinary signup, while allowing code holders to use the issued tier.
+    let requested_hosting_tier = input.hosting_tier.or_else(|| {
+        input
+            .launch_code
+            .trim()
+            .is_empty()
+            .then_some(crate::HostingTier::Standard)
+    });
     Ok(Json(
         state
             .store
@@ -20,9 +29,7 @@ pub(super) async fn create_agent_request(
                 },
                 AgentCreationConfiguration {
                     placement: state.agent_creation_placement,
-                    requested_hosting_tier: Some(
-                        input.hosting_tier.unwrap_or(crate::HostingTier::Standard),
-                    ),
+                    requested_hosting_tier,
                     profile_picture_url: input.profile_picture_url,
                     owner_chat_account_id: input.owner_chat_account_id,
                 },

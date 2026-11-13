@@ -22,6 +22,8 @@ PACKAGES = (
     "finite-saas-core",
     "finite-saas-local",
     "finite-saas-runner",
+    "finite-mover-host",
+    "finite-mover",
     "finitechat-server",
     "finitechat-hosted-device",
     "finite-agentd",

@@ -18,10 +18,10 @@ use finitesites_proto::dto::{
     HostedRequesterAssertionResponse, NativeViewerSessionExchangeRequest,
     NativeViewerSessionExchangeResponse, NativeViewerSessionRequest, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSharingResponse, ProjectStatusResponse,
-    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
-    SitesAuthorizedKeyRevokeRequest, VerifiedEmailViewerSessionRequest,
-    VerifiedEmailViewerSessionResponse,
+    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteRedirectResponse,
+    ProjectSiteSharingResponse, ProjectStatusResponse, SharingRequest, SiteRedirectRequest,
+    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
+    VerifiedEmailViewerSessionRequest, VerifiedEmailViewerSessionResponse,
 };
 use finitesites_proto::limits::{
     MAX_API_BODY_BYTES, MAX_AUTH_HEADER_BYTES, MAX_NATIVE_VIEWER_AUTH_BODY_BYTES,
@@ -58,6 +58,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v2/projects/{slug}/site/sharing",
             post(share_project_site),
+        )
+        .route(
+            "/api/v2/projects/{slug}/site/redirect",
+            post(redirect_project_site),
         )
         .route(
             "/internal/v1/viewer-sessions",
@@ -953,6 +957,28 @@ async fn share_project_site(
         shared_npubs: response.shared_npubs,
         invited_emails: response.invited_emails,
     }))
+}
+
+/// `POST /api/v2/projects/{slug}/site/redirect` (ADR 0030): the Project's
+/// owner sends every request for its Site to another origin, or stops.
+async fn redirect_project_site(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+    original_uri: OriginalUri,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<ProjectSiteRedirectResponse>, ApiError> {
+    let actor = authenticate(&state, &headers, "POST", &original_uri, Some(&body))?;
+    let request: SiteRedirectRequest = parse_json_body(&body)?;
+    let mut engine = state.engine.lock().expect("engine mutex never poisoned");
+    let response = engine
+        .set_project_site_redirect(&actor, &slug, &request, now_unix())
+        .map_err(|error| {
+            log_if_internal(&error);
+            ApiError::from(error)
+        })?;
+    assert_eq!(response.project_slug, slug);
+    Ok(Json(response))
 }
 
 #[derive(serde::Deserialize, Default)]

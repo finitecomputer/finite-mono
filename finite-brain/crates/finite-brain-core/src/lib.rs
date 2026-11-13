@@ -1,6 +1,15 @@
 //! FiniteBrain Portable v1 core domain and validation logic.
 
+pub mod personal_agent_consent;
 pub mod portability;
+
+pub use personal_agent_consent::{
+    MAX_PERSONAL_AGENT_CONSENT_SECONDS, PERSONAL_AGENT_CONSENT_VERSION,
+    PersonalAgentConsentPayload, is_reserved_personal_brain_id,
+    personal_agent_consent_event_template, personal_agent_consent_nonce,
+    personal_brain_id_for_owner, validate_personal_agent_consent_payload,
+    verify_personal_agent_consent_event,
+};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
@@ -67,7 +76,10 @@ pub const MAX_PERSONAL_AGENT_ROTATION_FOLDERS: usize = 100;
 /// Maximum Folder Key Grants accepted for one Folder rotation.
 pub const MAX_FOLDER_ROTATION_GRANTS: usize = 1_000;
 /// Maximum re-encrypted object records accepted for one Folder rotation.
-pub const MAX_FOLDER_ROTATION_RECORDS: usize = 1_000;
+/// Removing access must re-encrypt every live object of the Folder, and one
+/// Folder may hold every current object its Brain accepts, so this equals the
+/// envelope: an accepted Folder must never be too large to revoke.
+pub const MAX_FOLDER_ROTATION_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
 /// Maximum total Folder Key Grants accepted in one Personal Agent request.
 pub const MAX_PERSONAL_AGENT_ROTATION_GRANTS: usize = 10_000;
 /// Maximum total re-encrypted records accepted in one Personal Agent request.
@@ -83,6 +95,30 @@ pub const MAX_MEMBER_REMOVAL_ROTATIONS: usize =
 pub const MAX_MEMBER_REMOVAL_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
 /// Maximum total re-encrypted records accepted in one Member removal.
 pub const MAX_MEMBER_REMOVAL_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
+/// Maximum request body for one request that carries Folder Key rotation
+/// material: standalone rotation, Folder access removal, Member removal and
+/// Mount participant or Mount revocation. Each re-encrypted page travels with
+/// its signed revision event, so the ordinary 1 MiB request cap would refuse
+/// a Folder whose live pages total about 1 MiB. This explicit budget stays
+/// below the 128 MiB export a client downloads to prepare the rotation and is
+/// the binding bound for a Folder of many large pages; larger rotations are
+/// refused before anything is sent, never truncated.
+pub const MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// Seconds an admitted rotation request may take to deliver its body before
+/// the server answers 408 and releases its admission permit.
+pub const ROTATION_BODY_READ_DEADLINE_SECONDS: u64 = 60;
+/// Seconds an authorized rotation request may wait, in arrival order, for an
+/// admission permit before the server answers 503: two body deadlines, so a
+/// request with nobody waiting ahead of it reaches the front within one
+/// deadline of any stall ahead; each earlier waiter can add another deadline.
+pub const ROTATION_ADMISSION_WAIT_SECONDS: u64 = 2 * ROTATION_BODY_READ_DEADLINE_SECONDS;
+/// Maximum Folder rotations accepted in one admin demotion: at most every
+/// native Folder of the Brain.
+pub const MAX_ADMIN_DEMOTION_ROTATIONS: usize = BRAIN_CAPACITY_ENVELOPE.folders;
+/// Maximum total Folder Key Grants accepted in one admin demotion.
+pub const MAX_ADMIN_DEMOTION_GRANTS: usize = BRAIN_CAPACITY_ENVELOPE.folder_key_grants;
+/// Maximum total re-encrypted records accepted in one admin demotion.
+pub const MAX_ADMIN_DEMOTION_RECORDS: usize = BRAIN_CAPACITY_ENVELOPE.current_objects;
 
 /// Versioned official Product Client identity boundary.
 pub const BRAIN_IDENTITY_PROVIDER_VERSION: &str = "finite-brain-identity-provider-v1";
@@ -778,7 +814,13 @@ pub struct FolderRotationFanout {
 pub enum FolderRotationOperation {
     PersonalAgent,
     FolderAccessRemoval,
+    /// Standalone rotation of one Folder Key with no removed target. Bounded
+    /// exactly like Folder access removal: one Folder per request.
+    FolderKeyRotation,
     MemberRemoval,
+    /// Removing the admin role: one rotation per native Folder the demoted
+    /// key reached only through that role.
+    AdminDemotion,
 }
 
 /// Validate key-rotation work before cryptography, record parsing, or durable mutation.
@@ -789,22 +831,30 @@ pub fn validate_folder_rotation_fanout(
     let operation_name = match operation {
         FolderRotationOperation::PersonalAgent => "Personal Agent rotation",
         FolderRotationOperation::FolderAccessRemoval => "Folder access removal",
+        FolderRotationOperation::FolderKeyRotation => "Folder Key rotation",
         FolderRotationOperation::MemberRemoval => "Member removal",
+        FolderRotationOperation::AdminDemotion => "Admin demotion",
     };
     let max_rotations = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_FOLDERS,
-        FolderRotationOperation::FolderAccessRemoval => 1,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => 1,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_ROTATIONS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_ROTATIONS,
     };
     let max_total_grants = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_GRANTS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_GRANTS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_GRANTS,
     };
     let max_total_records = match operation {
         FolderRotationOperation::PersonalAgent => MAX_PERSONAL_AGENT_ROTATION_RECORDS,
-        FolderRotationOperation::FolderAccessRemoval => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        FolderRotationOperation::FolderAccessRemoval
+        | FolderRotationOperation::FolderKeyRotation => MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
         FolderRotationOperation::MemberRemoval => MAX_MEMBER_REMOVAL_RECORDS,
+        FolderRotationOperation::AdminDemotion => MAX_ADMIN_DEMOTION_RECORDS,
     };
 
     let mut rotation_count = 0usize;
@@ -1018,6 +1068,12 @@ fn bootstrap_organization_brain_with_admins(
     admin_user_ids: Vec<String>,
 ) -> Result<BootstrapOutput, CoreError> {
     let brain_id = BrainId::new(brain_id)?;
+    if is_reserved_personal_brain_id(brain_id.as_str()) {
+        return Err(CoreError::InvalidBootstrapInput {
+            reason: "Brain IDs shaped like personal-<16 hex characters> are reserved for Personal Brains"
+                .to_owned(),
+        });
+    }
     let name = DisplayName::new("brain_name", name)?;
     let admin_user_ids = admin_user_ids
         .into_iter()
@@ -1630,6 +1686,9 @@ pub enum AdminAccessAction {
     SetFolderAccessMode,
     /// Permanently delete a Folder subtree.
     DeleteFolder,
+    /// Permanently delete an Organization Brain. The signed note carries the
+    /// server's deletion preview state digest the admin confirmed.
+    DeleteBrain,
 }
 
 impl AdminAccessAction {
@@ -1646,6 +1705,7 @@ impl AdminAccessAction {
             Self::RotateFolderKey => "rotate-folder-key",
             Self::SetFolderAccessMode => "set-folder-access-mode",
             Self::DeleteFolder => "delete-folder",
+            Self::DeleteBrain => "delete-brain",
         }
     }
 }
@@ -1665,6 +1725,7 @@ impl TryFrom<&str> for AdminAccessAction {
             "rotate-folder-key" => Ok(Self::RotateFolderKey),
             "set-folder-access-mode" => Ok(Self::SetFolderAccessMode),
             "delete-folder" => Ok(Self::DeleteFolder),
+            "delete-brain" => Ok(Self::DeleteBrain),
             _ => Err(CryptoRecordError::BadOperation {
                 operation: value.to_owned(),
             }),
@@ -3302,6 +3363,23 @@ mod tests {
     }
 
     #[test]
+    fn every_rotation_admits_a_folder_holding_every_accepted_object() {
+        let full_folder = FolderRotationFanout {
+            grants: 1,
+            reencrypted_records: BRAIN_CAPACITY_ENVELOPE.current_objects,
+        };
+        for operation in [
+            FolderRotationOperation::PersonalAgent,
+            FolderRotationOperation::FolderAccessRemoval,
+            FolderRotationOperation::FolderKeyRotation,
+            FolderRotationOperation::MemberRemoval,
+            FolderRotationOperation::AdminDemotion,
+        ] {
+            validate_folder_rotation_fanout(operation, [full_folder]).unwrap();
+        }
+    }
+
+    #[test]
     fn bounds_folder_access_removal_rotation_fanout() {
         assert!(matches!(
             validate_folder_rotation_fanout(
@@ -3312,6 +3390,97 @@ mod tests {
                 }],
             ),
             Err(CoreError::RotationFanoutLimitExceeded {
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_admin_demotion_to_one_rotation_per_native_folder() {
+        let one_grant = FolderRotationFanout {
+            grants: 1,
+            reencrypted_records: 0,
+        };
+        assert!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                std::iter::repeat_n(one_grant, MAX_ADMIN_DEMOTION_ROTATIONS),
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                std::iter::repeat_n(one_grant, MAX_ADMIN_DEMOTION_ROTATIONS + 1),
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Admin demotion",
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::AdminDemotion,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ROTATION_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Admin demotion",
+                resource: "re-encrypted records per Folder rotation",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounds_standalone_folder_key_rotation_like_access_removal() {
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                    FolderRotationFanout {
+                        grants: 1,
+                        reencrypted_records: 0,
+                    },
+                ],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                resource: "Folder rotations",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: MAX_FOLDER_ACCESS_REMOVAL_GRANTS + 1,
+                    reencrypted_records: 0,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
+                ..
+            })
+        ));
+        assert!(matches!(
+            validate_folder_rotation_fanout(
+                FolderRotationOperation::FolderKeyRotation,
+                [FolderRotationFanout {
+                    grants: 0,
+                    reencrypted_records: MAX_FOLDER_ACCESS_REMOVAL_RECORDS + 1,
+                }],
+            ),
+            Err(CoreError::RotationFanoutLimitExceeded {
+                operation: "Folder Key rotation",
                 resource: "re-encrypted records per Folder rotation",
                 ..
             })

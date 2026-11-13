@@ -1,5 +1,6 @@
 //! Core domain contracts and the stable crate-root facade.
 
+pub mod account_labels;
 pub mod api;
 pub mod auth;
 pub mod billing;
@@ -105,9 +106,10 @@ pub use runtime::{
 };
 
 pub use runtime_admin::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminOffboardRetiredRuntimeInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRetireExactInput,
-    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, RetiredRuntimeOffboardReceipt,
+    AdminArchiveUnrecoverableRuntimeInput, AdminMarkRuntimeMovedExactInput,
+    AdminOffboardRetiredRuntimeInput, AdminRuntimeControlInput, AdminRuntimeOverview,
+    AdminRuntimeRetireExactInput, AdminRuntimeStopExactInput, AdminRuntimeUpgradeExactInput,
+    AdminRuntimeUpgradeInput, RetiredRuntimeOffboardReceipt, RuntimeMoveReceipt, RuntimeMoved,
     UnrecoverableRuntimeArchiveReceipt,
 };
 

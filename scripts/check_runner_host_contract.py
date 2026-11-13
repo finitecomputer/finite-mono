@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify all Kata Runner hosts share one runner-role declaration.
 
-finite-lat-1 (retired), finite-lat-3, finite-lat-4, and finite-lat-5 import
+finite-lat-1 (retired), finite-lat-3, finite-lat-4, finite-lat-5, and finite-lat-7 import
 infra/nixos/modules/kata-runner-host.nix,
 which renders the shared non-secret environment to
 /etc/finite/runner-shared.env and owns the finite-saas-runner unit shape. Host
@@ -18,7 +18,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4", "finite-lat-5"]
+HOSTS = ["finite-lat-1", "finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"]
 
 EXPECTED_MAX_SANDBOXES = {
     "finite-lat-1": "12",
@@ -27,6 +27,7 @@ EXPECTED_MAX_SANDBOXES = {
     "finite-lat-3": "32",
     "finite-lat-4": "32",
     "finite-lat-5": "32",
+    "finite-lat-7": "8",  # Qualified host ceiling; bootstrap overrides to one.
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
@@ -35,6 +36,7 @@ OPERATOR_ENV_TEMPLATES = (
     ROOT / "infra/nixos/hosts/finite-lat-3/runner.env.example",
     ROOT / "infra/nixos/hosts/finite-lat-4/runner.env.example",
     ROOT / "infra/nixos/hosts/finite-lat-5/runner.env.example",
+    ROOT / "infra/nixos/hosts/finite-lat-7/runner.env.example",
 )
 
 # Keys the host configs set through finite.kataRunnerHost.*. Everything else
@@ -319,7 +321,7 @@ def check_unit_fragments() -> None:
 def check_hosted_ingress() -> None:
     expected_origins = {
         f"finite-lat-{number}": f"https://agents-lat{number}.finite.computer"
-        for number in (3, 4, 5)
+        for number in (3, 4, 5, 7)
     }
     for host in HOSTS:
         enabled = json.loads(nix_eval(host, "finite.hostedHermes.enable"))

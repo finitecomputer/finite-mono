@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_upgrade(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_upgrade_exact(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_upgrade_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_retire_exact(
@@ -29,9 +27,79 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_retire_exact(&*tx, input).await;
+        self.finish(tx, result).await
+    }
+
+    /// The mover's stop, which holds the Runtime for its move
+    /// ([`move_holds`]).
+    pub async fn admin_request_runtime_stop_exact(
+        &self,
+        input: AdminRuntimeStopExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
+            let expected = RuntimeControlExpectedBinding {
+                agent_runtime_id: input.expected_agent_runtime_id,
+                source_host_id: input.expected_source_host_id,
+                source_machine_id: input.expected_source_machine_id,
+            };
+            let result = postgres_admin_request_runtime_control_holding(
+                &*tx,
+                AdminRuntimeControlInput {
+                    admin_verified_email: input.admin_verified_email,
+                    admin_workos_user_id: input.admin_workos_user_id,
+                    project_id: input.project_id,
+                    now: input.now,
+                },
+                RuntimeControlKind::Stop,
+                None,
+                Some(&expected),
+                MoveHold::Take,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
+    }
+
+    /// Restart one exact Runtime: the Stop-exact binding, a Restart control.
+    /// The mover's restart (staff gave it back) is the one start a hold
+    /// lets through: it releases the hold first, in this transaction. A
+    /// Runtime marked moved stays held, so it is refused and nothing
+    /// changes.
+    pub async fn admin_request_runtime_restart_exact(
+        &self,
+        input: AdminRuntimeStopExactInput,
+    ) -> CoreResult<RuntimeControlRequest> {
+        let mut client = self.connection().await?;
+        let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
+            let expected = RuntimeControlExpectedBinding {
+                agent_runtime_id: input.expected_agent_runtime_id,
+                source_host_id: input.expected_source_host_id,
+                source_machine_id: input.expected_source_machine_id,
+            };
+            let result = postgres_admin_request_runtime_control_holding(
+                &*tx,
+                AdminRuntimeControlInput {
+                    admin_verified_email: input.admin_verified_email,
+                    admin_workos_user_id: input.admin_workos_user_id,
+                    project_id: input.project_id,
+                    now: input.now,
+                },
+                RuntimeControlKind::Restart,
+                None,
+                Some(&expected),
+                MoveHold::Release,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_relocate_exact(
@@ -40,9 +108,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_admin_request_runtime_relocate_exact(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_restart(
@@ -51,11 +118,18 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_admin_request_runtime_control(&*tx, input, RuntimeControlKind::Restart, None)
-                .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result = postgres_admin_request_runtime_control(
+                &*tx,
+                input,
+                RuntimeControlKind::Restart,
+                None,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn admin_request_runtime_recover_known_good_chat(
@@ -70,9 +144,8 @@ impl CoreStore {
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
             None,
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 }
 
@@ -82,6 +155,39 @@ pub(super) async fn postgres_admin_request_runtime_control_bound<C>(
     kind: RuntimeControlKind,
     target_runtime_artifact_id: Option<String>,
     expected: Option<&RuntimeControlExpectedBinding>,
+) -> CoreResult<RuntimeControlRequest>
+where
+    C: GenericClient + Sync,
+{
+    postgres_admin_request_runtime_control_holding(
+        client,
+        input,
+        kind,
+        target_runtime_artifact_id,
+        expected,
+        MoveHold::Keep,
+    )
+    .await
+}
+
+/// What an admin control does to FIN-463's hold ([`move_holds`]): the
+/// mover's stop takes it, its restart releases it. Both happen after the
+/// admin user is ensured, so every path locks the user, then the Runtime,
+/// then the hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum MoveHold {
+    Keep,
+    Take,
+    Release,
+}
+
+async fn postgres_admin_request_runtime_control_holding<C>(
+    client: &C,
+    input: AdminRuntimeControlInput,
+    kind: RuntimeControlKind,
+    target_runtime_artifact_id: Option<String>,
+    expected: Option<&RuntimeControlExpectedBinding>,
+    move_hold: MoveHold,
 ) -> CoreResult<RuntimeControlRequest>
 where
     C: GenericClient + Sync,
@@ -98,6 +204,11 @@ where
     let project = select_project(client, &input.project_id)
         .await?
         .ok_or(CoreError::ProjectNotFound)?;
+    if move_hold == MoveHold::Release
+        && let Some(expected) = expected
+    {
+        release(client, &expected.agent_runtime_id).await?;
+    }
     let request = postgres_enqueue_runtime_control_request_bound(
         client,
         &project,
@@ -108,6 +219,10 @@ where
         expected,
     )
     .await?;
+    if move_hold == MoveHold::Take {
+        refuse_while_a_start_is_active(client, &request.agent_runtime_id).await?;
+        hold(client, &request).await?;
+    }
     record_explicit_trial_runtime_intent(client, &request).await?;
     let action = match kind {
         RuntimeControlKind::Restart => "runtime.admin_restart",

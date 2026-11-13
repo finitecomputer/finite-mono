@@ -62,7 +62,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
     violations = _require(
         text,
         (
-            "cvm-version: 0.14.13",
+            "cvm-version: 0.14.17",
             "cpus: 32",
             "memory: 524288",
             "gpus: 8",
@@ -98,7 +98,7 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         _require_once(
             text,
             (
-                "cvm-version: 0.14.13",
+                "cvm-version: 0.14.17",
                 "cpus: 32",
                 "memory: 524288",
                 "gpus: 8",
@@ -119,13 +119,30 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         r"^(?:cvm-version|cpus|memory|gpus):.*$", text, re.MULTILINE
     )
     if top_level_resources != [
-        "cvm-version: 0.14.13",
+        "cvm-version: 0.14.17",
         "cpus: 32",
         "memory: 524288",
         "gpus: 8",
     ]:
         violations.append(
             "GLM candidate has duplicate, reordered, or conflicting top-level resources"
+        )
+    # CVM 0.14.17 refuses multiple Hopper GPUs without measured consent to
+    # unencrypted NVLink. A container-local setting cannot satisfy this gate.
+    security_headers = re.findall(
+        r"""^(?:security|"security"|'security')[ \t]*:""", text, re.MULTILINE
+    )
+    security_blocks = re.findall(
+        r"^security:[^\n]*\n.*?(?=^\S|\Z)", text, re.MULTILINE | re.DOTALL
+    )
+    if (
+        security_headers != ["security:"]
+        or len(security_blocks) != 1
+        or security_blocks[0].strip() != "security:\n  allow-unencrypted-nvlink: true"
+    ):
+        violations.append(
+            "GLM candidate must declare exactly one top-level security block "
+            "allowing unencrypted NVLink for eight H200 GPUs"
         )
     # The current CVM rejects host IPC. Scope shared-memory settings to the
     # model container so declarations on the limiter cannot satisfy this gate.

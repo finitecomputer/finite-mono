@@ -476,6 +476,8 @@ fn build_rows_with_grant_evidence(
             }),
             description: IdentityDescriptionView::withheld("descriptions not yet attached"),
             stored_nip05: None,
+            operator_annotation: None,
+            operator_record: None,
             folders: entries,
             incoming_mounts: incoming,
             missing_current_grants,

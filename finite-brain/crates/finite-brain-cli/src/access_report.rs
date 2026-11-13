@@ -8,7 +8,10 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::signer::load_signer;
-use crate::{CliEnvironment, CliError, signed_json_request_with_response_limit, write_json};
+use crate::{
+    CliEnvironment, CliError, signed_json_request_with_response_limit, unsupported_on_older_server,
+    write_json,
+};
 
 pub(crate) const ACCESS_REPORT_VERSION: &str = "finite-brain-access-report-v1";
 const PAGE_LIMIT: usize = 100;
@@ -533,16 +536,10 @@ fn validate_page(
     Ok(())
 }
 
-/// A 404 that is the server's unknown-route answer means an older Brain
-/// server. Fail clearly instead of falling back to a weaker metadata view.
+/// An older Brain server has no report route. Fail clearly instead of
+/// falling back to a weaker metadata view.
 fn unsupported_report_server(error: CliError, brain_id: &str) -> CliError {
-    match error {
-        CliError::HttpStatus { status: 404, body } if body.contains("route not found") => {
-            unsupported(brain_id)
-        }
-        CliError::HttpStatus { status: 405, .. } => unsupported(brain_id),
-        other => other,
-    }
+    unsupported_on_older_server(error, || unsupported(brain_id))
 }
 
 fn unsupported(brain_id: &str) -> CliError {

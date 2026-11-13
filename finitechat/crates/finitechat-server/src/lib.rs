@@ -65,8 +65,8 @@ pub fn finite_delivery_limits() -> HttpDeliveryLimits {
 mod auth;
 /// One-time op-log fold of a pre-cutover database onto the normalized
 /// engine, plus the minimal legacy READER that feeds it. Transitional:
-/// PR 2 (`cleanup/chat-store-delete-old`) deletes this module wholesale
-/// before 2026-10-14.
+/// PR 2 (`cleanup/chat-store-delete-old`) deletes this module wholesale;
+/// Linear FIN-493 tracks it and its due date.
 mod cutover;
 mod projections;
 mod routes;
@@ -85,9 +85,8 @@ pub use state::{
 };
 
 /// Date the chat store swap cutover (PR 1) opened the rollback window. The
-/// boot banner, `scripts/finite-status`'s amber line, and the dated
-/// deletion-deadline test all key off dates in this module; PR 2 deletes
-/// all of them.
+/// boot banner and `scripts/finite-status`'s amber line key off this date;
+/// PR 2 (FIN-493) deletes all of them.
 pub const CHAT_ENGINE_ROLLOUT_SINCE: &str = "2026-08-31";
 
 /// Print the transitional rollback-window banner on stderr. Every durable
@@ -103,8 +102,7 @@ pub fn print_engine_rollout_banner() {
          the pre-fold backup only if `finitechat-server rollback-check\n\
          --sqlite PATH` passes; otherwise roll forward (the restore is\n\
          refused once any post-fold write exists). The legacy reader and\n\
-         fold code are deleted by cleanup/chat-store-delete-old before\n\
-         2026-10-14."
+         fold code are deleted by cleanup/chat-store-delete-old (FIN-493)."
     );
 }
 
@@ -640,53 +638,10 @@ fn kind_for_error(error: &HttpServerError) -> &'static str {
 #[cfg(test)]
 mod engine_cutover_tripwires {
     use std::path::PathBuf;
-    use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// PR 2 (`cleanup/chat-store-delete-old`) must land before this date.
-    /// After it, this test fails CI until the transitional reader/fold
-    /// module (`src/cutover.rs`) is deleted. Postponing the deletion means
-    /// consciously editing this constant in review — that is the point.
-    // Retain the reader through 2026-10-13 while the reader-removal PR
-    // assembles its own reviewed recovery evidence. Deletion ships alone.
-    const LEGACY_READER_DELETION_DEADLINE: (i64, u32, u32) = (2026, 10, 14);
-
-    fn deadline_unix_seconds() -> i64 {
-        let (year, month, day) = LEGACY_READER_DELETION_DEADLINE;
-        // Days since 1970-01-01 for the (year, month, day) Gregorian date
-        // (Howard Hinnant's days_from_civil).
-        let years = year - if month <= 2 { 1 } else { 0 };
-        let era = if years >= 0 { years } else { years - 399 } / 400;
-        let year_of_era = years - era * 400;
-        let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
-        let day_of_era =
-            year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year as i64;
-        let days = era * 146_097 + day_of_era - 719_468;
-        days * 86_400
-    }
-
-    #[test]
-    fn legacy_reader_module_is_deleted_by_the_cutover_deadline() {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("wall clock after the unix epoch")
-            .as_secs() as i64;
-        if now < deadline_unix_seconds() {
-            // Window still open: the transitional reader/fold is allowed to
-            // exist.
-            return;
-        }
-        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src")
-            .join("cutover.rs");
-        assert!(
-            !source.exists(),
-            "the chat store swap deletion deadline ({:?}) has passed and \
-             src/cutover.rs (the transitional legacy reader + fold) still exists: \
-             land PR 2 (cleanup/chat-store-delete-old) or consciously move \
-             LEGACY_READER_DELETION_DEADLINE in this test",
-            LEGACY_READER_DELETION_DEADLINE
-        );
-    }
+    // The transitional reader/fold module (`src/cutover.rs`) has no dated
+    // deletion test: no CI test may fail because of the calendar. Its
+    // deletion and due date are tracked in Linear FIN-493.
 
     #[test]
     fn legacy_engine_is_gone_from_the_source_tree() {

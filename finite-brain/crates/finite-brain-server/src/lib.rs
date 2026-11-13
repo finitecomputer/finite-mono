@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, OriginalUri, Path as AxumPath, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, OriginalUri, Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -24,18 +24,20 @@ use finite_brain_core::{
     FolderId, FolderObjectOperation, FolderObjectRevisionPayload, FolderObjectTombstonePayload,
     FolderRotationFanout, FolderRotationOperation, ObjectId, RequiredFolderKeyGrant,
     RevisionValidation, SafeRelativePath, TombstoneValidation, UserId,
-    bootstrap_organization_brain, bootstrap_organization_brain_with_requester, decode_sync_payload,
-    generate_capability_token, sha256_hex, validate_admin_access_change_event,
-    validate_folder_rotation_fanout, validate_revision_event, validate_tombstone_event,
+    bootstrap_organization_brain, bootstrap_organization_brain_with_requester,
+    bootstrap_personal_brain, decode_sync_payload, generate_capability_token, sha256_hex,
+    validate_admin_access_change_event, validate_folder_rotation_fanout, validate_revision_event,
+    validate_tombstone_event, verify_personal_agent_consent_event,
 };
 use finite_brain_store::{
     BrainInvitationTargetKind, BrainInviteTokenRole, BrainStore, ControlSyncRecord,
     EncryptedBrainExport, FolderKeyGrantMetadata, FolderObjectRevisionSyncRecord,
     FolderObjectTombstoneSyncRecord, GrantFolderAccessOutcome, IdentityAlias, LinkStatus,
-    MountedFolderProjection, MountedFolderState, PendingGrantWrap, SharedFolderConnectionStatus,
-    SharedFolderDirection, StoreError, StoredBrain, StoredBrainInvitation, StoredBrainInviteToken,
-    StoredShareLink, StoredSharedFolderConnection, StoredSharedFolderInvitation, StoredSyncRecord,
-    SyncRecordInput, SyncRecordType, VisibleBrain, VisibleBrainRole, timestamp_expired,
+    MountedFolderProjection, MountedFolderState, OpenFolderToAllMembersOutcome, PendingGrantWrap,
+    SharedFolderConnectionStatus, SharedFolderDirection, StoreError, StoredBrain,
+    StoredBrainInvitation, StoredBrainInviteToken, StoredShareLink, StoredSharedFolderConnection,
+    StoredSharedFolderInvitation, StoredSyncRecord, SyncRecordInput, SyncRecordType, VisibleBrain,
+    VisibleBrainRole, timestamp_expired,
 };
 use finite_nostr::{
     MAX_NIP05_DOCUMENT_BYTES, Nip05Identifier, Nip05WellKnownDocument, Nip05WellKnownRequest,
@@ -59,7 +61,9 @@ pub(crate) use object_records::*;
 pub(crate) use responses::*;
 
 use protected_routes::{
-    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware, validate_request_auth,
+    authenticate_request_header_at, charge_rotation_admission_exit,
+    cors_allowed_origins_from_public_base_url, cors_allowlist_middleware,
+    refuse_rate_limited_signer, validate_admitted_rotation_auth, validate_request_auth,
 };
 
 const DEFAULT_PUBLIC_BASE_URL: &str = "http://127.0.0.1:3015";
@@ -91,6 +95,8 @@ pub struct HealthStatus {
 pub enum BrainUpdateReason {
     ContentUpdated,
     AccessUpdated,
+    /// The Brain was permanently deleted; sent only to its former readers.
+    BrainDeleted,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
@@ -108,7 +114,8 @@ pub struct BrainUpdateNotification {
 pub struct ServerState {
     store: Arc<Mutex<BrainStore>>,
     public_base_url: Arc<str>,
-    auth_now_unix_seconds: Option<u64>,
+    /// Fixed auth clock for tests; shared so a test can advance it.
+    auth_clock: Option<Arc<std::sync::atomic::AtomicU64>>,
     max_auth_skew_seconds: u64,
     auth_replay_cache: Arc<Mutex<BTreeMap<String, u64>>>,
     rate_limit_hits: Arc<Mutex<BTreeMap<String, Vec<u64>>>>,
@@ -118,6 +125,14 @@ pub struct ServerState {
     invite_mailer: Option<BrainInviteMailer>,
     brain_updates: tokio::sync::broadcast::Sender<BrainUpdateNotification>,
     core_descriptions: Option<CoreDescriptionClient>,
+    /// Bounds how many rotation requests may hold large bodies at once.
+    rotation_request_permits: Arc<tokio::sync::Semaphore>,
+    /// How long an admitted rotation request may take to deliver its body.
+    rotation_body_read_deadline: Duration,
+    /// How long an authorized rotation request may wait for a permit.
+    rotation_admission_wait: Duration,
+    /// Authorized rotation requests currently waiting for a permit.
+    rotation_waiting_requests: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + Send + Sync>;
@@ -126,7 +141,7 @@ type BrainInviteMailer = Arc<dyn Fn(&BrainInviteEmail) -> Result<(), String> + S
 #[derive(Clone)]
 struct CoreDescriptionClient {
     brain_server: String,
-    lookup: core_descriptions::CoreDescriptionLookup,
+    lookup: core_descriptions::scoped::ScopedDescriptionLookup,
 }
 
 /// Server-visible Brain invitation email payload.
@@ -155,7 +170,7 @@ impl ServerState {
         Self {
             store: Arc::new(Mutex::new(store)),
             public_base_url: Arc::<str>::from(public_base_url),
-            auth_now_unix_seconds: None,
+            auth_clock: None,
             max_auth_skew_seconds: DEFAULT_MAX_AUTH_SKEW_SECONDS,
             auth_replay_cache: Arc::new(Mutex::new(BTreeMap::new())),
             rate_limit_hits: Arc::new(Mutex::new(BTreeMap::new())),
@@ -168,7 +183,27 @@ impl ServerState {
             invite_mailer: None,
             brain_updates,
             core_descriptions: None,
+            rotation_request_permits: Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_ROTATION_REQUESTS,
+            )),
+            rotation_body_read_deadline: ROTATION_BODY_READ_DEADLINE,
+            rotation_admission_wait: ROTATION_ADMISSION_WAIT,
+            rotation_waiting_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Override how long an authorized rotation request may wait, in arrival
+    /// order, for a permit (default `ROTATION_ADMISSION_WAIT`).
+    pub fn with_rotation_admission_wait(mut self, wait: Duration) -> Self {
+        self.rotation_admission_wait = wait;
+        self
+    }
+
+    /// Override how long an admitted rotation request may take to deliver its
+    /// body (default `ROTATION_BODY_READ_DEADLINE`).
+    pub fn with_rotation_body_read_deadline(mut self, deadline: Duration) -> Self {
+        self.rotation_body_read_deadline = deadline;
+        self
     }
 
     /// Let the access report ask Core's private identity listener to describe
@@ -183,7 +218,8 @@ impl ServerState {
         base_url: &str,
         credential: impl Into<String>,
     ) -> Result<Self, String> {
-        let lookup = core_descriptions::http_core_description_lookup(base_url, credential.into())?;
+        let lookup =
+            core_descriptions::scoped::http_scoped_description_lookup(base_url, credential.into())?;
         self.core_descriptions = Some(CoreDescriptionClient {
             brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
             lookup,
@@ -205,7 +241,7 @@ impl ServerState {
     ) -> Self {
         self.core_descriptions = Some(CoreDescriptionClient {
             brain_server: self.public_base_url.trim_end_matches('/').to_owned(),
-            lookup: Arc::new(lookup),
+            lookup: core_descriptions::scoped::legacy_fixture(Arc::new(lookup)),
         });
         self
     }
@@ -221,6 +257,15 @@ impl ServerState {
             latest_sequence,
             reason,
             notify_npubs: Vec::new(),
+        });
+    }
+
+    fn publish_brain_deleted(&self, brain_id: &BrainId, audience: &[UserId]) {
+        let _ = self.brain_updates.send(BrainUpdateNotification {
+            brain_id: brain_id.to_string(),
+            latest_sequence: 0,
+            reason: BrainUpdateReason::BrainDeleted,
+            notify_npubs: audience.iter().map(ToString::to_string).collect(),
         });
     }
 
@@ -265,7 +310,9 @@ impl ServerState {
 
     /// Override the auth validation clock for deterministic tests.
     pub fn with_auth_clock(mut self, now_unix_seconds: u64, max_skew_seconds: u64) -> Self {
-        self.auth_now_unix_seconds = Some(now_unix_seconds);
+        self.auth_clock = Some(Arc::new(std::sync::atomic::AtomicU64::new(
+            now_unix_seconds,
+        )));
         self.max_auth_skew_seconds = max_skew_seconds;
         self
     }
@@ -338,8 +385,20 @@ impl ServerState {
     }
 
     fn auth_now_unix_seconds(&self) -> u64 {
-        self.auth_now_unix_seconds
-            .unwrap_or_else(current_unix_seconds)
+        self.auth_clock
+            .as_ref()
+            .map_or_else(current_unix_seconds, |clock| {
+                clock.load(std::sync::atomic::Ordering::Acquire)
+            })
+    }
+
+    /// Move a fixed test auth clock forward, for every clone of this state.
+    #[cfg(test)]
+    fn advance_auth_clock(&self, seconds: u64) {
+        self.auth_clock
+            .as_ref()
+            .expect("advance_auth_clock needs with_auth_clock")
+            .fetch_add(seconds, std::sync::atomic::Ordering::AcqRel);
     }
 
     fn cors_origin_allowed(&self, origin: &str) -> bool {
@@ -387,7 +446,20 @@ impl From<StoreError> for ApiError {
             StoreError::MissingBrain { .. } | StoreError::MissingFolder { .. } => {
                 Self::new(StatusCode::NOT_FOUND, value.to_string())
             }
-            StoreError::DuplicateId { .. } | StoreError::Conflict { .. } => {
+            // A request that skips key versions was prepared incorrectly; a
+            // request at or below the current version lost a race.
+            StoreError::StaleFolderKeyVersion {
+                current_key_version,
+                requested_key_version,
+                ..
+            } if u64::from(requested_key_version) > u64::from(current_key_version) + 1 => {
+                Self::new(StatusCode::BAD_REQUEST, value.to_string())
+            }
+            StoreError::DuplicateId { .. }
+            | StoreError::Conflict { .. }
+            | StoreError::FolderRotationSetMismatch { .. }
+            | StoreError::PersonalBrainConflict { .. }
+            | StoreError::StaleFolderKeyVersion { .. } => {
                 Self::new(StatusCode::CONFLICT, value.to_string())
             }
             StoreError::MissingRequiredGrant { .. }
@@ -472,14 +544,19 @@ pub fn validate_core_identity_url(url: &str) -> Result<String, String> {
 /// Build a router with explicit state.
 pub fn router_with_state(state: ServerState) -> Router {
     let cors_state = state.clone();
-    let normal_routes = normal_signed_api_router();
-    let low_level_routes = low_level_signed_api_router();
+    let normal_routes = normal_signed_api_router(&state);
+    let low_level_routes = low_level_signed_api_router(&state);
     let signed_routes = Router::new().nest("/v1", normal_routes.nest("/admin", low_level_routes));
+    let deletion_state = state.clone();
     Router::new()
         .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .merge(signed_routes)
         .fallback(api_route_not_found_handler)
+        .layer(middleware::from_fn_with_state(
+            deletion_state,
+            deleted_brain_notice_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             cors_state,
             cors_allowlist_middleware,
@@ -495,7 +572,7 @@ async fn api_route_not_found_handler() -> ApiError {
     )
 }
 
-fn normal_signed_api_router() -> Router<ServerState> {
+fn normal_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route("/brain-updates", get(brain_updates_handler))
         .route(
@@ -504,6 +581,14 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route("/identities/resolve", post(resolve_identity_handler))
         .route("/my-invitations", get(list_my_invitations_handler))
+        .route(
+            "/brains/{brain_id}",
+            axum::routing::delete(delete_brain_handler),
+        )
+        .route(
+            "/brains/{brain_id}/deletion-preview",
+            get(brain_deletion_preview_handler),
+        )
         .route("/brains/{brain_id}/metadata", get(brain_metadata_handler))
         .route("/brains/{brain_id}/rename", post(rename_brain_handler))
         .route("/brains/{brain_id}/access", get(brain_metadata_handler))
@@ -579,6 +664,10 @@ fn normal_signed_api_router() -> Router<ServerState> {
             axum::routing::delete(delete_folder_handler),
         )
         .route(
+            "/brains/{brain_id}/folders/{folder_id}/deletion-preview",
+            get(folder_deletion_preview_handler),
+        )
+        .route(
             "/brains/{brain_id}/folders/{folder_id}/invitations",
             get(list_folder_share_links_handler).post(create_folder_invitation_handler),
         )
@@ -609,13 +698,19 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
         .route(
             "/mounts/{connection_id}",
-            get(get_shared_folder_connection_handler)
-                .delete(revoke_shared_folder_connection_handler),
+            get(get_shared_folder_connection_handler).merge(rotation_method(
+                state,
+                RotationAuthority::MountRevocation,
+                axum::routing::delete(revoke_shared_folder_connection_handler),
+            )),
         )
         .route(
             "/mounts/{connection_id}/participants/{target_npub}",
-            axum::routing::put(add_mount_participant_handler)
-                .delete(remove_mount_participant_handler),
+            axum::routing::put(add_mount_participant_handler).merge(rotation_method(
+                state,
+                RotationAuthority::MountParticipantRemoval,
+                axum::routing::delete(remove_mount_participant_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/mounts",
@@ -641,23 +736,55 @@ fn normal_signed_api_router() -> Router<ServerState> {
         )
 }
 
-fn low_level_signed_api_router() -> Router<ServerState> {
+fn low_level_signed_api_router(state: &ServerState) -> Router<ServerState> {
     Router::new()
         .route(
             "/brains/{brain_id}/members/{target_npub}",
-            axum::routing::put(add_member_handler).delete(remove_member_handler),
+            axum::routing::put(add_member_handler).merge(rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::delete(remove_member_handler),
+            )),
+        )
+        .route(
+            "/brains/{brain_id}/members/{target_npub}/removal-plan",
+            get(member_removal_plan_handler),
         )
         .route(
             "/brains/{brain_id}/roles/admin/{target_npub}",
             axum::routing::put(add_admin_handler).delete(remove_admin_handler),
         )
         .route(
+            "/brains/{brain_id}/roles/admin/{target_npub}/demotion",
+            rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::post(demote_admin_handler),
+            ),
+        )
+        .route(
             "/brains/{brain_id}/folders/{folder_id}/access/{target_npub}",
-            axum::routing::put(grant_folder_access_handler).delete(remove_folder_access_handler),
+            axum::routing::put(grant_folder_access_handler).merge(rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::delete(remove_folder_access_handler),
+            )),
         )
         .route(
             "/brains/{brain_id}/folders/{folder_id}/pending-wraps",
             axum::routing::post(complete_pending_wraps_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/open-to-all-members",
+            axum::routing::post(open_folder_to_all_members_handler),
+        )
+        .route(
+            "/brains/{brain_id}/folders/{folder_id}/key-rotations",
+            rotation_method(
+                state,
+                RotationAuthority::BrainAdmin,
+                axum::routing::post(rotate_folder_key_handler),
+            ),
         )
 }
 
@@ -1799,6 +1926,16 @@ fn format_unix_timestamp(unix_seconds: u64) -> Option<String> {
         .ok()
 }
 
+/// A new invitation, invite code or offer: 16 bytes from the OS. A hash of
+/// its request would repeat when an admin re-invites the same key within the
+/// second it revoked, and the store would refuse the duplicate.
+fn fresh_link_id(prefix: &str) -> Result<String, ApiError> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes)
+        .map_err(|_| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"))?;
+    Ok(format!("{prefix}-{}", hex_prefix(&bytes, bytes.len())))
+}
+
 fn generated_link_id(prefix: &str, parts: &[&str], hash_bytes: usize) -> String {
     let mut hasher = Sha256::new();
     for part in parts {
@@ -1827,8 +1964,10 @@ mod tests {
         ORIGIN,
     };
     use finite_brain_core::{
-        FolderKey, FolderObjectAad, MAX_FOLDER_ACCESS_REMOVAL_GRANTS, bootstrap_personal_brain,
-        encrypt_folder_object_with_nonce,
+        FolderKey, FolderObjectAad, MAX_FOLDER_ACCESS_REMOVAL_GRANTS,
+        PERSONAL_AGENT_CONSENT_VERSION, PersonalAgentConsentPayload, bootstrap_personal_brain,
+        encrypt_folder_object_with_nonce, personal_agent_consent_event_template,
+        personal_brain_id_for_owner, sign_brain_event_template,
     };
     use finite_nostr::{
         GiftWrapValidation, HttpAuthEventRequest, build_rumor, encode_http_auth_header,
@@ -1859,7 +1998,7 @@ mod tests {
     fn server_state_defaults_to_portable_v1_auth_skew() {
         let state = ServerState::new(BrainStore::open_in_memory().unwrap(), TEST_BASE_URL);
         assert_eq!(state.max_auth_skew_seconds, 60);
-        assert_eq!(state.auth_now_unix_seconds, None);
+        assert!(state.auth_clock.is_none());
         assert_eq!(state.rate_limit.max_requests, 120);
         assert_eq!(state.rate_limit.window_seconds, 60);
         assert!(state.cors_origin_allowed(TEST_BASE_URL));
@@ -2591,7 +2730,7 @@ mod tests {
         assert_error(
             response,
             StatusCode::BAD_REQUEST,
-            "account-bound agent selection is no longer resolved by the Brain server",
+            "Personal Agent fields are only valid for a Personal Brain",
         )
         .await;
         assert!(
@@ -2617,7 +2756,7 @@ mod tests {
         assert_error(
             response,
             StatusCode::BAD_REQUEST,
-            "Personal Brain creation runs through the account agent bootstrap",
+            "Personal Brain creation requires personalAgentNpub and that Agent's signed personalAgentConsent",
         )
         .await;
         assert!(
@@ -2626,6 +2765,350 @@ mod tests {
                 .lock()
                 .unwrap()
                 .list_visible_brains(&UserId::new(npub(&owner_keys)).unwrap())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    fn personal_agent_consent(
+        agent_keys: &Keys,
+        owner_npub: &str,
+        brain_server: &str,
+        created_at: u64,
+        expires_at: u64,
+    ) -> serde_json::Value {
+        let payload = PersonalAgentConsentPayload {
+            version: PERSONAL_AGENT_CONSENT_VERSION.to_owned(),
+            agent_npub: npub(agent_keys),
+            owner_npub: owner_npub.to_owned(),
+            brain_id: personal_brain_id_for_owner(owner_npub)
+                .unwrap()
+                .as_str()
+                .to_owned(),
+            brain_server: brain_server.to_owned(),
+            nonce: "cd".repeat(16),
+            expires_at,
+        };
+        let template = personal_agent_consent_event_template(&payload, created_at).unwrap();
+        let event = sign_brain_event_template(agent_keys, &template).unwrap();
+        serde_json::from_str(&event.as_json()).unwrap()
+    }
+
+    fn personal_brain_body(brain_id: &str, agent_npub: &str, consent: serde_json::Value) -> String {
+        serde_json::json!({
+            "brainId": brain_id,
+            "kind": "personal",
+            "name": "Personal Brain",
+            "personalAgentNpub": agent_npub,
+            "personalAgentConsent": consent,
+        })
+        .to_string()
+    }
+
+    #[tokio::test]
+    async fn owner_and_agent_signatures_create_one_personal_brain() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let agent = npub(&agent_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let consent =
+            personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600);
+        let body = personal_brain_body(brain_id.as_str(), &agent, consent);
+
+        let response = post_brain(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        // A request retried after a lost response reaches the same Brain.
+        let retry = post_brain(
+            router.clone(),
+            &owner_keys,
+            &body,
+            TEST_NOW + 1,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(retry.status(), StatusCode::OK);
+
+        let stored = state.store.lock().unwrap().load_brain(&brain_id).unwrap();
+        assert_eq!(stored.brain.kind, BrainKind::Personal);
+        assert_eq!(
+            stored.brain.owner_user_id,
+            Some(UserId::new(owner).unwrap())
+        );
+        assert!(stored.brain.folders.is_empty());
+        assert_eq!(
+            stored.personal_agent.unwrap().agent_npub,
+            UserId::new(agent).unwrap()
+        );
+        let brains =
+            authed_request(router, &agent_keys, "GET", "/v1/brains", None, TEST_NOW + 2).await;
+        let brains: VisibleBrainsResponse = read_json(brains).await;
+        assert_eq!(brains.brains.len(), 1);
+        assert_eq!(brains.brains[0].brain_id, brain_id.as_str());
+        assert_eq!(brains.brains[0].role, "personal_agent");
+    }
+
+    #[tokio::test]
+    async fn personal_agent_consent_must_bind_this_agent_owner_brain_server_and_time() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let agent = npub(&agent_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let other_owner = npub(&Keys::generate());
+        let valid =
+            || personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600);
+        let signed_by_owner = {
+            let payload = PersonalAgentConsentPayload {
+                version: PERSONAL_AGENT_CONSENT_VERSION.to_owned(),
+                agent_npub: agent.clone(),
+                owner_npub: owner.clone(),
+                brain_id: brain_id.as_str().to_owned(),
+                brain_server: TEST_BASE_URL.to_owned(),
+                nonce: "cd".repeat(16),
+                expires_at: TEST_NOW + 600,
+            };
+            let template = personal_agent_consent_event_template(&payload, TEST_NOW).unwrap();
+            let event = sign_brain_event_template(&owner_keys, &template).unwrap();
+            serde_json::from_str(&event.as_json()).unwrap()
+        };
+        let cases = [
+            (
+                personal_brain_body(brain_id.as_str(), &npub(&Keys::generate()), valid()),
+                StatusCode::FORBIDDEN,
+                "signed by a different Agent",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &other_owner,
+                        TEST_BASE_URL,
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different owner",
+            ),
+            (
+                // Only the owner binding stops a consent for someone else's
+                // Personal Brain, even when the request names that Brain.
+                personal_brain_body(
+                    personal_brain_id_for_owner(&other_owner).unwrap().as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &other_owner,
+                        TEST_BASE_URL,
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different owner",
+            ),
+            (
+                personal_brain_body("personal-elsewhere", &agent, valid()),
+                StatusCode::FORBIDDEN,
+                "names a different Personal Brain",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        "https://other.example",
+                        TEST_NOW,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "names a different Brain server",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        TEST_BASE_URL,
+                        TEST_NOW - 700,
+                        TEST_NOW - 100,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "has expired",
+            ),
+            (
+                personal_brain_body(
+                    brain_id.as_str(),
+                    &agent,
+                    personal_agent_consent(
+                        &agent_keys,
+                        &owner,
+                        TEST_BASE_URL,
+                        TEST_NOW + 120,
+                        TEST_NOW + 600,
+                    ),
+                ),
+                StatusCode::FORBIDDEN,
+                "signed in the future",
+            ),
+            (
+                personal_brain_body(brain_id.as_str(), &agent, signed_by_owner),
+                StatusCode::BAD_REQUEST,
+                "signer does not match its Agent",
+            ),
+        ];
+        for (body, status, message) in cases {
+            let state = test_state();
+            let response = post_brain(
+                router_with_state(state.clone()),
+                &owner_keys,
+                &body,
+                TEST_NOW,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert_error(response, status, message).await;
+            for key in [&owner, &other_owner] {
+                assert!(
+                    state
+                        .store
+                        .lock()
+                        .unwrap()
+                        .list_visible_brains(&UserId::new(key.clone()).unwrap())
+                        .unwrap()
+                        .is_empty(),
+                    "created a Personal Brain despite: {message}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn organization_creation_cannot_take_a_personal_brain_id() {
+        let owner_keys = Keys::generate();
+        let agent_keys = Keys::generate();
+        let owner = npub(&owner_keys);
+        let brain_id = personal_brain_id_for_owner(&owner).unwrap();
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let squat = create_brain_body(brain_id.as_str(), "organization");
+
+        let response = post_brain(
+            router.clone(),
+            &Keys::generate(),
+            &squat,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "reserved for Personal Brains",
+        )
+        .await;
+
+        let body = personal_brain_body(
+            brain_id.as_str(),
+            &npub(&agent_keys),
+            personal_agent_consent(&agent_keys, &owner, TEST_BASE_URL, TEST_NOW, TEST_NOW + 600),
+        );
+        let response = post_brain(router, &owner_keys, &body, TEST_NOW, None, None, None).await;
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_agent_serves_only_one_personal_brain() {
+        let agent_keys = Keys::generate();
+        let agent = npub(&agent_keys);
+        let state = test_state();
+        let router = router_with_state(state.clone());
+        let first_owner_keys = Keys::generate();
+        let first_owner = npub(&first_owner_keys);
+        let first = personal_brain_body(
+            personal_brain_id_for_owner(&first_owner).unwrap().as_str(),
+            &agent,
+            personal_agent_consent(
+                &agent_keys,
+                &first_owner,
+                TEST_BASE_URL,
+                TEST_NOW,
+                TEST_NOW + 600,
+            ),
+        );
+        let response = post_brain(
+            router.clone(),
+            &first_owner_keys,
+            &first,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let second_owner_keys = Keys::generate();
+        let second_owner = npub(&second_owner_keys);
+        let second = personal_brain_body(
+            personal_brain_id_for_owner(&second_owner).unwrap().as_str(),
+            &agent,
+            personal_agent_consent(
+                &agent_keys,
+                &second_owner,
+                TEST_BASE_URL,
+                TEST_NOW,
+                TEST_NOW + 600,
+            ),
+        );
+        let response = post_brain(
+            router,
+            &second_owner_keys,
+            &second,
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_error(
+            response,
+            StatusCode::CONFLICT,
+            "agent is already the personal agent of another personal brain",
+        )
+        .await;
+        assert!(
+            state
+                .store
+                .lock()
+                .unwrap()
+                .list_visible_brains(&UserId::new(second_owner).unwrap())
                 .unwrap()
                 .is_empty()
         );
@@ -2828,6 +3311,29 @@ mod tests {
             None,
             Some(1),
         );
+        for keys in [&agent_keys, &owner_keys] {
+            let preview = authed_request(
+                router.clone(),
+                keys,
+                "GET",
+                "/v1/brains/personal/folders/agent-notes/deletion-preview",
+                None,
+                TEST_NOW + 3,
+            )
+            .await;
+            assert_eq!(preview.status(), StatusCode::OK);
+            let preview: FolderDeletionPreviewResponse = read_json(preview).await;
+            assert_eq!(
+                preview,
+                FolderDeletionPreviewResponse {
+                    brain_id: "personal".to_owned(),
+                    folder_id: "agent-notes".to_owned(),
+                    folder_ids: vec!["agent-notes".to_owned()],
+                    object_count: 1,
+                    current_key_version: 1,
+                }
+            );
+        }
         let stale_delete_body = serde_json::json!({
             "deletionEvent": deletion_event.clone(),
             "expectedFolderIds": ["agent-notes"],
@@ -2956,6 +3462,169 @@ mod tests {
             "permanent deletion requires brain destructive authority",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn folder_deletion_preview_is_admin_only_and_is_the_scope_delete_accepts() {
+        let admin_keys = Keys::generate();
+        let member_keys = Keys::generate();
+        let member_npub = npub(&member_keys);
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let add_member_body = serde_json::json!({
+            "targetNpub": member_npub,
+            "accessChangeEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "add-preview-test-member",
+                AdminAccessAction::AddMember,
+                None,
+                Some(member_npub.as_str()),
+                None,
+            ),
+        })
+        .to_string();
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "PUT",
+                &format!("/v1/admin/brains/acme/members/{member_npub}"),
+                Some(add_member_body),
+                TEST_NOW,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let object_body = object_write_body(
+            &admin_keys,
+            RevisionFixture {
+                brain_id: "acme",
+                folder_id: "getting-started",
+                object_id: "obj_000000000301",
+                operation: FolderObjectOperation::Create,
+                revision: 1,
+                base_revision: None,
+                key_version: 1,
+                content: "preview note",
+                nonce: 31,
+                record_type: false,
+            },
+        );
+        assert_eq!(
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "PUT",
+                "/v1/brains/acme/folders/getting-started/objects/obj_000000000301",
+                Some(object_body),
+                TEST_NOW + 1,
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let preview_path = "/v1/brains/acme/folders/getting-started/deletion-preview";
+
+        let unsigned = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(preview_path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                unsigned.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ),
+            "{}",
+            unsigned.status()
+        );
+        // Members can read the Folder but hold no destructive authority, so
+        // they cannot probe the subtree size either.
+        let denied = authed_request(
+            router.clone(),
+            &member_keys,
+            "GET",
+            preview_path,
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_error(
+            denied,
+            StatusCode::FORBIDDEN,
+            "permanent deletion requires brain destructive authority",
+        )
+        .await;
+        let missing = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            "/v1/brains/acme/folders/no-such-folder/deletion-preview",
+            None,
+            TEST_NOW + 2,
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let preview = authed_request(
+            router.clone(),
+            &admin_keys,
+            "GET",
+            preview_path,
+            None,
+            TEST_NOW + 3,
+        )
+        .await;
+        assert_eq!(preview.status(), StatusCode::OK);
+        let preview: FolderDeletionPreviewResponse = read_json(preview).await;
+        assert_eq!(
+            preview,
+            FolderDeletionPreviewResponse {
+                brain_id: "acme".to_owned(),
+                folder_id: "getting-started".to_owned(),
+                folder_ids: vec!["getting-started".to_owned()],
+                object_count: 1,
+                current_key_version: 1,
+            }
+        );
+
+        let delete_body = serde_json::json!({
+            "deletionEvent": admin_event(
+                &admin_keys,
+                "acme",
+                "delete-previewed-folder",
+                AdminAccessAction::DeleteFolder,
+                Some("getting-started"),
+                None,
+                Some(preview.current_key_version),
+            ),
+            "expectedFolderIds": preview.folder_ids,
+            "expectedObjectCount": preview.object_count,
+        })
+        .to_string();
+        let deleted = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            "/v1/brains/acme/folders/getting-started",
+            Some(delete_body),
+            TEST_NOW + 4,
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let deleted: FolderDeleteResponse = read_json(deleted).await;
+        assert_eq!(deleted.deleted_folder_ids, vec!["getting-started"]);
+        assert_eq!(deleted.object_count, 1);
+
+        let gone =
+            authed_request(router, &admin_keys, "GET", preview_path, None, TEST_NOW + 5).await;
+        assert_eq!(gone.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -4056,6 +4725,20 @@ mod tests {
         let actor = UserId::new(npub(&keys)).unwrap();
         let state = test_state();
         let router = router_with_state(state.clone());
+        // Rotation admission first requires an admin of the path Brain.
+        let created = post_brain(
+            router.clone(),
+            &keys,
+            &create_brain_body("acme", "organization"),
+            TEST_NOW,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        add_test_org_folders(&router, &keys).await;
+        let sequence_before = latest_sync_sequence(&router, &keys, "acme").await;
 
         let grants = (0..=MAX_FOLDER_ACCESS_REMOVAL_GRANTS)
             .map(|index| {
@@ -4076,11 +4759,11 @@ mod tests {
         })
         .to_string();
         let access = authed_request(
-            router,
+            router.clone(),
             &keys,
             "DELETE",
             &format!(
-                "/v1/admin/brains/personal/folders/notes/access/{}",
+                "/v1/admin/brains/acme/folders/restricted/access/{}",
                 actor.as_str()
             ),
             Some(access_body),
@@ -4094,14 +4777,22 @@ mod tests {
         )
         .await;
 
-        assert!(
-            state
-                .store
-                .lock()
-                .unwrap()
-                .list_visible_brains(&actor)
-                .unwrap()
-                .is_empty()
+        let stored = state
+            .store
+            .lock()
+            .unwrap()
+            .load_brain(&BrainId::new("acme").unwrap())
+            .unwrap();
+        let restricted = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id.as_str() == "restricted")
+            .unwrap();
+        assert_eq!(restricted.current_key_version, 1);
+        assert_eq!(
+            latest_sync_sequence_at(&router, &keys, "acme", TEST_NOW + 2).await,
+            sequence_before
         );
     }
 
@@ -5104,7 +5795,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demoted_member_cannot_regrant_retained_folder_access() {
+    async fn demoted_member_cannot_regrant_folder_access() {
         let admin = Keys::generate();
         let member = Keys::generate();
         let target = npub(&member);
@@ -5137,11 +5828,11 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
         }
         let path = format!("/v1/admin/brains/acme/folders/restricted/access/{target}");
-        let body = |signer: &Keys, id: &str| {
+        let body = |signer: &Keys, id: &str, key_version: u32| {
             serde_json::json!({
-            "grant": folder_key_grant_value(id, 1, &target),
+            "grant": folder_key_grant_value(id, key_version, &target),
             "accessChangeEvent": admin_event(signer, "acme", id,
-                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(1))
+                AdminAccessAction::GrantFolderAccess, Some("restricted"), Some(&target), Some(key_version))
         }).to_string()
         };
         let grant = authed_request(
@@ -5149,19 +5840,30 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "initial-grant")),
+            Some(body(&admin, "initial-grant", 1)),
             TEST_NOW,
         )
         .await;
         assert_eq!(grant.status(), StatusCode::OK);
+        // Demotion rotates the restricted key the member held only by role.
         let demote = authed_request(
             router.clone(),
             &admin,
-            "DELETE",
-            &format!("/v1/admin/brains/acme/roles/admin/{target}"),
+            "POST",
+            &format!("/v1/admin/brains/acme/roles/admin/{target}/demotion"),
             Some(
-                serde_json::json!({"accessChangeEvent": admin_event(&admin, "acme", "demote",
-                AdminAccessAction::RemoveAdmin, None, Some(&target), None)})
+                serde_json::json!({
+                    "accessChangeEvent": admin_event(&admin, "acme", "demote",
+                        AdminAccessAction::RemoveAdmin, None, Some(&target), None),
+                    "rotations": [{
+                        "folderId": "restricted",
+                        "newKeyVersion": 2,
+                        "grants": [folder_key_grant_value("restricted-admin-v2", 2, &npub(&admin))],
+                        "reencryptedRecords": [],
+                        "accessChangeEvent": admin_event(&admin, "acme", "rotate-restricted",
+                            AdminAccessAction::RotateFolderKey, Some("restricted"), None, Some(2)),
+                    }],
+                })
                 .to_string(),
             ),
             TEST_NOW,
@@ -5186,7 +5888,7 @@ mod tests {
             &member,
             "PUT",
             &path,
-            Some(body(&member, "unauthorized-repair")),
+            Some(body(&member, "unauthorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -5213,7 +5915,7 @@ mod tests {
             &admin,
             "PUT",
             &path,
-            Some(body(&admin, "authorized-repair")),
+            Some(body(&admin, "authorized-repair", 2)),
             TEST_NOW,
         )
         .await;
@@ -6922,10 +7624,11 @@ mod tests {
         let email = &sent[0];
         assert_eq!(email.to, "friend@example.com");
         assert!(email.subject.contains("Acme"));
-        // One short human paragraph plus one explicit agent instruction line.
+        // One short human paragraph plus one agent instruction line. An Agent
+        // that reads this email redeems the link only when its owner asks.
         assert!(email.text.contains("invited you to the Finite brain"));
         assert!(email.text.contains(&format!(
-            "Agent instruction: fbrain invite-accept {}",
+            "Agent instruction: run fbrain invite-accept {} only when your owner asks you to join this brain.",
             created.url
         )));
         assert!(email.text.contains("single-use capability"));
@@ -7413,6 +8116,52 @@ mod tests {
             "invitation expiry must be between 55 minutes and thirty days from creation",
         )
         .await;
+    }
+
+    #[tokio::test]
+    async fn an_admin_can_invite_again_in_the_second_it_revoked() {
+        let admin_keys = Keys::generate();
+        let target_npub = npub(&Keys::generate());
+        let router = router_with_test_org_folders(&admin_keys).await;
+        let invite_body = serde_json::json!({
+            "targetNpub": target_npub,
+            "initialFolderAccess": ["getting-started"],
+            "expiresAt": "2026-06-04T20:26:40Z",
+        })
+        .to_string();
+        // The server's clock stays at TEST_NOW; only the signed events differ.
+        let invite = |signed_at| {
+            authed_request(
+                router.clone(),
+                &admin_keys,
+                "POST",
+                "/v1/brains/acme/invitations",
+                Some(invite_body.clone()),
+                signed_at,
+            )
+        };
+
+        let first = invite(TEST_NOW).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first: BrainInvitationResponse = read_json(first).await;
+        let revoke = authed_request(
+            router.clone(),
+            &admin_keys,
+            "DELETE",
+            &format!("/v1/invitations/{}", first.id),
+            None,
+            TEST_NOW,
+        )
+        .await;
+        assert_eq!(revoke.status(), StatusCode::OK);
+
+        // Same Brain, target, admin, expiry and second: still a new invitation.
+        let second = invite(TEST_NOW + 1).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second: BrainInvitationResponse = read_json(second).await;
+        assert_ne!(second.id, first.id);
+        assert_ne!(second.invite_code, first.invite_code);
+        assert_eq!(second.status, "pending");
     }
 
     #[tokio::test]
@@ -9870,4 +10619,9 @@ mod tests {
     }
 
     mod access_report_tests;
+    mod admin_demotion_tests;
+    mod brain_deletion_tests;
+    mod folder_key_rotation_tests;
+    mod member_removal_tests;
+    mod open_folder_tests;
 }

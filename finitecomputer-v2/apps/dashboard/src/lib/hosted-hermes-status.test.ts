@@ -86,3 +86,37 @@ test("malformed, empty and oversized native bodies invalidate prior inventory", 
       error => error instanceof HostedHermesStatusError && error.kind === "unsupported");
   }
 });
+
+import { sendHostedHermesChange } from "./hosted-hermes-status";
+
+test("a change uses one fresh grant, one request and is never retried", async (t) => {
+  for (const status of [401, 409, 502, 504, 200]) {
+    const calls: { url: string; init: RequestInit }[] = [];
+    t.mock.method(globalThis, "fetch", async (input: string | URL, init: RequestInit) => {
+      calls.push({ url: String(input), init });
+      if (String(input).startsWith("/api/agents/")) return Response.json({ baseUrl: "https://agents.test/runtimes/a/", accessToken: "synthetic", expiresAt: 100 });
+      return Response.json({ error: "busy", private: "kept out of the parsed body only by callers" }, { status });
+    });
+    const result = await sendHostedHermesChange("a", "api/plugins/finite-brain/invitations/acme",
+      { method: "POST", body: { target: "mia@finite.vip" } }, new AbortController().signal);
+    assert.equal(result.status, status);
+    assert.equal(calls.length, 2, `status ${status}`);
+    const sent = calls[1];
+    assert.equal(sent.url, "https://agents.test/runtimes/a/api/plugins/finite-brain/invitations/acme");
+    assert.equal(sent.init.method, "POST");
+    assert.equal(sent.init.credentials, "omit");
+    assert.equal(sent.init.redirect, "error");
+    assert.equal(new Headers(sent.init.headers).get("content-type"), "application/json");
+    assert.equal(new Headers(sent.init.headers).get("authorization"), "Bearer synthetic");
+    assert.equal(sent.init.body, JSON.stringify({ target: "mia@finite.vip" }));
+  }
+});
+
+test("a change refuses non-plugin paths before asking for a grant", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => { calls++; return new Response(null); });
+  for (const path of ["api/config", "api/plugins/finite-brain/../config", "api/plugins/finite-brain/x?y=1", "https://x.test/api/plugins/a/b", "api/plugins//x"]) {
+    await assert.rejects(sendHostedHermesChange("a", path, { method: "DELETE" }, new AbortController().signal), /Invalid agent API path/);
+  }
+  assert.equal(calls, 0);
+});

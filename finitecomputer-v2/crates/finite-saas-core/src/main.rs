@@ -5,14 +5,15 @@ use finite_saas_core::auth::CoreAuth;
 use finite_saas_core::hosted_hermes::HostedHermesOrigins;
 use finite_saas_core::store::CoreStore;
 use finite_saas_core::{
-    AdminArchiveUnrecoverableRuntimeInput, AdminOffboardRetiredRuntimeInput, AdminRuntimeOverview,
-    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput,
+    AdminArchiveUnrecoverableRuntimeInput, AdminMarkRuntimeMovedExactInput,
+    AdminOffboardRetiredRuntimeInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
+    AdminRuntimeRetireExactInput, AdminRuntimeStopExactInput, AdminRuntimeUpgradeExactInput,
     ApproveFinitePrivateGrantInput, CoreResult, FinitePrivateApiKey, FinitePrivateGrant,
     IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, OffboardingPhase,
     ResetFinitePrivateUsageWindowInput, RevokeFinitePrivateApiKeyInput,
     RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
-    RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimePlacement,
-    RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
+    RuntimeArtifactKind, RuntimeControlRequest, RuntimeControlRequestStatus, RuntimeMoveReceipt,
+    RuntimeMoved, RuntimePlacement, RuntimeSummaryStatus, UpsertRuntimeArtifactInput,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -47,6 +48,11 @@ async fn main() -> Result<()> {
         Command::RuntimeCredentialRecoverExact(args) => {
             print_json(&runtime_credential_recovery_command(args).await?)
         }
+        Command::BrainScopedRecords {
+            manifest,
+            expected_manifest_sha256,
+            execute,
+        } => brain_scoped_records_command(manifest, expected_manifest_sha256, execute).await,
         Command::Serve => serve().await,
         Command::RuntimeArtifactUpsert {
             artifact_id,
@@ -172,6 +178,12 @@ async fn main() -> Result<()> {
         }
         Command::RuntimeArtifactRollout(args) => runtime_artifact_rollout_command(args).await,
         Command::RuntimeRetireExact(args) => runtime_retire_exact_command(args).await,
+        Command::RuntimeStopExact(args) => runtime_stop_exact_command(args).await,
+        Command::RuntimeRestartExact(args) => runtime_restart_exact_command(args).await,
+        Command::RuntimeMarkMovedExact(args) => {
+            let receipt = runtime_mark_moved_exact_command(args).await?;
+            print_json(&receipt)
+        }
         Command::RuntimeColdRelocateExact(args) => {
             let request = runtime_cold_relocate_exact_command(args).await?;
             print_json(&request)

@@ -451,32 +451,37 @@ async fn sync_stream(
             after_seq: inbox.after_seq,
         }),
     };
+    let heartbeat = std::time::Duration::from_millis(heartbeat_ms);
     let stream = futures_util::stream::unfold(
         SyncStreamLoop {
             state,
             cursors,
             pending: VecDeque::new(),
-            heartbeat_ms,
+            heartbeat,
+            heartbeat_due: tokio::time::Instant::now() + heartbeat,
         },
         |mut stream| async move {
             loop {
                 if let Some(event) = stream.pending.pop_front() {
-                    return Some((Ok(sync_sse_event(event)), stream));
+                    return Some(emit_sync_hint(stream, event));
                 }
 
                 stream
                     .pending
                     .extend(stream.state.collect_sync_hints(&mut stream.cursors));
                 if let Some(event) = stream.pending.pop_front() {
-                    return Some((Ok(sync_sse_event(event)), stream));
+                    return Some(emit_sync_hint(stream, event));
                 }
 
+                // Any write on the server wakes every stream. Waiting on a
+                // fixed deadline keeps that traffic from postponing this
+                // stream's heartbeat, which clients use to bound their reads.
                 let wake = Arc::clone(&stream.state.wake);
                 let notified = wake.notified();
                 tokio::select! {
                     _ = notified => continue,
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(stream.heartbeat_ms)) => {
-                        return Some((Ok(sync_sse_event(SyncHintEvent::Heartbeat)), stream));
+                    _ = tokio::time::sleep_until(stream.heartbeat_due) => {
+                        return Some(emit_sync_hint(stream, SyncHintEvent::Heartbeat));
                     }
                 }
             }
@@ -484,6 +489,14 @@ async fn sync_stream(
     );
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+fn emit_sync_hint(
+    mut stream: SyncStreamLoop,
+    event: SyncHintEvent,
+) -> (Result<Event, Infallible>, SyncStreamLoop) {
+    stream.heartbeat_due = tokio::time::Instant::now() + stream.heartbeat;
+    (Ok(sync_sse_event(event)), stream)
 }
 
 fn sync_sse_event(event: SyncHintEvent) -> Event {

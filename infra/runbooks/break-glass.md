@@ -26,6 +26,19 @@ the `wg-finite` overlay hub at `10.254.3.1`.
 - **lat1 is the frozen point-in-time record.** Do not boot it back into
   service; a second writer on Postgres/chat/sites is split-brain.
 
+## SSH refused on a Latitude host
+
+`infra/nixos/modules/ssh-flood-limits.nix` throttles unauthenticated SSH on
+lat2, lat3, lat4, lat5 and lat7 with sshd settings only; there is no ban
+daemon and no firewall rule. A penalised source is refused for at most 10
+minutes, so waiting it out works. Sources in the module's exempt list (the
+WireGuard overlay and the listed operator address) are never penalised; add a
+changed operator address there. From any working session,
+`systemctl reload sshd` re-executes the listener and clears every penalty;
+open sessions survive. With no working session, assume the provider IPMI
+console offers no login: the path is a power cycle into the previous GRUB
+generation, a full host outage that needs its own go.
+
 ## Legacy hosts
 
 smoke is `15.204.56.61`; clawland is `15.204.108.57`. Consult their host README

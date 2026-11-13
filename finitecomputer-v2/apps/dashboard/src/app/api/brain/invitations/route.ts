@@ -9,7 +9,7 @@ import { requestOriginSameOrNone } from "@/lib/http-headers";
 
 const NO_STORE = { "cache-control": "no-store" };
 
-/// The account's pending Brain invitations (the invitation card's data).
+/// Retained API for the account's pending Brain invitations; no current Chat UI caller.
 export async function GET(request: Request) {
   if (!requestOriginSameOrNone(request)) {
     return Response.json({ error: "Invitations require the dashboard." }, { status: 403, headers: NO_STORE });

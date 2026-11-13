@@ -421,6 +421,31 @@ rec {
     sharedCargoArtifacts = finiteSaasCargoArtifacts;
     cargoArtifactGroup = "finite-saas";
   };
+  # FIN-463: the read-only reader of one durable tree, run on Runner hosts
+  # only as the mover's forced ssh command (modules/finite-mover-host.nix).
+  finite-mover-host = mkWorkspaceCrate {
+    pname = "finite-mover-host";
+    dir = "finitecomputer-v2/crates/finite-mover-host";
+    sourcePaths = [ "finitecomputer-v2/crates/finite-mover-host" ];
+    # The owner notice's curl, by store path: the forced command's PATH has none.
+    extraAttrs.FINITE_MOVER_CURL = "${pkgs.curl}/bin/curl";
+  };
+  # FIN-463: the mover on lat-2 (modules/finite-mover.nix). Its database
+  # role's grants ship beside it, from the same source as its queries.
+  finite-mover = mkWorkspaceCrate {
+    pname = "finite-mover";
+    dir = "finitecomputer-v2/crates/finite-mover";
+    # Core only for Cargo's manifest walk: the tests' schema dev-dependency.
+    sourcePaths = finiteSaasCoreSourcePaths ++ [
+      "finite-nostr"
+      "finitecomputer-v2/crates/finite-mover"
+      "finitecomputer-v2/crates/finite-mover-host"
+    ];
+    extraAttrs.postInstall = ''
+      install -Dm0444 ${sourceRoot + "/finitecomputer-v2/crates/finite-mover/core-role.sql"} \
+        "$out/share/finite-mover/core-role.sql"
+    '';
+  };
   finitechat-server = mkWorkspaceCrate {
     pname = "finitechat-server";
     dir = "finitechat/crates/finitechat-server";

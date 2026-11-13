@@ -15,9 +15,8 @@ impl CoreStore {
             claim_notice,
             now,
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn finite_private_usage_status_for_workos_user(
@@ -27,10 +26,14 @@ impl CoreStore {
     ) -> CoreResult<Option<FinitePrivateUsageStatus>> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_finite_private_usage_status_for_workos_user(&*tx, workos_user_id, now).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result =
+                postgres_finite_private_usage_status_for_workos_user(&*tx, workos_user_id, now)
+                    .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn claim_finite_private_daily_reset_for_api_key(
@@ -40,11 +43,14 @@ impl CoreStore {
     ) -> CoreResult<FinitePrivateDailyResetResult> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_claim_finite_private_daily_reset_for_api_key(&*tx, presented_api_key, now)
-                .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result =
+                postgres_claim_finite_private_daily_reset_for_api_key(&*tx, presented_api_key, now)
+                    .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn claim_finite_private_daily_reset_for_workos_user(
@@ -54,11 +60,17 @@ impl CoreStore {
     ) -> CoreResult<Option<FinitePrivateDailyResetResult>> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_claim_finite_private_daily_reset_for_workos_user(&*tx, workos_user_id, now)
-                .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result = postgres_claim_finite_private_daily_reset_for_workos_user(
+                &*tx,
+                workos_user_id,
+                now,
+            )
+            .await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

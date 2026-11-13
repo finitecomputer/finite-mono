@@ -28,6 +28,7 @@ fresh read-only evidence establish observed state.
 | Missing conversations | [Chat diagnosis](chats-appear-missing.md) |
 | Billing support | [Stripe](stripe-billing.md) |
 | Host access | [Break-glass](break-glass.md) |
+| IPv4 TCP kernel vulnerability mitigation | [TCP IP-options guard](tcp-ip-options-guard.md) |
 
 ## Standing boundaries
 

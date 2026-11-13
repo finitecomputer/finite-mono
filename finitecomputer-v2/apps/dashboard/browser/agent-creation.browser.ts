@@ -4,8 +4,9 @@ import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { once } from "node:events";
 import { mkdir, rm } from "node:fs/promises";
 import { test } from "node:test";
+import { sealData } from "iron-session";
 
-import { chromium, type Browser, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type ConsoleMessage, type Frame, type Page } from "playwright";
 
 import { chromiumLaunchOptions } from "../scripts/playwright-browser";
 import { sealAgentOnboardingDraft } from "../src/lib/agent-onboarding";
@@ -218,6 +219,7 @@ type HostedDeviceState = {
 };
 
 type AgentConnectionsStatus = {
+  openrouter?: { key_saved: boolean };
   inference: {
     profile: "finite_private" | "openrouter";
     provider: string;
@@ -245,6 +247,112 @@ type FakeSitesState = {
   redemptions: number;
   privateContentRequests: number;
 };
+
+test("organization launch code: explicit submission, auth continuation and binding retry", { timeout: 180_000 }, async () => {
+  await resetDashboardDevDirs();
+  const core = await startFakeCore();
+  const hosted = await startFakeHostedDevice();
+  hosted.state.app.identity.account_id = "a".repeat(64);
+  hosted.state.bindingAuthorizations = [];
+  const port = await freePort();
+  const dashboard = startDashboard(port, core.url, hosted.url, "http://127.0.0.1:1", {
+    workosAuth: true, distDir: ".next-browser-test",
+  });
+  const output = collectOutput(dashboard);
+  let browser: Browser | null = null;
+  try {
+    await waitForDashboard(port, output);
+    browser = await chromium.launch({ headless: true, ...chromiumLaunchOptions() });
+    const context = await browser.newContext();
+    await withoutMoveCheck(context);
+    const page = await context.newPage();
+    page.setDefaultTimeout(30_000);
+    const base = `http://127.0.0.1:${port}`;
+    const requestedUrls: string[] = [];
+    page.on("request", request => requestedUrls.push(request.url()));
+    await page.goto(base);
+    assert.equal(await page.getByRole("link", { name: "Enter organization launch code" }).getAttribute("href"), "/code");
+    await onboardingScreenshots(page, "code-entry-home");
+    await page.goto(`${base}/code#code=finite_synthetic_org&name=Organization%20Agent`);
+    await page.getByLabel("Launch code", { exact: true }).waitFor();
+    await waitFor(async () => await page.getByLabel("Launch code", { exact: true }).inputValue() === "finite_synthetic_org");
+    assert.equal(new URL(page.url()).hash, "");
+    assert.equal(await page.getByLabel("Agent name").inputValue(), "Organization Agent");
+    assert.equal(core.state.creationPosts.length, 0);
+    assert.equal(await page.getByRole("button", { name: "Create agent", exact: true }).count(), 0);
+    await onboardingScreenshots(page, "code-before-auth");
+    const unauthenticated = await context.request.post(`${base}/code/redeem`, {
+      headers: { origin: base }, data: { launchCode: "finite_synthetic_org" },
+    });
+    assert.equal(unauthenticated.status(), 401);
+    assert.equal(core.state.creationPosts.length, 0);
+    // Synthetic WorkOS authorization return: real login URL generation and
+    // sealed session cookie, with no external identity-provider requests.
+    let authVisited = false;
+    await page.route(`${base}/login?**`, async route => {
+      const loginResponse = await route.fetch({ maxRedirects: 0 });
+      const authorizationUrl = loginResponse.headers().location;
+      assert(authorizationUrl, "login must redirect to authentication");
+      assert(!authorizationUrl.includes("finite_synthetic_org"));
+      authVisited = true;
+      const token = `fixture.${Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 })).toString("base64url")}.signature`;
+      const cookie = await sealData({ accessToken: token, user: { id: "user_browser", email: "browser@finite.vip", emailVerified: true } }, {
+        password: "browser-test-cookie-password-32-characters-minimum",
+      });
+      await context.addCookies([{ name: "wos-session", value: cookie, url: base, httpOnly: true, sameSite: "Lax" }]);
+      await route.fulfill({ status: 302, headers: { location: `${base}/code` } });
+    });
+    await page.getByRole("link", { name: "Log in", exact: true }).click();
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    assert(authVisited);
+    await waitFor(async () => await page.getByRole("button", { name: "Create agent", exact: true }).isEnabled());
+    assert.equal(await page.getByLabel("Launch code", { exact: true }).inputValue(), "finite_synthetic_org");
+    assert.equal(core.state.creationPosts.length, 0, "auth return must not redeem");
+    await page.reload();
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    assert.equal(core.state.creationPosts.length, 0, "reload must not redeem");
+    await onboardingScreenshots(page, "code-ready");
+    const forbidden = await context.request.post(`${base}/code/redeem`, {
+      headers: { origin: "https://other.example" }, data: { launchCode: "finite_synthetic_org" },
+    });
+    assert.equal(forbidden.status(), 403);
+    assert.equal(core.state.creationPosts.length, 0);
+    core.state.creationError = "Invalid launch code";
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "Invalid launch code" }).waitFor();
+    await page.getByLabel("Launch code", { exact: true }).fill("finite_corrected_org");
+    core.state.creationError = null;
+    hosted.state.bindingAuthorizationFailuresRemaining = 1;
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.getByRole("alert").filter({ hasText: "binding authorization is temporarily unavailable" }).waitFor();
+    assert.equal(core.state.creationResults.size, 1);
+    const accepted = core.state.creationPosts.at(-1) as Record<string, unknown>;
+    assert.equal(accepted.launchCode, "finite_corrected_org");
+    assert.equal(accepted.ownerChatAccountId, hosted.state.app.identity.account_id);
+    assert.equal(accepted.hostingTier, undefined);
+    // Reopening the personalized link must preserve the consumed code's retry key.
+    await page.goto(base);
+    await page.goto(`${base}/code#code=finite_corrected_org&name=Organization%20Agent`);
+    await page.getByRole("button", { name: "Create agent", exact: true }).waitFor();
+    await page.route(`${base}/dashboard?**`, route => route.fulfill({ status: 200, contentType: "text/html", body: "<h1>Dashboard handoff</h1>" }));
+    await page.getByRole("button", { name: "Create agent", exact: true }).click();
+    await page.waitForURL(url => url.pathname === "/dashboard");
+    assert.equal(core.state.creationResults.size, 1, "binding retry must not create another project");
+    assert.equal((core.state.creationPosts.at(-1) as Record<string, unknown>).idempotencyKey, accepted.idempotencyKey);
+    assert.equal(hosted.state.bindingAuthorizations.length, 2);
+    assert.equal(await page.evaluate(() => sessionStorage.getItem("finite-organization-launch-code")), null);
+    assert(!requestedUrls.some(url => url.includes("finite_synthetic_org") && !url.includes("#")), "code must not enter request URLs");
+    await context.close();
+  } catch (error) {
+    throw new Error(`${String(error)}\nDashboard output:\n${output()}`);
+  } finally {
+    await browser?.close();
+    await stopChildProcess(dashboard);
+    core.server.close();
+    hosted.server.close();
+    await resetDashboardDevDirs();
+  }
+});
 
 test("dashboard agent creation browser states", { timeout: 300_000 }, async () => {
   await resetDashboardDevDirs();
@@ -955,6 +1063,11 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await skillsLink.click();
       await page.waitForURL(/\/dashboard\/skills\?machine=runtime_completed-oslo-bot$/u);
       await page.getByRole("heading", { name: "Skills", exact: true }).waitFor({ state: "visible" });
+      // FIN-495: from this page load on, the page itself logs the switcher's
+      // life (see `logSwitcherInPage`), for the report below.
+      // tsx names inner functions through an `__name` helper the page lacks.
+      await page.addInitScript("globalThis.__name ??= (target) => target;");
+      await page.addInitScript(logSwitcherInPage);
       await page.goto(
         `http://127.0.0.1:${dashboardPort}/dashboard/machines/runtime_completed-oslo-bot`
       );
@@ -977,12 +1090,26 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         async () =>
           `agent switcher did not hydrate after returning from Skills\nURL: ${page.url()}\n${await pageText(page)}\n${dashboardOutput()}`
       );
-      await machineSwitcher.click();
+      // FIN-495 / FIN-188: this menu has failed to open in CI and never here.
+      // Record what the page does around the click (listeners only, so the
+      // click's timing is unchanged) and report it if the item never shows.
+      const aroundClick = recordPageEvents(page);
       const secondAgentItem = page.getByRole("menuitem", {
         name: "Second Oslo Bot",
         exact: true,
       });
-      await secondAgentItem.waitFor({ state: "visible" });
+      try {
+        await machineSwitcher.click();
+        aroundClick.mark("clicked");
+        await secondAgentItem.waitFor({ state: "visible" }).catch(async (error: Error) => {
+          throw new Error(
+            `${error.message}\n${await switcherState(page)}\n${aroundClick.report()}\n`
+              + `dashboard output (tail):\n${dashboardOutput().slice(-3_000)}`
+          );
+        });
+      } finally {
+        aroundClick.stop();
+      }
       await secondAgentItem.click();
       await page.waitForURL(/\/dashboard\/machines\/runtime_second-oslo-bot$/u);
 
@@ -1192,17 +1319,46 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
         connectionsStatusIndex > ownerClaimIndex,
         "Connections status was requested before the owner claim succeeded"
       );
-      await page.getByRole("button", { name: "Use OpenRouter" }).click();
+      const originalInference = { ...hostedDevice.state.connections.inference };
+      await page.getByRole("button", { name: "Connect OpenRouter" }).click();
       await page.getByLabel("OpenRouter key").fill("test-only-invalid-key");
-      await page.getByLabel("OpenRouter model").fill("openai/gpt-5-mini");
-      await page.getByRole("button", { name: "Save" }).click();
-      await expectVisibleText(page, "OpenRouter · openai/gpt-5-mini");
+      await page.getByRole("button", { name: "Save key", exact: true }).click();
+      await expectVisibleText(page, "Key saved. Your default and session choices are unchanged.");
+      assert.deepEqual(hostedDevice.state.connections.inference, originalInference);
+      assert.equal(await page.getByLabel("OpenRouter key").count(), 0);
+      await page.getByLabel("OpenRouter session model").fill("openai/gpt-5-mini");
+      await expectVisibleText(page, "/model openai/gpt-5-mini --provider openrouter --session");
       assert(
         hostedDevice.state.runtimeCommands.some(
-          (command) => command.command === "agent.inference.apply"
+          (command) => command.command === "agent.openrouter.save"
         ),
-        "inference change did not use the runtime command channel"
+        "credential save did not use the runtime command channel"
       );
+      assert(!hostedDevice.state.runtimeCommands.some((command) => command.command === "agent.inference.apply"));
+      await page.getByRole("button", { name: "Replace key" }).click();
+      await page.getByLabel("OpenRouter key").fill("replacement-test-only-key");
+      await page.getByRole("button", { name: "Save key", exact: true }).click();
+      await page.getByRole("button", { name: "Replace key" }).waitFor();
+      assert.deepEqual(hostedDevice.state.connections.inference, originalInference);
+      await page.screenshot({ path: "/tmp/finite-openrouter-connections-desktop.png", fullPage: true });
+      const mobileConnections = await page.context().newPage();
+      try {
+        await mobileConnections.setViewportSize({ width: 390, height: 844 });
+        await mobileConnections.goto(page.url());
+        await mobileConnections.getByRole("button", { name: "Replace key" }).waitFor();
+        await mobileConnections.screenshot({ path: "/tmp/finite-openrouter-connections-mobile.png", fullPage: true });
+      } finally {
+        await mobileConnections.close();
+      }
+
+      // An old runtime must never trigger the old default-changing operation.
+      delete hostedDevice.state.connections.openrouter;
+      await page.reload();
+      await expectVisibleText(page, "Runtime update needed");
+      assert(await page.getByRole("button", { name: "Connect OpenRouter" }).isDisabled());
+      hostedDevice.state.connections.openrouter = { key_saved: true };
+      await page.reload();
+      await page.getByRole("button", { name: "Replace key" }).waitFor();
       const connectionsPath =
         "/dashboard/machines/runtime_completed-oslo-bot/connections";
       const connectionsSidebar = page.getByRole("navigation", {
@@ -1268,6 +1424,10 @@ test("dashboard agent creation browser states", { timeout: 300_000 }, async () =
       await chatSidebar
         .getByRole("button", { name: "Sidebar QA", exact: true })
         .waitFor({ state: "visible" });
+      // Row actions appear on hover, so point at the row first, as a person does.
+      await chatSidebar
+        .getByRole("button", { name: "Sidebar QA", exact: true })
+        .hover();
       await chatSidebar
         .getByRole("button", { name: "Archive Sidebar QA", exact: true })
         .click();
@@ -2201,6 +2361,7 @@ function startDashboard(
     stripeConfigured?: boolean;
     runtimeRetirement?: boolean;
     distDir?: string;
+    workosAuth?: boolean;
   } = {}
 ) {
   const adminOrganizationId = "org_browser_admin";
@@ -2234,7 +2395,9 @@ function startDashboard(
         FC_DASHBOARD_TRIALS_ENABLED: options.stripeConfigured ? "true" : "false",
         FC_DASHBOARD_ENABLE_RUNTIME_RETIREMENT: options.runtimeRetirement ? "1" : "",
         WORKOS_COOKIE_PASSWORD: "browser-test-cookie-password-32-characters-minimum",
-        FC_WORKOS_AUTH_ENABLED: "0",
+        FC_WORKOS_AUTH_ENABLED: options.workosAuth ? "1" : "0",
+        WORKOS_API_KEY: options.workosAuth ? "sk_test_local_fixture" : "",
+        WORKOS_CLIENT_ID: options.workosAuth ? "client_local_fixture" : "",
         NEXT_PUBLIC_WORKOS_REDIRECT_URI: `http://127.0.0.1:${port}/callback`,
         STRIPE_SECRET_KEY: options.stripeConfigured ? "sk_test_browser_fixture" : "",
         STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID: options.stripeConfigured
@@ -2362,6 +2525,7 @@ async function startFakeHostedDevice() {
     bindingAuthorizationFailuresRemaining: 0,
     agentBindings: new Map(),
     connections: {
+      openrouter: { key_saved: false },
       inference: {
         profile: "finite_private",
         provider: "finite_private",
@@ -2694,7 +2858,9 @@ function applyRuntimeCommand(
   const body = request.body && typeof request.body === "object"
     ? request.body as Record<string, unknown>
     : {};
-  if (command === "agent.inference.apply") {
+  if (command === "agent.openrouter.save") {
+    state.connections.openrouter = { key_saved: true };
+  } else if (command === "agent.inference.apply") {
     const profile = String(body.profile ?? "");
     if (profile === "finite_private") {
       state.connections.inference = {
@@ -3333,6 +3499,14 @@ async function handleCoreRequest(
   writeJson(response, 404, { error: "not found" });
 }
 
+/** This file counts Core reads exactly. An open dashboard's move check
+ * (FIN-463) reads Core on each navigation, and a check a navigation cut
+ * short still reads it on the server, so here its route answers "not
+ * moved" in the browser. finite-chat-move.browser.ts covers the check. */
+async function withoutMoveCheck(context: BrowserContext) {
+  await context.route("**/api/finite-chat-move", (route) => route.fulfill({ json: { redirect: null } }));
+}
+
 async function withSignedInPage(
   browser: Browser,
   dashboardPort: number,
@@ -3340,6 +3514,7 @@ async function withSignedInPage(
 ) {
   const context = await browser.newContext();
   try {
+    await withoutMoveCheck(context);
     const page = await context.newPage();
     page.setDefaultNavigationTimeout(90_000);
     await fn(page);
@@ -3514,6 +3689,107 @@ async function waitFor(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(await timeoutMessage());
+}
+
+/** Timestamped main-frame navigations, loads, page errors and console
+ * errors or warnings, from now until `stop`. */
+function recordPageEvents(page: Page) {
+  const start = Date.now();
+  const events: string[] = [];
+  const mark = (what: string) => events.push(`+${Date.now() - start}ms ${what}`);
+  const navigated = (frame: Frame) => {
+    if (frame === page.mainFrame()) mark(`navigated ${frame.url()}`);
+  };
+  const loaded = () => mark("load");
+  const failed = (error: Error) => mark(`pageerror ${error.message.slice(0, 300)}`);
+  const logged = (message: ConsoleMessage) => {
+    if (
+      (message.type() === "error" || message.type() === "warning")
+      && !message.text().includes("was preloaded using link preload")
+    ) {
+      mark(`console.${message.type()} ${message.text().slice(0, 300)}`);
+    }
+  };
+  page.on("framenavigated", navigated);
+  page.on("load", loaded);
+  page.on("pageerror", failed);
+  page.on("console", logged);
+  const stop = () => {
+    page.off("framenavigated", navigated);
+    page.off("load", loaded);
+    page.off("pageerror", failed);
+    page.off("console", logged);
+  };
+  return {
+    mark,
+    stop,
+    report: () => {
+      stop();
+      return `page events since just before the click:\n${events.join("\n") || "(none)"}`;
+    },
+  };
+}
+
+/** Runs in the page (an init script). Logs, with page timestamps: each
+ * pointerdown or click on an agent switcher and whether React had hydrated
+ * that button then, each `aria-expanded` change, and switchers or menus
+ * added or removed (a remount). Each switcher button gets a number, so a
+ * replaced button shows up as a new one. */
+function logSwitcherInPage() {
+  const log: string[] = [];
+  (window as unknown as { __switcherLog: string[] }).__switcherLog = log;
+  const ids = new WeakMap<Element, number>();
+  let next = 0;
+  const id = (element: Element) => {
+    if (!ids.has(element)) ids.set(element, ++next);
+    return ids.get(element);
+  };
+  const at = (what: string) => log.push(`${Math.round(performance.now())}ms ${what}`);
+  const hydrated = (element: Element) => Object.keys(element).some((key) => key.startsWith("__reactProps$"));
+  for (const type of ["pointerdown", "click"]) {
+    window.addEventListener(type, (event) => {
+      const button = (event.target as Element | null)?.closest?.(".ocean-machine-switcher__button");
+      if (button) at(`${type} on switcher #${id(button)} hydrated=${hydrated(button)}`);
+    }, true);
+  }
+  // `document` exists before its root element does, so this sees the parse too.
+  new MutationObserver((records) => {
+    for (const record of records) {
+      if (record.type === "attributes" && record.target instanceof Element
+        && record.target.matches(".ocean-machine-switcher__button")) {
+        at(`switcher #${id(record.target)} aria-expanded=${record.target.getAttribute("aria-expanded")}`);
+      }
+      for (const [nodes, verb] of [[record.addedNodes, "added"], [record.removedNodes, "removed"]] as const) {
+        for (const node of Array.from(nodes)) {
+          if (!(node instanceof Element)) continue;
+          for (const found of [node, ...Array.from(node.querySelectorAll(".ocean-machine-switcher__button, [role=menu]"))]) {
+            if (found.matches(".ocean-machine-switcher__button")) at(`switcher #${id(found)} ${verb}`);
+            else if (found.matches("[role=menu]")) at(`menu ${verb}`);
+          }
+        }
+      }
+    }
+  }).observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-expanded"] });
+}
+
+/** The agent switchers as the page has them now: hydrated or not, open or
+ * not, and the menu's items, plus the page's own switcher log. */
+async function switcherState(page: Page) {
+  const state = await page
+    .evaluate(() => ({
+      url: location.href,
+      readyState: document.readyState,
+      switchers: Array.from(document.querySelectorAll(".ocean-machine-switcher__button")).map((button) => ({
+        label: button.getAttribute("aria-label"),
+        expanded: button.getAttribute("aria-expanded"),
+        hydrated: Object.keys(button).some((key) => key.startsWith("__reactProps$")),
+      })),
+      menus: Array.from(document.querySelectorAll('[role="menu"]')).map((menu) =>
+        Array.from(menu.querySelectorAll('[role="menuitem"]')).map((item) => item.textContent?.trim())),
+      log: (window as unknown as { __switcherLog?: string[] }).__switcherLog?.slice(-60) ?? null,
+    }))
+    .catch((error: unknown) => ({ evaluateFailed: String(error) }));
+  return `switcher state: ${JSON.stringify(state)}`;
 }
 
 async function pageText(page: Page) {

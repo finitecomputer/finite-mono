@@ -15,6 +15,7 @@ use crate::config::{
     ConfigManager, ConfigOfferPolicyV1, HermesConfigOfferV1, MODEL_CONFIG_PATH,
     TELEGRAM_CONFIG_PATH,
 };
+use crate::google_scopes::accepted_google_scopes;
 
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
 const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4.6";
@@ -31,10 +32,22 @@ pub(crate) struct ConnectionManager {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ConnectionsStatus {
     pub inference: InferenceStatus,
+    pub openrouter: OpenRouterStatus,
     pub telegram: TelegramStatus,
     pub google: GoogleStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simplex: Option<crate::simplex::SimplexStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct OpenRouterStatus {
+    pub key_saved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OpenRouterSaveRequest {
+    pub api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,9 +155,44 @@ impl ConnectionManager {
     pub(crate) fn status(&self) -> Result<ConnectionsStatus, AgentdError> {
         Ok(ConnectionsStatus {
             inference: self.inference_status()?,
+            openrouter: self.openrouter_status()?,
             telegram: self.telegram_status()?,
             google: self.google_status(),
             simplex: self.simplex_status()?,
+        })
+    }
+
+    pub(crate) fn save_openrouter_key(
+        &self,
+        request: OpenRouterSaveRequest,
+    ) -> Result<OpenRouterStatus, AgentdError> {
+        let key = request.api_key.trim();
+        validate_secret("OpenRouter key", key)?;
+        let path = self.openrouter_env_path();
+        let before = snapshot(&path)?;
+        let rendered = upsert_dotenv_value(
+            before.as_deref().unwrap_or_default(),
+            OPENROUTER_API_KEY_ENV,
+            key,
+        )?;
+        atomic_private_bytes(&path, &rendered)?;
+        // The packaged gateway reads this credential on model selection and
+        // on subsequent OpenRouter turns. Saving never restarts active chat.
+        Ok(OpenRouterStatus { key_saved: true })
+    }
+
+    fn openrouter_status(&self) -> Result<OpenRouterStatus, AgentdError> {
+        let model = self.config.current_value(MODEL_CONFIG_PATH)?;
+        let legacy = (model.get("provider").and_then(Value::as_str) == Some("openrouter"))
+            .then(|| model.get("api_key").and_then(Value::as_str))
+            .flatten();
+        let durable = read_dotenv_value(&self.openrouter_env_path(), OPENROUTER_API_KEY_ENV)?;
+        let provisioned = std::env::var(OPENROUTER_API_KEY_ENV).ok();
+        Ok(OpenRouterStatus {
+            key_saved: [durable.as_deref(), legacy, provisioned.as_deref()]
+                .into_iter()
+                .flatten()
+                .any(|key| !key.trim().is_empty() && !key.contains("${")),
         })
     }
 
@@ -464,13 +512,7 @@ impl ConnectionManager {
 
     pub(crate) fn apply_google(&self, request: GoogleApplyRequest) -> Result<(), AgentdError> {
         validate_google_request(&request)?;
-        let expected_scopes = self.google_scopes()?;
-        let supplied_scopes = request.scopes.iter().cloned().collect::<BTreeSet<_>>();
-        if supplied_scopes != expected_scopes {
-            return Err(AgentdError::InvalidPayload(
-                "Google did not grant the requested Finite Workspace access".to_owned(),
-            ));
-        }
+        let token = self.google_token(&request)?;
 
         let client_path = self.hermes_home.join("google_client_secret.json");
         let token_path = self.hermes_home.join("google_token.json");
@@ -489,7 +531,6 @@ impl ConnectionManager {
                 "redirect_uris": [request.redirect_uri],
             }
         });
-        let token = google_authorized_user_token(&request, &expected_scopes);
         let metadata = json!({
             "email": request.connected_email.to_ascii_lowercase(),
             "connected_at_ms": now_ms(),
@@ -682,6 +723,11 @@ impl ConnectionManager {
             ));
         }
         Ok(scopes.into_iter().collect())
+    }
+
+    fn google_token(&self, request: &GoogleApplyRequest) -> Result<Value, AgentdError> {
+        let granted = accepted_google_scopes(&request.scopes, &self.google_scopes()?)?;
+        Ok(google_authorized_user_token(request, &granted))
     }
 
     fn check_google_auth(&self) -> Result<(), AgentdError> {
@@ -993,6 +1039,80 @@ mod tests {
     }
 
     #[test]
+    fn saving_openrouter_credentials_preserves_defaults_history_and_other_secrets() {
+        for provider in ["custom", "openrouter"] {
+            let (_temp, manager) = manager();
+            let config = format!("model:\n  default: user/model\n  provider: {provider}\n");
+            fs::write(manager.hermes_home.join("config.yaml"), &config).unwrap();
+            let session_path = manager.hermes_home.join("sessions.json");
+            fs::write(&session_path, b"durable-session-history").unwrap();
+            fs::write(
+                manager.openrouter_env_path(),
+                b"OPENAI_API_KEY='private-test-key'\n",
+            )
+            .unwrap();
+            for key in ["first-openrouter-test-key", "rotated-openrouter-test-key"] {
+                let result = manager
+                    .save_openrouter_key(OpenRouterSaveRequest {
+                        api_key: key.to_owned(),
+                    })
+                    .unwrap();
+                assert!(result.key_saved);
+                assert!(manager.openrouter_status().unwrap().key_saved);
+                assert_eq!(
+                    fs::read_to_string(manager.hermes_home.join("config.yaml")).unwrap(),
+                    config
+                );
+                assert_eq!(fs::read(&session_path).unwrap(), b"durable-session-history");
+                assert_eq!(
+                    read_dotenv_value(&manager.openrouter_env_path(), OPENROUTER_API_KEY_ENV)
+                        .unwrap()
+                        .as_deref(),
+                    Some(key)
+                );
+                assert_eq!(
+                    read_dotenv_value(&manager.openrouter_env_path(), "OPENAI_API_KEY")
+                        .unwrap()
+                        .as_deref(),
+                    Some("private-test-key")
+                );
+                assert_eq!(
+                    fs::metadata(manager.openrouter_env_path())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+                assert!(!serde_json::to_string(&result).unwrap().contains(key));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_openrouter_save_leaves_the_previous_key_intact() {
+        let (_temp, manager) = manager();
+        let original = b"OPENROUTER_API_KEY='existing-test-key'\n";
+        fs::write(manager.openrouter_env_path(), original).unwrap();
+        for invalid in ["", "short", "invalid\nkey-value"] {
+            assert!(
+                manager
+                    .save_openrouter_key(OpenRouterSaveRequest {
+                        api_key: invalid.to_owned()
+                    })
+                    .is_err()
+            );
+            assert_eq!(fs::read(manager.openrouter_env_path()).unwrap(), original);
+        }
+        assert!(
+            serde_json::from_value::<OpenRouterSaveRequest>(
+                json!({"api_key":"valid-test-key", "profile":"openrouter"})
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn finite_private_vision_is_scoped_to_the_known_model_and_route() {
         for base_url in [
             "https://finite-private.finite.containers.tinfoil.dev/v1",
@@ -1097,17 +1217,21 @@ mod tests {
         assert!(validate_telegram_token("not-a-token").is_err());
     }
 
-    #[test]
-    fn google_token_uses_the_standard_authorized_user_shape() {
-        let request = GoogleApplyRequest {
+    fn google_request(scopes: &[&str]) -> GoogleApplyRequest {
+        GoogleApplyRequest {
             client_id: "client-id".to_owned(),
             client_secret: "client-secret".to_owned(),
             refresh_token: "refresh-token".to_owned(),
             access_token: "access-token".to_owned(),
             redirect_uri: "https://finite.example/google/callback".to_owned(),
             connected_email: "person@example.com".to_owned(),
-            scopes: vec!["https://www.googleapis.com/auth/drive".to_owned()],
-        };
+            scopes: scopes.iter().map(|scope| (*scope).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn google_token_uses_the_standard_authorized_user_shape() {
+        let request = google_request(&["https://www.googleapis.com/auth/drive"]);
         let scopes = request.scopes.iter().cloned().collect();
 
         let token = google_authorized_user_token(&request, &scopes);
@@ -1115,6 +1239,33 @@ mod tests {
         assert_eq!(token["type"], "authorized_user");
         assert_eq!(token["refresh_token"], "refresh-token");
         assert_eq!(token["scopes"][0], "https://www.googleapis.com/auth/drive");
+    }
+
+    #[test]
+    fn google_token_records_only_the_scopes_the_person_granted() {
+        let (_temp, manager) = manager();
+        let drive = "https://www.googleapis.com/auth/drive";
+        let email = "https://www.googleapis.com/auth/userinfo.email";
+        let contract = [
+            drive,
+            "https://www.googleapis.com/auth/gmail.send",
+            "openid",
+            email,
+        ];
+        let references = manager.google_skill_root().join("references");
+        fs::create_dir_all(&references).unwrap();
+        fs::write(
+            references.join("google-workspace-scopes.json"),
+            serde_json::to_vec(&contract).unwrap(),
+        )
+        .unwrap();
+
+        let token = manager
+            .google_token(&google_request(&["openid", email, drive]))
+            .unwrap();
+
+        assert_eq!(token["scopes"], json!([drive, email, "openid"]));
+        assert!(manager.google_token(&google_request(&[drive])).is_err());
     }
 
     #[test]

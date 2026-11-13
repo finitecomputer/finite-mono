@@ -22,3 +22,14 @@ or the [coordinated snapshot](../../../infra/runbooks/hosted-web-chat-recovery.m
 The process acceptance test `built_fbrain_process_brain_restore_drill` exercises
 shutdown, copy, empty-target restore and permission continuity with real CLI
 and server processes. A green backup timer alone is not this proof.
+
+## Deleted Organization Brains
+
+A deleted Organization Brain stays deleted on its live server: the
+`deleted_brains` record retires its id, a trigger refuses to reinsert it, and
+former readers get `410 Gone`. Recover it by restoring a backup taken before
+the deletion onto an empty isolated target as above; never copy its rows back
+into the live database. Client identity keys come from their own backups.
+`built_fbrain_deletes_v1_and_leaves_content_and_marketing_brains_intact`
+proves this for one Brain database and one admin identity key, not for the
+hosted five-part Recovery Set.

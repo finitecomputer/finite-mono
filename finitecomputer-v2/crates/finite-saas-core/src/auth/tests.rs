@@ -185,6 +185,62 @@ async fn user_lookup_fails_closed_for_unknown_or_mismatched_records() {
     );
 }
 
+/// The WorkOS User Management body Core already fetches. Names are optional
+/// and their shape is untrusted: no name value may fail a valid sign-in.
+#[tokio::test]
+async fn workos_user_names_are_optional_and_never_fail_sign_in() {
+    let parse = |body: serde_json::Value| serde_json::from_value::<WorkosUser>(body).unwrap();
+    let base = serde_json::json!({
+        "object": "user", "id": "user_named", "email": "ada@example.org",
+        "email_verified": true, "profile_picture_url": null,
+        "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+    });
+    let with = |first: serde_json::Value, last: serde_json::Value| {
+        let mut body = base.clone();
+        body["first_name"] = first;
+        body["last_name"] = last;
+        parse(body)
+    };
+    let display = |user: WorkosUser| {
+        crate::account_labels::workos_display_name(
+            user.first_name.as_ref(),
+            user.last_name.as_ref(),
+        )
+    };
+    assert_eq!(display(parse(base.clone())), None);
+    assert_eq!(
+        display(with(
+            serde_json::json!("Ada"),
+            serde_json::json!("Lovelace")
+        ))
+        .as_deref(),
+        Some("Ada Lovelace")
+    );
+    assert_eq!(
+        display(with(serde_json::json!(7), serde_json::json!(["x"]))),
+        None
+    );
+    assert_eq!(
+        display(with(
+            serde_json::json!("x".repeat(5_000)),
+            serde_json::json!(null)
+        )),
+        None
+    );
+
+    let token = test_support::access_token_with_profile(
+        "user_named_malformed",
+        "named@example.org",
+        Some(serde_json::json!({"given": "Ada"})),
+        Some(serde_json::json!("Lovelace")),
+    );
+    let authenticator = authenticator();
+    let session = authenticator.verify_access_token(&token).await.unwrap();
+    let user = authenticator.verified_user(&session.subject).await.unwrap();
+    assert_eq!(user.email, "named@example.org");
+    assert_eq!(user.display_name, None);
+}
+
 #[test]
 fn service_route_credentials_must_be_distinct() {
     let result = CoreAuth::new(authenticator(), "same", "same", "usage");

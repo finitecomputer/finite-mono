@@ -1,19 +1,27 @@
+pub(crate) mod admin_demotion;
 pub(crate) mod approvals;
+pub(crate) mod brain_deletion;
 pub(crate) mod brains;
 pub(crate) mod collaboration;
+pub(crate) mod folder_keys;
 pub(crate) mod folders;
 pub(crate) mod identities;
 pub(crate) mod invite_tokens;
+pub(crate) mod member_removal;
 pub(crate) mod objects_sync;
 pub(crate) mod public;
 pub(crate) mod sharing;
 
+pub(crate) use admin_demotion::*;
 pub(crate) use approvals::*;
+pub(crate) use brain_deletion::*;
 pub(crate) use brains::*;
 pub(crate) use collaboration::*;
+pub(crate) use folder_keys::*;
 pub(crate) use folders::*;
 pub(crate) use identities::*;
 pub(crate) use invite_tokens::*;
+pub(crate) use member_removal::*;
 pub(crate) use objects_sync::*;
 pub(crate) use public::*;
 pub(crate) use sharing::*;

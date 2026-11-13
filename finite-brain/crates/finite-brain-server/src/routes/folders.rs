@@ -25,6 +25,39 @@ pub(crate) async fn folder_access_handler(
 use finite_brain_core::BRAIN_CAPACITY_ENVELOPE;
 use finite_brain_store::FolderDeletionExpectation;
 
+/// Read-only pre-flight for `DELETE /folders/{folder_id}`: the subtree and its
+/// live object count, without downloading object ciphertext. Same authority as
+/// the deletion itself.
+pub(crate) async fn folder_deletion_preview_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+) -> Result<Json<FolderDeletionPreviewResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, None)?;
+    spawn_store(state, move |state| {
+        let brain_id = BrainId::new(brain_id)?;
+        let folder_id = FolderId::new(folder_id)?;
+        let store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_direct_delete_authority(&stored, &actor)?;
+        let preview = store.folder_deletion_preview(&brain_id, &folder_id, &UserId::new(actor)?)?;
+        Ok(Json(FolderDeletionPreviewResponse {
+            brain_id: brain_id.to_string(),
+            folder_id: folder_id.to_string(),
+            folder_ids: preview
+                .folder_ids
+                .into_iter()
+                .map(|folder_id| folder_id.to_string())
+                .collect(),
+            object_count: preview.object_count,
+            current_key_version: preview.root_key_version,
+        }))
+    })
+    .await
+}
+
 pub(crate) async fn delete_folder_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -336,6 +369,97 @@ pub(crate) async fn grant_folder_access_handler(
     Ok(Json(GrantFolderAccessResponse { metadata, outcome }))
 }
 
+/// Signed note binding a `set-folder-access-mode` event to this transition.
+const OPEN_TO_ALL_MEMBERS_NOTE: &str = "all_members";
+
+/// Open one Restricted Folder to every Member of its Organization Brain.
+pub(crate) async fn open_folder_to_all_members_handler(
+    State(state): State<ServerState>,
+    headers: HeaderMap,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    AxumPath((brain_id, folder_id)): AxumPath<(String, String)>,
+    body: Bytes,
+) -> Result<Json<OpenFolderToAllMembersResponse>, ApiError> {
+    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let request: OpenFolderToAllMembersRequest = serde_json::from_slice(&body)
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
+    let brain_id = BrainId::new(brain_id)?;
+    let folder_id = FolderId::new(folder_id)?;
+    if request.grants.len() > finite_brain_core::MAX_FOLDER_ROTATION_GRANTS {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too many Folder Key Grants in one request",
+        ));
+    }
+    let (event, payload) = validate_admin_access_change_value(
+        request.access_change_event,
+        &brain_id,
+        &actor,
+        AdminAccessAction::SetFolderAccessMode,
+        Some(&folder_id),
+        None,
+        Some(request.key_version),
+    )?;
+    if payload.note.as_deref() != Some(OPEN_TO_ALL_MEMBERS_NOTE) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "opening a Folder requires a signed set-folder-access-mode note of all_members",
+        ));
+    }
+    let grant_created_at = server_timestamp(&state);
+    let grants = grant_requests_to_metadata(
+        &request.grants,
+        &folder_id,
+        &actor,
+        Some(event.as_json()),
+        &grant_created_at,
+    )?
+    .into_iter()
+    .map(|grant| folder_key_grant_sync_record(&grant).map(|record| (grant, record)))
+    .collect::<Result<Vec<_>, _>>()?;
+    let audit_record = admin_access_change_sync_record(&actor, &event, &payload)?;
+
+    let (metadata, outcome) = {
+        let mut store = state.store.lock().map_err(lock_error)?;
+        let stored = store.load_brain(&brain_id)?;
+        ensure_brain_admin(&stored, &actor)?;
+        let outcome = store.open_folder_to_all_members_with_control_records(
+            &brain_id,
+            &folder_id,
+            request.key_version,
+            &grants,
+            &audit_record,
+        )?;
+        let stored = store.load_brain(&brain_id)?;
+        let mut metadata = metadata_response(stored);
+        enrich_metadata_identities(&store, &mut metadata)?;
+        (metadata, outcome)
+    };
+    let (outcome, granted_recipients) = match outcome {
+        OpenFolderToAllMembersOutcome::Opened { granted_recipients } => {
+            // Every Member's authoritative view changed.
+            state.publish_access_update(&brain_id);
+            (
+                OpenFolderToAllMembersResponseOutcome::Opened,
+                granted_recipients
+                    .into_iter()
+                    .map(|recipient| recipient.to_string())
+                    .collect(),
+            )
+        }
+        OpenFolderToAllMembersOutcome::AlreadyOpen => (
+            OpenFolderToAllMembersResponseOutcome::AlreadyOpen,
+            Vec::new(),
+        ),
+    };
+    Ok(Json(OpenFolderToAllMembersResponse {
+        metadata,
+        outcome,
+        granted_recipients,
+    }))
+}
+
 pub(crate) async fn complete_pending_wraps_handler(
     State(state): State<ServerState>,
     headers: HeaderMap,
@@ -418,96 +542,4 @@ pub(crate) fn attach_pending_wraps(
         .map(pending_grant_wrap_response)
         .collect();
     Ok(())
-}
-
-pub(crate) async fn remove_folder_access_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, folder_id, target_npub)): AxumPath<(String, String, String)>,
-    body: Bytes,
-) -> Result<Json<BrainMetadataResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: RemoveFolderAccessRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    validate_folder_rotation_fanout(
-        FolderRotationOperation::FolderAccessRemoval,
-        [FolderRotationFanout {
-            grants: request.grants.len(),
-            reencrypted_records: request.reencrypted_records.len(),
-        }],
-    )?;
-    let brain_id = BrainId::new(brain_id)?;
-    let folder_id = FolderId::new(folder_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
-    let target = UserId::new(target_identity.npub.clone())?;
-    {
-        let store = state.store.lock().map_err(lock_error)?;
-        let stored = store.load_brain(&brain_id)?;
-        ensure_brain_admin(&stored, &actor)?;
-    }
-    let (event, payload) = validate_admin_access_change_value(
-        request.access_change_event,
-        &brain_id,
-        &actor,
-        AdminAccessAction::RemoveFolderAccess,
-        Some(&folder_id),
-        Some(target.as_str()),
-        Some(request.new_key_version),
-    )?;
-    let event_json = event.as_json();
-    let grant_created_at = server_timestamp(&state);
-    let updated_at = grant_created_at.clone();
-    let grants = grant_requests_to_metadata(
-        &request.grants,
-        &folder_id,
-        &actor,
-        Some(event_json),
-        &grant_created_at,
-    )?;
-    let mut reencrypted_records = Vec::new();
-    for record in request.reencrypted_records {
-        if record.key_version != request.new_key_version {
-            return Err(ApiError::new(
-                StatusCode::BAD_REQUEST,
-                "rotation record keyVersion must match newKeyVersion",
-            ));
-        }
-        let object_id = ObjectId::new(record.object_id)?;
-        let write_request = ObjectWriteRequest {
-            base_revision: record.base_revision,
-            key_version: record.key_version,
-            cipher: record.cipher,
-            ciphertext: record.ciphertext,
-            revision_event: record.revision_event,
-        };
-        let (record, _) = validate_object_revision_record(
-            &brain_id,
-            &folder_id,
-            &object_id,
-            &actor,
-            write_request,
-            FolderObjectOperation::Update,
-        )?;
-        reencrypted_records.push(record);
-    }
-    let control_records = admin_mutation_control_records(&grants, &actor, &event, &payload)?;
-
-    let notification_state = state.clone();
-    let notification_brain_id = brain_id.clone();
-    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.rotate_folder_key_for_access_removal_with_control_records(
-            brain_id,
-            &folder_id,
-            &target,
-            request.new_key_version,
-            &grants,
-            &reencrypted_records,
-            &updated_at,
-            &control_records,
-        )
-    })?;
-    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
-    Ok(Json(response))
 }

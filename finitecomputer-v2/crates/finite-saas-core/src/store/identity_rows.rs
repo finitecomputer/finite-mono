@@ -1,7 +1,30 @@
 use super::*;
 
 impl CoreStore {
+    /// Link a verified account without touching its stored WorkOS name.
     pub async fn link_verified_user(&self, input: LinkVerifiedUserInput) -> CoreResult<CoreUser> {
+        self.link_user(input, None).await
+    }
+
+    /// Link a verified account and record the WorkOS name from the same
+    /// verified user record. `None` clears a stored name: WorkOS is the only
+    /// source, so Core never keeps showing a name WorkOS no longer gives.
+    /// The name is written only when it changed. The existing account-link
+    /// behavior of `users.updated_at` is unchanged.
+    pub async fn link_verified_user_with_name(
+        &self,
+        input: LinkVerifiedUserInput,
+        display_name: Option<&str>,
+    ) -> CoreResult<CoreUser> {
+        self.link_user(input, Some(display_name)).await
+    }
+
+    #[tracing::instrument(skip_all, fields(operation = "link_verified_user", workos_user_id = %input.workos_user_id))]
+    async fn link_user(
+        &self,
+        input: LinkVerifiedUserInput,
+        display_name: Option<Option<&str>>,
+    ) -> CoreResult<CoreUser> {
         let now = input.now.unwrap_or(current_time_iso()?);
         let verified_email = normalize_owner_email(Some(&input.verified_email))
             .ok_or(CoreError::MissingVerifiedEmail)?;
@@ -11,16 +34,30 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let user = ensure_linked_user_row(
-            &*tx,
-            &verified_email,
-            &workos_user_id,
-            BillingClass::Standard,
-            &now,
-        )
-        .await?;
-        self.finish(tx).await?;
-        Ok(user)
+        let result: CoreResult<_> = async {
+            let user = ensure_linked_user_row(
+                &*tx,
+                &verified_email,
+                &workos_user_id,
+                BillingClass::Standard,
+                &now,
+            )
+            .await?;
+            if let Some(display_name) = display_name {
+                tx.execute(
+                    "UPDATE users
+                 SET workos_display_name = $2,
+                     workos_display_name_updated_at = $3::text::timestamptz
+                 WHERE id = $1 AND workos_display_name IS DISTINCT FROM $2",
+                    &[&user.id, &display_name, &now],
+                )
+                .await
+                .map_err(store_error)?;
+            }
+            Ok(user)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  acceptedGoogleWorkspaceScopes,
   googleWorkspaceOAuthConfig,
   googleWorkspaceOAuthConfigured,
   googleWorkspaceDashboardUrl,
@@ -72,4 +73,34 @@ test("dashboard and installed skill share one Google Workspace scope contract", 
     )
   );
   assert.deepEqual(GOOGLE_WORKSPACE_SCOPES, skillScopes);
+});
+
+const DRIVE = "https://www.googleapis.com/auth/drive";
+const GMAIL_SEND = "https://www.googleapis.com/auth/gmail.send";
+const USERINFO_EMAIL = "https://www.googleapis.com/auth/userinfo.email";
+const USERINFO_PROFILE = "https://www.googleapis.com/auth/userinfo.profile";
+
+test("Google Workspace accepts a partial grant that still binds the account email", () => {
+  const withoutSend = GOOGLE_WORKSPACE_SCOPES.filter((scope) => scope !== GMAIL_SEND);
+  assert.deepEqual(acceptedGoogleWorkspaceScopes(GOOGLE_WORKSPACE_SCOPES.join(" ")), [
+    ...GOOGLE_WORKSPACE_SCOPES,
+  ]);
+  assert.deepEqual(acceptedGoogleWorkspaceScopes([...withoutSend].reverse().join("  ")), withoutSend);
+  assert.deepEqual(acceptedGoogleWorkspaceScopes(`openid ${USERINFO_EMAIL} ${DRIVE} ${DRIVE}`), [
+    DRIVE,
+    "openid",
+    USERINFO_EMAIL,
+  ]);
+});
+
+test("Google Workspace rejects grants outside the contract or without Workspace access", () => {
+  const identity = `openid ${USERINFO_EMAIL}`;
+  assert.equal(
+    acceptedGoogleWorkspaceScopes(`${identity} ${DRIVE} https://www.googleapis.com/auth/script.projects`),
+    null
+  );
+  assert.equal(acceptedGoogleWorkspaceScopes(`openid ${DRIVE}`), null);
+  assert.equal(acceptedGoogleWorkspaceScopes(`${USERINFO_EMAIL} ${DRIVE}`), null);
+  assert.equal(acceptedGoogleWorkspaceScopes(`${identity} ${USERINFO_PROFILE}`), null);
+  assert.equal(acceptedGoogleWorkspaceScopes(""), null);
 });

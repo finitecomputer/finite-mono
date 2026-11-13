@@ -1,0 +1,145 @@
+--- a/finite-agentd/integrations/hermes/finite-export/dashboard/export.py
++++ b/finite-agentd/integrations/hermes/finite-export/dashboard/export.py
+@@ -2242,6 +2242,89 @@ def file_limit(options):
+     return float("inf") if options.everything else options.max_file_mb * MiB
+ 
+ 
++def build_raw(paths, env, options):
++    """The raw-folder zip for the new Finite (FIN-463, "The raw-folder
++    export"): the agent's own folder in the `finite-computer` layout, minus
++    secrets, caches and the runtime, read there by `fragment home` and the
++    `import-agent-home` skill. raw_export.py, beside this file, decides what
++    goes in, exactly as the mover's host reader does; this function adds
++    what only the agent's own tools know: owned brains and sites, and the
++    small fact files. Every file is also put through this file's own
++    `secret_reason` and credential scan."""
++    import importlib.util
++
++    spec = importlib.util.spec_from_file_location(
++        "raw_export", Path(__file__).resolve().with_name("raw_export.py")
++    )
++    raw_export = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(raw_export)
++
++    root = Path(os.path.commonpath([paths.finite_home, paths.workspace]))
++    out_dir = Path(options.out) if options.out else paths.finite_home / "exports"
++    profile = agent_profile(paths, env)
++    stamp = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d-%H%M")
++    target = out_dir / f"finite-raw-{slug(profile.get('name') or 'agent')}-{stamp}.zip"
++    brains, brain_error = list_brains()
++    owned = {b["brainId"]: b for b in brains if b.get("role") == "owner"}
++    chosen = [brain for brain in options.brain if brain in owned]
++    facts = {
++        "agent/profile.json": json.dumps(
++            {
++                "name": profile.get("name"),
++                "picture_url": None if profile["picture_is_default"] else profile["picture_url"],
++            }
++        ).encode()
++    }
++    for brain in chosen:
++        facts[f"workspace/finitebrain/{brain}.json"] = json.dumps(
++            {"name": owned[brain].get("name")}
++        ).encode()
++    scratch = Path(tempfile.mkdtemp(prefix="finite-raw-"))
++    problems = [f"brains: {brain_error}"] if brain_error else []
++    try:
++        projects, site_error = list_projects()
++        if site_error:
++            problems.append(f"sites: {site_error}")
++        sites = {}
++        for project in sorted(projects, key=lambda p: p["slug"]):
++            wanted = site_decision(project) == "yes" or (
++                site_decision(project) == "ask" and project["slug"] in options.site
++            )
++            if not wanted or project["slug"] in options.leave_out_site:
++                continue
++            source, why = clone_site(project, scratch)
++            if source is None:
++                problems.append(f"site {project['slug']}: could not get its files: {why}")
++                continue
++            name = safe_name(project["slug"])
++            sites[name] = source
++            facts[f"sites/{name}.json"] = json.dumps(site_meta(project)).encode()
++        summary = raw_export.export_raw(
++            root,
++            target,
++            chosen,
++            sites,
++            facts,
++            summary_id=env.get("FINITECHAT_HERMES_AGENT_NAME") or "raw",
++            extra_name_check=secret_reason,
++            extra_text_check=lambda text: secret_in_string(text.decode("utf-8", "ignore")),
++        )
++    finally:
++        shutil.rmtree(scratch, ignore_errors=True)
++    return {
++        "format": "finite-raw-export/1",
++        "zip": str(target),
++        "bytes": target.stat().st_size,
++        "files": summary["staged"]["files"],
++        "staged_bytes": summary["staged"]["bytes"],
++        "brains": chosen,
++        "sites": sorted(sites),
++        "left": summary["left"][:20],
++        "left_more": len(summary["left"]) - min(len(summary["left"]), 20),
++        "problems": problems,
++    }
++
++
+ def build(paths, env, options):
+     max_bytes = file_limit(options)
+     out_dir = Path(options.out) if options.out else paths.workspace / "finite-export"
+@@ -2503,17 +2586,39 @@ def parse(argv):
+     build_cmd.add_argument(
+         "--max-file-mb",
+         type=int,
+-        default=DEFAULT_MAX_FILE_MB,
+-        help="leave out any file larger than this",
++        default=None,
++        help=f"leave out any file larger than this (default {DEFAULT_MAX_FILE_MB})",
+     )
+     build_cmd.add_argument(
+         "--out", help="the folder for the zip (default: <workspace>/finite-export)"
+     )
+     build_cmd.add_argument("--everything", action="store_true", help=EVERYTHING_HELP)
++    build_cmd.add_argument(
++        "--raw",
++        action="store_true",
++        help="write the raw-folder zip for fragment home (FIN-463) instead "
++        "(default --out: <finite home>/exports)",
++    )
+     build_cmd.add_argument(
+         "--no-report", action="store_true", help="don't tell the move site this ran"
+     )
+     options = parser.parse_args(argv)
++    # The raw zip takes the folder by raw_export.py's own rules, so these
++    # choices of `build` would be quietly ignored: refuse them instead.
++    if getattr(options, "raw", False):
++        ignored = [
++            flag
++            for flag, given in [
++                ("--no-workspace", options.no_workspace),
++                ("--everything", options.everything),
++                ("--max-file-mb", options.max_file_mb is not None),
++            ]
++            if given
++        ]
++        if ignored:
++            parser.error(f"--raw does not take {', '.join(ignored)}")
++    if options.max_file_mb is None:
++        options.max_file_mb = DEFAULT_MAX_FILE_MB
+     if options.max_file_mb < 1:
+         parser.error("--max-file-mb must be at least 1")
+     return options
+@@ -2532,8 +2637,9 @@ def main(argv=None):
+         found = survey(paths, os.environ, out_dir, file_limit(options), options.everything)
+         result = reported(found, "survey", paths, os.environ, not options.no_report)
+     else:
++        make = build_raw if options.raw else build
+         result = reported(
+-            build(paths, os.environ, options), "build", paths, os.environ, not options.no_report
++            make(paths, os.environ, options), "build", paths, os.environ, not options.no_report
+         )
+         # Kept beside the zip too, for a build run in the background.
+         Path(result["zip"]).with_name("last-build.json").write_text(

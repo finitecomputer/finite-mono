@@ -131,12 +131,15 @@ if data.get("repository") != "finitecomputer/finite-mono":
     raise SystemExit(f"unexpected repository: {data.get('repository')!r}")
 
 rev = data.get("rev")
+application_rev = data.get("application_rev", rev)
 system = data.get("system")
 disko = data.get("disko")
 kexec = data.get("kexec")
 cache = data.get("cache")
 if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
     raise SystemExit(f"invalid rev: {rev!r}")
+if not isinstance(application_rev, str) or not re.fullmatch(r"[0-9a-f]{40}", application_rev):
+    raise SystemExit(f"invalid application_rev: {application_rev!r}")
 if not isinstance(system, str) or not re.fullmatch(
     r"/nix/store/[0-9a-z]{32}-nixos-system-finite-lat-2-[^/\s]+", system
 ):
@@ -153,6 +156,7 @@ print(system)
 print(disko)
 print(kexec)
 print(cache)
+print(application_rev)
 PY
 
 REV="$(sed -n '1p' "$manifest_values_file")"
@@ -160,6 +164,7 @@ SYSTEM="$(sed -n '2p' "$manifest_values_file")"
 DISKO="$(sed -n '3p' "$manifest_values_file")"
 KEXEC="$(sed -n '4p' "$manifest_values_file")"
 CACHE_REL="$(sed -n '5p' "$manifest_values_file")"
+APPLICATION_REV="$(sed -n '6p' "$manifest_values_file")"
 CACHE_DIR="$artifact_dir/$CACHE_REL"
 
 if [[ ! -d "$CACHE_DIR" || ! -f "$CACHE_DIR/nix-cache-info" ]]; then
@@ -172,9 +177,14 @@ git merge-base --is-ancestor "$REV" origin/main || {
   echo "refusing: $REV is not on origin/main" >&2
   exit 65
 }
+git merge-base --is-ancestor "$APPLICATION_REV" "$REV" || {
+  echo "refusing application source outside the reviewed host revision's ancestry" >&2
+  exit 65
+}
 
 echo "==> validated finite-lat-2 closure artifact"
 echo "    rev=$REV"
+echo "    application_rev=$APPLICATION_REV"
 echo "    system=$SYSTEM"
 echo "    disko=$DISKO"
 echo "    kexec=$KEXEC"

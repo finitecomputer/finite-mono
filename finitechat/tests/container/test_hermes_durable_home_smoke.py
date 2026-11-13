@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -222,6 +224,56 @@ class HermesDurableHomeSmokeTest(unittest.TestCase):
                 agent_container="agent-container",
             )
         self.assertIn("AGENT-LOG-TAIL", str(raised.exception))
+
+    def test_reply_read_error_is_fatal_even_after_slow_command_setup(self) -> None:
+        # Docker startup and StartRuntime precede the SSE read. Total command
+        # time cannot distinguish an early stream break from a read timeout.
+        for setup_seconds, stream_seconds in ((0, 3), (15, 3), (35, 3), (0, 17)):
+            with self.subTest(setup=setup_seconds, stream=stream_seconds):
+                self.assert_read_failure_is_fatal(setup_seconds, stream_seconds)
+
+    def assert_read_failure_is_fatal(self, setup_seconds: int, stream_seconds: int) -> None:
+        clock = 0.0
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal clock
+            calls.append(args)
+            if "send" in args:
+                return subprocess.CompletedProcess(args, 0, '{"messages": []}', "")
+            if "state" in args and sum("state" in call for call in calls) == 1:
+                clock += setup_seconds + stream_seconds
+                return subprocess.CompletedProcess(
+                    args,
+                    1,
+                    "",
+                    "delivery error: SSE hint stream read failed: request or response body error\n",
+                )
+            if "inspect" in args:
+                return subprocess.CompletedProcess(args, 0, '[{"State": {"Running": true}}]', "")
+            return subprocess.CompletedProcess(
+                args, 0, json.dumps({"messages": [{"is_mine": False, "text": "hello"}]}), ""
+            )
+
+        with (
+            mock.patch.object(smoke.subprocess, "run", side_effect=fake_run),
+            mock.patch.object(smoke.time, "monotonic", side_effect=lambda: clock),
+            mock.patch.object(smoke.time, "sleep"),
+            self.assertRaises(smoke.SmokeFailure) as raised,
+        ):
+            smoke.run_model_smoke(
+                image="test",
+                user_volume="user",
+                server_url="https://chat.example",
+                room_id="room",
+                expected="hello",
+                env={},
+                agent_container="agent",
+            )
+        self.assertIn("SSE hint stream read failed", str(raised.exception))
+        self.assertEqual(sum("send" in call for call in calls), 1)
+        self.assertEqual(sum("state" in call for call in calls), 1)
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":

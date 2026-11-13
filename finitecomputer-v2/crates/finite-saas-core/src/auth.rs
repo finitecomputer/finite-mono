@@ -426,6 +426,10 @@ impl WorkosAuthenticator {
             return Err(WorkosAuthError::InvalidUser);
         }
         Ok(VerifiedWorkosUser {
+            display_name: crate::account_labels::workos_display_name(
+                user.first_name.as_ref(),
+                user.last_name.as_ref(),
+            ),
             id: user.id,
             email: email.to_string(),
         })
@@ -582,6 +586,9 @@ pub struct VerifiedWorkosSession {
 pub struct VerifiedWorkosUser {
     pub id: String,
     pub email: String,
+    /// Normalized WorkOS first and last name; `None` when WorkOS has no
+    /// usable name. Never required for sign-in.
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -602,6 +609,12 @@ struct WorkosUser {
     id: String,
     email: String,
     email_verified: bool,
+    // Optional and untrusted in shape: any JSON value is accepted here so a
+    // malformed name can never fail sign-in. See `workos_display_name`.
+    #[serde(default)]
+    first_name: Option<serde_json::Value>,
+    #[serde(default)]
+    last_name: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

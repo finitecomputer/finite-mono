@@ -1,10 +1,13 @@
 # Release-ready source for the model-independent `finite-private` Tinfoil
 # container. The checkpoint, modelwrap artifact, and Finite images are pinned
 # to immutable identities for the authorized 2026-08-28 production window.
-cvm-version: 0.14.13
+cvm-version: 0.14.17
 cpus: 32
 memory: 524288
 gpus: 8
+
+security:
+  allow-unencrypted-nvlink: true
 
 models:
   - name: "glm-5-3-flash"

@@ -28,6 +28,58 @@ impl BrainStore {
             .map_err(StoreError::from)
     }
 
+    /// Server-authoritative scope of a permanent Folder deletion, read
+    /// without loading object payloads. The caller echoes `folder_ids` and
+    /// `object_count` back as its `FolderDeletionExpectation`, which the
+    /// deletion transaction checks again, so a change in between still fails
+    /// closed.
+    pub fn folder_deletion_preview(
+        &self,
+        brain_id: &BrainId,
+        root_folder_id: &FolderId,
+        actor_npub: &UserId,
+    ) -> Result<FolderDeletionPreview, StoreError> {
+        let stored = self.load_brain(brain_id)?;
+        if !has_brain_operational_authority(&stored, actor_npub) {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Folder deletion requires brain destructive authority".to_owned(),
+            });
+        }
+        let root_folder = stored
+            .brain
+            .folders
+            .iter()
+            .find(|folder| folder.id == *root_folder_id)
+            .ok_or_else(|| StoreError::MissingFolder {
+                folder_id: root_folder_id.to_string(),
+            })?;
+        let folder_ids = folder_subtree_depths(&stored, root_folder_id)?
+            .into_keys()
+            .collect::<BTreeSet<_>>();
+        // One indexed count per Folder: the subtree is already bounded by
+        // the Folder capacity envelope, and no ciphertext is read.
+        let mut object_count = 0_usize;
+        for folder_id in &folder_ids {
+            let count = self.conn.query_row(
+                r#"SELECT COUNT(*) FROM current_encrypted_brain_objects
+                   WHERE brain_id = ?1 AND folder_id = ?2 AND deleted = 0"#,
+                params![brain_id.as_str(), folder_id.as_str()],
+                |row| row.get::<_, usize>(0),
+            )?;
+            object_count += count;
+        }
+        if object_count > BRAIN_CAPACITY_ENVELOPE.current_objects {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Folder subtree holds more live objects than the Brain envelope".to_owned(),
+            });
+        }
+        Ok(FolderDeletionPreview {
+            folder_ids,
+            object_count,
+            root_key_version: root_folder.current_key_version,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn delete_folder_subtree(
         &mut self,
@@ -87,46 +139,7 @@ impl BrainStore {
             });
         }
 
-        let mut children = BTreeMap::<FolderId, Vec<FolderId>>::new();
-        for folder in &stored.brain.folders {
-            if let Some(parent) = &folder.parent_folder_id {
-                children
-                    .entry(parent.clone())
-                    .or_default()
-                    .push(folder.id.clone());
-            }
-        }
-        let mut subtree_depths = BTreeMap::new();
-        let mut pending = vec![(root_folder_id.clone(), 1_usize)];
-        while let Some((folder_id, depth)) = pending.pop() {
-            if depth > BRAIN_CAPACITY_ENVELOPE.folder_depth {
-                return Err(StoreError::CapacityExceeded {
-                    limit: "folder_depth".to_owned(),
-                    max: BRAIN_CAPACITY_ENVELOPE.folder_depth,
-                    current: depth,
-                });
-            }
-            if subtree_depths.insert(folder_id.clone(), depth).is_some() {
-                return Err(StoreError::BrokenInvariant {
-                    reason: "Folder hierarchy contains a cycle".to_owned(),
-                });
-            }
-            if subtree_depths.len() > BRAIN_CAPACITY_ENVELOPE.folders {
-                return Err(StoreError::CapacityExceeded {
-                    limit: "brain_folders".to_owned(),
-                    max: BRAIN_CAPACITY_ENVELOPE.folders,
-                    current: subtree_depths.len(),
-                });
-            }
-            if let Some(descendants) = children.get(&folder_id) {
-                pending.extend(
-                    descendants
-                        .iter()
-                        .rev()
-                        .map(|child| (child.clone(), depth + 1)),
-                );
-            }
-        }
+        let subtree_depths = folder_subtree_depths(&stored, root_folder_id)?;
         let subtree = subtree_depths.keys().cloned().collect::<BTreeSet<_>>();
         let mut folders = stored
             .brain
@@ -348,6 +361,56 @@ impl BrainStore {
         }
         Ok(folder_ids)
     }
+}
+
+/// Depth of every Folder in the subtree rooted at `root_folder_id`, with the
+/// depth, size and cycle limits enforced. Preview and deletion share this so
+/// they always agree on the subtree.
+fn folder_subtree_depths(
+    stored: &StoredBrain,
+    root_folder_id: &FolderId,
+) -> Result<BTreeMap<FolderId, usize>, StoreError> {
+    let mut children = BTreeMap::<FolderId, Vec<FolderId>>::new();
+    for folder in &stored.brain.folders {
+        if let Some(parent) = &folder.parent_folder_id {
+            children
+                .entry(parent.clone())
+                .or_default()
+                .push(folder.id.clone());
+        }
+    }
+    let mut subtree_depths = BTreeMap::new();
+    let mut pending = vec![(root_folder_id.clone(), 1_usize)];
+    while let Some((folder_id, depth)) = pending.pop() {
+        if depth > BRAIN_CAPACITY_ENVELOPE.folder_depth {
+            return Err(StoreError::CapacityExceeded {
+                limit: "folder_depth".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.folder_depth,
+                current: depth,
+            });
+        }
+        if subtree_depths.insert(folder_id.clone(), depth).is_some() {
+            return Err(StoreError::BrokenInvariant {
+                reason: "Folder hierarchy contains a cycle".to_owned(),
+            });
+        }
+        if subtree_depths.len() > BRAIN_CAPACITY_ENVELOPE.folders {
+            return Err(StoreError::CapacityExceeded {
+                limit: "brain_folders".to_owned(),
+                max: BRAIN_CAPACITY_ENVELOPE.folders,
+                current: subtree_depths.len(),
+            });
+        }
+        if let Some(descendants) = children.get(&folder_id) {
+            pending.extend(
+                descendants
+                    .iter()
+                    .rev()
+                    .map(|child| (child.clone(), depth + 1)),
+            );
+        }
+    }
+    Ok(subtree_depths)
 }
 
 fn folder_deletion_payload(

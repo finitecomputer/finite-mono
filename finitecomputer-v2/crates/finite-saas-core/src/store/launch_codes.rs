@@ -12,44 +12,47 @@ impl CoreStore {
         };
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let code_count = i32::try_from(prepared.batch.code_count)
-            .map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?;
-        tx.execute(
-            "INSERT INTO launch_code_batches
+        let result: CoreResult<_> = async {
+            let code_count = i32::try_from(prepared.batch.code_count)
+                .map_err(|_| CoreError::InvalidLaunchCodeBatchSize)?;
+            tx.execute(
+                "INSERT INTO launch_code_batches
                (id, name, hosting_tier, code_count, expires_at, revoked_at,
                 revoked_by_workos_user_id, created_by_workos_user_id, created_at)
              VALUES ($1, $2, $3, $4, $5::text::timestamptz, NULL, NULL, $6,
                      $7::text::timestamptz)",
-            &[
-                &prepared.batch.id,
-                &prepared.batch.name,
-                &prepared.batch.hosting_tier.map(HostingTier::as_str),
-                &code_count,
-                &prepared.batch.expires_at,
-                &prepared.batch.created_by_workos_user_id,
-                &prepared.batch.created_at,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-        for record in prepared.records {
-            tx.execute(
-                "INSERT INTO launch_codes
-                   (id, batch_id, code_hash, redeemed_customer_org_id,
-                    redemption_idempotency_key, redeemed_at, created_at)
-                 VALUES ($1, $2, $3, NULL, NULL, NULL, $4::text::timestamptz)",
                 &[
-                    &record.id,
-                    &record.batch_id,
-                    &record.code_hash,
-                    &record.created_at,
+                    &prepared.batch.id,
+                    &prepared.batch.name,
+                    &prepared.batch.hosting_tier.map(HostingTier::as_str),
+                    &code_count,
+                    &prepared.batch.expires_at,
+                    &prepared.batch.created_by_workos_user_id,
+                    &prepared.batch.created_at,
                 ],
             )
             .await
             .map_err(store_error)?;
+            for record in prepared.records {
+                tx.execute(
+                    "INSERT INTO launch_codes
+                   (id, batch_id, code_hash, redeemed_customer_org_id,
+                    redemption_idempotency_key, redeemed_at, created_at)
+                 VALUES ($1, $2, $3, NULL, NULL, NULL, $4::text::timestamptz)",
+                    &[
+                        &record.id,
+                        &record.batch_id,
+                        &record.code_hash,
+                        &record.created_at,
+                    ],
+                )
+                .await
+                .map_err(store_error)?;
+            }
+            Ok(response)
         }
-        self.finish(tx).await?;
-        Ok(response)
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Root-only operator command: bind an unused code issued by the named
@@ -67,6 +70,7 @@ impl CoreStore {
             normalize_owner_email(Some(operator_email)).ok_or(CoreError::MissingVerifiedEmail)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let operator = select_user_by_email(&*tx, &email)
             .await?
             .filter(|user| user.workos_user_id.as_deref() == Some(operator_workos_user_id))
@@ -117,7 +121,10 @@ impl CoreStore {
                 now: &current_time_iso()?,
             }).await?;
         }
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Preserve the original binding and append one retry after an exact,
@@ -135,6 +142,7 @@ impl CoreStore {
             .ok_or(CoreError::MissingVerifiedEmail)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let operator = select_user_by_email(&*tx, &email)
             .await?
             .filter(|u| u.workos_user_id.as_deref() == Some(input.operator_workos_user_id.as_str()))
@@ -224,7 +232,10 @@ impl CoreStore {
             )
             .await?;
         }
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Append a release receipt; targeting rows and all user state stay intact.
@@ -238,6 +249,7 @@ impl CoreStore {
             .ok_or(CoreError::MissingVerifiedEmail)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         select_user_by_email(&*tx, &email)
             .await?
             .filter(|user| {
@@ -277,7 +289,7 @@ impl CoreStore {
             {
                 return Err(CoreError::RuntimeSpecMismatch);
             }
-            return self.finish(tx).await;
+            return Ok(());
         }
         // Lock every code and batch so redemption/revocation cannot invalidate
         // the check. Do not open the pool with a usable qualification code left.
@@ -350,7 +362,10 @@ impl CoreStore {
             },
         )
         .await?;
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn list_launch_code_batches(&self) -> CoreResult<Vec<LaunchCodeBatchDetails>> {
@@ -370,6 +385,7 @@ impl CoreStore {
         parse_time(&now)?;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let row = tx
             .query_opt(
                 "UPDATE launch_code_batches
@@ -386,7 +402,9 @@ impl CoreStore {
             .ok_or(CoreError::LaunchCodeBatchNotFound)?;
         let batch = launch_code_batch_from_row(&row)?;
         let details = postgres_launch_code_batch_details(&*tx, batch).await?;
-        self.finish(tx).await?;
         Ok(details)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }

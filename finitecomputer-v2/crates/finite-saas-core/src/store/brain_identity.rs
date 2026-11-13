@@ -2,6 +2,11 @@
 //! scoped exact-key description snapshot. See
 //! `finitecomputer-v2/docs/brain-identity-descriptions-v1.md`.
 
+mod observations;
+mod scoped;
+mod scoped_operations;
+mod snapshot;
+
 use super::*;
 use crate::brain_identity::{
     AgentLifecycle, BrainAccountObservationRequest, BrainIdentityDescriptionsRequest,
@@ -219,7 +224,10 @@ fn agent_evidence<'a>(rows: &[&'a AgentPinRow]) -> AgentEvidence<'a> {
 struct AccountRow {
     /// `None` when the stored email is over the wire bound.
     email: Option<String>,
+    /// WorkOS name; `None` when absent or over the wire bound.
+    display_name: Option<String>,
     linked: bool,
+    workos_subject: Option<String>,
     updated_at: String,
 }
 
@@ -231,194 +239,11 @@ struct HumanAssociationRow {
 }
 
 impl CoreStore {
-    /// Atomically record one trusted hosted observation: the human key
-    /// association (when present), the account/Brain sharing scope and the
-    /// idempotency receipt. An exact retry returns the stored outcome without
-    /// re-checking freshness or re-applying any write.
-    pub async fn record_brain_account_observation(
-        &self,
-        workos_user_id: &str,
-        issuer: &str,
-        request: &BrainAccountObservationRequest,
-        now: time::OffsetDateTime,
-    ) -> Result<ObservationOutcome, BrainObservationError> {
-        let payload_sha256 = request.payload_sha256();
-        let mut client = self.connection().await?;
-        let tx = client.transaction().await.map_err(store_error)?;
-        tx.batch_execute("SET LOCAL statement_timeout = '5s'")
-            .await
-            .map_err(store_error)?;
-        // Resolve an existing linked account only; no user, personal org or
-        // link is created or changed here. The row lock (scoped to this
-        // account) serializes its observations, so a concurrent duplicate of
-        // one operation reads the first attempt's receipt instead of failing
-        // on its unique constraint. It does not block key-share readers.
-        let user_id: String = tx
-            .query_opt(
-                "SELECT id FROM users
-                 WHERE workos_user_id = $1 AND link_status = 'linked'
-                 FOR NO KEY UPDATE",
-                &[&workos_user_id],
-            )
-            .await
-            .map_err(store_error)?
-            .ok_or(BrainObservationError::AccountNotLinked)?
-            .get("id");
-        let user_id = user_id.as_str();
-
-        if let Some(receipt) = tx
-            .query_opt(
-                "SELECT issuer, payload_sha256, outcome FROM brain_account_observation_receipts
-                 WHERE user_id = $1 AND operation_id = $2",
-                &[&user_id, &request.operation_id],
-            )
-            .await
-            .map_err(store_error)?
-        {
-            tx.rollback().await.map_err(store_error)?;
-            let stored_issuer: String = receipt.get("issuer");
-            let stored_payload: String = receipt.get("payload_sha256");
-            if stored_issuer != issuer || stored_payload != payload_sha256 {
-                return Err(BrainObservationError::OperationReused);
-            }
-            let outcome: String = receipt.get("outcome");
-            return ObservationOutcome::parse(&outcome).ok_or_else(|| {
-                CoreError::Store("stored Brain observation outcome is invalid".to_string()).into()
-            });
-        }
-
-        let observed = parse_time(&request.observed_at)?;
-        let age = now - observed;
-        if age > time::Duration::seconds(OBSERVATION_WINDOW_SECONDS + OBSERVATION_SKEW_SECONDS)
-            || -age > time::Duration::seconds(OBSERVATION_SKEW_SECONDS)
-        {
-            return Err(BrainObservationError::Stale);
-        }
-        let now_text = now
-            .format(&Rfc3339)
-            .map_err(|_| CoreError::InvalidTimestamp)?;
-
-        if request.action_kind == ObservationActionKind::OwnedAgentHostedAction {
-            let npub = npub_for_hex(&request.participating_public_key_hex)
-                .ok_or(BrainObservationError::AgentNotOwned)?;
-            let rows = agent_pin_rows(&*tx, &[npub]).await?;
-            let refs = rows.iter().collect::<Vec<_>>();
-            let owned_and_live = matches!(
-                agent_evidence(&refs),
-                AgentEvidence::Agent {
-                    pin,
-                    lifecycle: Some(AgentLifecycle::Active | AgentLifecycle::Offboarding),
-                    ..
-                } if pin.owner_user_id == user_id
-            );
-            if !owned_and_live {
-                return Err(BrainObservationError::AgentNotOwned);
-            }
-        }
-
-        let mut changed = false;
-        if let Some(human_key) = request.observed_human_public_key_hex.as_deref() {
-            let npub = npub_for_hex(human_key).ok_or_else(|| {
-                CoreError::Store("validated human key did not encode".to_string())
-            })?;
-            if !agent_pin_rows(&*tx, &[npub]).await?.is_empty() {
-                return Err(BrainObservationError::KeyIsAgentRecord);
-            }
-            let association_id = generate_surrogate_id("account_key")?;
-            let inserted = tx
-                .query_opt(
-                    "INSERT INTO account_brain_principals (
-                       id, user_id, public_key_hex, source, issuer, status,
-                       first_observed_at, last_observed_at, revision
-                     ) VALUES ($1, $2, $3, 'hosted_device_observation', $4, 'active',
-                               $5::text::timestamptz, $5::text::timestamptz, 1)
-                     ON CONFLICT (public_key_hex) WHERE status = 'active' DO NOTHING
-                     RETURNING id",
-                    &[&association_id, &user_id, &human_key, &issuer, &now_text],
-                )
-                .await
-                .map_err(store_error)?;
-            if inserted.is_some() {
-                changed = true;
-            } else {
-                // The conflicting active row may in principle have changed
-                // since the insert; anything but this account's own active
-                // association is refused.
-                let owner: Option<String> = tx
-                    .query_opt(
-                        "SELECT user_id FROM account_brain_principals
-                         WHERE public_key_hex = $1 AND status = 'active'",
-                        &[&human_key],
-                    )
-                    .await
-                    .map_err(store_error)?
-                    .map(|row| row.get("user_id"));
-                if owner.as_deref() != Some(user_id) {
-                    return Err(BrainObservationError::KeyAssociatedElsewhere);
-                }
-                // Refreshes evidence time only; `revision` names the
-                // association itself, which is unchanged.
-                tx.execute(
-                    "UPDATE account_brain_principals
-                     SET last_observed_at = GREATEST(last_observed_at, $3::text::timestamptz)
-                     WHERE public_key_hex = $1 AND user_id = $2 AND status = 'active'",
-                    &[&human_key, &user_id, &now_text],
-                )
-                .await
-                .map_err(store_error)?;
-            }
-        }
-
-        let scope_id = generate_surrogate_id("brain_scope")?;
-        let scope_inserted = tx
-            .execute(
-                "INSERT INTO account_brain_sharing_scopes (
-                   id, user_id, brain_server, brain_id, issuer, established_at, revoked_at, revision
-                 ) VALUES ($1, $2, $3, $4, $5, $6::text::timestamptz, NULL, 1)
-                 ON CONFLICT (user_id, brain_server, brain_id) WHERE revoked_at IS NULL DO NOTHING",
-                &[
-                    &scope_id,
-                    &user_id,
-                    &request.brain_server,
-                    &request.brain_id,
-                    &issuer,
-                    &now_text,
-                ],
-            )
-            .await
-            .map_err(store_error)?;
-        changed |= scope_inserted == 1;
-
-        let outcome = if changed {
-            ObservationOutcome::Recorded
-        } else {
-            ObservationOutcome::Unchanged
-        };
-        let receipt_id = generate_surrogate_id("brain_observation")?;
-        tx.execute(
-            "INSERT INTO brain_account_observation_receipts (
-               id, user_id, operation_id, issuer, payload_sha256, outcome, recorded_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7::text::timestamptz)",
-            &[
-                &receipt_id,
-                &user_id,
-                &request.operation_id,
-                &issuer,
-                &payload_sha256,
-                &outcome.as_str(),
-                &now_text,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-        self.finish(tx).await?;
-        Ok(outcome)
-    }
-
     /// Describe exact keys for one Brain audience from one REPEATABLE READ
-    /// snapshot. Results are returned in request order. A key whose
+    /// snapshot. Results are returned in request order. Under v1 a key whose
     /// responsible account has not shared with this exact Brain is
-    /// `notShared`, identical to a key Core does not know.
+    /// `notShared`, identical to a key Core does not know; v2 skips that
+    /// check (see `requires_sharing_scope`).
     pub async fn describe_brain_identities(
         &self,
         request: &BrainIdentityDescriptionsRequest,
@@ -431,174 +256,34 @@ impl CoreStore {
             .start()
             .await
             .map_err(store_error)?;
-        // Bound the SQL itself; dropping a timed-out future would leave the
-        // query running on a pooled connection.
-        tx.batch_execute(&format!(
-            "SET LOCAL statement_timeout = '{}ms'",
-            DESCRIPTION_BUDGET.as_millis()
-        ))
-        .await
-        .map_err(store_error)?;
-
-        let keys = &request.public_keys_hex;
-        let npub_by_key = keys
-            .iter()
-            .filter_map(|key| npub_for_hex(key).map(|npub| (key.clone(), npub)))
-            .collect::<BTreeMap<_, _>>();
-        let npubs = npub_by_key.values().cloned().collect::<Vec<_>>();
-
-        let humans = tx
-            .query(
-                "SELECT id, user_id, public_key_hex, core_rfc3339(last_observed_at) AS last_observed_at,
-                        revision
-                 FROM account_brain_principals
-                 WHERE status = 'active' AND public_key_hex = ANY($1)",
-                &[keys],
-            )
+        let result: CoreResult<_> = async {
+            // Bound the SQL itself; dropping a timed-out future would leave the
+            // query running on a pooled connection.
+            tx.batch_execute(&format!(
+                "SET LOCAL statement_timeout = '{}ms'",
+                DESCRIPTION_BUDGET.as_millis()
+            ))
             .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| {
-                (
-                    row.get::<_, String>("public_key_hex"),
-                    HumanAssociationRow {
-                        id: row.get("id"),
-                        user_id: row.get("user_id"),
-                        last_observed_at: row.get("last_observed_at"),
-                        revision: row.get("revision"),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        let agent_rows = agent_pin_rows(&*tx, &npubs).await?;
-        let mut agents_by_npub: BTreeMap<&str, Vec<&AgentPinRow>> = BTreeMap::new();
-        for row in &agent_rows {
-            agents_by_npub
-                .entry(row.npub.as_str())
-                .or_default()
-                .push(row);
-        }
+            .map_err(store_error)?;
 
-        let mut implicated = humans
-            .values()
-            .map(|row| row.user_id.clone())
-            .collect::<BTreeSet<_>>();
-        implicated.extend(
-            agent_rows
+            let hints =
+                (!request.requires_sharing_scope()).then_some(request.public_keys_hex.as_slice());
+            let snapshot = snapshot::IdentitySnapshot::load(
+                &*tx,
+                request,
+                &request.public_keys_hex,
+                &[],
+                hints,
+            )
+            .await?;
+            Ok(request
+                .public_keys_hex
                 .iter()
-                .filter_map(|row| row.consistent.as_ref())
-                .map(|pin| pin.owner_user_id.clone()),
-        );
-        let implicated = implicated.into_iter().collect::<Vec<_>>();
-
-        let shared = tx
-            .query(
-                "SELECT user_id FROM account_brain_sharing_scopes
-                 WHERE revoked_at IS NULL AND brain_server = $1 AND brain_id = $2
-                   AND user_id = ANY($3)",
-                &[&request.brain_server, &request.brain_id, &implicated],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| row.get::<_, String>("user_id"))
-            .collect::<BTreeSet<_>>();
-        let shared_ids = shared.iter().cloned().collect::<Vec<_>>();
-        let accounts = tx
-            .query(
-                "SELECT id,
-                        CASE WHEN octet_length(normalized_email) <= $2 THEN normalized_email END
-                          AS normalized_email,
-                        link_status, core_rfc3339(updated_at) AS updated_at
-                 FROM users WHERE id = ANY($1)",
-                &[&shared_ids, &(MAX_CONTACT_BYTES as i32)],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| {
-                (
-                    row.get::<_, String>("id"),
-                    AccountRow {
-                        email: row.get("normalized_email"),
-                        linked: row.get::<_, String>("link_status") == "linked",
-                        updated_at: row.get("updated_at"),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        // Bounded in SQL: at most MAX_RESPONSIBLE_HUMAN_KEYS rows per shared
-        // account, read through the (user_id, public_key_hex) partial index.
-        let mut human_keys_by_account: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for row in tx
-            .query(
-                "SELECT account.id AS user_id, account_key.public_key_hex
-                 FROM unnest($1::text[]) AS account(id)
-                 CROSS JOIN LATERAL (
-                   SELECT public_key_hex FROM account_brain_principals
-                   WHERE user_id = account.id AND status = 'active'
-                   ORDER BY public_key_hex
-                   LIMIT $2
-                 ) AS account_key
-                 ORDER BY account.id, account_key.public_key_hex",
-                &[&shared_ids, &(MAX_RESPONSIBLE_HUMAN_KEYS as i64)],
-            )
-            .await
-            .map_err(store_error)?
-        {
-            human_keys_by_account
-                .entry(row.get::<_, String>("user_id"))
-                .or_default()
-                .push(row.get("public_key_hex"));
+                .map(|key| snapshot.describe(key))
+                .collect())
         }
-        // A human key that is also pinned as an agent is a conflicting
-        // record, not a hint. Exclude it with one bounded, indexed equality
-        // read over the (at most 8 per account) candidate keys.
-        let hint_npubs = human_keys_by_account
-            .values()
-            .flatten()
-            .filter_map(|key| npub_for_hex(key))
-            .collect::<Vec<_>>();
-        let pinned_hints = tx
-            .query(
-                "SELECT DISTINCT health_reporting_npub FROM agent_runtimes
-                 WHERE health_reporting_npub = ANY($1)",
-                &[&hint_npubs],
-            )
-            .await
-            .map_err(store_error)?
-            .iter()
-            .map(|row| row.get::<_, String>("health_reporting_npub"))
-            .collect::<BTreeSet<_>>();
-        for keys in human_keys_by_account.values_mut() {
-            keys.retain(|key| npub_for_hex(key).is_some_and(|npub| !pinned_hints.contains(&npub)));
-        }
-        tx.commit().await.map_err(store_error)?;
-
-        // An account may disclose only when it has shared with this exact
-        // Brain and is a linked (WorkOS-verified) account.
-        let disclosable = |user_id: &str| {
-            shared.contains(user_id) && accounts.get(user_id).is_some_and(|account| account.linked)
-        };
-        let empty = Vec::new();
-        Ok(keys
-            .iter()
-            .map(|key| {
-                let human = humans.get(key);
-                let pins = npub_by_key
-                    .get(key)
-                    .and_then(|npub| agents_by_npub.get(npub.as_str()))
-                    .unwrap_or(&empty);
-                describe_key(
-                    key,
-                    human,
-                    agent_evidence(pins),
-                    &disclosable,
-                    &accounts,
-                    &human_keys_by_account,
-                )
-            })
-            .collect())
+        .await;
+        self.finish(tx, result).await
     }
 }
 
@@ -617,12 +302,15 @@ fn describe_key(
             if !disclosable(&human.user_id) {
                 return not_shared();
             }
-            let Some(email) = bounded(accounts[&human.user_id].email.as_deref(), MAX_CONTACT_BYTES)
-            else {
+            let account = &accounts[&human.user_id];
+            let Some(email) = bounded(account.email.as_deref(), MAX_CONTACT_BYTES) else {
                 return IdentityDescription::bare(key, DescriptionState::Unknown);
             };
             IdentityDescription {
                 kind: Some(DescribedKind::Human),
+                // The account's WorkOS name, released with the email under
+                // the same gate. Optional: an unusable name is omitted.
+                display_name: bounded(account.display_name.as_deref(), MAX_DISPLAY_NAME_BYTES),
                 account_email: Some(email),
                 source: Some(DescriptionSource {
                     kind: "hostedDeviceObservation".to_string(),

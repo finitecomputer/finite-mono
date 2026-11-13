@@ -106,17 +106,10 @@ const PRE_LIFECYCLE_SCHEMA_SQL: &str = concat!(
     include_str!("../../migrations/0019_brain_agent_departure_facts.sql")
 );
 
-/// A stageable retirement fixture: a launched, retirement-capable Runtime
-/// with one provisioned runtime key and an enqueued exact destroy. Returns
-/// the project, runtime, destroy request, and leased RuntimeSpec ids the
-/// destroy completion must bind to.
-async fn stage_retirement_in_flight(
-    store: &TestDb,
-    run: &str,
-    host: &str,
-) -> (String, String, crate::RuntimeControlRequest, String, String) {
+/// A launched, online Kata Runtime on `host`, machine `{run}-agent-001`.
+/// Returns its project and runtime ids.
+async fn launched_kata_runtime(store: &TestDb, run: &str, host: &str) -> (String, String) {
     let owner_email = format!("{run}-owner@finite.vip");
-    let admin_email = format!("{run}-admin@finite.vip");
     let machine_id = format!("{run}-agent-001");
     let launch_code = issue_test_launch_code(store, "2026-07-21T12:00:00Z").await;
     store
@@ -189,7 +182,21 @@ async fn stage_retirement_in_flight(
         .await
         .unwrap();
     let runtime_id = completed.request.agent_runtime_id.clone().unwrap();
-    let project_id = completed.project.id.clone();
+    (completed.project.id.clone(), runtime_id)
+}
+
+/// A stageable retirement fixture: a launched, retirement-capable Runtime
+/// with one provisioned runtime key and an enqueued exact destroy. Returns
+/// the project, runtime, destroy request, and leased RuntimeSpec ids the
+/// destroy completion must bind to.
+async fn stage_retirement_in_flight(
+    store: &TestDb,
+    run: &str,
+    host: &str,
+) -> (String, String, crate::RuntimeControlRequest, String, String) {
+    let admin_email = format!("{run}-admin@finite.vip");
+    let machine_id = format!("{run}-agent-001");
+    let (project_id, runtime_id) = launched_kata_runtime(store, run, host).await;
     let retirement_capable =
         serde_json::to_string(&RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
             runtime_retirement: true,
@@ -277,6 +284,8 @@ mod provider_operations;
 mod relocation_absence;
 mod relocation_registration;
 mod retirement;
+mod runtime_move_holds;
+mod runtime_moves;
 mod upgrade_migration;
 
 async fn retry_canary_fixture(

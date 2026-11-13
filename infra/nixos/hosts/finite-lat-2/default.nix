@@ -86,6 +86,9 @@ in
     ../../modules/backups.nix
     ../../modules/monitoring.nix
     ../../modules/finite-litestream.nix
+    ../../modules/finite-mover.nix
+    ../../modules/ssh-flood-limits.nix
+    ../../modules/tcp-ip-options-guard.nix
   ];
 
   networking.hostName = "finite-lat-2";
@@ -98,6 +101,7 @@ in
       finite-lat-3 = "https://agents-lat3.finite.computer";
       finite-lat-4 = "https://agents-lat4.finite.computer";
       finite-lat-5 = "https://agents-lat5.finite.computer";
+      finite-lat-7 = "https://agents-lat7.finite.computer";
     };
   };
   services.caddy.virtualHosts."runtime-api.finite.computer".extraConfig = ''
@@ -113,6 +117,38 @@ in
   finite.importMode = {
     enable = false;
     units = importModeUnits;
+  };
+
+  # FIN-463's mover (../../modules/finite-mover.nix), on with the app
+  # release that carries finite-mover and Core's runtime-mark-moved-exact
+  # (lat2-app-source 500109e4, FIN-492). Each Runner host is reached over
+  # wg-finite, its host key read off the box on 2026-11-11 and matched over
+  # the overlay. Its timers wait for finite.chat to know its npub
+  # (timers.enable).
+  finite.mover = {
+    enable = true;
+    core = {
+      adminEmail = "austin@finite.vip";
+      adminWorkosUserId = "user_01KSNFQE5SSD07EMMKN9GV1H2S";
+    };
+    hosts = {
+      finite-lat-3 = {
+        address = "10.254.3.2";
+        hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHVzCCh0/610YBNMob+CLVSleRE5DCUoHDKentDH6hWk";
+      };
+      finite-lat-4 = {
+        address = "10.254.3.4";
+        hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDxlqqF27jbkR1e6RZwfVCkpUoY9g7Mg1M+L3xRAis/E";
+      };
+      finite-lat-5 = {
+        address = "10.254.3.5";
+        hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOV5At4Cvb56W4u8VWSEQyrPjFyzA5ERxV4mqWixenuY";
+      };
+      finite-lat-7 = {
+        address = "10.254.3.6";
+        hostKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINrZ2ccP1KZwy7Hh6nKu6yPhtwO95rEruykVcg8sL0Wd";
+      };
+    };
   };
 
   # Reuse the existing finitecomputer rsync.net destination account, with a
@@ -240,6 +276,14 @@ in
         endpoint = "64.34.93.213:51820";
         persistentKeepalive = 25;
       }
+      {
+        # finite-lat-7: public half of its unique OS bootstrap key.
+        # .6 is the remaining usable address in this /29; .7 is broadcast.
+        publicKey = "unTcFY/UDM+QtEcvZsmLKXhl9BmO/kb5n3awrzMbDFw=";
+        allowedIPs = [ "10.254.3.6/32" ];
+        endpoint = "64.34.89.107:51820";
+        persistentKeepalive = 25;
+      }
     ];
   };
 
@@ -299,6 +343,16 @@ in
         -s 10.254.3.5/32 -d 10.254.3.1/32 -i wg-finite \
         -p tcp --dport 18790 \
         -m comment --comment finite-lat5-identity \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.6/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 14200 \
+        -m comment --comment finite-lat7-core \
+        -j nixos-fw-accept
+      iptables -w -A nixos-fw \
+        -s 10.254.3.6/32 -d 10.254.3.1/32 -i wg-finite \
+        -p tcp --dport 18790 \
+        -m comment --comment finite-lat7-identity \
         -j nixos-fw-accept
     '';
   };

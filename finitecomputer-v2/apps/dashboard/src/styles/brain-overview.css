@@ -28,6 +28,8 @@
 .brain-preview-options summary { cursor: pointer; margin-bottom: 10px; width: fit-content; }
 .brain-table-preview summary:focus-visible { outline: 2px solid #879fc3; outline-offset: 3px; border-radius: 2px; }
 @media (max-width: 640px) { .brain-table th, .brain-table td { padding: 14px 10px; } .brain-table { min-width: 480px; } }
+.brain-identity-table { min-width: 900px; }
+@media (max-width: 640px) { .brain-identity-table th:first-child { width: 230px; } }
 .brain-table tr > :first-child { padding-left: 0; }
 .brain-table tr > :last-child { padding-right: 0; }
 .brain-table-refresh button { width: 32px; height: 32px; padding: 0; border: 0; background: transparent; }
@@ -60,3 +62,6 @@
 .brain-empty-chat { margin-top: 20px; gap: 8px; min-height: 44px; padding: 10px 16px; border-radius: 999px; background: var(--foreground); color: var(--background); font-size: 15px; font-weight: 500; }
 .brain-empty-chat:hover { opacity: .85; }
 .brain-empty-state button:hover { border-radius: 999px; background: var(--foreground); color: var(--background); }
+.brain-empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 20px; }
+.brain-empty-actions .brain-empty-chat { margin-top: 0; }
+.brain-empty-state .brain-empty-secondary, .brain-empty-state .brain-empty-secondary:hover { border: 1px solid var(--border); background: transparent; color: var(--foreground); }

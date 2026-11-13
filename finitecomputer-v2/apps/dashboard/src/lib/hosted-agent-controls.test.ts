@@ -6,7 +6,28 @@ import {
   agentOwnerClaimCommand,
   parseAgentConnectionAction,
   parseSimplexStatus,
+  commandForAction,
+  parseConnectionsStatus,
 } from "@/lib/hosted-agent-controls";
+
+test("saving OpenRouter access cannot silently apply an inference default", () => {
+  const action = parseAgentConnectionAction({ action: "openrouter_save", apiKey: "test-key", profile: "openrouter", model: "ignored/model" });
+  assert.deepEqual(action, { action: "openrouter_save", apiKey: "test-key" });
+  assert(action.action === "openrouter_save");
+  assert.deepEqual(commandForAction(action), {
+    command: "agent.openrouter.save", schema: "finite.agent.openrouter.save.v1", body: { api_key: "test-key" },
+  });
+  assert.throws(() => parseAgentConnectionAction({ action: "openrouter_save", apiKey: " " }));
+});
+
+test("OpenRouter availability is independent of default and absent on old runtimes", () => {
+  const status = { inference: { profile: "finite_private", provider: "custom", model: "private-model" }, telegram: {}, google: {} };
+  assert.equal(parseConnectionsStatus(status).openrouter, undefined);
+  const connected = parseConnectionsStatus({ ...status, openrouter: { key_saved: true, api_key: "must-not-escape" } });
+  assert.deepEqual(connected.openrouter, { key_saved: true });
+  assert.equal(connected.inference.profile, "finite_private");
+  assert.equal(JSON.stringify(connected).includes("must-not-escape"), false);
+});
 
 test("Connections reuses the durable successful owner claim", () => {
   assert.deepEqual(agentOwnerClaimCommand("room-1", "agent-account-1"), {

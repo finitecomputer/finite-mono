@@ -12,40 +12,41 @@ use crate::launch_codes::{
 use crate::{
     AdminArchiveUnrecoverableRuntimeInput, AdminAssignFinitePrivateLimitProfileInput,
     AdminIssueFinitePrivateFriendKeyInput, AdminIssuedFinitePrivateKey,
-    AdminOffboardRetiredRuntimeInput, AdminResetFinitePrivateUsageWindowInput,
-    AdminRevokeFinitePrivateApiKeyInput, AdminRotateFinitePrivateApiKeyInput,
-    AdminRuntimeControlInput, AdminRuntimeOverview, AdminRuntimeRelocateExactInput,
-    AdminRuntimeRetireExactInput, AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput,
-    AgentCreationConfiguration, AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest,
-    AgentCreationRequestStatus, AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass,
-    BillingOverview, CORE_SCHEMA_SQL, CancelAgentCreationRequestInput,
-    CompleteAgentCreationRequestInput, CompleteRuntimeControlRequestInput, CoreError, CoreResult,
-    CoreUser, CustomerBillingAccount, CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE,
-    FailAgentCreationRequestInput, FailRuntimeControlRequestInput, FinitePrivateAdminAccount,
-    FinitePrivateAdminAuditEvent, FinitePrivateAdminProject, FinitePrivateAdminState,
-    FinitePrivateApiKey, FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult,
-    FinitePrivateGrant, FinitePrivateGrantStatus, FinitePrivateLimitProfile,
-    FinitePrivateReservation, FinitePrivateReservationStatus, FinitePrivateUsageDecision,
-    FinitePrivateUsageNotice, FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier,
-    IssueFinitePrivateApiKeyInput, IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey,
-    LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkVerifiedUserInput, MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OWNER_CHAT_NPUBS_ENV,
-    OffboardingPhase, Project, ProjectMembershipRole, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderOperationTransitionRecord, ProviderOperationV1,
-    ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
-    RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS, RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS,
-    RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
-    RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
-    RenewRuntimeControlRequestInput, RequestAgentCreationInput, RequestAgentCreationResult,
-    RequestRuntimeDestroyInput, RequestRuntimeRecoverKnownGoodChatInput,
-    RequestRuntimeRestartInput, RequestRuntimeStopInput, ReserveFinitePrivateUsageInput,
-    ResetFinitePrivateUsageWindowInput, RetiredRuntimeOffboardReceipt,
-    RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput, RevokeFinitePrivateGrantInput,
-    RotateFinitePrivateApiKeyInput, RuntimeArtifact, RuntimeBootIntent,
-    RuntimeCapabilitiesEnvelope, RuntimeControlCompletion, RuntimeControlExpectedBinding,
-    RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest, RuntimeControlRequestStatus,
-    RuntimeHealthProjection, RuntimeHealthReportAck, RuntimeHealthTarget, RuntimeHealthTargetList,
-    RuntimeLifecycleStage, RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1,
+    AdminMarkRuntimeMovedExactInput, AdminOffboardRetiredRuntimeInput,
+    AdminResetFinitePrivateUsageWindowInput, AdminRevokeFinitePrivateApiKeyInput,
+    AdminRotateFinitePrivateApiKeyInput, AdminRuntimeControlInput, AdminRuntimeOverview,
+    AdminRuntimeRelocateExactInput, AdminRuntimeRetireExactInput, AdminRuntimeStopExactInput,
+    AdminRuntimeUpgradeExactInput, AdminRuntimeUpgradeInput, AgentCreationConfiguration,
+    AgentCreationEntitlement, AgentCreationLease, AgentCreationRequest, AgentCreationRequestStatus,
+    AgentRuntime, ApproveFinitePrivateGrantInput, BillingClass, BillingOverview, CORE_SCHEMA_SQL,
+    CancelAgentCreationRequestInput, CompleteAgentCreationRequestInput,
+    CompleteRuntimeControlRequestInput, CoreError, CoreResult, CoreUser, CustomerBillingAccount,
+    CustomerOrganization, FINITE_PRIVATE_SECRET_REFERENCE, FailAgentCreationRequestInput,
+    FailRuntimeControlRequestInput, FinitePrivateAdminAccount, FinitePrivateAdminAuditEvent,
+    FinitePrivateAdminProject, FinitePrivateAdminState, FinitePrivateApiKey,
+    FinitePrivateApiKeyStatus, FinitePrivateDailyResetResult, FinitePrivateGrant,
+    FinitePrivateGrantStatus, FinitePrivateLimitProfile, FinitePrivateReservation,
+    FinitePrivateReservationStatus, FinitePrivateUsageDecision, FinitePrivateUsageNotice,
+    FinitePrivateUsageStatus, HostOwnedRuntimeFacts, HostingTier, IssueFinitePrivateApiKeyInput,
+    IssueFinitePrivateFriendKeyInput, IssuedFinitePrivateFriendKey, LeaseAgentCreationRequestInput,
+    LeaseRuntimeControlRequestInput, LinkStripeCustomerInput, LinkVerifiedUserInput,
+    MAX_RUNTIME_HEALTH_REPORT_REASON_CHARS, OWNER_CHAT_NPUBS_ENV, OffboardingPhase, Project,
+    ProjectMembershipRole, ProviderOperationEnvelope, ProviderOperationTransition,
+    ProviderOperationTransitionRecord, ProviderOperationV1, ProvisionFinitePrivateRuntimeKeyInput,
+    ProvisionFinitePrivateRuntimeKeyResult, RUNTIME_HEALTH_REPORT_MAX_INTERVAL_SECONDS,
+    RUNTIME_HEALTH_REPORT_MIN_INTERVAL_SECONDS, RecordFinitePrivateRequestDiagnosticInput,
+    RecordProviderOperationTransitionInput, RecordRuntimeHealthReportInput,
+    RegisterAgentCreationRuntimeInput, RenewRuntimeControlRequestInput, RequestAgentCreationInput,
+    RequestAgentCreationResult, RequestRuntimeDestroyInput,
+    RequestRuntimeRecoverKnownGoodChatInput, RequestRuntimeRestartInput, RequestRuntimeStopInput,
+    ReserveFinitePrivateUsageInput, ResetFinitePrivateUsageWindowInput,
+    RetiredRuntimeOffboardReceipt, RetryRuntimeControlRequestInput, RevokeFinitePrivateApiKeyInput,
+    RevokeFinitePrivateGrantInput, RotateFinitePrivateApiKeyInput, RuntimeArtifact,
+    RuntimeBootIntent, RuntimeCapabilitiesEnvelope, RuntimeControlCompletion,
+    RuntimeControlExpectedBinding, RuntimeControlKind, RuntimeControlLease, RuntimeControlRequest,
+    RuntimeControlRequestStatus, RuntimeHealthProjection, RuntimeHealthReportAck,
+    RuntimeHealthTarget, RuntimeHealthTargetList, RuntimeLifecycleStage, RuntimeMoveReceipt,
+    RuntimeMoved, RuntimePlacement, RuntimeRelocationEnvelope, RuntimeRelocationV1,
     RuntimeRetirementSnapshot, RuntimeRetirementSnapshotReceipt, RuntimeSpecEnvelope,
     RuntimeSpecIdentity, RuntimeSummaryStatus, SettleFinitePrivateReservationInput,
     SettleFinitePrivateReservationResult, StoreErrorDetail, StoredRuntimeHealth,
@@ -170,9 +171,13 @@ mod health;
 use health::*;
 mod identity_rows;
 use identity_rows::*;
+mod key_aliases;
+pub use key_aliases::KeyAliasError;
 mod launch_code_rows;
 use launch_code_rows::*;
 mod launch_codes;
+mod move_holds;
+use move_holds::*;
 mod offboarding;
 #[cfg(test)]
 mod trial_access_gates_tests;
@@ -205,6 +210,7 @@ mod relocation;
 use relocation::*;
 mod retirement;
 mod row_decoding;
+mod runtime_moves;
 use row_decoding::*;
 mod runtime_rows;
 pub(crate) use billing_accounts::{
@@ -283,16 +289,34 @@ impl CoreStore {
         })
     }
 
-    /// Commit, or roll back when this store is in dry-run mode.
+    /// End `tx` before the call returns: commit an `Ok` (roll it back when this
+    /// store is in dry-run mode) and roll back an `Err`.
     ///
-    /// Every write path in this impl ends here, so `--dry-run` cannot silently
-    /// miss a mutation that a later method introduces.
-    async fn finish(&self, tx: Transaction<'_>) -> CoreResult<()> {
+    /// Every transaction in this impl ends here, so `--dry-run` cannot silently
+    /// miss a mutation that a later method introduces. A dropped tokio-postgres
+    /// transaction only queues its ROLLBACK, so a method that returned early
+    /// kept its row locks after it returned: the next call, on another pooled
+    /// connection, could still meet them (a `SKIP LOCKED` lease skipped the row).
+    async fn finish<T, E: From<CoreError>>(
+        &self,
+        tx: Transaction<'_>,
+        result: Result<T, E>,
+    ) -> Result<T, E> {
+        let value = match result {
+            Ok(value) => value,
+            Err(error) => {
+                // The caller's error wins. A rollback that fails here means the
+                // connection is gone, and its transaction with it.
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         if self.dry_run {
-            tx.rollback().await.map_err(store_error)
+            tx.rollback().await.map_err(store_error)?;
         } else {
-            tx.commit().await.map_err(store_error)
+            tx.commit().await.map_err(store_error)?;
         }
+        Ok(value)
     }
 
     pub async fn migrate(&self) -> CoreResult<()> {

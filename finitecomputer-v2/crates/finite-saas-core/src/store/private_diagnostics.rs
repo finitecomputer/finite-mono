@@ -14,16 +14,21 @@ impl CoreStore {
     ) -> CoreResult<()> {
         let mut client = self.diagnostic_connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        tx.batch_execute("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '250ms';")
+        let result: CoreResult<_> = async {
+            tx.batch_execute(
+                "SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '250ms';",
+            )
             .await
             .map_err(store_error)?;
-        let valid_reservation =
-            postgres_record_finite_private_request_diagnostic(&*tx, input).await?;
-        if !valid_reservation {
-            return Err(CoreError::FinitePrivateReservationNotFound);
+            let valid_reservation =
+                postgres_record_finite_private_request_diagnostic(&*tx, input).await?;
+            if !valid_reservation {
+                return Err(CoreError::FinitePrivateReservationNotFound);
+            }
+            Ok(())
         }
-        self.finish(tx).await?;
-        Ok(())
+        .await;
+        self.finish(tx, result).await
     }
 }
 

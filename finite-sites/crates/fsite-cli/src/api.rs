@@ -7,9 +7,9 @@ use finitesites_proto::dto::{
     ApiErrorBody, AuthRegisterResponse, EmailLoginRequest, EmailLoginResponse, EmailRedeemRequest,
     EmailRedeemResponse, GitAuthRequest, GitAuthResponse, ProjectGrantRequest,
     ProjectGrantResponse, ProjectInitRequest, ProjectInitResponse, ProjectListResponse,
-    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteSharingResponse, ProjectStatusResponse,
-    SharingRequest, SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse,
-    SitesAuthorizedKeyRevokeRequest,
+    ProjectRevokeRequest, ProjectRevokeResponse, ProjectSiteRedirectResponse,
+    ProjectSiteSharingResponse, ProjectStatusResponse, SharingRequest, SiteRedirectRequest,
+    SitesAuthorizedKeyRegisterRequest, SitesAuthorizedKeyResponse, SitesAuthorizedKeyRevokeRequest,
 };
 use finitesites_proto::nip98;
 
@@ -345,6 +345,21 @@ impl Client {
                 "/api/v2/projects/{project_slug}/site/sharing{}",
                 invite_query(send_invite)
             ),
+            Some(&body),
+        )
+    }
+
+    pub fn redirect_project_site(
+        &self,
+        key: &KeyFile,
+        project_slug: &str,
+        request: &SiteRedirectRequest,
+    ) -> Result<ProjectSiteRedirectResponse, CliError> {
+        let body = serde_json::to_vec(request).expect("request serializes");
+        self.request(
+            key,
+            "POST",
+            &format!("/api/v2/projects/{project_slug}/site/redirect"),
             Some(&body),
         )
     }

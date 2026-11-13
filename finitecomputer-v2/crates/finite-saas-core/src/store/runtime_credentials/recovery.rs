@@ -30,6 +30,7 @@ impl CoreStore {
         let u = &input.upgrade;
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let assignment = tx
             .query_opt(
                 "SELECT p.owner_user_id, r.runtime_artifact_id, r.host_facts,
@@ -181,8 +182,10 @@ impl CoreStore {
             },
         )
         .await?;
-        self.finish(tx).await?;
         Ok(request)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

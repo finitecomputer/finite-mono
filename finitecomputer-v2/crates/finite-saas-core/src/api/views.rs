@@ -6,6 +6,10 @@ pub struct MeResponse {
     pub workos_user_id: String,
     pub projects: Vec<PublicVisibleProject>,
     pub agent_creation_requests: Vec<AgentCreationRequestSummary>,
+    /// FIN-463: every agent this person had has moved to finite.chat, so
+    /// the dashboard sends them there. Additive; older readers ignore it.
+    #[serde(default)]
+    pub moved_to_finite_chat: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,8 +7,8 @@ use serde::Deserialize;
 
 use crate::{
     AccessExplanation, AgentState, AgentSyncStatus, AuthStatus, CliEnvironment, CliError,
-    ConflictState, DaemonStatus, StatusReport, SyncStatus, identity_paths, load_identity_optional,
-    option_value, timestamp, validate_private_working_tree,
+    ConflictState, DaemonStatus, StatusReport, SyncStatus, brain_deleted_error, identity_paths,
+    load_identity_optional, option_value, timestamp, validate_private_working_tree,
     validate_working_tree_managed_structure, write_json_file,
     write_private_file_atomic_for_migration,
 };
@@ -84,6 +84,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
             conflicts: Vec::new(),
             blocked: vec!["no Brain Working Tree found".to_owned()],
             pending_wraps: None,
+            brain_deleted: None,
         });
     };
     let state = read_agent_state(&root)?;
@@ -107,6 +108,9 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
     if !open_conflicts.is_empty() {
         blocked.push("unresolved conflicts".to_owned());
     }
+    if let Some(deleted) = state.brain_deleted.as_ref() {
+        blocked.insert(0, brain_deleted_error(&state.brain_id, deleted).to_string());
+    }
     Ok(StatusReport {
         brain_id: Some(state.brain_id.clone()),
         working_tree_path: Some(root.display().to_string()),
@@ -120,6 +124,7 @@ pub(crate) fn status_report(env: &CliEnvironment) -> Result<StatusReport, CliErr
         conflicts: open_conflicts,
         blocked,
         pending_wraps: None,
+        brain_deleted: state.brain_deleted,
     })
 }
 

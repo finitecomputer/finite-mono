@@ -2,15 +2,20 @@
 
 mod access_report;
 mod admin;
+mod admin_demotion;
 mod args;
+mod brain_deletion;
 mod clock;
 mod embedding_provider;
 mod environment;
 mod error;
+mod folder_key_rotation;
 mod http;
 mod identity_authority;
+mod member_removal;
 mod models;
 mod output;
+mod personal_brain;
 mod requester_context;
 mod search;
 mod semantic_index;
@@ -30,10 +35,14 @@ pub use error::CliError;
 pub use models::{ActivityEntry, ConflictEntry, ConflictState};
 
 pub(crate) use admin::*;
+pub(crate) use admin_demotion::*;
 pub(crate) use args::*;
+pub(crate) use brain_deletion::*;
 pub(crate) use clock::*;
+pub(crate) use folder_key_rotation::*;
 pub(crate) use http::*;
 pub(crate) use identity_authority::*;
+pub(crate) use member_removal::*;
 pub(crate) use models::*;
 pub(crate) use output::*;
 pub(crate) use requester_context::*;
@@ -157,7 +166,7 @@ where
 fn help<W: Write>(output: &mut W) -> Result<(), CliError> {
     writeln!(
         output,
-        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create <personal|organization> <display-name>|rename <display-name> [--brain <brain-id>]|bootstrap-personal|metadata|export\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
+        "fbrain [--config-dir <path>] doctor\nrepair\nauth status|import [--file <path>]|login <email>|redeem <email> <token>\nsigner status|public-key|sign|encrypt|decrypt\ndaemon status|start|stop|logs|tick|watch|supervise [--working-tree-root <path>]\nsync status|now [--summary]\nopen personal [path]\nopen <brain-id> [path]\nstatus [--json]\nconflicts\nresolve <id>\nsearch <query> [--folder <folder>...] [--limit <1-50>] [--lexical-only] [--json]\nsearch-index status [--folder <folder>...]|enable --folder <folder>|disable --folder <folder> [--json]\nactivity\nwiki check\naccess explain|list|summary [--brain <brain-id>]\nbrain list|create organization <display-name>|rename <display-name> [--brain <brain-id>]|personal-agent-consent --owner <npub>|metadata|export|delete <brain-id> [--confirm <stateDigest>]\nfolder create <display-name>|list|delete\nmount offer create|list|inspect|revoke\nmount accept|list|inspect|revoke\nmount participant add|remove\nadmin member add|remove\nadmin role grant|revoke admin\nadmin folder-access grant|revoke --target <NIP-05|npub|hex>\nadmin folder-access rotate --folder <folder-id>\nadmin folder-access open --folder <folder-id>\nadmin ensure-access --brain <brain-id> --target <NIP-05|npub|hex>\ncollaborator ensure-admin --brain <brain-id> --target <NIP-05|npub|hex>\ninvite brain create|list|inspect|accept|revoke\ninvite folder create|list|inspect|accept|revoke\ninvite-token create|list|revoke\ninvite-accept <url-or-token>\napprovals list [--brain <brain-id>] [--all]|approve --id <request-id> [--brain <brain-id>]|deny --id <request-id> [--brain <brain-id>]\n--skill print the self-contained agent guide"
     )?;
     Ok(())
 }
@@ -1313,8 +1322,12 @@ fn run_brain_sync_worker(
     tree_env.cwd = path;
     run_coalesced_notification_queue_until_cancelled(receiver, &cancelled, |notification| {
         let result = retry_transient_notification_work(&cancelled, || {
-            let paused_for_access = read_agent_state(&tree_env.cwd)?.sync.status
-                == AgentSyncStatus::PausedAccessRevoked;
+            let state = read_agent_state(&tree_env.cwd)?;
+            // A deleted Brain is terminal; its Working Tree is never synced.
+            if state.brain_deleted.is_some() {
+                return Ok(());
+            }
+            let paused_for_access = state.sync.status == AgentSyncStatus::PausedAccessRevoked;
             if paused_for_access && notification.reason == "local_updated" {
                 return Ok(());
             }
@@ -1614,6 +1627,7 @@ fn daemon_watch<W: Write>(
                     retry_backoff_millis = 0;
                 }
                 Err(error) => {
+                    let brain_deleted = matches!(error, CliError::BrainDeleted { .. });
                     if local_changes_due && env.embedding_provider.is_some() {
                         semantic_refresh_pending = true;
                         mutate_agent_state(env, |state, _| {
@@ -1635,6 +1649,9 @@ fn daemon_watch<W: Write>(
                         );
                         Ok(())
                     })?;
+                    if brain_deleted {
+                        break;
+                    }
                 }
             }
         } else {
@@ -2192,13 +2209,14 @@ fn resolve_unique_personal_brain(
     select_unique_personal_brain(response)
 }
 
+// "personal" means this key's own Personal Brain. Anyone can add a key as a
+// member of their own Personal Brain, so a member role never qualifies.
 fn select_unique_personal_brain(response: VisibleBrainsResponse) -> Result<String, CliError> {
     let personal = response
         .brains
         .into_iter()
         .filter(|brain| {
-            brain.kind == "personal"
-                && matches!(brain.role.as_str(), "owner" | "personal_agent" | "member")
+            brain.kind == "personal" && matches!(brain.role.as_str(), "owner" | "personal_agent")
         })
         .collect::<Vec<_>>();
     match personal.as_slice() {
@@ -2462,25 +2480,58 @@ fn access_revoke<W: Write>(
     let target_input = required_option_or_positional(args, "--target", 1, "target")?;
     let target = resolve_identity_npub(env, args, &target_input)?;
     let metadata = fetch_brain_metadata(env, args, &brain_id)?;
+    if let Some(folder) = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+    {
+        let access_without_target = folder
+            .access_user_ids
+            .iter()
+            .filter(|user| **user != target)
+            .cloned()
+            .collect::<Vec<_>>();
+        if folder_required_recipients(&metadata, &folder.access, &access_without_target)?
+            .contains(&target)
+        {
+            return Err(CliError::InvalidInput(format!(
+                "{target} holds Folder {folder_id} through its Brain role (admin, all_members Member, owner or Personal Agent), not Folder access; revoking would hand it the new Folder Key. Change the role instead, for example `fbrain admin role revoke admin --target {target}`. Nothing was changed"
+            )));
+        }
+    }
     let body = prepare_folder_access_removal(env, args, &metadata, &brain_id, &folder_id, &target)?;
     let new_key_version = body["newKeyVersion"].as_u64().ok_or_else(|| {
         CliError::InvalidInput("prepared rotation omitted key version".to_owned())
     })?;
     let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/access/{target}");
-    let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+    let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
     let authoritative: BrainMetadataView = serde_json::from_value(response)?;
     let folder = authoritative
         .folders
         .iter()
         .find(|folder| folder.id == folder_id)
         .ok_or_else(|| CliError::NotFound(format!("folder {folder_id} after revocation")))?;
+    // The new key is wrapped for exactly the Folder's required recipients, so
+    // the target must not be one of them in the authoritative roster.
+    let still_wrapped =
+        folder_required_recipients(&authoritative, &folder.access, &folder.access_user_ids)?
+            .contains(&target);
     if folder.current_key_version != new_key_version as u32
         || folder.access_user_ids.iter().any(|user| user == &target)
+        || still_wrapped
     {
         return Err(CliError::InvalidInput(
             "Folder access revocation postcondition was not authoritative".to_owned(),
         ));
     }
+    let summary = format!(
+        "Folder access revoked brain={brain_id} folder={folder_id} target={target} keyVersion={new_key_version}"
+    );
+    // Best effort: the local activity log exists only inside a Working Tree.
+    let _ = mutate_agent_state(env, |state, now| {
+        state.add_activity(now, "admin.folder_access.revoked", summary.clone());
+        Ok(())
+    });
     let receipt = serde_json::json!({
         "state": "complete",
         "operation": "admin-folder-access-revoke",
@@ -2692,6 +2743,9 @@ fn brain<W: Write>(
                 signed_json_request_to_server(env, &server_url, "POST", "/v1/brains", Some(body))?;
             write_command_response(output, json, &response)
         }
+        "personal-agent-consent" => {
+            personal_brain::personal_agent_consent(&args[1..], env, json, output)
+        }
         "rename" => {
             let mut values = args[1..].to_vec();
             for flag in ["--brain", "--server"] {
@@ -2770,6 +2824,7 @@ fn brain<W: Write>(
             let response = brain_inventory_read(env, args, &path)?;
             write_command_response(output, json, &response)
         }
+        "delete" => brain_delete(args, env, json, output),
         "export" => {
             let explicit_brain_id =
                 option_value(args, "--brain").or_else(|| positional_values(args).get(1).cloned());
@@ -2920,28 +2975,20 @@ fn folder<W: Write>(
                     break;
                 }
             }
-            let bootstrap_route = format!("/v1/brains/{brain_id}/sync/bootstrap");
-            let bootstrap = signed_json_request(env, args, "GET", &bootstrap_route, None)?;
-            let expected_object_count = bootstrap
-                .get("objects")
-                .and_then(serde_json::Value::as_array)
-                .ok_or_else(|| {
-                    CliError::InvalidInput(
-                        "Folder deletion confirmation could not read current objects".to_owned(),
-                    )
-                })?
-                .iter()
-                .filter(|object| {
-                    !object
-                        .get("deleted")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(false)
-                        && object
-                            .get("folderId")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|folder| expected_folder_ids.contains(folder))
-                })
-                .count();
+            // The server computes the live object count without sending any
+            // ciphertext. The local metadata view must agree on the subtree and
+            // key version; the deletion transaction checks both again.
+            let preview = fetch_folder_deletion_preview(env, args, &brain_id, folder_id)?;
+            let previewed_folder_ids = preview.folder_ids.iter().cloned().collect::<BTreeSet<_>>();
+            if previewed_folder_ids.len() != preview.folder_ids.len()
+                || previewed_folder_ids != expected_folder_ids
+                || preview.current_key_version != folder.current_key_version
+            {
+                return Err(CliError::InvalidInput(format!(
+                    "Folder {folder_id} changed while preparing its deletion; nothing was deleted. Retry `fbrain folder delete {folder_id}`"
+                )));
+            }
+            let expected_object_count = preview.object_count;
             let deletion_event = admin_access_change_event(
                 env,
                 &brain_id,
@@ -3150,7 +3197,7 @@ fn mount<W: Write>(
                         "reencryptedRecords": []
                     })
                 };
-                signed_json_request(env, args, "DELETE", &route, Some(body))?
+                signed_rotation_request(env, args, "DELETE", &route, body)?
             } else {
                 return Err(CliError::InvalidCommand(format!(
                     "mount participant {action}"
@@ -3201,7 +3248,7 @@ fn mount<W: Write>(
                     env, args, &metadata, &brain_id, &folder_id, &targets,
                 )?
             };
-            let response = signed_json_request(env, args, "DELETE", &route, Some(body))?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             if response["status"] != "revoked" {
                 return Err(CliError::InvalidInput(
                     "Mount revoke postcondition was not authoritative".to_owned(),
@@ -3379,26 +3426,38 @@ fn admin_operation<W: Write>(
             )?;
             let metadata = fetch_brain_metadata(env, args, &brain_id)?;
             let post_removal_metadata = metadata_after_member_removal(&metadata, &target);
-            let mut rotations = Vec::new();
-            for folder in &metadata.folders {
-                let recipients =
-                    folder_required_recipients(&metadata, &folder.access, &folder.access_user_ids)?;
-                if !recipients.iter().any(|recipient| recipient == &target) {
-                    continue;
-                }
-                let prepared = prepare_folder_access_removal(
+            // The server names every Folder whose current key the target reads
+            // or still holds without entitlement; the removal must rotate all.
+            let plan = fetch_member_removal_plan(env, args, &brain_id, &target)?;
+            let removed = BTreeSet::from([target.clone()]);
+            let mut rotations = Vec::with_capacity(plan.folder_rotations.len());
+            let mut rotated_folders = Vec::with_capacity(plan.folder_rotations.len());
+            for planned in &plan.folder_rotations {
+                let prepared = prepare_folder_key_rotation(
                     env,
                     args,
                     &post_removal_metadata,
                     &brain_id,
-                    &folder.id,
-                    &target,
+                    &planned.folder_id,
+                    FolderKeyRotationIntent::RemoveAccess(&removed),
                 )?;
+                if prepared.previous_key_version != planned.current_key_version {
+                    return Err(CliError::InvalidInput(format!(
+                        "Folder {} changed while member removal was prepared; nothing was changed, retry the removal",
+                        planned.folder_id
+                    )));
+                }
                 rotations.push(serde_json::json!({
-                    "folderId": folder.id,
-                    "newKeyVersion": prepared["newKeyVersion"],
-                    "grants": prepared["grants"],
-                    "reencryptedRecords": prepared["reencryptedRecords"],
+                    "folderId": planned.folder_id,
+                    "newKeyVersion": prepared.new_key_version,
+                    "grants": prepared.body["grants"],
+                    "reencryptedRecords": prepared.body["reencryptedRecords"],
+                }));
+                rotated_folders.push(serde_json::json!({
+                    "folderId": planned.folder_id,
+                    "reason": planned.reason,
+                    "previousKeyVersion": prepared.previous_key_version,
+                    "newKeyVersion": prepared.new_key_version,
                 }));
             }
             let mounts_route = format!("/v1/brains/{brain_id}/mounts");
@@ -3476,19 +3535,26 @@ fn admin_operation<W: Write>(
                 }));
             }
             let route = format!("/v1/admin/brains/{brain_id}/members/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({
-                    "accessChangeEvent": event,
-                    "rotations": rotations,
-                    "mountRotations": mount_rotations
-                })),
+            let body = serde_json::json!({
+                "accessChangeEvent": event,
+                "rotations": rotations,
+                "mountRotations": mount_rotations
+            });
+            ensure_rotation_request_fits(
+                &format!("Member removal of {target}"),
+                &body,
+                finite_brain_core::MAX_FOLDER_ROTATION_REQUEST_BODY_BYTES,
             )?;
+            let response = signed_rotation_request(env, args, "DELETE", &route, body)?;
             let authoritative: BrainMetadataView = serde_json::from_value(response)?;
-            if authoritative.members.iter().any(|member| member == &target)
+            let every_planned_folder_rotated = rotated_folders.iter().all(|rotated| {
+                authoritative.folders.iter().any(|folder| {
+                    rotated["folderId"] == folder.id.as_str()
+                        && rotated["newKeyVersion"] == folder.current_key_version
+                })
+            });
+            if !every_planned_folder_rotated
+                || authoritative.members.iter().any(|member| member == &target)
                 || authoritative
                     .folders
                     .iter()
@@ -3516,7 +3582,9 @@ fn admin_operation<W: Write>(
                     "Member removal left an active Mount participation".to_owned(),
                 ));
             }
-            write_command_response(output, json, &serde_json::to_value(authoritative)?)
+            let mut receipt = serde_json::to_value(authoritative)?;
+            receipt["rotatedFolders"] = serde_json::Value::Array(rotated_folders);
+            write_command_response(output, json, &receipt)
         }
         ("role", "grant") => {
             let brain_id = command_brain_id(args, env)?;
@@ -3533,28 +3601,6 @@ fn admin_operation<W: Write>(
             let body = serde_json::json!({ "accessChangeEvent": event });
             let route = format!("/v1/admin/brains/{brain_id}/roles/admin/{target}");
             let response = signed_json_request(env, args, "PUT", &route, Some(body))?;
-            write_command_response(output, json, &response)
-        }
-        ("role", "revoke") => {
-            let brain_id = command_brain_id(args, env)?;
-            let raw_target = required_option_or_positional(args, "--target", 1, "target-identity")?;
-            let target = resolve_identity_npub(env, args, &raw_target)?;
-            let event = admin_access_change_event(
-                env,
-                &brain_id,
-                AdminAccessAction::RemoveAdmin,
-                None,
-                Some(&target),
-                None,
-            )?;
-            let route = format!("/v1/admin/brains/{brain_id}/roles/admin/{target}");
-            let response = signed_json_request(
-                env,
-                args,
-                "DELETE",
-                &route,
-                Some(serde_json::json!({ "accessChangeEvent": event })),
-            )?;
             write_command_response(output, json, &response)
         }
         ("folder-access", "grant") => {
@@ -3637,6 +3683,12 @@ fn admin<W: Write>(
         ("folder-access", "revoke") => {
             return access_revoke(&args[1..], env, json, output);
         }
+        ("folder-access", "rotate") => {
+            return access_rotate(&args[1..], env, json, output);
+        }
+        ("folder-access", "open") => {
+            return admin_folder_open(&args[1..], env, json, output);
+        }
         ("role", "grant") | ("role", "revoke") => {
             let positional_role = args.get(2).filter(|value| !value.starts_with('-')).cloned();
             let role = option_value(args, "--role")
@@ -3647,11 +3699,15 @@ fn admin<W: Write>(
                     "admin is the only role managed by this command, got {role}"
                 )));
             }
-            if positional_role.is_some() {
+            let role_args = if positional_role.is_some() {
                 &args[2..]
             } else {
                 &args[1..]
+            };
+            if action == "revoke" {
+                return admin_role_revoke(role_args, env, json, output);
             }
+            role_args
         }
         _ => {
             return Err(CliError::InvalidCommand(format!(
@@ -3660,6 +3716,30 @@ fn admin<W: Write>(
         }
     };
     admin_operation(namespace, action, operation_args, env, json, output)
+}
+
+fn admin_folder_open<W: Write>(
+    args: &[String],
+    env: &CliEnvironment,
+    json: bool,
+    output: &mut W,
+) -> Result<(), CliError> {
+    let brain_id = command_brain_id(args, env)?;
+    let folder_id = option_value(args, "--folder").ok_or(CliError::MissingArgument("--folder"))?;
+    let receipt = open_folder_to_all_members(env, args, &brain_id, &folder_id)?;
+    if json {
+        return write_json(output, &receipt);
+    }
+    let granted = receipt["grantedRecipients"].as_array().map_or(0, Vec::len);
+    if receipt["outcome"] == "alreadyOpen" {
+        writeln!(output, "Folder {folder_id} is already open to all Members.")?;
+    } else {
+        writeln!(
+            output,
+            "Folder {folder_id} is now open to all Members of {brain_id}; {granted} new key grant(s)."
+        )?;
+    }
+    Ok(())
 }
 
 fn admin_ensure_access<W: Write>(
@@ -4751,6 +4831,11 @@ mod tests {
     use tempfile::TempDir;
 
     mod access_report_tests;
+    mod admin_demotion_tests;
+    mod brain_deletion_tests;
+    mod folder_delete_tests;
+    mod folder_key_rotation_tests;
+    mod member_removal_tests;
 
     #[test]
     fn invite_accept_input_parses_url_fragment_and_bare_token() {
@@ -5090,8 +5175,14 @@ mod tests {
 
     #[test]
     fn packaged_invite_guidance_matches_the_supported_invite_surface() {
-        let skill = include_str!(
-            "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+        // The skill routes invitations to its sharing reference.
+        let skill = concat!(
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/SKILL.md"
+            ),
+            include_str!(
+                "../../../../finite-skills/skills/software-development/finitebrain/references/sharing.md"
+            ),
         );
         let reference = include_str!(
             "../../../../finite-skills/skills/software-development/finitebrain/references/fbrain-cli.md"
@@ -5117,7 +5208,7 @@ mod tests {
         for (source, text) in [
             ("help", help.as_str()),
             ("--skill", guide.as_str()),
-            ("SKILL.md", skill),
+            ("finitebrain skill", skill),
             ("fbrain-cli.md", reference),
             ("generated AGENTS.md template", generated.as_str()),
         ] {
@@ -5131,7 +5222,7 @@ mod tests {
 
         // Syntax and terminology guards supplement source review; they cannot
         // prove that arbitrary natural-language guidance describes the contract.
-        for (source, text) in [("--skill", guide.as_str()), ("SKILL.md", skill)] {
+        for (source, text) in [("--skill", guide.as_str()), ("finitebrain skill", skill)] {
             let normalized = normalized_invite_examples(text);
             for contract in [
                 "--target <npub|hex|NIP-05>",
@@ -8570,6 +8661,94 @@ mod tests {
             assert!(!identity_file.exists());
             assert!(output.is_empty());
         }
+    }
+
+    #[test]
+    fn personal_agent_consent_never_mints_an_identity() {
+        let tmp = TempDir::new().unwrap();
+        let env = env_for(&tmp);
+        let identity_file = signer::identity_paths(&env).unwrap().identity_file();
+        let owner =
+            finite_nostr::NostrPublicKey::from_protocol(nostr::Keys::generate().public_key())
+                .to_npub()
+                .unwrap();
+        let mut output = Vec::new();
+        let error = run_with_env(
+            [
+                "brain",
+                "personal-agent-consent",
+                "--owner",
+                owner.as_str(),
+                "--server",
+                "http://127.0.0.1:1",
+                "--json",
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap_err();
+        assert!(matches!(error, CliError::Identity(_)), "{error:?}");
+        assert!(!identity_file.exists());
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn personal_agent_consent_names_the_owner_and_the_signed_brain_origin() {
+        let tmp = TempDir::new().unwrap();
+        import_identity_secret(
+            &tmp,
+            "0000000000000000000000000000000000000000000000000000000000000001",
+        );
+        let owner_keys = nostr::Keys::generate();
+        let owner = finite_nostr::NostrPublicKey::from_protocol(owner_keys.public_key())
+            .to_npub()
+            .unwrap();
+        let mut env = env_for(&tmp);
+        // Requests travel through the transport URL but sign the public origin.
+        env.server_url = Some("http://127.0.0.1:13002".to_owned());
+        env.public_base_url = Some("https://brain.example".to_owned());
+        let mut output = Vec::new();
+        run_with_env(
+            [
+                "brain",
+                "personal-agent-consent",
+                "--owner",
+                owner_keys.public_key().to_hex().as_str(),
+                "--json",
+            ],
+            env,
+            &mut output,
+        )
+        .unwrap();
+
+        let result: Value = serde_json::from_slice(&output).unwrap();
+        let consent = nostr::Event::from_json(result["consent"].to_string()).unwrap();
+        let payload = finite_brain_core::verify_personal_agent_consent_event(&consent).unwrap();
+        let agent = finite_nostr::NostrPublicKey::from_protocol(
+            nostr::Keys::new(
+                nostr::SecretKey::parse(
+                    "0000000000000000000000000000000000000000000000000000000000000001",
+                )
+                .unwrap(),
+            )
+            .public_key(),
+        )
+        .to_npub()
+        .unwrap();
+        assert_eq!(result["agentNpub"], agent.as_str());
+        assert_eq!(payload.agent_npub, agent);
+        assert_eq!(result["ownerNpub"], owner.as_str());
+        assert_eq!(payload.owner_npub, owner);
+        assert_eq!(
+            result["brainId"],
+            finite_brain_core::personal_brain_id_for_owner(&owner)
+                .unwrap()
+                .as_str()
+        );
+        assert_eq!(result["brainServer"], "https://brain.example");
+        assert_eq!(payload.brain_server, "https://brain.example");
+        assert_eq!(result["expiresAt"], payload.expires_at);
+        assert_eq!(payload.expires_at - consent.created_at.as_secs(), 600);
     }
 
     #[test]
@@ -13407,6 +13586,36 @@ mod tests {
         .unwrap();
 
         assert_eq!(selected, "personal-owned");
+    }
+
+    #[test]
+    fn personal_brain_selection_skips_another_owners_brain_where_this_key_is_a_member() {
+        let selected = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![
+                VisibleBrainSummary {
+                    brain_id: "personal-someone-else".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "member".to_owned(),
+                },
+                VisibleBrainSummary {
+                    brain_id: "personal-own".to_owned(),
+                    kind: "personal".to_owned(),
+                    role: "personal_agent".to_owned(),
+                },
+            ],
+        })
+        .unwrap();
+        assert_eq!(selected, "personal-own");
+
+        let error = select_unique_personal_brain(VisibleBrainsResponse {
+            brains: vec![VisibleBrainSummary {
+                brain_id: "personal-someone-else".to_owned(),
+                kind: "personal".to_owned(),
+                role: "member".to_owned(),
+            }],
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("no personal Brain is visible"));
     }
 
     #[test]

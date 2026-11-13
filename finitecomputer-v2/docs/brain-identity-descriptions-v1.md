@@ -15,6 +15,7 @@ an admin role, Folder entitlement or a Folder Key Grant.
 | Fact | Authoritative source | Meaning |
 | --- | --- | --- |
 | Account contact | Core `users.normalized_email`, linked through verified WorkOS identity | Current account email, in any domain; not perpetual mailbox verification |
+| Account name | Core `users.workos_display_name`, from the verified WorkOS user record | Optional account label, disclosed under the same gate as its email; not key ownership evidence |
 | Agent name | Core `projects.display_name` | Hosted project's name |
 | Agent key | Authenticated `agent_runtimes.health_reporting_npub`, consistent active project/runtime link | Exact recorded runtime principal; not inferred from a slug |
 | Responsible account | Current `projects.owner_user_id` | Account responsible for the hosted agent; not proof of legal ownership or decryption |
@@ -25,11 +26,50 @@ Do not use `agent_creation_requests.owner_chat_account_id` as a current reverse
 registry. It is launch-time input. Do not query the operator runtime inventory
 as the product API, scan sealed Chat bindings, or derive account IDs from email.
 
-Human names are optional: use an existing exact-key profile only with its stated
-source. Without a supported human display name, render the shared account email
-as the readable fallback. Never manufacture a person's name from an email slug.
+The optional human name is the linked account's WorkOS name, released with its
+email under the same gate. `source` describes the key association, not the name.
+Without a usable name, render the shared account email as the readable fallback.
+Never manufacture a person's name from an email slug. See "Account names and
+private aliases" for normalization and freshness.
 
 ## Trusted hosted observation
+
+### Registration after Hosted Chat bootstrap
+
+After a successful Hosted Chat bootstrap, the dashboard schedules a separate,
+best-effort observation through `after()`. Transcript reads and roster reads do
+not register keys. Hosted Device `identifyMember` loads the verified Account's
+existing identity and matching Chat state without minting a key. Browser input,
+Brain membership, invitation issuers and private aliases supply no association.
+
+`POST /api/core/internal/v1/hosted-account-observations` is on the existing private
+identity listener. It requires the same observation credential plus the current
+verified WorkOS bearer. Its strict `finite-core-hosted-account-observation-v1`
+body contains only `operationId`, `observedAt`, `publicKeyHex` and `version`.
+It reuses the existing account-key association and observation receipt tables,
+freshness window, conflict rules and account-scoped idempotency. The versioned
+payload hash prevents replaying an operation as a Brain action. No migration,
+sharing scope, scoped operator record, Brain participation, membership or grant
+is created. Conflicting Accounts or Agent keys fail closed.
+
+Registration makes the Account connection available to normal description
+readers. V1 still requires sharing, and v3 still requires participation or a
+valid scoped record. An admin-added human key can therefore remain withheld
+with `noParticipation` after registration. V2 applies no Core-side disclosure
+gate: registered keys are describable to a caller with the description
+credential, so the Brain server's participation filter remains the only v2 gate.
+Existing scoped records and their
+binding checks remain in force. The normal participating description retains
+precedence over an operator annotation.
+
+The hook uses the existing dashboard identity configuration and public Brain
+origin. A missing configuration, older Core (404), missing identity, conflict,
+timeout or failed scheduling does not delay or fail Chat. A lost POST response
+is retried once with the same operation ID. No backfill runs on deployment;
+existing Accounts register on their next successful Chat bootstrap. Associations
+and receipts survive binary rollback in the existing Core Recovery Set.
+
+### Brain action and sharing observations
 
 The dashboard backend already verifies an account and can call Hosted Device
 `identifyMember`. That operation loads the existing identity and Chat store;
@@ -85,8 +125,15 @@ operation, with no challenge route, borrowed Brain proof URL or new signing API.
 ## Private contact disclosure
 
 An admin can add an arbitrary key to a Brain. That action does not authorize
-reverse discovery of private account information. Autonomous agent participation
-also does not authorize publishing its account holder's contact.
+reverse discovery of private account information. Under v1, autonomous agent
+participation also does not authorize publishing its account holder's contact;
+v2 accepts that risk (see "Disclosure without a sharing scope").
+
+The disclosure scope, its revocation and the successor-scope rule below apply to
+v1 requests only. A v2 request applies no scope, so revoking one does not
+withhold contact from a v2 answer, and v2 has no per-account opt-out. Under v2
+the description credential describes any linked key Brain sends for any Brain
+ID; Brain's participation rule is the only gate.
 
 Core owns one disclosure scope per stable account, exact Brain server identity
 and exact Brain ID. A trusted account-authenticated hosted action establishes it
@@ -114,7 +161,43 @@ of whether an internal account match exists. Do not expose account-existence
 information through different private errors. Existing public NIP-05 evidence
 can still be shown separately, with its source and observation time.
 
+## Disclosure without a sharing scope (v2, FIN-166)
+
+Version `finite-core-brain-identity-descriptions-v2` keeps the v1 request and
+response shape and drops the per-Brain sharing scope. Brain sends only keys
+that themselves have recorded participation in that Brain, so participation
+alone decides which keys Core describes. The linked-account, conflict,
+ambiguity, lifecycle and current-owner rules are unchanged. Core keeps serving
+v1 with the v1 policy, so an older Brain discloses nothing new. Brain asks v2
+first and asks v1 only when Core answers exactly 400
+`{"error": "unsupported descriptions version"}`.
+
+Accepted risk (decision recorded in FIN-166, 2026-10-05): any participation by
+an Agent key in a Brain releases the Agent's name and its owner's account email
+to that Brain's admins. That includes participation the owner did not request:
+a non-owner's request in chat, an "Agent instruction" in an invite email, or
+injected content. Folder Key Grant wraps a client delivers while it syncs are
+not participation, so holding a key and syncing releases nothing (see the
+Brain access report contract). Participation by a hosted human key releases
+that human's email. An admin still cannot learn who owns a key only by adding
+it to their Brain.
+
+Owner human keys: v2 lists in `responsibleAccount.humanPublicKeysHex` only the
+owner's keys that are in the same request. Brain also drops listed keys it did
+not ask about, whichever version answered.
+
+Ownership transfer: v2 releases the current owner because an Agent key acted in
+the past. That is sound only while a project's owner never changes. Core has no
+writer that changes `projects.owner_user_id`, and a test fails if one is added.
+A transfer writer must first stop participation recorded before the transfer
+from releasing the new owner.
+
 ## Private batch boundary
+
+The additive [v3 scoped operator protocol](brain-scoped-roster-v3.md) extends
+this endpoint with an exact-Brain exception for reviewed legacy keys. It does
+not alter v1/v2 request shapes, policy or global associations. The v3 contract
+defines the participating subset, precedence, diagnostics and negotiation.
 
 Route: `POST /api/core/internal/v1/brain-identity-descriptions` on a
 service-owned private router. Route tests freeze the path and protocol. Caddy must not maintain a second per-route allowlist.
@@ -221,26 +304,31 @@ Core (`finite-saas-core`):
 - Descriptions: header `x-finite-brain-description-credential` only. One
   REPEATABLE READ, read-only transaction with a 2-second SQL statement
   timeout. Source fields are length-checked in SQL (email 254 bytes, display
-  name 200 bytes); oversized or control-character values make the row
-  `unknown` and are never truncated. Responses over 256 KiB fail with 503.
+  name 200 bytes). An unusable email or agent name makes the row `unknown`;
+  an unusable optional human name is omitted while its eligible email remains
+  resolved. Values are never truncated. Responses over 256 KiB fail with 503.
   Logs carry the Brain id, the requesting admin key and counts, never contact.
-- Disclosure: `resolved` needs an active scope for the responsible account
-  (the current project owner for agents) and a linked account. `ambiguous`
-  is stated only when every implicated account shared with this Brain.
+- Disclosure: `resolved` needs a linked responsible account (the current
+  project owner for agents) and, under v1 only, an active scope for it.
+  `ambiguous` is stated only when every implicated account is linked and,
+  under v1, shared with this Brain. The response `version` echoes the request.
   Missing projects or foreign active links are `notShared`. An inactive
   sibling without completed retirement makes the agent `unknown`.
   `responsibleAccount.humanPublicKeysHex` lists at most 8 of the owner's
-  associated keys and excludes any key that is also pinned as an agent.
+  associated keys (under v2, only keys in the request) and excludes any key
+  that is also pinned as an agent.
 
 Dashboard: `src/lib/brain-identity-observation.ts`, called through `after()`
 from `POST /api/brain/invitations/accept` once the Brain server returns an
 acceptance by the exact hosted key, and from `POST /api/brain/approvals/approve`
 once the Brain server applies a delegation-grant approval signed for that
-exact Brain (how existing admins qualify). Both cards tell the user that the
-action lets the Brain's admins see their account email and that they are
-responsible for their agents there, and send `shareAccountContact: true` with
-that text. A request without it (a tab loaded before the text existed) still
-joins or approves but records no sharing. It loads the key with Hosted Device
+exact Brain (how existing admins qualify). Chat shows only the Approve card;
+the Join card was removed, so the accept route records only for older tabs
+and other callers. The card tells the user that the action lets the Brain's
+admins see their account email and that they are responsible for their agents
+there, and sends `shareAccountContact: true` with that text. A request without
+it (a tab loaded before the text existed) still joins or approves but records
+no sharing. It loads the key with Hosted Device
 `identifyMember` (no mint), retries a lost response once with the same
 operation id, and never changes the join result. Configuration:
 `FC_CORE_BRAIN_IDENTITY_URL` and `FC_CORE_BRAIN_OBSERVATION_TOKEN`; the Brain
@@ -249,4 +337,65 @@ upstream origin), which must equal `FC_CORE_BRAIN_IDENTITY_BRAIN_SERVER`.
 
 Not in v1: scope revocation has no product writer (an operator can set
 `revoked_at`), there is no owner-transfer writer, and existing hosted humans
-are described only after their next qualifying action.
+still need qualifying participation (or valid scoped operator evidence) before
+their registered Account details can be described to a Brain.
+
+## Account names and private aliases
+
+Core migration `0043_account_names_and_key_aliases.sql` adds nullable
+`users.workos_display_name` (with its change time) and `account_key_aliases`.
+Nothing is backfilled. Startup reapplies the additive DDL, including a brief
+exclusive lock on `users`; schedule release startup accordingly.
+
+Name writer: the verified-account link on `GET /api/core/v1/me`,
+`/me/dashboard-summary` and `/me/runtime-routes/{id}`. It reads `first_name`
+and `last_name` from the WorkOS user record that request already fetched; no
+extra WorkOS call. Each part is trimmed and inner whitespace collapsed; a
+missing, null or blank part is skipped. A part that is not a string, exceeds 100
+characters, or has control or bidirectional-override characters makes the name
+unusable, as does a joined name over 200 bytes. Present parts are joined with
+one space. An unusable or absent name clears the stored name, so Core never
+shows a name WorkOS no longer gives. An unusable name does not block sign-in,
+enrollment or Chat, and names are never derived from email. Name persistence is
+part of the existing account-link transaction, so database failures still fail
+that transaction. The name column changes only when the value changes; the
+existing account-link behavior of `users.updated_at` is unchanged.
+
+Name reader: a `resolved` human row adds `displayName` under the same gates that
+release its `accountEmail`. Wire shape, versions and `source` are unchanged:
+`source` still describes the key association, and the name is the linked
+account's WorkOS name as of its latest verified dashboard request. This also
+applies to v3 scoped account-chat-key records under their existing exact-scope
+and account-binding checks; names never change the mapping or its provenance.
+Agent rows keep the project name. `responsibleAccount` carries no name because current
+Brain servers parse it strictly.
+
+Private aliases: `POST /api/core/v1/me/key-aliases/lookup` (`publicKeys`, 1-100
+`npub` or hex keys) and `PUT`/`DELETE /api/core/v1/me/key-aliases/{npub-or-hex}`
+(`alias`) on the account router. The viewer is the verified WorkOS account; no
+route accepts an account, owner or email. An unlinked account's lookup returns
+an empty list; PUT and DELETE return 403 `account_not_linked` without enrollment.
+Keys must be valid x-only secp256k1
+keys and are stored as lowercase hex. Aliases are 1-64 characters after the
+same trim and collapse, with no control or bidirectional-override characters,
+at most 1,000 per account (409 `alias_limit_reached`). An alias is visible only
+to its writer. It is never identity evidence and is not read by descriptions,
+Brain access, ownership, membership, roles or grants. The dashboard roster shows
+an alias first, marked "Your alias", with the existing identity label beneath
+it. WorkOS name/email, dated scoped annotation, stored public name, lifecycle
+qualifiers and the final "Unknown" fallback keep their existing precedence.
+When alias lookup fails or Core lacks these routes, the roster shows without
+aliases.
+
+Deploy Core before the dashboard to avoid the older-Core unavailable notice.
+Rollback: older Core ignores the new column and table. Names stop refreshing
+and aliases stop showing until the new Core returns; both are kept.
+
+Local browser proof: build the dashboard with `just web-check`, then run
+`scripts/with-dev-env cargo run --locked -p devfinity -- run -- cargo test
+--locked -p finite-saas-core key_alias_browser_composition -- --ignored
+--nocapture`. It uses real Core/Postgres, dashboard routes and Chromium for
+name display, alias save/reload/edit/clear, viewer isolation, origin rejection
+and unavailable fallback. WorkOS is a signed local fixture; the unchanged
+Agent/Brain roster transport is synthetic. This is not live OAuth or runtime
+qualification. `FC_BROWSER_ARTIFACT_DIR` optionally records UI screenshots.

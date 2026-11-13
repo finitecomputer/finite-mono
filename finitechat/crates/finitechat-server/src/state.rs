@@ -326,7 +326,10 @@ pub(crate) struct SyncStreamLoop {
     pub(crate) state: HttpServerState,
     pub(crate) cursors: SyncStreamCursors,
     pub(crate) pending: VecDeque<SyncHintEvent>,
-    pub(crate) heartbeat_ms: u64,
+    pub(crate) heartbeat: std::time::Duration,
+    /// When the stream owes its next heartbeat. Only an emitted event moves
+    /// it: wakes for other rooms must not postpone it.
+    pub(crate) heartbeat_due: tokio::time::Instant,
 }
 
 /// Manual Debug: the state owns SQLite connections that are not `Debug`.

@@ -35,6 +35,8 @@ in
     ../../modules/finite-saas-runner.nix
     ../../modules/kata-runner-host.nix
     ../../modules/metrics.nix
+    ../../modules/ssh-flood-limits.nix
+    ../../modules/tcp-ip-options-guard.nix
   ];
 
   networking.hostName = "finite-lat-5";
@@ -47,6 +49,12 @@ in
     runtimeCoreUrl = "https://runtime-api.finite.computer";
     allowedOrigins = [ "https://finite.computer" ];
   };
+
+  # FIN-463 mover on finite-lat-2 (key made by finite-mover-keys.service at
+  # the FIN-492 lat2 activation). Forced to finite-mover-host only.
+  finite.moverHost.authorizedKeys = [
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGZpeECJfJCT0sEDsYokkQaOPlCA9fdz2HycMCKLhPp7 finite-mover@finite-lat-2"
+  ];
 
   # Shared Kata Runner role (modules/kata-runner-host.nix); only genuine host
   # differences are declared here. Core is remote, so sandboxes are reached
@@ -316,6 +324,13 @@ in
   };
   boot.kernel.sysctl."vm.swappiness" = 20;
   zramSwap.enable = false;
+
+  # Kata keeps each Agent VM's guest RAM in /dev/shm, and a full tmpfs
+  # crashes VMs with SIGBUS (2026-10-15). 110 GiB (118.1 GB) gives the full
+  # sandbox ceiling more room than the NixOS default of 50% of RAM
+  # (100.8 GB here). Change this value rather than remounting by hand:
+  # every switch remounts /dev/shm with it.
+  boot.devShmSize = "110G";
 
   services.fstrim.enable = true;
   services.smartd = {

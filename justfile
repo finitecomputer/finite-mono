@@ -194,3 +194,18 @@ nixos-build-lat5-closure rev out_dir="target/lat5-nixos-closure":
 
 lat5-runner-rollout-contract:
     just nixos lat5-runner-rollout-contract
+
+# lat7 provisioning and artifact validation.
+[positional-arguments]
+deploy-lat7-closure artifact_dir *args:
+    just nixos deploy-lat7-closure "$@"
+
+[positional-arguments]
+install-lat7-from-artifact artifact_dir target_host *args:
+    just nixos install-lat7-from-artifact "$artifact_dir" "$target_host" "$@"
+
+nixos-build-lat7-closure rev out_dir="target/lat7-nixos-closure":
+    just nixos nixos-build-lat7-closure {{ quote(rev) }} {{ quote(out_dir) }}
+
+lat7-runner-rollout-contract:
+    just nixos lat7-runner-rollout-contract

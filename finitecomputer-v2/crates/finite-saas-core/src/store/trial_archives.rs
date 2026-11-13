@@ -247,6 +247,7 @@ impl CoreStore {
     ) -> CoreResult<()> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         let request = locked_agent_creation_request(&*tx, &input.request_id).await?;
         if request
             .relocation
@@ -277,6 +278,9 @@ impl CoreStore {
             return Err(CoreError::InvalidAgentCreationLeaseDuration);
         }
         tx.execute("UPDATE agent_creation_requests SET lease_expires_at=clock_timestamp()+make_interval(secs=>$2::double precision) WHERE id=$1", &[&request.id,&(seconds as f64)]).await.map_err(store_error)?;
-        self.finish(tx).await
+        Ok(())
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }

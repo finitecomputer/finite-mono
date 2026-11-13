@@ -12,80 +12,87 @@ impl CoreStore {
     ) -> CoreResult<Option<RuntimeBootstrapCredential>> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let request = locked_agent_creation_request(&*tx, &input.creation_request_id).await?;
-        verify_agent_creation_lease_active(&*tx, &request, &input.runner_id, &input.lease_token)
+        let result: CoreResult<_> = async {
+            let request = locked_agent_creation_request(&*tx, &input.creation_request_id).await?;
+            verify_agent_creation_lease_active(
+                &*tx,
+                &request,
+                &input.runner_id,
+                &input.lease_token,
+            )
             .await?;
-        let relocation = request
-            .relocation
-            .as_ref()
-            .ok_or(CoreError::RuntimeSpecMismatch)?
-            .v1();
-        if input.source_host_id != relocation.target_source_host_id
-            || request.target_source_host_id.as_deref() != Some(input.source_host_id.as_str())
-        {
-            return Err(CoreError::ProviderOperationIdentityMismatch);
-        }
-        let runtime = lock_assignment(
-            &*tx,
-            &request,
-            &relocation.source_host_id,
-            &relocation.source_machine_id,
-        )
-        .await?;
-        let existing_runtime = select_agent_runtime(&*tx, &runtime).await?;
-        validate_runtime_relocation_registration(
-            &request,
-            existing_runtime.as_ref(),
-            &relocation.target_source_host_id,
-            &relocation.source_machine_id,
-        )?;
-        let handoff = lock_handoff(&*tx, &runtime, &request).await?;
-        ensure_live_now(&*tx, &request.id).await?;
-        let Some((_, pending)) = handoff else {
-            self.finish(tx).await?;
-            return Ok(None);
-        };
-        let lease_hash = digest(
-            request
-                .lease_token
-                .as_deref()
-                .ok_or(CoreError::AgentCreationRequestLeaseConflict)?,
-        );
-        let secret = if let Some(pending) = pending {
-            validate_successor(&pending, &request)?;
-            tx.execute(
+            let relocation = request
+                .relocation
+                .as_ref()
+                .ok_or(CoreError::RuntimeSpecMismatch)?
+                .v1();
+            if input.source_host_id != relocation.target_source_host_id
+                || request.target_source_host_id.as_deref() != Some(input.source_host_id.as_str())
+            {
+                return Err(CoreError::ProviderOperationIdentityMismatch);
+            }
+            let runtime = lock_assignment(
+                &*tx,
+                &request,
+                &relocation.source_host_id,
+                &relocation.source_machine_id,
+            )
+            .await?;
+            let existing_runtime = select_agent_runtime(&*tx, &runtime).await?;
+            validate_runtime_relocation_registration(
+                &request,
+                existing_runtime.as_ref(),
+                &relocation.target_source_host_id,
+                &relocation.source_machine_id,
+            )?;
+            let handoff = lock_handoff(&*tx, &runtime, &request).await?;
+            ensure_live_now(&*tx, &request.id).await?;
+            let Some((_, pending)) = handoff else {
+                return Ok(None);
+            };
+            let lease_hash = digest(
+                request
+                    .lease_token
+                    .as_deref()
+                    .ok_or(CoreError::AgentCreationRequestLeaseConflict)?,
+            );
+            let secret = if let Some(pending) = pending {
+                validate_successor(&pending, &request)?;
+                tx.execute(
                 "UPDATE runtime_core_credentials SET lease_sha256=$2 WHERE creation_request_id=$1",
                 &[&request.id, &lease_hash],
             )
             .await
             .map_err(store_error)?;
-            pending.get("bootstrap_secret")
-        } else {
-            let secret = new_secret()?;
-            tx.execute(
-                "INSERT INTO runtime_core_credentials
+                pending.get("bootstrap_secret")
+            } else {
+                let secret = new_secret()?;
+                tx.execute(
+                    "INSERT INTO runtime_core_credentials
                  (creation_request_id,source_host_id,source_machine_id,owner_user_id,
                   bootstrap_secret,token_sha256,lease_sha256)
                  VALUES ($1,$2,$3,$4,$5,$6,$7)",
-                &[
-                    &request.id,
-                    &relocation.target_source_host_id,
-                    &relocation.source_machine_id,
-                    &request.owner_user_id,
-                    &secret,
-                    &digest(&secret),
-                    &lease_hash,
-                ],
-            )
-            .await
-            .map_err(store_error)?;
-            secret
-        };
-        self.finish(tx).await?;
-        Ok(Some(RuntimeBootstrapCredential {
-            secret,
-            expected_previous_credential_sha256: None,
-        }))
+                    &[
+                        &request.id,
+                        &relocation.target_source_host_id,
+                        &relocation.source_machine_id,
+                        &request.owner_user_id,
+                        &secret,
+                        &digest(&secret),
+                        &lease_hash,
+                    ],
+                )
+                .await
+                .map_err(store_error)?;
+                secret
+            };
+            Ok(Some(RuntimeBootstrapCredential {
+                secret,
+                expected_previous_credential_sha256: None,
+            }))
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

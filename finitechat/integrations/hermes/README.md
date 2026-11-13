@@ -57,6 +57,40 @@ Hosted Web Device starts the room independently.
 
 ## Native Hermes capability profiles
 
+### OpenRouter for one session
+
+In the managed dashboard, Connections → OpenRouter → Save key stores access
+without changing the default model or restarting chat. Existing deliberate
+OpenRouter defaults are preserved. Default changes remain under **Default
+model → Change default**; older runtimes must be updated before credential-only
+setup is available.
+
+Use `/model` in chat to see choices, or select a model explicitly:
+
+```text
+/model anthropic/claude-sonnet-4.6 --provider openrouter --session
+```
+
+The selected session's requests, including conversation context, go to
+OpenRouter using the saved key. Other sessions keep their own choices. On the
+managed runtime, `/model private` returns the current conversation to Finite
+Private without clearing its history; `/new` starts a session on the configured
+default. Session choices survive gateway restart. Key rotation takes effect on
+the next OpenRouter turn; an already-running request may finish with its
+original credential. Missing credentials cannot borrow the Finite Private key.
+Auxiliary requests (including compression and vision) can use OpenRouter only
+when the effective session provider is OpenRouter. A saved key never enables
+automatic OpenRouter fallback from a private session, including after
+`/model private` when the configured default is OpenRouter.
+
+The key stays in the existing private Hermes `.env`; status exposes only
+`openrouter.key_saved`, not the credential or a claim of provider validation.
+The typed `agent.openrouter.save` action uses the existing owner-authorized
+Finite Chat command path. The packaged inference patch resolves OpenRouter
+against that key and its own endpoint, independently of the default model.
+
+### Finite Private vision
+
 The managed Finite Private `glm-5-3-flash` profile declares
 `model.supports_vision: true`. Hermes cannot discover capabilities for the
 generic `custom` provider. With its default `agent.image_input_mode: auto`,

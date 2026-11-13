@@ -3,6 +3,9 @@
 import { useEffect, useRef } from "react";
 import type { SidebarChat } from "@/lib/hosted-web-chat-topics";
 
+/** A held drag within this distance of the list's top or bottom edge scrolls it. */
+export const TOUCH_DRAG_EDGE_PX = 28;
+
 // A hold starts dragging; moving before the hold remains normal sidebar scrolling.
 // Native non-passive move/end listeners are needed to cancel the browser gesture
 // only after pickup. React's delegated touch listeners are passive.
@@ -25,7 +28,8 @@ export function useChatTouchDrag(options: {
       if (!gesture?.active || !nav) return;
       const bounds = nav.getBoundingClientRect();
       if (gesture.x >= bounds.left && gesture.x <= bounds.right && gesture.y >= bounds.top && gesture.y <= bounds.bottom) {
-        const direction = gesture.y < bounds.top + 28 ? -1 : gesture.y > bounds.bottom - 28 ? 1 : 0;
+        const direction = gesture.y < bounds.top + TOUCH_DRAG_EDGE_PX ? -1
+          : gesture.y > bounds.bottom - TOUCH_DRAG_EDGE_PX ? 1 : 0;
         if (direction) {
           nav.scrollTop += direction * 8;
           latest.current.hover(document.elementFromPoint(gesture.x, gesture.y));

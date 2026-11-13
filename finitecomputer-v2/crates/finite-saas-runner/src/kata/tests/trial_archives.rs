@@ -412,3 +412,31 @@ fn trial_restore_authorized_launch_preserves_identity_and_uses_durable_key() {
         "everything"
     );
 }
+
+#[test]
+fn trial_restore_pause_refuses_after_a_failed_stop() {
+    // The trial restore rewrites /data after this pause. After a failed stop
+    // containerd's restart monitor may still start the container, so a failed
+    // stop never counts as paused, even when its VM is proven gone.
+    let temp = tempfile::tempdir().unwrap();
+    let (launcher, plan, fake, restore) = restored_fixture(&temp);
+    write_fake_container(
+        &fake,
+        &plan.container_name,
+        RELOCATION_TEST_IMAGE,
+        "artifact-v1",
+        "",
+        41234,
+        &plan.state_root,
+    );
+    dead_guest_stop(&launcher, &fake, &plan.container_name);
+    let error = launcher
+        .pause_trial_restore_state(&restore, &plan, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Cannot pause target after a failed stop")
+            && error.contains("ttrpc: closed"),
+        "{error}"
+    );
+}

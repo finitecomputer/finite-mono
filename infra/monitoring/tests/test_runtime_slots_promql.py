@@ -21,6 +21,8 @@ PANELS = {
     5: ("finite-lat-4", True),
     9: ("finite-lat-5", False),
     10: ("finite-lat-5", True),
+    11: ("finite-lat-7", False),
+    12: ("finite-lat-7", True),
     6: (None, False),
     7: (None, True),
 }
@@ -59,8 +61,9 @@ def main():
         runtime("finite-lat-3", "new", 5),
         runtime("finite-lat-4", "new", 32),
         runtime("finite-lat-5", "new", 1),
+        runtime("finite-lat-7", "new", 1),
     ]
-    counts = {"finite-lat-3": 17, "finite-lat-4": 32, "finite-lat-5": 1}
+    counts = {"finite-lat-3": 17, "finite-lat-4": 32, "finite-lat-5": 1, "finite-lat-7": 1}
     cases = [
         ("fresh mixed artifacts", 900, active, counts),
         ("just before expiry", 601, active, counts),
@@ -68,8 +71,10 @@ def main():
         ("missing file age", None, active, {}),
         ("future file age", 1201, active, {}),
         ("empty host", 900, [], {}),
-        ("one host missing", 900, active[2:], {"finite-lat-4": 32, "finite-lat-5": 1}),
-        ("lat5 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 32}),
+        ("one host missing", 900, active[2:], {"finite-lat-4": 32, "finite-lat-5": 1, "finite-lat-7": 1}),
+        ("lat5 and lat7 absent", 900, active[:3], {"finite-lat-3": 17, "finite-lat-4": 32}),
+        ("lat7 at qualified ceiling", 900, [runtime("finite-lat-7", "new", 8)], {"finite-lat-7": 8}),
+        ("lat7 over qualified ceiling", 900, [runtime("finite-lat-7", "new", 9)], {"finite-lat-7": 9}),
         (
             "over ceiling",
             900,

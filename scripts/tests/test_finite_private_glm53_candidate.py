@@ -48,12 +48,61 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
     def test_release_contract_accepts_committed_release_ready_candidate(self) -> None:
         self.assertEqual(check_repository(ROOT, release_ready=True), [])
 
-    def test_main_cvm_must_match_the_bridge_compatible_recovery(self) -> None:
-        text = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
-        text = text.replace("cvm-version: 0.14.13", "cvm-version: 0.10.8")
-        with temporary_repository(main_text=text) as temporary_directory:
-            violations = check_repository(Path(temporary_directory), release_ready=True)
-        self.assertTrue(any("cvm-version" in item for item in violations), violations)
+    def test_main_cvm_requires_the_patched_release(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        for version in ("0.10.8", "0.14.13"):
+            with self.subTest(version=version):
+                text = original.replace(
+                    "cvm-version: 0.14.17", f"cvm-version: {version}"
+                )
+                with temporary_repository(main_text=text) as temporary_directory:
+                    violations = check_repository(
+                        Path(temporary_directory), release_ready=True
+                    )
+                self.assertTrue(
+                    any("cvm-version" in item for item in violations), violations
+                )
+
+    def test_multi_h200_requires_explicit_top_level_nvlink_consent(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        consent = "security:\n  allow-unencrypted-nvlink: true\n"
+        for replacement in (
+            "",
+            "security:\n  allow-unencrypted-nvlink: false\n",
+            "security:\n",
+            "  security:\n    allow-unencrypted-nvlink: true\n",
+            consent + "security:\n  allow-unencrypted-nvlink: false\n",
+            consent + "  allow-unencrypted-nvlink: false\n",
+        ):
+            with self.subTest(replacement=replacement):
+                text = original.replace(consent, replacement)
+                with temporary_repository(main_text=text) as temporary_directory:
+                    violations = check_repository(
+                        Path(temporary_directory), release_ready=True
+                    )
+                self.assertTrue(
+                    any("NVLink" in item for item in violations), violations
+                )
+
+    def test_equivalent_or_unterminated_duplicate_security_keys_are_rejected(
+        self,
+    ) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        for header in ("security:", "security :", '"security":', "'security':"):
+            for ending in ("\n", ""):
+                with self.subTest(header=header, ending=ending):
+                    text = (
+                        original
+                        + f"\n{header}\n  allow-unencrypted-nvlink: false"
+                        + ending
+                    )
+                    with temporary_repository(main_text=text) as temporary_directory:
+                        violations = check_repository(
+                            Path(temporary_directory), release_ready=True
+                        )
+                    self.assertTrue(
+                        any("NVLink" in item for item in violations), violations
+                    )
 
     def test_model_requires_private_ipc_and_256g_shared_memory(self) -> None:
         original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
@@ -81,7 +130,9 @@ class FinitePrivateGlm53CandidateTests(unittest.TestCase):
             violations = check_repository(Path(temporary_directory))
         self.assertTrue(any("IPC" in item for item in violations), violations)
 
-    def test_limiter_digest_accepts_an_optional_tag_but_never_a_mutable_image(self) -> None:
+    def test_limiter_digest_accepts_an_optional_tag_but_never_a_mutable_image(
+        self,
+    ) -> None:
         original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
         image_prefix = "ghcr.io/finitecomputer/private-limiter"
         digest = original.split(image_prefix + "@sha256:", 1)[1].split('"', 1)[0]

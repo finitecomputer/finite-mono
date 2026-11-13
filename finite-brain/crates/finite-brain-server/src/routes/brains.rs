@@ -73,12 +73,11 @@ pub(crate) async fn create_brain_handler(
     let request: CreateBrainRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
 
-    // Account-bound agent selection was verified through the Core/Identity
-    // authorities, which this server no longer consults (auth kernel cut).
-    // There is no server-side replacement: agents join by npub invitation or
-    // capability Invite Token after creation.
+    // Account-bound agent selection by email, and the initial Organization
+    // Brain agent, were resolved through Core/Identity, which this server no
+    // longer consults (auth kernel cut). Agents join an Organization Brain by
+    // npub invitation or capability Invite Token after creation.
     if request.personal_agent_email.is_some()
-        || request.personal_agent_npub.is_some()
         || request.initial_agent_email.is_some()
         || request.initial_agent_npub.is_some()
     {
@@ -89,13 +88,15 @@ pub(crate) async fn create_brain_handler(
     }
 
     let organization_requester = match request.kind {
-        CreateBrainKind::Personal if request.requesting_user_npub.is_some() => {
+        CreateBrainKind::Personal => {
+            return create_personal_brain(&state, &actor_npub, request).map(Json);
+        }
+        _ if request.personal_agent_npub.is_some() || request.personal_agent_consent.is_some() => {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
-                "Organization Brain requester identity is only valid for an Organization Brain",
+                "Personal Agent fields are only valid for a Personal Brain",
             ));
         }
-        CreateBrainKind::Personal => None,
         // The requester is declared provenance, not an authority-verified
         // identity: the Agent Runtime's turn-scoped lease remains the
         // client-side guard, and every initial admin can add admins anyway.
@@ -108,29 +109,15 @@ pub(crate) async fn create_brain_handler(
             .transpose()?,
     };
 
-    if request.kind == CreateBrainKind::Personal {
-        return Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            "Personal Brain creation runs through the account agent bootstrap, which no longer resolves through this server",
-        ));
-    }
-
-    let output = match request.kind {
-        CreateBrainKind::Personal => {
-            unreachable!("personal brain creation returned above")
-        }
-        CreateBrainKind::Organization => {
-            if let Some(requester) = organization_requester {
-                bootstrap_organization_brain_with_requester(
-                    request.brain_id,
-                    request.name,
-                    actor_npub.clone(),
-                    requester.as_str().to_owned(),
-                )?
-            } else {
-                bootstrap_organization_brain(request.brain_id, request.name, actor_npub.clone())?
-            }
-        }
+    let output = if let Some(requester) = organization_requester {
+        bootstrap_organization_brain_with_requester(
+            request.brain_id,
+            request.name,
+            actor_npub.clone(),
+            requester.as_str().to_owned(),
+        )?
+    } else {
+        bootstrap_organization_brain(request.brain_id, request.name, actor_npub.clone())?
     };
     let brain_id = output.brain.id.clone();
     let grants = if request.bootstrap_grants.is_empty() {
@@ -156,6 +143,99 @@ pub(crate) async fn create_brain_handler(
         enrich_metadata_identities(&store, &mut response)?;
     }
     Ok(Json(response))
+}
+
+/// Create the signing owner's Personal Brain with the Agent that consented to
+/// serve it. Both keys sign: the owner signs this request and the Agent signs
+/// the consent, so nobody can claim another person's Agent.
+fn create_personal_brain(
+    state: &ServerState,
+    actor_npub: &str,
+    request: CreateBrainRequest,
+) -> Result<BrainMetadataResponse, ApiError> {
+    if request.requesting_user_npub.is_some() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Organization Brain requester identity is only valid for an Organization Brain",
+        ));
+    }
+    if !request.bootstrap_grants.is_empty() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "a Personal Brain starts without Folders, so it takes no bootstrap grants",
+        ));
+    }
+    let missing = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "Personal Brain creation requires personalAgentNpub and that Agent's signed personalAgentConsent",
+        )
+    };
+    let agent_npub =
+        canonical_personal_agent_npub(request.personal_agent_npub.as_deref().ok_or_else(missing)?)?;
+    let consent_value = request.personal_agent_consent.ok_or_else(missing)?;
+    let event = Event::from_json(consent_value.to_string()).map_err(|_| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "personalAgentConsent is not a signed Nostr event",
+        )
+    })?;
+    let consent = verify_personal_agent_consent_event(&event).map_err(|error| {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("invalid personalAgentConsent: {error}"),
+        )
+    })?;
+    let forbidden = |reason: &str| ApiError::new(StatusCode::FORBIDDEN, reason.to_owned());
+    if consent.agent_npub != agent_npub {
+        return Err(forbidden(
+            "personalAgentConsent was signed by a different Agent",
+        ));
+    }
+    if consent.owner_npub != actor_npub {
+        return Err(forbidden(
+            "personalAgentConsent names a different owner than the signer",
+        ));
+    }
+    if consent.brain_id != request.brain_id {
+        return Err(forbidden(
+            "personalAgentConsent names a different Personal Brain",
+        ));
+    }
+    if consent.brain_server != state.public_base_url.trim_end_matches('/') {
+        return Err(forbidden(
+            "personalAgentConsent names a different Brain server",
+        ));
+    }
+    let now = state.auth_now_unix_seconds();
+    if now > consent.expires_at {
+        return Err(forbidden("personalAgentConsent has expired"));
+    }
+    if event.created_at.as_secs() > now.saturating_add(state.max_auth_skew_seconds) {
+        return Err(forbidden("personalAgentConsent is signed in the future"));
+    }
+
+    let output = bootstrap_personal_brain(request.brain_id, request.name, actor_npub)?;
+    let brain_id = output.brain.id.clone();
+    let owner = UserId::new(actor_npub)?;
+    let agent = UserId::new(agent_npub)?;
+    let created_at = server_timestamp(state);
+    let mut store = state.store.lock().map_err(lock_error)?;
+    store.create_personal_brain_bootstrap(&output, &[], &agent, &owner, &created_at)?;
+    let mut response = metadata_response(store.load_brain(&brain_id)?);
+    enrich_metadata_identities(&store, &mut response)?;
+    Ok(response)
+}
+
+fn canonical_personal_agent_npub(value: &str) -> Result<String, ApiError> {
+    NostrPublicKey::parse(value)
+        .and_then(|public_key| public_key.to_npub())
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("invalid personalAgentNpub: {error}"),
+            )
+        })
 }
 
 fn canonical_requesting_user_npub(value: &str) -> Result<String, ApiError> {
@@ -414,9 +494,11 @@ pub(crate) async fn remove_member_handler(
     method: Method,
     OriginalUri(uri): OriginalUri,
     AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
+    Extension(admitted_at): Extension<RotationAdmittedAt>,
     body: Bytes,
 ) -> Result<Json<BrainMetadataResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
+    let actor =
+        validate_admitted_rotation_auth(&state, &headers, &method, &uri, &body, admitted_at)?;
     let request: RemoveMemberRequest = serde_json::from_slice(&body)
         .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
     validate_folder_rotation_fanout(
@@ -518,8 +600,9 @@ pub(crate) async fn remove_member_handler(
     let notification_brain_ids = control_records_by_brain.keys().cloned().collect::<Vec<_>>();
     let actor_user_id = UserId::new(&actor)?;
     let notification_state = state.clone();
+    let mut skipped_stale_grants = Vec::new();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.remove_member_with_rotations_and_control_records(
+        let result = store.remove_member_with_rotations_and_control_records(
             brain_id,
             &actor_user_id,
             &target,
@@ -527,12 +610,49 @@ pub(crate) async fn remove_member_handler(
             &mount_rotations,
             &updated_at,
             &control_records_by_brain,
-        )
+        );
+        if let Err(StoreError::FolderRotationSetMismatch {
+            supplied_folder_ids,
+            ..
+        }) = &result
+        {
+            // Same store lock, same rule: name the stale-grant Folders the
+            // request skipped so the caller knows what to do.
+            let planned = finite_brain_store::member_removal_folder_rotations(
+                &store.load_brain(brain_id)?,
+                &target,
+            )?;
+            skipped_stale_grants = finite_brain_store::member_removal_skipped_stale_grant_folders(
+                &planned,
+                supplied_folder_ids,
+            );
+        }
+        result
+    })
+    .map_err(|error| {
+        if skipped_stale_grants.is_empty() {
+            error
+        } else {
+            stale_grant_rotations_skipped(&target, &skipped_stale_grants)
+        }
     })?;
     for affected_brain_id in notification_brain_ids {
         notification_state.publish_access_update_for(&affected_brain_id, target.as_str());
     }
     Ok(Json(response))
+}
+
+/// A removal that rotated every Folder the Member reads but skipped Folders
+/// where it still holds the current key without entitlement. Same 409 as any
+/// rotation-set mismatch; nothing was changed.
+fn stale_grant_rotations_skipped(target: &UserId, folder_ids: &[String]) -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        format!(
+            "member removal omitted rotations for Folders where {target} still holds the current Folder Key without being entitled to it: [{}]; nothing was changed. Upgrade fbrain if using an older version; otherwise retry the removal to refresh its plan",
+            folder_ids.join(", ")
+        ),
+    )
 }
 
 pub(crate) async fn add_admin_handler(
@@ -563,39 +683,6 @@ pub(crate) async fn add_admin_handler(
     let notification_brain_id = brain_id.clone();
     let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
         store.add_admin_with_control_records(brain_id, &target, &control_records)
-    })?;
-    notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
-    Ok(Json(response))
-}
-
-pub(crate) async fn remove_admin_handler(
-    State(state): State<ServerState>,
-    headers: HeaderMap,
-    method: Method,
-    OriginalUri(uri): OriginalUri,
-    AxumPath((brain_id, target_npub)): AxumPath<(String, String)>,
-    body: Bytes,
-) -> Result<Json<BrainMetadataResponse>, ApiError> {
-    let actor = validate_request_auth(&state, &headers, &method, &uri, Some(&body))?;
-    let request: AdminEventRequest = serde_json::from_slice(&body)
-        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request body"))?;
-    let brain_id = BrainId::new(brain_id)?;
-    let target_identity = resolve_and_record_identity(&state, &target_npub).await?;
-    let target = UserId::new(target_identity.npub.clone())?;
-    let (event, payload) = validate_admin_access_change_value(
-        request.access_change_event,
-        &brain_id,
-        &actor,
-        AdminAccessAction::RemoveAdmin,
-        None,
-        Some(target.as_str()),
-        None,
-    )?;
-    let control_records = admin_mutation_control_records(&[], &actor, &event, &payload)?;
-    let notification_state = state.clone();
-    let notification_brain_id = brain_id.clone();
-    let response = run_as_admin(state, brain_id, actor, |store, brain_id| {
-        store.remove_admin_with_control_records(brain_id, &target, &control_records)
     })?;
     notification_state.publish_access_update_for(&notification_brain_id, target.as_str());
     Ok(Json(response))
@@ -729,29 +816,8 @@ pub(crate) async fn create_brain_invitation_handler(
     let invitation = {
         let target = UserId::new(target_npub)?;
         let initial_folder_access = selected_folder_ids(&request.initial_folder_access)?;
-        let id = generated_link_id(
-            "invitation",
-            &[
-                brain_id.as_str(),
-                target.as_str(),
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-            ],
-            16,
-        );
-        let invite_code = generated_link_id(
-            "invite",
-            &[
-                brain_id.as_str(),
-                target.as_str(),
-                actor_user_id.as_str(),
-                request.expires_at.as_str(),
-                created_at.as_str(),
-                "code",
-            ],
-            16,
-        );
+        let id = fresh_link_id("invitation")?;
+        let invite_code = fresh_link_id("invite")?;
         let accept_path = format!("/v1/brain-invitation-links/{invite_code}/accept");
         let mut store = state.store.lock().map_err(lock_error)?;
         let stored = store.load_brain(&brain_id)?;

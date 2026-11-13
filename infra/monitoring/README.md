@@ -184,7 +184,7 @@ credential. It is intentionally separate from the Prometheus remote-write
 credential.
 
 The repository-provisioned Grafana dashboard includes `finite-lat-1` through
-`finite-lat-5`. Retired hosts remain visible in the scrape-health panel as
+`finite-lat-5` and `finite-lat-7`. Retired hosts remain visible in the scrape-health panel as
 `DOWN` after their remote-written series goes stale, while replacement hosts
 appear as soon as their Alloy collectors begin writing with the corresponding
 host label.

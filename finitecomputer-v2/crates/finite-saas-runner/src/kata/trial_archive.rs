@@ -441,7 +441,17 @@ impl KataLauncher {
         self.validate_owned(plan, &lease.project.id, &inspected)?;
         renew()?;
         if inspected.state.status == "running" {
-            self.stop_compute(&plan.container_name)?;
+            match self.stop_compute(&plan.container_name)? {
+                KataStop::Clean => {}
+                // The trial restore that follows rewrites this /data. After
+                // a failed stop containerd may still restart the container,
+                // so refuse; the operation stays retryable.
+                KataStop::FailedButGone { cause } => {
+                    return Err(invalid(&format!(
+                        "Cannot pause target after a failed stop ({cause})"
+                    )));
+                }
+            }
         }
         Ok(())
     }

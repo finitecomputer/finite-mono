@@ -361,6 +361,50 @@ def brain_queries(brain_id: str) -> dict[str, str]:
     }
 
 
+def collect_inventory(
+    database: Path,
+    scratch_copy: Callable[[Path], Any],
+    query: Callable[[Path, str], list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Enumerate every stored Brain, including empty and personal Brains.
+
+    Select only bounded identifying metadata from a private scratch copy;
+    no owner keys, contacts, grants or content are returned. Overflow or an
+    unusable identifier refuses the census rather than silently omitting it.
+    """
+    started = _now()
+    with scratch_copy(database) as scratch:
+        copied = _now()
+        rows = _bounded("Brain inventory", query(scratch,
+            f"SELECT {_text('id', 128)}, kind, {_text('name', MAX_NAME_CHARS)}"
+            f" FROM brains ORDER BY id LIMIT {MAX_BRAINS + 1};"), MAX_BRAINS)
+    seen: set[str] = set()
+    for row in rows:
+        brain_id = row.get("id")
+        if (not isinstance(brain_id, str) or not BRAIN_ID.fullmatch(brain_id)
+                or brain_id in seen or row.get("kind") not in ("personal", "organization")
+                or not isinstance(row.get("name"), str)):
+            raise RosterError("Brain inventory contains invalid, oversized or duplicate metadata")
+        seen.add(brain_id)
+    return {
+        "schema_version": "finite.brain-inventory-status.v1",
+        "generated_at": _now(),
+        "exit_code": 0,
+        "mode": "operatorInventory",
+        "evidence": {"brainDatabase": str(database),
+                     "brainScratchCopyStartedAt": started, "brainScratchCopiedAt": copied},
+        "coverage": {"state": "complete", "brainCount": len(rows),
+                     "maximumBrains": MAX_BRAINS},
+        "brains": rows,
+        "limitations": [
+            "One configured Brain store only; this does not discover other servers.",
+            "Stored Brains, including empty/test Brains; not a caller's authorized Brain list.",
+            "Names and identifiers only; use --brain-roster for each exact Brain's identity evidence.",
+            "The scratch copy is an observation, not an atomic snapshot with later roster reads.",
+        ],
+    }
+
+
 def alias_query(npubs: list[str]) -> str:
     """Stored aliases for the selected keys only. Every key is a strictly
     decoded canonical npub, so it is safe to embed as a literal."""

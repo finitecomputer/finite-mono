@@ -1,0 +1,272 @@
+--- a/agent/auxiliary_client.py
++++ b/agent/auxiliary_client.py
+@@ -3082,7 +3082,20 @@
+     )
+ 
+ 
+-def _try_openrouter(explicit_api_key: str = None, model: str = None) -> Tuple[Optional[OpenAI], Optional[str]]:
++def _try_openrouter(explicit_api_key: str = None, model: str = None, *, main_runtime=None) -> Tuple[Optional[OpenAI], Optional[str]]:
++    from hermes_cli.finite_inference import is_finite_runtime, openrouter_runtime
++    finite_route = None
++    if is_finite_runtime():
++        runtime = _normalize_main_runtime(main_runtime)
++        if (runtime.get("provider") or _read_main_provider()) != "openrouter":
++            # A saved key is availability, not consent to send a private
++            # session's compression/vision requests through another provider.
++            return None, None
++        from hermes_cli.config import load_config_readonly
++        try:
++            finite_route = openrouter_runtime(load_config_readonly().get("model"))
++        except ValueError:
++            return None, None
+     free_only, cfg_model = _aux_openrouter_settings()
+     or_model = model or cfg_model
+     if free_only and not _is_free_model(or_model):
+@@ -3097,6 +3110,11 @@
+         return None, None
+     if not _is_free_model(or_model):
+         _warn_paid_lane_once(or_model)
++
++    if finite_route is not None:
++        return _create_openai_client(
++            api_key=finite_route["api_key"], base_url=finite_route["base_url"],
++            default_headers=build_or_headers()), or_model
+ 
+     pool_present, entry = _select_pool_entry("openrouter")
+     if pool_present:
+@@ -6321,6 +6339,7 @@
+                 explicit_base_url=explicit_base_url,
+                 explicit_api_key=explicit_api_key,
+                 api_mode=runtime_api_mode or None,
++                main_runtime=runtime,
+             )
+             if client is not None:
+                 logger.info("Auxiliary auto-detect: using main provider %s (%s)",
+@@ -6682,10 +6701,11 @@
+ 
+     # ── Auto: try all providers in priority order ────────────────────
+     if provider == "auto":
+-        client, resolved, effective_provider = _resolve_auto_route(
+-            main_runtime=main_runtime,
+-            task=task,
+-        )
++        with scoped_runtime_main(main_runtime):
++            client, resolved, effective_provider = _resolve_auto_route(
++                main_runtime=main_runtime,
++                task=task,
++            )
+         if client is None:
+             return None, None
+         # When auto-detection lands on a non-OpenRouter provider (e.g. a
+@@ -6710,6 +6730,7 @@
+         client, default = _try_openrouter(
+             explicit_api_key=explicit_api_key,
+             model=model,
++            main_runtime=main_runtime,
+         )
+         if client is None:
+             logger.warning(
+@@ -7484,12 +7505,14 @@
+ def _resolve_strict_vision_backend(
+     provider: str,
+     model: Optional[str] = None,
++    *,
++    main_runtime=None,
+ ) -> Tuple[Optional[Any], Optional[str]]:
+     provider = _normalize_vision_provider(provider)
+     if provider == "copilot":
+         return resolve_provider_client("copilot", model, is_vision=True)
+     if provider == "openrouter":
+-        return _try_openrouter(model=model)
++        return _try_openrouter(model=model, main_runtime=main_runtime)
+     if provider == "nous":
+         # Must go through resolve_provider_client so anthropic/* vision
+         # recommendations wrap onto /v1/messages — _try_nous alone returns
+@@ -7654,7 +7677,7 @@
+                 # image and the upstream rejects it with a 404. Only an
+                 # explicit auxiliary.vision.model may override the Portal.
+                 sync_client, default_model = _resolve_strict_vision_backend(
+-                    main_provider, resolved_model or provider_vision_default
++                    main_provider, resolved_model or provider_vision_default, main_runtime=runtime
+                 )
+                 if sync_client is not None:
+                     logger.info(
+@@ -7742,7 +7765,7 @@
+         for candidate in _VISION_AUTO_PROVIDER_ORDER:
+             if candidate == main_provider:
+                 continue  # already tried above
+-            sync_client, default_model = _resolve_strict_vision_backend(candidate)
++            sync_client, default_model = _resolve_strict_vision_backend(candidate, main_runtime=runtime)
+             if sync_client is not None:
+                 return _finalize(candidate, sync_client, default_model)
+ 
+@@ -7751,7 +7774,7 @@
+ 
+     if requested in _VISION_AUTO_PROVIDER_ORDER:
+         sync_client, default_model = _resolve_strict_vision_backend(
+-            requested, resolved_model
++            requested, resolved_model, main_runtime=runtime
+         )
+         return _finalize(requested, sync_client, default_model)
+ 
+@@ -8223,17 +8246,38 @@
+         except RuntimeError:
+             pass
+     runtime = _normalize_main_runtime(main_runtime)
++    finite_cache_scope = ()
++    from hermes_cli.finite_inference import is_finite_runtime, openrouter_runtime
++    normalized_provider = _normalize_aux_provider(provider)
++    if is_finite_runtime() and normalized_provider in {"auto", "openrouter"}:
++        effective_provider = runtime.get("provider") or _read_main_provider()
++        if normalized_provider == "openrouter" and effective_provider != "openrouter":
++            # Eligibility applies before a cache hit, not just client creation.
++            return None, None
++        if effective_provider == "openrouter":
++            from hermes_cli.config import load_config_readonly
++            try:
++                route = openrouter_runtime(load_config_readonly().get("model"))
++            except ValueError:
++                return None, None
++            runtime = {**runtime, **route}
++            if normalized_provider == "openrouter":
++                base_url, api_key = route["base_url"], route["api_key"]
++        finite_cache_scope = (effective_provider,) + tuple(
++            _runtime_cache_discriminator(field, runtime.get(field, ""))
++            for field in _MAIN_RUNTIME_FIELDS
++        )
+     cache_key = _client_cache_key(
+         provider,
+         async_mode=async_mode,
+         base_url=base_url,
+         api_key=api_key,
+         api_mode=api_mode,
+-        main_runtime=main_runtime,
++        main_runtime=runtime,
+         is_vision=is_vision,
+         task=task,
+         model=model,
+-    )
++    ) + finite_cache_scope
+     with _client_cache_lock:
+         if cache_key in _client_cache:
+             cached_client, cached_default, cached_loop = _client_cache[cache_key]
+@@ -9774,6 +9818,7 @@
+ 
+     try:
+         with (
++            scoped_runtime_main(main_runtime),
+             aux_progress_hook(
+                 prior_progress_hook
+                 if callable(prior_progress_hook)
+@@ -10707,22 +10752,23 @@
+     if semaphore is not None:
+         await semaphore.acquire()
+     try:
+-        return await _async_call_llm_impl(
+-            task=task,
+-            provider=provider,
+-            model=model,
+-            base_url=base_url,
+-            api_key=api_key,
+-            main_runtime=main_runtime,
+-            messages=messages,
+-            temperature=temperature,
+-            max_tokens=max_tokens,
+-            tools=tools,
+-            timeout=timeout,
+-            extra_body=extra_body,
+-            reasoning_config=reasoning_config,
+-            route_info=route_info,
+-        )
++        with scoped_runtime_main(main_runtime):
++            return await _async_call_llm_impl(
++                task=task,
++                provider=provider,
++                model=model,
++                base_url=base_url,
++                api_key=api_key,
++                main_runtime=main_runtime,
++                messages=messages,
++                temperature=temperature,
++                max_tokens=max_tokens,
++                tools=tools,
++                timeout=timeout,
++                extra_body=extra_body,
++                reasoning_config=reasoning_config,
++                route_info=route_info,
++            )
+     finally:
+         if semaphore is not None:
+             semaphore.release()
+--- a/hermes_cli/runtime_provider.py
++++ b/hermes_cli/runtime_provider.py
+@@ -1918,6 +1918,11 @@
+                 f"provider {requested_provider!r} is disabled in config "
+                 f"(providers.{requested_provider}.enabled: false)"
+             )
++
++    from hermes_cli.finite_inference import is_finite_runtime, openrouter_runtime
++    if requested_provider == "openrouter" and is_finite_runtime():
++        # Finite Private's OPENAI_API_KEY is not an OpenRouter credential.
++        return openrouter_runtime(_get_model_config())
+ 
+     if requested_provider == "moa":
+         return {
+--- a/gateway/slash_commands.py
++++ b/gateway/slash_commands.py
+@@ -1760,7 +1760,9 @@
+           /model <name> --provider <provider> — switch provider + model
+           /model --provider <provider>        — switch to provider, auto-detect model
+         """
+-        from gateway.run import _hermes_home, _load_gateway_config
++        from gateway.run import _hermes_home, _load_gateway_config, _reload_runtime_env_preserving_config_authority
++        # Connections saves credentials without restarting active chat.
++        _reload_runtime_env_preserving_config_authority()
+         from hermes_cli.model_switch import (
+             switch_model as _switch_model, parse_model_switch_args,
+             resolve_persist_behavior,
+@@ -1849,6 +1851,18 @@
+             current_provider = override.get("provider", current_provider)
+             current_base_url = override.get("base_url", current_base_url)
+             current_api_key = override.get("api_key", current_api_key)
++
++        if raw_args == "private":
++            from hermes_cli.finite_inference import private_route
++            try:
++                model_input, current_base_url, current_api_key = private_route()
++            except ValueError as exc:
++                return str(exc)
++            # Resolve the named private route, not the previous session endpoint.
++            explicit_provider = "custom"
++            current_provider = "custom"
++            persist_global = False
++            is_session = True
+ 
+         # No args: show interactive picker (Telegram/Discord) or text list
+         if not model_input and not explicit_provider:
+@@ -2204,6 +2218,9 @@
+             lines.append(t("gateway.model.usage_switch_model"))
+             lines.append(t("gateway.model.usage_switch_provider"))
+             lines.append(t("gateway.model.usage_persist"))
++            from hermes_cli.finite_inference import is_finite_runtime
++            if is_finite_runtime():
++                lines.append("Finite Private for this session: /model private")
+             return "\n".join(lines)
+ 
+         # Perform the switch
+--- a/gateway/run.py
++++ b/gateway/run.py
+@@ -8680,6 +8680,13 @@
+             _override_state.conversation.model_override if _override_state else None
+         )
+         if override:
++            from hermes_cli.finite_inference import is_finite_runtime, session_runtime
++            if is_finite_runtime():
++                runtime = session_runtime(override, _load_gateway_config().get("model"))
++                if runtime:
++                    if override.get("api_key") != runtime["api_key"]:
++                        self._evict_cached_agent(resolved_session_key)
++                    override.update(runtime)
+             override_model = override.get("model", model)
+             override_runtime = {
+                 "provider": override.get("provider"),

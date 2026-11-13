@@ -128,7 +128,8 @@ pub struct AccessReportSnapshot {
     pub member_provenance: BTreeMap<UserId, MemberProvenance>,
     /// Keys among `evidence_keys` that participated in this Brain themselves.
     pub verified_participation: BTreeMap<UserId, ParticipationEvidence>,
-    /// Stored identity aliases for participating `evidence_keys`; labels only.
+    /// Stored identity aliases for `evidence_keys`; labels only. The server
+    /// decides which of them a row may show.
     pub aliases: BTreeMap<UserId, IdentityAlias>,
 }
 
@@ -212,11 +213,11 @@ impl BrainStore {
             }
         }
         let verified_participation = self.participation_for_keys(brain_id, &evidence_keys)?;
-        // Aliases are server-global labels anyone's lookup may have written;
-        // read them only for keys that participated here themselves.
-        let participating = verified_participation.keys().cloned().collect::<Vec<_>>();
+        // Aliases are server-global labels anyone's lookup may have written.
+        // Read them for the page's keys; the report filters what it shows.
+        let page_keys = evidence_keys.iter().cloned().collect::<Vec<_>>();
         let aliases = self
-            .load_identity_aliases(&participating)?
+            .load_identity_aliases(&page_keys)?
             .into_iter()
             .map(|alias| (alias.npub.clone(), alias))
             .collect();

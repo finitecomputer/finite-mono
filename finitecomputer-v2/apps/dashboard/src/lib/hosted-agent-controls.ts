@@ -17,6 +17,8 @@ const EMPTY_SCHEMA = "finite.agent.empty.request.v1";
 const OWNER_CLAIM = "agent.owner.claim";
 
 export type AgentConnectionsStatus = {
+  // Absent on runtimes that cannot save credentials without changing defaults.
+  openrouter?: { key_saved: boolean };
   inference: {
     profile: "finite_private" | "openrouter";
     provider: string;
@@ -49,6 +51,7 @@ export type SimplexConnectionStatus = {
 
 export type AgentConnectionAction =
   | { action: "status" }
+  | { action: "openrouter_save"; apiKey: string }
   | {
       action: "inference";
       profile: "finite_private" | "openrouter";
@@ -137,6 +140,8 @@ export function parseAgentConnectionAction(payload: unknown): AgentConnectionAct
         model: optionalString(record.model, "model", 256),
       };
     }
+    case "openrouter_save":
+      return { action, apiKey: boundedString(record.apiKey, "OpenRouter key", 16 * 1024) };
     case "telegram_connect":
       return { action, token: boundedString(record.token, "token", 256) };
     case "simplex_approve_request": {
@@ -284,8 +289,14 @@ function assertCommandSucceeded(response: HostedRuntimeCommandResponse) {
   );
 }
 
-function commandForAction(action: Exclude<AgentConnectionAction, { action: "status" }>) {
+export function commandForAction(action: Exclude<AgentConnectionAction, { action: "status" }>) {
   switch (action.action) {
+    case "openrouter_save":
+      return {
+        command: "agent.openrouter.save",
+        schema: "finite.agent.openrouter.save.v1",
+        body: { api_key: action.apiKey },
+      };
     case "inference":
       return {
         command: "agent.inference.apply",
@@ -327,7 +338,7 @@ function commandForAction(action: Exclude<AgentConnectionAction, { action: "stat
   }
 }
 
-function parseConnectionsStatus(value: unknown): AgentConnectionsStatus {
+export function parseConnectionsStatus(value: unknown): AgentConnectionsStatus {
   const root = objectRecord(value);
   const inference = objectRecord(root.inference);
   const telegram = objectRecord(root.telegram);
@@ -337,6 +348,9 @@ function parseConnectionsStatus(value: unknown): AgentConnectionsStatus {
     throw new HostedAgentControlError("The agent returned an unknown inference choice.", 502);
   }
   return {
+    openrouter: root.openrouter == null
+      ? undefined
+      : { key_saved: objectRecord(root.openrouter).key_saved === true },
     inference: {
       profile,
       provider: boundedString(inference.provider, "inference provider", 128),

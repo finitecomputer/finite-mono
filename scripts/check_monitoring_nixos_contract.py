@@ -44,8 +44,9 @@ LAT_DASHBOARD_HOSTS = (
     "finite-lat-3",
     "finite-lat-4",
     "finite-lat-5",
+    "finite-lat-7",
 )
-LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-5]"
+LAT_DASHBOARD_HOST_REGEX = "finite-lat-[1-57]"
 
 HOST_METRIC_NAMES = [
     "node_cpu_seconds_total",
@@ -177,6 +178,16 @@ LAT_LOG_UNITS = {
         "systemd-networkd.service",
         "wireguard-wg-finite.service",
     ],
+    "finite-lat-7": [
+        "alloy.service",
+        "finite-md-check.service",
+        "finite-saas-runner.service",
+        "finite-storage-health.service",
+        "prometheus-node-exporter.service",
+        "systemd-networkd-persistent-storage.service",
+        "systemd-networkd.service",
+        "wireguard-wg-finite.service",
+    ],
 }
 
 LAT_ROLES = {
@@ -186,6 +197,7 @@ LAT_ROLES = {
     "finite-lat-2": "app",
     "finite-lat-4": "runner",
     "finite-lat-5": "runner",
+    "finite-lat-7": "runner",
 }
 
 
@@ -194,6 +206,17 @@ def nix_eval() -> dict[str, Any]:
       let
         flake = builtins.getFlake (toString ./.);
         cfg = flake.nixosConfigurations.finite-monitoring.config;
+        lat1 = flake.nixosConfigurations.finite-lat-1.config;
+        lat2 = flake.nixosConfigurations.finite-lat-2.config;
+        appPkgs = import flake.inputs.nixpkgs { system = "x86_64-linux"; };
+        pinnedApps = import ./infra/nixos/packages.nix {
+          pkgs = appPkgs;
+          craneLib = flake.inputs.crane.mkLib appPkgs;
+          sourceRoot = /. + builtins.unsafeDiscardStringContext flake.inputs.lat2-app-source.outPath;
+        };
+        pinnedDashboard = (import
+          (flake.inputs.lat2-app-source + "/infra/nixos/modules/dashboard.nix")
+          {}).virtualisation.oci-containers.containers.finite-saas-dashboard;
         datasourceNames =
           map (datasource: datasource.name)
             cfg.services.grafana.provision.datasources.settings.datasources;
@@ -206,6 +229,31 @@ def nix_eval() -> dict[str, Any]:
             cfg.services.prometheus.scrapeConfigs
         );
       in {
+        lat1Applications = {
+          hostRevision = lat1.system.configurationRevision;
+          metrics = lat1.finite.metrics.staticVersionMetrics;
+        };
+        lat2Applications = {
+          revision = flake.inputs.lat2-app-source.rev;
+          hostRevision = lat2.system.configurationRevision;
+          metrics = lat2.finite.metrics.staticVersionMetrics;
+          dashboard = {
+            expectedImage = pinnedDashboard.image;
+            actualImage = lat2.virtualisation.oci-containers.containers.finite-saas-dashboard.image;
+            expectedEnvironment = pinnedDashboard.environment;
+            actualEnvironment = lat2.virtualisation.oci-containers.containers.finite-saas-dashboard.environment;
+          };
+          services = builtins.mapAttrs (unit: package: {
+            expected = toString package;
+            actual = lat2.systemd.services.${unit}.serviceConfig.ExecStart;
+          }) {
+            finite-saas-core = pinnedApps.finite-saas-core;
+            finitechat-server = pinnedApps.finitechat-server;
+            finitechat-hosted-device = pinnedApps.finitechat-hosted-device;
+            finite-brain-app = pinnedApps.finite-brain;
+            finite-identity = pinnedApps.finite-identity;
+          };
+        };
         hostName = cfg.networking.hostName;
         release = cfg.system.nixos.release;
         firewallTcp = cfg.networking.firewall.allowedTCPPorts;
@@ -289,6 +337,12 @@ def nix_eval() -> dict[str, Any]:
             envFiles = flake.nixosConfigurations.finite-lat-5.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
             supplementaryGroups = flake.nixosConfigurations.finite-lat-5.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
             activation = flake.nixosConfigurations.finite-lat-5.config.system.activationScripts.finite-lat-monitoring-secrets.text;
+          };
+          finite-lat-7 = {
+            config = flake.nixosConfigurations.finite-lat-7.config.environment.etc."alloy/config.alloy".text;
+            envFiles = flake.nixosConfigurations.finite-lat-7.config.systemd.services.alloy.serviceConfig.EnvironmentFile;
+            supplementaryGroups = flake.nixosConfigurations.finite-lat-7.config.systemd.services.alloy.serviceConfig.SupplementaryGroups;
+            activation = flake.nixosConfigurations.finite-lat-7.config.system.activationScripts.finite-lat-monitoring-secrets.text;
           };
         };
       }
@@ -751,6 +805,34 @@ def check_ubuntu_contract() -> None:
 
 def main() -> int:
     contract = nix_eval()
+    apps = contract["lat2Applications"]
+    dashboard = apps["dashboard"]
+    require(dashboard["actualImage"] == dashboard["expectedImage"],
+            "lat2 dashboard image must use the locked application source")
+    require(dashboard["actualEnvironment"] == dashboard["expectedEnvironment"],
+            "lat2 dashboard environment must use the locked application source")
+    for unit, paths in apps["services"].items():
+        require(
+            paths["actual"].startswith(paths["expected"] + "/bin/"),
+            f"lat2 {unit} must use the locked application source",
+        )
+    for component in (
+        "finite-saas-core", "finitechat-server", "finitechat-hosted-device", "finite-brain",
+        "nixos-system-profile",
+    ):
+        for host in ("lat1", "lat2"):
+            host_apps = contract[f"{host}Applications"]
+            metric = next(
+                line for line in host_apps["metrics"].splitlines()
+                if line.startswith("finite_component_build_info{")
+                and f'component="{component}"' in line
+            )
+            revision = (
+                host_apps["hostRevision"]
+                if host == "lat1" or component == "nixos-system-profile"
+                else host_apps["revision"]
+            )
+            require_contains(metric, f'git_sha="{revision or ""}"', f"{host} {component} revision")
 
     require(
         contract["hostName"] == "finite-monitoring", "unexpected monitoring hostname"

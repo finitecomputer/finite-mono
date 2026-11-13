@@ -15,7 +15,21 @@ Core account-owner check. Unauthorized requests fail before any source lookup.
 
 `fbrain access list --brain <exact-id>` renders the report; `--json` returns the
 same facts. Existing Chat agents use this CLI result through the FiniteBrain
-skill. There is no new Chat message protocol or dashboard roster screen.
+skill. There is no new Chat message protocol. The dashboard Brain page shows
+admins a read-only roster through the Agent's Brain plugin: each key's role,
+Folders, and, only when Core resolved it, kind, name, email and responsible
+account email. Otherwise it shows the key's stored public name when the report
+carries one.
+
+The Runtime plugin also carries `resolution.state` and the allowlisted
+`noParticipation` reason. When no current, scoped or public name is available,
+the Identity cell explains missing participation, withheld details, unsupported
+identity evidence, conflicting records or an unavailable lookup. It never
+forwards arbitrary backend reasons. `notShared` does not distinguish an unknown
+key from withheld Account information, so the UI must not claim it proves a
+missing Account connection. Older plugins omit resolution; the dashboard then
+says details are unavailable without guessing a reason. Private aliases remain
+viewer-local labels, and mutation confirmations retain the authoritative key.
 
 The full report, including shared account contact, is admin-only in v1. Ordinary
 metadata visibility does not confer access to every Folder or private contact.
@@ -66,8 +80,9 @@ name that limitation instead of claiming global completeness.
    private description withheld; an account-scoped authenticated hosted flow may
    supply the explicit participation evidence without logging every report read.
 4. Call the optional private Core batch client for eligible page keys and this
-   exact Brain server/ID. Core additionally enforces the account/Brain sharing
-   scope. No response or caller-supplied description changes access facts.
+   exact Brain server/ID. Core descriptions v2 apply no account/Brain sharing
+   scope (FIN-166); a v1 answer from an older Core still enforces it. No
+   response or caller-supplied description changes access facts.
 5. Recheck caller authority and the fingerprint after the external call. If the
    caller lost authority, deny. If report authority changed, restart within a
    small bounded retry budget or return a conflict; never combine stale access
@@ -101,7 +116,13 @@ npub1… · identity source unavailable · removed · Private Tasks: revocation 
 Human names may be absent in Core; a shared account email is an honest readable
 fallback. Agent NIP-05 names are not contact mailboxes. Cached public aliases are
 separate evidence, labelled with their stored observation time and lack of a
-fresh check. Do not make outbound name verification a prerequisite for reporting.
+fresh check. `storedAt` is when the Brain server last resolved that name to the
+key, for a request on any Brain it hosts. A key that never acted shows only a
+stored Identity Directory (`finite.vip`) name, because any other domain's NIP-05
+document can claim any key. That name is the key's public Directory binding:
+for a managed Agent its Agent name, for a person their Finite VIP Email. By
+decision it is shown whatever kind of key it is. Do not make outbound name
+verification a prerequisite for reporting.
 
 Core not configured, old protocol, timeout or outage leaves every access row
 available and marks descriptions unavailable. Reject malformed batches, unknown
@@ -121,9 +142,10 @@ shared keys; explicit read-only Guests; Folder Invitations; Mount Offers; pendin
 wrong-key and automatically added recipients; missing grants; demoted Members
 and removed keys retaining grants. Test same-email keys remain separate.
 
-Prove arbitrary-key insertion cannot disclose private contacts, an agent cannot
-release its account holder's contact, revoked/absent scopes withhold, and owner
-transfer requires the successor's sharing scope. Verify denial before lookup,
+Prove arbitrary-key insertion cannot disclose private contacts, and that a v1
+answer still withholds without a scope. Under v2, an agent's own participation
+releases its owner's contact by decision (see the Core contract's
+"Disclosure without a sharing scope"). Verify denial before lookup,
 admin removal/access change during lookup, paging conflicts and source outages.
 Compare text/JSON and before/after exports, authority and content sequences.
 
@@ -153,11 +175,15 @@ coupling the two product features.
   `storedAt`). Page coverage is `descriptions` (`checked`, `notConfigured`,
   `notNeeded`, `unavailable`, `unsupported`) with Core's `checkedAt`.
 - Keys without recorded participation get `notShared` with reason
-  `noParticipation` and are never sent to Core. Participation evidence is
-  Invite Token redemption, npub Brain Invitation acceptance, Folder Invitation
-  acceptance, addressed Mount Offer acceptance, an accepted authenticated
-  Brain record, or an applied Approval by its exact signer
-  (`brain_approval_nonces`). Approval targets do not inherit it.
+  `noParticipation` and are never sent to Core. They carry `storedNip05` only
+  when the stored name is a `finite.vip` Directory name; participating keys
+  carry any stored name. Core descriptions still require participation.
+  Participation evidence is Invite Token redemption, npub Brain Invitation
+  acceptance, Folder Invitation acceptance, addressed Mount Offer acceptance,
+  an accepted authenticated Brain record, or an applied Approval by its exact
+  signer (`brain_approval_nonces`). Approval targets do not inherit it. Folder
+  Key Grant records do not count: any key-holding client delivers pending wraps
+  during sync without a request from its owner.
 - SCHEMA_V30 adds only indexes for those reads. Grant evidence is the stored
   issuer, time and provenance; signed-audit re-verification, the Identity
   Directory lookup and outbound NIP-05 rechecks are not part of this report.
@@ -167,5 +193,13 @@ coupling the two product features.
   A Core outage, old Core or invalid batch keeps every row and marks
   participating keys `unavailable`; malformed, partial, foreign or
   extra-key batches are refused whole.
+- Brain asks [Core v3](../../finitecomputer-v2/docs/brain-scoped-roster-v3.md)
+  with the page and its canonical participating subset. Exact scoped records
+  can describe nonparticipants; other nonparticipants retain the Directory-only
+  alias policy. Only the two documented schema/version rejections reconstruct
+  v2 from the subset, then v1 on version rejection. Owner human-key hints remain
+  restricted to that subset; operator-sourced hints are refused. Optional
+  `descriptions.coreProtocolVersion` and `coreNegotiation` retain legacy states.
+  Optional row `operatorAnnotation` and `operatorRecord` do not change access.
 - `fbrain access list --brain <id>` renders text and `--json`; `fbrain access
   summary` keeps the older metadata view.

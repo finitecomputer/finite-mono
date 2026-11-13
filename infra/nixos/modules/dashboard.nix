@@ -4,10 +4,10 @@
 { ... }:
 {
   virtualisation.oci-containers.containers.finite-saas-dashboard = {
-    # October 12 signup and fresh Agent recovery status, built from 036b2e58.
-    # Core/Chat Rust retains qualified a3cbda97 inputs; excludes PR1055.
-    # https://github.com/finitecomputer/finite-mono/actions/runs/38314673205
-    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:ca15806f1a87dd5e3e4e945396e547053cc3223f16472853282dbb1f7a7ad815";
+    # Scoped Brain roster attribution (#1121) on the retained production
+    # generation, built from 2a51182f; excludes unrelated trial migrations.
+    # https://github.com/finitecomputer/finite-mono/actions/runs/39711516885
+    image = "ghcr.io/finitecomputer/finite-saas-dashboard@sha256:edeb58da6ddac69b511cfecfd3808e4220af90a952e3fe131812b5979c8233ea";
 
     # Host networking: the dashboard must reach core on the HOST loopback
     # (127.0.0.1:4200) and itself bind 127.0.0.1:3000 (HOSTNAME below). With
@@ -37,6 +37,9 @@
       FC_DASHBOARD_BASE_URL = "https://finite.computer";
       NEXT_PUBLIC_WORKOS_REDIRECT_URI = "https://finite.computer/callback";
       STRIPE_FINITE_COMPUTER_STANDARD_PRICE_ID = "price_1TsqWWA50jhCdjMEhQLEBpvR";
+      # FIN-463 phase 2, Paul's switch: FC_REDIRECT_ALL_TO_FINITE_CHAT = "true";
+      # sends every page visit to finite.chat (machine routes keep answering;
+      # apps/dashboard/README.md). Needs a dashboard image with the redirect.
     };
 
     # Operator-created, root:root 0600. Variable NAMES only (values from k8s

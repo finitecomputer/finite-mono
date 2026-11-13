@@ -9,7 +9,7 @@ production host.
 | Surface | Authority |
 | --- | --- |
 | Core, dashboard, Chat, Hosted Device, Brain, Identity and edge | `nixos/hosts/finite-lat-2/` and `nixos/modules/` |
-| Kata Runner hosts | `nixos/hosts/finite-lat-{3,4,5}/` |
+| Kata Runner hosts | `nixos/hosts/finite-lat-{3,4,5,7}/` |
 | Sites at `finite.site` | `fly/sites/fly.toml` |
 | Finite Private inference | `tinfoil/` satellite configuration and measured images |
 | Monitoring | `monitoring/`, receiver configuration and dashboard workflow |

@@ -18,6 +18,7 @@ pub use auth::{
     HTTP_AUTH_KIND, HTTP_AUTH_SCHEME, HttpAuthEventRequest, HttpAuthValidation,
     decode_http_auth_header, encode_http_auth_header, sign_http_auth_event,
     sign_http_auth_header_with_secret, validate_http_auth_event,
+    validate_http_auth_event_before_body,
 };
 pub use error::NostrPrimitiveError;
 pub use event::{EventIdHex, compute_event_id, verify_event_integrity};
@@ -153,6 +154,47 @@ mod tests {
             HttpAuthValidation::new("POST", URL, NOW, 60).with_body(b"{\"name\":\"a\"}".to_vec());
 
         validate_http_auth_event(&event, &expected).unwrap();
+    }
+
+    #[test]
+    fn validates_a_signed_header_before_its_body_without_skipping_the_body_check() {
+        let keys = test_keys();
+        let body = b"{\"delete\":true}";
+        let event = signed_auth_event(&keys, "DELETE", URL, NOW, Some(body));
+        let header_only = HttpAuthValidation::new("DELETE", URL, NOW, 60);
+
+        assert_eq!(
+            validate_http_auth_event_before_body(&event, &header_only).unwrap(),
+            NostrPublicKey::from_protocol(keys.public_key())
+        );
+        // The header pass is not a substitute for the full check with the body.
+        assert!(matches!(
+            validate_http_auth_event(
+                &event,
+                &HttpAuthValidation::new("DELETE", URL, NOW, 60).with_body(b"other".to_vec())
+            )
+            .unwrap_err(),
+            NostrPrimitiveError::PayloadMismatch { .. }
+        ));
+        // Signature, method, URL and time are still enforced before the body.
+        let mut tampered = event.clone();
+        tampered.content = "tampered".to_owned();
+        assert!(validate_http_auth_event_before_body(&tampered, &header_only).is_err());
+        assert!(matches!(
+            validate_http_auth_event_before_body(
+                &event,
+                &HttpAuthValidation::new("POST", URL, NOW, 60)
+            )
+            .unwrap_err(),
+            NostrPrimitiveError::MethodMismatch { .. }
+        ));
+        assert!(
+            validate_http_auth_event_before_body(
+                &event,
+                &HttpAuthValidation::new("DELETE", URL, NOW + 3_600, 60)
+            )
+            .is_err()
+        );
     }
 
     #[test]

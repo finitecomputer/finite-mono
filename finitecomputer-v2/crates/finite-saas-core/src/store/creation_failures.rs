@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_fail_agent_creation_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_fail_agent_creation_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 
     pub async fn cancel_agent_creation_request(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<AgentCreationRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = postgres_cancel_agent_creation_request(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result = postgres_cancel_agent_creation_request(&*tx, input).await;
+        self.finish(tx, result).await
     }
 }
 

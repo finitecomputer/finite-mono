@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use crate::{
     AgentSyncStatus, CliEnvironment, CliError, HealthCheck, HttpResponse, SyncOnceReport,
-    find_agent_state, load_signer, mutate_agent_state, option_value,
-    pending_working_tree_change_paths, read_agent_state, reconcile_local_search_paths,
-    reconcile_search_changes, run_working_tree_sync, signed_http_auth_header,
+    brain_deleted_error, brain_deleted_notice, find_agent_state, load_signer, mutate_agent_state,
+    option_value, pending_working_tree_change_paths, read_agent_state,
+    reconcile_local_search_paths, reconcile_search_changes, record_brain_deleted,
+    run_working_tree_sync, signed_http_auth_header,
 };
 
 pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
@@ -17,6 +18,20 @@ pub(crate) const FINITE_BRAIN_DEVELOPMENT_HTTP_HOST_ENV: &str =
 pub(crate) const FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES_ENV: &str =
     "FINITE_BRAIN_EXPORT_RESPONSE_LIMIT_BYTES";
 const DEFAULT_JSON_RESPONSE_LIMIT_BYTES: usize = 10 * 1024 * 1024;
+/// Whole-request timeout for ordinary Brain API calls.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Server time allowed after a rotation request's body arrives: identity
+/// resolution, the store lock wait and grant and record verification.
+const ROTATION_HANDLER_ALLOWANCE_SECONDS: u64 = 60;
+/// Whole-request timeout for requests that carry Folder Key rotation
+/// material. The server may queue them for its admission wait, then read the
+/// body under its body deadline, then apply them; giving up sooner would
+/// abandon a request before its fair turn.
+pub(crate) const ROTATION_REQUEST_TIMEOUT: Duration = Duration::from_secs(
+    finite_brain_core::ROTATION_ADMISSION_WAIT_SECONDS
+        + finite_brain_core::ROTATION_BODY_READ_DEADLINE_SECONDS
+        + ROTATION_HANDLER_ALLOWANCE_SECONDS,
+);
 pub(crate) const SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_EXPORT_RESPONSE_LIMIT_BYTES: usize = SYNC_BOOTSTRAP_RESPONSE_LIMIT_BYTES;
 
@@ -161,6 +176,14 @@ fn sync_once_with_local_paths_holding_lock(
     discovered_local_paths: Option<Vec<String>>,
     root: Option<PathBuf>,
 ) -> Result<SyncOnceReport, CliError> {
+    // A deleted Brain is terminal: never contact the server again from this
+    // Working Tree, and never move or upload its files.
+    if let Some(root) = root.as_deref() {
+        let state = read_agent_state(root)?;
+        if let Some(deleted) = state.brain_deleted.as_ref() {
+            return Err(brain_deleted_error(&state.brain_id, deleted));
+        }
+    }
     let local_paths = discovered_local_paths.map_or_else(
         || {
             root.as_deref()
@@ -170,6 +193,13 @@ fn sync_once_with_local_paths_holding_lock(
         |paths| Ok(Some(paths)),
     );
     let report = run_working_tree_sync(env, args, activity_kind);
+    if let (Err(error), Some(root)) = (&report, root.as_deref())
+        && let Some((brain_id, deleted_at)) = brain_deleted_notice(error)
+        && crate::brain_deletion::deletion_is_for_working_tree(env, args, root, &brain_id)?
+    {
+        let deleted = record_brain_deleted(env, root, &brain_id, &deleted_at)?;
+        return Err(brain_deleted_error(&brain_id, &deleted));
+    }
     if report.as_ref().is_err_and(is_brain_access_loss) {
         let _ = mutate_agent_state(env, |state, now| {
             state.sync.status = AgentSyncStatus::PausedAccessRevoked;
@@ -255,6 +285,26 @@ pub(crate) fn is_brain_access_loss(error: &CliError) -> bool {
     )
 }
 
+/// Phrase in the Brain server's fallback answer for an unknown API route.
+const SERVER_ROUTE_NOT_FOUND: &str = "route not found";
+
+/// An older Brain server answers a route it predates with its unknown-route
+/// 404, or with 405 when only the method is new. Map either to the caller's
+/// `CliError::Unsupported` so commands fail closed with an upgrade message
+/// instead of falling back to a weaker path; every other error passes through.
+pub(crate) fn unsupported_on_older_server(
+    error: CliError,
+    unsupported: impl FnOnce() -> CliError,
+) -> CliError {
+    match error {
+        CliError::HttpStatus { status: 404, body } if body.contains(SERVER_ROUTE_NOT_FOUND) => {
+            unsupported()
+        }
+        CliError::HttpStatus { status: 405, .. } => unsupported(),
+        other => other,
+    }
+}
+
 pub(crate) fn signed_json_request(
     env: &CliEnvironment,
     args: &[String],
@@ -281,6 +331,7 @@ pub(crate) fn signed_json_read_existing_identity(
         None,
         DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
         crate::signer::load_existing_signer,
+        DEFAULT_REQUEST_TIMEOUT,
     )
 }
 
@@ -336,9 +387,35 @@ pub(crate) fn signed_json_request_to_server_with_response_limit(
         body,
         response_limit_bytes,
         load_signer,
+        DEFAULT_REQUEST_TIMEOUT,
     )
 }
 
+/// Send a request that carries Folder Key rotation material (Folder Key
+/// rotation, Folder access removal, Member removal, Mount revocation or Mount
+/// participant removal) with [`ROTATION_REQUEST_TIMEOUT`], so the CLI waits
+/// out the server's admission queue instead of giving up after 10 seconds.
+pub(crate) fn signed_rotation_request(
+    env: &CliEnvironment,
+    args: &[String],
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    signed_json_request_with_signer(
+        env,
+        &server_url,
+        method,
+        path,
+        Some(body),
+        DEFAULT_JSON_RESPONSE_LIMIT_BYTES,
+        load_signer,
+        ROTATION_REQUEST_TIMEOUT,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn signed_json_request_with_signer(
     env: &CliEnvironment,
     server_url: &str,
@@ -347,6 +424,7 @@ fn signed_json_request_with_signer(
     body: Option<serde_json::Value>,
     response_limit_bytes: usize,
     signer_loader: fn(&CliEnvironment) -> Result<crate::signer::LocalSigner, CliError>,
+    timeout: Duration,
 ) -> Result<serde_json::Value, CliError> {
     let body = body.map(|body| serde_json::to_vec(&body)).transpose()?;
     let transport_url = absolute_server_url(server_url, path);
@@ -361,6 +439,7 @@ fn signed_json_request_with_signer(
         Some(&authorization),
         body.as_deref(),
         response_limit_bytes,
+        timeout,
     )?;
     if !(200..300).contains(&response.status) {
         return Err(CliError::HttpStatus {
@@ -384,11 +463,12 @@ fn http_request_with_response_limit(
     authorization: Option<&str>,
     body: Option<&[u8]>,
     response_limit_bytes: usize,
+    timeout: Duration,
 ) -> Result<HttpResponse, CliError> {
     validate_http_url(url)?;
     let body = body.unwrap_or_default();
     let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(10))
+        .timeout(timeout)
         .redirects(0)
         .build();
     let mut request = agent
@@ -595,6 +675,18 @@ pub(crate) fn absolute_server_url(server_url: &str, path: &str) -> String {
             format!("/{path}")
         }
     )
+}
+
+/// The Brain origin this CLI signs into request authorization: the public
+/// base URL when requests travel through the configured transport.
+pub(crate) fn signed_brain_origin(
+    env: &CliEnvironment,
+    args: &[String],
+) -> Result<String, CliError> {
+    let server_url = server_url_for_command(env, args)?;
+    Ok(authorization_url_for_request(env, &server_url, "/")
+        .trim_end_matches('/')
+        .to_owned())
 }
 
 fn authorization_url_for_request(env: &CliEnvironment, server_url: &str, path: &str) -> String {

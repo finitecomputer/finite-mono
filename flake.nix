@@ -13,6 +13,13 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-25.11";
     crane.url = "github:ipetkov/crane/v0.23.4";
+    # Keep app-plane releases explicit: adding a Runner's network peer must
+    # not also deploy every application change since the last platform wave.
+    # Advance this pin with the coordinated app-plane rollout.
+    lat2-app-source = {
+      url = "github:finitecomputer/finite-mono/500109e481d5d227e48780741d536b33fedfb11f";
+      flake = false;
+    };
     # Hermes Agent's PyPI channel was retired in v0.20.0. Keep every repo-owned
     # Hermes runtime path on the upstream Nix package instead of ad hoc archives.
     hermes-nixpkgs.url = "github:NixOS/nixpkgs/0954f7ee2f6bb3dc7d4e3d0d8bcb8fd4bde4cfc5";
@@ -65,6 +72,7 @@
       self,
       nixpkgs,
       crane,
+      lat2-app-source,
       hermes-nixpkgs,
       hermes-agent,
       nixpkgs-lat3,
@@ -84,6 +92,12 @@
         craneLib = crane.mkLib finitePackagePkgsLinux;
         sourceRoot = ./.;
       };
+      lat2PackagesLinux = import ./infra/nixos/packages.nix {
+        pkgs = finitePackagePkgsLinux;
+        craneLib = crane.mkLib finitePackagePkgsLinux;
+        # fileset requires a path value; the lock keeps this source immutable.
+        sourceRoot = /. + builtins.unsafeDiscardStringContext lat2-app-source.outPath;
+      };
       kataPackagesLinux = import nixpkgs-kata { system = "x86_64-linux"; };
       # FIN-162 qualification only; no host or fixture imports it.
       kataNerdctlCandidateLinux = import ./infra/nixos/kata-nerdctl-candidate.nix {
@@ -102,7 +116,12 @@
       };
       runnerSpecialArgs = {
         finitePackages = finitePackagesLinux;
+        finitePackagesRevision = null;
         kataPackages = kataPackagesLinux;
+      };
+      lat2SpecialArgs = runnerSpecialArgs // {
+        finitePackages = lat2PackagesLinux;
+        finitePackagesRevision = lat2-app-source.rev;
       };
       lat3Modules = [
         disko.nixosModules.disko
@@ -128,11 +147,33 @@
         modules = lat3Modules ++ [ ./infra/nixos/hosts/finite-lat-3/esp-guard.nix ];
       };
 
+      # tzdata 2026b's `now.ck` self-check (its `check` target) compares
+      # every zone from the build's own clock forward against zonenow.tab.
+      # From 2026-11, America/Vancouver and America/Phoenix agree from now on
+      # and zonenow.tab does not yet say so, so every fresh build fails
+      # ("make: *** now.ck Error 1"). Only the installers' static set builds
+      # tzdata from source, so skip its checks there. The host systems'
+      # packages are untouched; drop this with the next tzdata release.
+      kexecTzdataNowCheck = {
+        nixpkgs.overlays = [
+          (final: prev: {
+            tzdata =
+              if prev.stdenv.hostPlatform.isStatic then
+                prev.tzdata.overrideAttrs (_: {
+                  doCheck = false;
+                })
+              else
+                prev.tzdata;
+          })
+        ];
+      };
+
       lat3Kexec = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-3-installer";
             system.kexec-installer.name = "finite-lat-3-nixos-26.05-kexec";
@@ -149,17 +190,24 @@
         revisionModule
         ./infra/nixos/modules/secrets.nix
         ./infra/nixos/hosts/finite-lat-2
+        {
+          # The dashboard is part of the application release, including its
+          # digest and runtime environment. Retain it with the Rust services
+          # when a host-only change follows a newer application release.
+          disabledModules = [ ./infra/nixos/modules/dashboard.nix ];
+          imports = [ (lat2-app-source + "/infra/nixos/modules/dashboard.nix") ];
+        }
       ];
 
       lat2Unguarded = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = runnerSpecialArgs;
+        specialArgs = lat2SpecialArgs;
         modules = lat2Modules;
       };
 
       lat2 = nixpkgs-lat3.lib.nixosSystem {
         system = "x86_64-linux";
-        specialArgs = runnerSpecialArgs // {
+        specialArgs = lat2SpecialArgs // {
           unguardedInstallBootLoader = lat2Unguarded.config.system.build.installBootLoader;
         };
         modules = lat2Modules ++ [ ./infra/nixos/hosts/finite-lat-2/esp-guard.nix ];
@@ -170,6 +218,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-2-installer";
             system.kexec-installer.name = "finite-lat-2-nixos-26.05-kexec";
@@ -208,6 +257,7 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-4-installer";
             system.kexec-installer.name = "finite-lat-4-nixos-26.05-kexec";
@@ -243,9 +293,46 @@
         modules = [
           nixos-images.nixosModules.kexec-installer
           nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
           {
             networking.hostName = "finite-lat-5-installer";
             system.kexec-installer.name = "finite-lat-5-nixos-26.05-kexec";
+            system.stateVersion = "26.05";
+          }
+        ];
+      };
+
+      lat7Modules = [
+        disko.nixosModules.disko
+        sops-nix.nixosModules.sops
+        revisionModule
+        ./infra/nixos/modules/secrets.nix
+        ./infra/nixos/hosts/finite-lat-7
+      ];
+
+      lat7Unguarded = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs;
+        modules = lat7Modules;
+      };
+
+      lat7 = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = runnerSpecialArgs // {
+          unguardedInstallBootLoader = lat7Unguarded.config.system.build.installBootLoader;
+        };
+        modules = lat7Modules ++ [ ./infra/nixos/hosts/finite-lat-7/esp-guard.nix ];
+      };
+
+      lat7Kexec = nixpkgs-lat3.lib.nixosSystem {
+        system = "x86_64-linux";
+        modules = [
+          nixos-images.nixosModules.kexec-installer
+          nixos-images.nixosModules.noninteractive
+          kexecTzdataNowCheck
+          {
+            networking.hostName = "finite-lat-7-installer";
+            system.kexec-installer.name = "finite-lat-7-nixos-26.05-kexec";
             system.stateVersion = "26.05";
           }
         ];
@@ -292,6 +379,7 @@
                 chmod -R u+w "$plugins"
                 cp -R ${./finite-brain/integrations/hermes/finite-brain} "$plugins/finite-brain"
                 cp -R ${./finite-sites/integrations/hermes/finite-sites} "$plugins/finite-sites"
+                cp -R ${./finite-agentd/integrations/hermes/finite-export} "$plugins/finite-export"
                 chmod -R u+w "$plugins"
               '';
             });
@@ -371,7 +459,10 @@
             postgresql_16
             process-compose
             protobuf
-            python3
+            # PyYAML: the raw-folder exporter (tools/finite-raw-export) reads
+            # config.yaml with it, as Hermes's own Python does, and its tests
+            # run under this Python.
+            (python3.withPackages (ps: [ ps.pyyaml ]))
           ];
           rustCiPackages = rustBasePackages ++ [ rustCiToolchain ];
           # CI's devfinity smoke starts the dashboard dev server, but it does not
@@ -454,6 +545,17 @@
         inherit disko;
         production = lat5;
       };
+
+      checks.x86_64-linux.finite-mover = import ./infra/nixos/tests/finite-mover.nix {
+        nixpkgs = nixpkgs-lat3;
+        finitePackages = finitePackagesLinux;
+      };
+
+      checks.x86_64-linux.lat7-storage-boot = import ./infra/nixos/tests/lat7-storage-boot.nix {
+        nixpkgs = nixpkgs-lat3;
+        inherit disko;
+        production = lat7;
+      };
       packages = systemOutputs.packages // {
         # Server binaries + CLIs built by nix from this workspace (built by CI /
         # Depot-backed runners; eval-only on darwin). See infra/nixos/packages.nix.
@@ -479,12 +581,16 @@
             finite-lat-2-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-lat-4-system = lat4.config.system.build.toplevel;
             finite-lat-5-system = lat5.config.system.build.toplevel;
+            finite-lat-7-system = lat7.config.system.build.toplevel;
             finite-lat-4-disko = lat4.config.system.build.diskoScript;
             finite-lat-5-disko = lat5.config.system.build.diskoScript;
+            finite-lat-7-disko = lat7.config.system.build.diskoScript;
             finite-lat-4-kexec = lat4Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-5-kexec = lat5Kexec.config.system.build.kexecInstallerTarball;
+            finite-lat-7-kexec = lat7Kexec.config.system.build.kexecInstallerTarball;
             finite-lat-4-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-lat-5-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
+            finite-lat-7-nixos-anywhere = nixos-anywhere.packages.x86_64-linux.nixos-anywhere;
             finite-monitoring-system = monitoring.config.system.build.toplevel;
           };
       };
@@ -516,6 +622,7 @@
       # infra/runbooks/install-host.md; it starts drained.
       nixosConfigurations.finite-lat-4 = lat4;
       nixosConfigurations.finite-lat-5 = lat5;
+      nixosConfigurations.finite-lat-7 = lat7;
 
       # Dedicated NixOS Grafana/Prometheus/Loki receiver. This is the hard-cut
       # replacement for the historical monitoring Docker Compose stack.

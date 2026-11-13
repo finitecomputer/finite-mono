@@ -88,7 +88,12 @@ let
     lib.concatStringsSep "\n" (lib.mapAttrsToList (name: value: "${name}=${value}") environment);
 in
 {
-  imports = [ ./finite-saas-runner.nix ];
+  imports = [
+    ./finite-saas-runner.nix
+    # FIN-463's read-only forced-command account; creates nothing until the
+    # mover's key is set.
+    ./finite-mover-host.nix
+  ];
 
   options.finite.kataRunnerHost = {
     coreUrl = lib.mkOption {

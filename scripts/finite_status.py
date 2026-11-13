@@ -40,7 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # status run shows the rollback window. PR 2 (cleanup/chat-store-delete-old)
 # deletes this constant and its line.
 CHAT_ENGINE_ROLLOUT_WINDOW_SINCE = "2026-08-31"
-CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE = "2026-10-14"
+CHAT_ENGINE_ROLLOUT_DELETION_ISSUE = "FIN-493"
 
 # Every operational name lives here. The contract test keeps entries that are
 # owned by Nix aligned with their declaring modules.
@@ -163,6 +163,7 @@ CONTRACT: dict[str, Any] = {
             "207.188.7.157": "finite-lat-3",
             "152.236.34.15": "finite-lat-4",
             "64.34.93.213": "finite-lat-5",
+            "64.34.89.107": "finite-lat-7",
         },
     },
     "hosts": {
@@ -215,6 +216,15 @@ CONTRACT: dict[str, Any] = {
             # Nix kataHostAddress: where Agent contact endpoints are published.
             "kata_host_address": "10.254.3.5",
         },
+        "finite-lat-7": {
+            "mounts": ["/", "/data", "/boot-a", "/boot-b"],
+            "storage": "raid",
+            "storage_health_unit": "finite-storage-health.service",
+            "roles": ["runner"],
+            "recovery": False,
+            # Nix kataHostAddress: where Agent contact endpoints are published.
+            "kata_host_address": "10.254.3.6",
+        },
     },
     "thresholds": {
         "filesystem_red_percent": 90.0,
@@ -228,7 +238,12 @@ STATUS_BUNDLE_FILES = (
     "finite-status",
     "finite_status.py",
     "finite_status_brain_roster.py",
+    "finite_status_hosted_identity.py",
+    "finite_status_brain_scoped.py",
+    "finite_status_brain_bindings.py",
+    "finite_status_brain_protocol.py",
     "finite_tinfoil_status.py",
+    "finite_status_tcp_security.py",
     "kata_guest_probe.py",
     "kata_network_probe.py",
 )
@@ -1110,6 +1125,10 @@ SELECT json_build_object('schema_present', false);
 
 def collect_brain_identity() -> dict[str, Any]:
     """Aggregate, contact-free Brain identity description state from Core."""
+    if __package__:
+        from . import finite_status_brain_scoped as scoped
+    else:
+        import finite_status_brain_scoped as scoped
     result = run_read_only(
         [
             "psql",
@@ -1126,7 +1145,7 @@ def collect_brain_identity() -> dict[str, Any]:
         input_text=(
             "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
             "SET LOCAL statement_timeout = '15s';\n"
-            f"{BRAIN_IDENTITY_QUERY}ROLLBACK;\n"
+            f"{BRAIN_IDENTITY_QUERY}{scoped.IDENTITY_QUERY}ROLLBACK;\n"
         ),
     )
     if result.returncode != 0:
@@ -1134,15 +1153,22 @@ def collect_brain_identity() -> dict[str, Any]:
         detail = message[-1] if message else f"exit {result.returncode}"
         raise CollectionError(f"read-only Brain identity query failed: {detail}")
     try:
-        identity = json.loads(result.stdout)
-    except ValueError as error:
+        if len(result.stdout.encode()) > scoped.MAX_FACT_BYTES:
+            raise ValueError("scoped facts exceeded byte limit")
+        parts = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        if not parts or not all(isinstance(part, dict) for part in parts):
+            raise ValueError("invalid identity facts")
+        identity = parts[0]
+        facts = next((part["scoped_record_facts"] for part in parts[1:] if "scoped_record_facts" in part), None)
+        identity["scoped_records"] = scoped.identity_summary(facts)
+    except (ValueError, KeyError, TypeError) as error:
         raise CollectionError("Brain identity query returned invalid JSON") from error
     return {
         "schema_version": "finite.brain-identity-status.v1",
         "generated_at": isoformat(utc_now()),
         "exit_code": 0,
         "limitations": [
-            "Counts only: no email, account id, key or Brain id is read into this report.",
+            "Aggregate counts and opaque conflict record ids only: no contact, account id, key or Brain id is returned.",
             "Hosted humans are described only after a qualifying action; absent associations are not errors.",
             "Agent keys with ambiguous, foreign-link or unsupported lifecycle records are described as "
             "notShared or unknown by Core, never guessed; they need read-only investigation, not repair.",
@@ -2818,7 +2844,99 @@ def collect_chat_server_state(hostname: str) -> dict[str, Any]:
     return raw
 
 
-def collect_brain_roster(brain_id: str) -> dict[str, Any]:
+def collect_brain_scoped_bindings(account_file: Path) -> dict[str, Any]:
+    """Opt-in private export for exact scoped-manifest account bindings."""
+    if __package__:
+        from . import finite_status_brain_bindings as bindings
+    else:
+        import finite_status_brain_bindings as bindings
+    try:
+        requested = bindings.account_ids(account_file)
+        result = run_read_only(
+            ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+             "--set", "ON_ERROR_STOP=1", "--set", "account_ids=" + json.dumps(requested),
+             "--dbname", CONTRACT["database"]["name"]],
+            environment=postgres_environment(), input_text=bindings.QUERY)
+        if result.returncode != 0 or len(result.stdout.encode()) > bindings.MAX_BYTES:
+            raise ValueError("binding query failed")
+        payload = json.loads(result.stdout)
+        if not isinstance(payload, dict) or not isinstance(payload.get("checkedAt"), str) or parse_time(payload["checkedAt"]) is None:
+            raise ValueError("invalid binding observation time")
+        return bindings.report(requested, payload)
+    except (OSError, ValueError, TypeError, KeyError, CollectionError):
+        raise CollectionError("private Core account binding export unavailable or invalid") from None
+
+
+def collect_brain_hosted_census(key_file: Path) -> dict[str, Any]:
+    """Inspect only exact requested public keys across every hosted user root."""
+    if __package__:
+        from . import finite_status_hosted_identity as census
+        from . import finite_status_brain_roster as roster
+    else:
+        import finite_status_hosted_identity as census
+        import finite_status_brain_roster as roster
+    started = isoformat(utc_now())
+    try:
+        with key_file.open("rb") as source:
+            data = source.read(64 * 1024 + 1)
+        keys = json.loads(data) if len(data) <= 64 * 1024 else None
+        if (not isinstance(keys, list) or not 1 <= len(keys) <= census.MAX_KEYS
+                or any(not isinstance(key, str) or not census.HEX.fullmatch(key) for key in keys)
+                or len(set(keys)) != len(keys)):
+            raise CollectionError("census input must contain 1-512 distinct canonical public key hexes")
+    except (OSError, ValueError):
+        raise CollectionError("census public-key input unreadable or invalid") from None
+    result = run_read_only(
+        ["psql", "--no-psqlrc", "--tuples-only", "--no-align", "--quiet",
+         "--set", "ON_ERROR_STOP=1", "--dbname", CONTRACT["database"]["name"]],
+        environment=postgres_environment(),
+        input_text=(
+            "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;\n"
+            "SET LOCAL statement_timeout = '15s';\n"
+            "WITH candidates AS (SELECT id AS account, link_status,"
+            " CASE WHEN octet_length(normalized_email) <= 254 THEN normalized_email END AS email,"
+            " encode(sha256(convert_to(workos_user_id, 'UTF8')), 'hex') AS storage"
+            " FROM users WHERE workos_user_id IS NOT NULL ORDER BY id LIMIT 2001)"
+            " SELECT json_build_object('checked_at', core_rfc3339(now()),"
+            " 'accounts', COALESCE(json_agg(candidates), '[]'::json)) FROM candidates;\n"
+            "ROLLBACK;\n"
+        ),
+    )
+    if result.returncode != 0 or len(result.stdout) > 2 * 1024 * 1024:
+        raise CollectionError("read-only hosted account census failed or exceeded bound")
+    try:
+        core = json.loads(result.stdout)
+        if (not isinstance(core, dict) or not isinstance(core.get("accounts"), list)
+                or any(not isinstance(account, dict) for account in core["accounts"])
+                or not isinstance(core.get("checked_at"), str)
+                or parse_time(core["checked_at"]) is None):
+            raise census.CensusError("invalid Core census payload")
+        report = census.collect(
+            roster.HOSTED_DATA_ROOT, keys, core["accounts"], scratch_copy_sqlite,
+            lambda database, sql: sqlite_json_query(database, sql, timeout=15))
+    except (census.CensusError, OSError, ValueError, KeyError, TypeError) as error:
+        detail = str(error) if isinstance(error, census.CensusError) else type(error).__name__
+        raise CollectionError(f"hosted identity census unavailable: {detail}") from None
+    report["evidence"] = {"startedAt": started, "coreCheckedAt": core["checked_at"],
+                          "hostedDataRoot": str(roster.HOSTED_DATA_ROOT)}
+    report["generated_at"] = isoformat(utc_now())
+    return report
+
+
+def collect_brain_inventory() -> dict[str, Any]:
+    """Operator-only inventory of the configured Brain store, without contacts."""
+    if __package__:
+        from . import finite_status_brain_roster as roster
+    else:
+        import finite_status_brain_roster as roster
+    try:
+        return roster.collect_inventory(
+            roster.BRAIN_DATABASE, scratch_copy_sqlite, sqlite_json_query)
+    except roster.RosterError as error:
+        raise CollectionError(str(error)) from error
+
+
+def collect_brain_roster(brain_id: str, *, skip_hosted: bool = False) -> dict[str, Any]:
     """Opt-in operator roster: exact Brain keys with platform identity evidence.
 
     Brain facts come from a private scratch copy of the Brain store; Core
@@ -2827,8 +2945,10 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
     """
     if __package__:  # imported as scripts.finite_status (tests)
         from . import finite_status_brain_roster as roster
+        from . import finite_status_brain_protocol as protocol
     else:
         import finite_status_brain_roster as roster
+        import finite_status_brain_protocol as protocol
 
     def directory(npubs: list[str]) -> dict[str, Any]:
         # The operator token is read here and used only in its request
@@ -2886,7 +3006,7 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
     try:
         core = roster.parse_core_output(result.stdout)
         unknown = roster.unknown_hexes(brain, core)
-        core["hosted"] = roster.collect_hosted(
+        core["hosted"] = None if skip_hosted else roster.collect_hosted(
             roster.hosted_candidates(core, unknown),
             unknown,
             scratch_copy_sqlite,
@@ -2897,6 +3017,12 @@ def collect_brain_roster(brain_id: str) -> dict[str, Any]:
         report = roster.build_report(brain, core, brain_id)
     except roster.RosterError as error:
         raise CollectionError(str(error)) from error
+    try:
+        description_environment = read_environment_values(
+            Path(CONTRACT["database"]["environment_file"]), protocol.ENV_NAMES)
+    except CollectionError:
+        description_environment = {}
+    report["evidence"]["coreDescriptionProtocol"] = protocol.collect(brain, brain_id, description_environment)
     report["generated_at"] = isoformat(utc_now())
     return report
 
@@ -4118,7 +4244,7 @@ def build_report(raw: dict[str, Any], now: datetime) -> dict[str, Any]:
         # the exit code, only be impossible to miss while the window is open.
         "chat_engine_rollback_window": {
             "open_since": CHAT_ENGINE_ROLLOUT_WINDOW_SINCE,
-            "deletion_deadline": CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE,
+            "deletion_issue": CHAT_ENGINE_ROLLOUT_DELETION_ISSUE,
             "note": (
                 "normalized chat engine is the only engine; the first boot folds "
                 "pre-cutover databases; there is no engine flag, so rollback means "
@@ -4186,8 +4312,8 @@ def render_human(report: dict[str, Any]) -> str:
         f"[AMBER] chat engine rollback window open "
         f"(since {CHAT_ENGINE_ROLLOUT_WINDOW_SINCE}); rollback = restore pre-fold "
         f"backup + revert deploy only if `finitechat-server rollback-check` passes, "
-        f"otherwise roll forward; reader/fold deletion PR due by "
-        f"{CHAT_ENGINE_ROLLOUT_DELETION_DEADLINE}",
+        f"otherwise roll forward; reader/fold deletion tracked in "
+        f"{CHAT_ENGINE_ROLLOUT_DELETION_ISSUE}",
         "",
     ]
 
@@ -4771,6 +4897,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
                       help="read one Project's exact Core recovery inputs without credential values; emits JSON")
     mode.add_argument("--kata-recovery-host", action="store_true",
                       help="read host prerequisites for an isolated Kata recovery rehearsal; emits JSON")
+    mode.add_argument("--tcp-security", action="store_true",
+                      help="read CVE-2026-98432 packet-filter, MPTCP, and boot-persistence evidence; emits JSON")
     mode.add_argument("--runtime-route", metavar="SOURCE_MACHINE_ID",
                       help="compare one owned Kata Runtime's direct and published identity routes")
     mode.add_argument("--runtime-lifecycle", nargs=4,
@@ -4796,10 +4924,27 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="read only aggregate Finite Private limits and accounting; emits JSON",
     )
     mode.add_argument(
+        "--brain-scoped-bindings", type=Path, metavar="ACCOUNT_ID_JSON",
+        help="operator-only private contact/WorkOS binding export for 1-100 exact Core account IDs",
+    )
+    mode.add_argument(
+        "--brain-hosted-census", type=Path, metavar="PUBLIC_KEY_JSON",
+        help="operator-only: match exact hex public keys against all hosted current selectors and store metadata",
+    )
+    mode.add_argument(
+        "--brain-inventory",
+        action="store_true",
+        help="operator-only: enumerate all Brains in this host's store, without keys or contacts; emits JSON",
+    )
+    mode.add_argument(
         "--brain-roster",
         metavar="BRAIN_ID",
         help="operator-only: exact keys of one Brain with platform identity evidence and"
              " account emails; read-only; emits JSON",
+    )
+    parser.add_argument(
+        "--brain-roster-skip-hosted", action="store_true",
+        help="with --brain-roster, leave Hosted store evidence notChecked; useful for a metadata census",
     )
     mode.add_argument(
         "--brain-identity",
@@ -4818,6 +4963,8 @@ def parse_args(arguments: list[str]) -> argparse.Namespace:
         help="maximum Sites snapshot and upload age in seconds (default: 129600 / 36h)",
     )
     options = parser.parse_args(arguments)
+    if options.brain_roster_skip_hosted and not options.brain_roster:
+        parser.error("--brain-roster-skip-hosted requires --brain-roster")
     if options.guest_agent_probe and not options.runtime_lifecycle:
         parser.error("--guest-agent-probe requires --runtime-lifecycle")
     if options.brain_roster is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", options.brain_roster):
@@ -4859,6 +5006,10 @@ def main(arguments: list[str] | None = None) -> None:
         elif options.runtime_lifecycle:
             report = collect_runtime_lifecycle(*options.runtime_lifecycle,
                                                guest_agent_probe=options.guest_agent_probe)
+        elif options.tcp_security:
+            from finite_status_tcp_security import collect
+
+            report = collect()
         elif options.tinfoil:
             from finite_tinfoil_status import collect
 
@@ -4867,8 +5018,15 @@ def main(arguments: list[str] | None = None) -> None:
             report = collect_finite_private_usage()
         elif options.brain_identity:
             report = collect_brain_identity()
+        elif options.brain_hosted_census:
+            report = collect_brain_hosted_census(options.brain_hosted_census)
+        elif options.brain_scoped_bindings:
+            report = collect_brain_scoped_bindings(options.brain_scoped_bindings)
+        elif options.brain_inventory:
+            report = collect_brain_inventory()
         elif options.brain_roster:
-            report = collect_brain_roster(options.brain_roster)
+            report = (collect_brain_roster(options.brain_roster, skip_hosted=True)
+                      if options.brain_roster_skip_hosted else collect_brain_roster(options.brain_roster))
         elif options.sites_backup_state:
             report = build_sites_backup_report(
                 options.sites_backup_state, utc_now(), options.sites_backup_max_age
@@ -4898,9 +5056,13 @@ def main(arguments: list[str] | None = None) -> None:
         }
     if (
         options.json
+        or options.tcp_security
         or options.tinfoil
         or options.finite_private_usage
         or options.brain_identity
+        or options.brain_inventory
+        or options.brain_hosted_census
+        or options.brain_scoped_bindings
         or options.brain_roster
         or options.runtime_route
         or options.runtime_lifecycle

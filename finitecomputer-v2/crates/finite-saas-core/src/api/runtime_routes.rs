@@ -107,14 +107,7 @@ pub(super) async fn resolve_runtime_route(
     Path(identifier): Path<String>,
 ) -> Result<Json<RuntimeRouteResolution>, ApiError> {
     let identity = require_verified_identity(&state, &headers).await?;
-    state
-        .store
-        .link_verified_user(LinkVerifiedUserInput {
-            verified_email: identity.email,
-            workos_user_id: identity.workos_user_id.clone(),
-            now: None,
-        })
-        .await?;
+    link_verified_identity(&state, &identity).await?;
     let identifier = identifier.trim();
     let resolution = state
         .store

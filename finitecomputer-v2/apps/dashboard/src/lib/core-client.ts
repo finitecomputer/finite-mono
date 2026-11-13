@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 
 import { getAccountAuthContext, type AccountAuthContext } from "@/lib/dashboard-auth";
 import { parseHostedHermesAccess, parseHostedHermesSession } from "@/lib/hosted-hermes-status";
+import { parseKeyAlias, parseKeyAliases, type KeyAlias } from "@/lib/brain-key-aliases";
 import {
   invalidateServerSwrCache,
   readThroughServerSwr,
@@ -181,6 +182,7 @@ export type CoreRuntimeControlRequest = {
 };
 
 export type CoreFinitePrivateGrant = {
+  burst_window_epoch?: number;
   id: string;
   user_id: string;
   limit_profile_id: string;
@@ -276,6 +278,7 @@ export type CoreFinitePrivateUsageResult = CoreBridgeStatus & {
 };
 
 export type CoreAdminRuntimeOverview = {
+  offboarding_phase?: string | null;
   project_id: string;
   project_display_name: string;
   owner_email?: string | null;
@@ -413,6 +416,8 @@ export type CoreMe = {
   workos_user_id: string;
   projects: CoreVisibleProject[];
   agent_creation_requests: CoreAgentCreationRequestSummary[];
+  /** FIN-463: every agent this person had has moved to finite.chat. Older Core omits it. */
+  moved_to_finite_chat?: boolean;
 };
 
 export type CoreMeResult = {
@@ -645,7 +650,7 @@ export type CoreAgentCreationInput = {
   displayName: string;
   launchCode: string;
   idempotencyKey: string;
-  hostingTier: "standard" | "confidential";
+  hostingTier?: "standard" | "confidential";
   profilePictureUrl?: string | null;
   /**
    * Owner hosted-chat account id (64 hex), pre-minted via the hosted-device
@@ -1121,6 +1126,38 @@ export async function createCoreHostedHermesSession(runtimeId: string, signal?: 
     { method: "POST", signal }
   );
   return parseHostedHermesSession(grant);
+}
+
+// --- Private key aliases ---
+//
+// Core derives the viewer from the signed-in account's WorkOS token. No
+// request names an owner, account or email.
+
+const CORE_ALIAS_LOOKUP_KEYS = 100;
+
+export async function lookupCoreKeyAliases(npubs: string[], signal?: AbortSignal): Promise<KeyAlias[]> {
+  const aliases: KeyAlias[] = [];
+  for (let start = 0; start < npubs.length; start += CORE_ALIAS_LOOKUP_KEYS) {
+    const page = await coreAdminFetch<unknown>("/api/core/v1/me/key-aliases/lookup", {
+      method: "POST", signal,
+      body: JSON.stringify({ publicKeys: npubs.slice(start, start + CORE_ALIAS_LOOKUP_KEYS) }),
+    });
+    aliases.push(...parseKeyAliases(page));
+  }
+  return aliases;
+}
+
+export async function setCoreKeyAlias(npub: string, alias: string, signal?: AbortSignal) {
+  return parseKeyAlias(await coreAdminFetch<unknown>(
+    `/api/core/v1/me/key-aliases/${encodeURIComponent(npub)}`,
+    { method: "PUT", body: JSON.stringify({ alias }), signal }
+  ));
+}
+
+export async function clearCoreKeyAlias(npub: string, signal?: AbortSignal) {
+  await coreAdminFetch<unknown>(`/api/core/v1/me/key-aliases/${encodeURIComponent(npub)}`, {
+    method: "DELETE", signal,
+  });
 }
 
 export async function loadCoreAdminRuntimes(): Promise<CoreAdminRuntimesResult> {
@@ -1620,6 +1657,12 @@ export class CoreFetchError extends Error {
  * server failure, so callers can surface it inline. */
 export function isCoreRuntimeControlConflict(error: unknown): boolean {
   return error instanceof CoreFetchError && error.status === 409;
+}
+
+/** Core holds an agent the finite.chat mover stopped for its move (423):
+ * nothing here may start it. */
+export function isCoreRuntimeMoving(error: unknown): boolean {
+  return error instanceof CoreFetchError && error.status === 423;
 }
 
 /** Inline message for a rejected-overlap runtime control, naming the request

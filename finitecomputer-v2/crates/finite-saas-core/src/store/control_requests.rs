@@ -7,10 +7,13 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Restart).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result =
+                postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Restart).await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn request_runtime_recover_known_good_chat(
@@ -24,9 +27,8 @@ impl CoreStore {
             input,
             RuntimeControlKind::RecoverKnownGoodChatRuntime,
         )
-        .await?;
-        self.finish(tx).await?;
-        Ok(result)
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn request_runtime_stop(
@@ -35,10 +37,13 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Stop).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result =
+                postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Stop).await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     pub async fn request_runtime_destroy(
@@ -47,10 +52,13 @@ impl CoreStore {
     ) -> CoreResult<RuntimeControlRequest> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result =
-            postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Destroy).await?;
-        self.finish(tx).await?;
-        Ok(result)
+        let result: CoreResult<_> = async {
+            let result =
+                postgres_request_runtime_control(&*tx, input, RuntimeControlKind::Destroy).await?;
+            Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 
@@ -112,6 +120,14 @@ where
             || runtime.source_machine_id != expected.source_machine_id
     }) {
         return Err(CoreError::RuntimeSpecMismatch);
+    }
+    if matches!(
+        kind,
+        RuntimeControlKind::Restart
+            | RuntimeControlKind::RecoverKnownGoodChatRuntime
+            | RuntimeControlKind::Upgrade
+    ) {
+        refuse_a_held_start(client, &runtime.id).await?;
     }
     if kind == RuntimeControlKind::Destroy
         && let Some(phase) = postgres_offboarding_phase(client, &runtime.id).await?

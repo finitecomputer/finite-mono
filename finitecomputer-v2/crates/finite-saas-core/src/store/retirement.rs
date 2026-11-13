@@ -7,9 +7,8 @@ impl CoreStore {
     ) -> CoreResult<UnrecoverableRuntimeArchiveReceipt> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(receipt)
+        let receipt = postgres_admin_archive_unrecoverable_runtime(&*tx, input).await;
+        self.finish(tx, receipt).await
     }
 
     pub async fn admin_offboard_retired_runtime(
@@ -18,9 +17,8 @@ impl CoreStore {
     ) -> CoreResult<RetiredRuntimeOffboardReceipt> {
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let receipt = postgres_admin_offboard_retired_runtime(&*tx, input).await?;
-        self.finish(tx).await?;
-        Ok(receipt)
+        let receipt = postgres_admin_offboard_retired_runtime(&*tx, input).await;
+        self.finish(tx, receipt).await
     }
 }
 

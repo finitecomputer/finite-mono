@@ -14,7 +14,7 @@ production state.
 | Surface | Source of truth | How to read it |
 |---|---|---|
 | Dashboard image | `infra/nixos/modules/dashboard.nix` (`image = …@sha256:…`) | `git log -- infra/nixos/modules/dashboard.nix`; on lat2 `podman inspect finite-saas-dashboard --format '{{.ImageDigest}}'` |
-| Agent Runtime image for **new** launches | Core's promoted runtime-artifact record plus `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4, lat5) | `scripts/finite-status` reports the pin per host; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) |
+| Agent Runtime image for **new** launches | Core's newest promoted, unretired runtime artifact, bound into each creation's `RuntimeSpec` at lease time. `FC_RUNNER_RUNTIME_ARTIFACT_ID` in `/etc/finite/runner.env` on each Kata host (lat3, lat4, lat5) does not choose it; it is the Runner's required default and must name an artifact Core knows, or every cycle on that host fails | `scripts/finite-status` shows the target artifact and each host's pin as matched or mismatched against it; promotion per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §3 |
 | Agent Runtime image for **existing** Agents | Core's per-Runtime record — Agents pin at launch and never auto-update | `scripts/finite-status`; serial upgrades per [`runbooks/runtime-image.md`](runbooks/runtime-image.md) §4a |
 | CLI releases (`finitechat`, `fsite`, `fbrain`) | component-scoped source tags in finite-mono and public rolling alias releases in `finitecomputer/finite-releases` (`finitechat-latest`, `fsite-latest`, `fbrain-latest`) | `gh release list --repo finitecomputer/finite-releases`; `git tag -l 'finitechat/*' 'fsite/*' 'fbrain/*'` |
 | Server binaries on lat2 (Core, chat, Hosted Device, Brain, Identity) | the NixOS closure built from `infra/nixos/` at the deployed revision | `readlink -f /run/current-system` on the host; `scripts/finite-status` |
@@ -98,3 +98,56 @@ Identity descriptions are off until optional settings are added, per
 the report route and descriptions; stored associations and scopes stay in
 Core and are ignored by the older binary. Hosted Agents keep their pinned
 Runtime; this release needs no Runtime upgrade.
+
+### fbrain 0.7.1, Personal Brain setup and descriptions v2
+
+Deploy Core and Brain in a lat2 closure retaining the current dashboard pin,
+then qualify and upgrade the Runtime, then deploy the new dashboard pin.
+Sync existing Agents' managed skills after the dashboard setup button is
+available. Publish the CLI only after the new Brain server is live. No Core or
+Brain schema changes. The Brain server now
+creates a Personal Brain from an owner-signed `POST /v1/brains` carrying the
+Agent's signed consent; the older server refused every Personal Brain
+creation. Organization Brain IDs shaped like `personal-<16 hex>` are now
+refused for every client. Folder Key Grant records stop counting as
+participation in the access report, including records stored earlier.
+Fielded 0.6.0 and 0.7.0 clients otherwise keep working.
+
+Core descriptions v2 describe participating keys without a sharing scope;
+that disclosure cannot be recalled by a rollback (see
+[the runbook](runbooks/brain-identity-descriptions.md)). Rolling the server
+back stops Personal Brain creation; Personal Brains already created remain.
+
+The dashboard's **Set up Personal Brain** needs a Runtime whose Brain plugin
+and `fbrain` 0.7.1 provide `brain personal-agent-consent`; an older Runtime
+reports that the Agent needs an update. `fbrain open personal` selects only a
+Brain where the key is owner or Personal Agent from 0.7.1 on.
+
+### fbrain 0.9.0 and Organization Brain deletion
+
+Deploy the Brain server and Hosted Web Device built with the new Brain core
+before exposing the dashboard Delete Brain action or publishing the CLI.
+The rollout's `lat2-app-source` must include both services and the dashboard
+image digest; a host revision alone does not advance them. Use the
+[application release procedure](runbooks/deploy-core.md#deploy-flow--prebuilt-immutable-mono-rev).
+Older Hosted Devices refuse to sign `delete-brain`, and older servers refuse
+the new deletion routes without mutation. Existing Agents receive the CLI only
+through a separately qualified Runtime upgrade; this dashboard action requires
+no new Runtime capability. Managed skills update through `finite skills sync`.
+
+Brain SCHEMA_V31 adds durable deletion receipts and the prior-access audience,
+plus a trigger preventing reuse of a deleted Brain ID. The previous server can
+reopen the database and still blocks ID reuse, but loses the deletion API and
+private `410 Gone` notices. A server rollback does not restore deleted content;
+preserve the current database and subsequent accepted writes. Restoring a
+pre-deletion backup is an operator-run, isolated-empty-target operation per the
+[Brain restore drill](../finite-brain/docs/runbooks/brain-restore-drill.md).
+Its automated proof covers a Brain database and admin identity key, not the
+complete hosted Recovery Set.
+
+Older clients cannot recreate a deleted Brain or upload its stale content.
+Updated clients additionally stop sync and keep local files and unsynced paths.
+The dashboard continues to discover Brains through the selected Agent's access,
+while the account's own key must be a current Brain admin to delete. The CLI
+supports an admin whose Agent cannot see the Brain. Personal Brains remain
+excluded; active cross-Brain mounts must be disconnected before deletion.

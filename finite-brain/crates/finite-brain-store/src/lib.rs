@@ -18,13 +18,17 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 mod access_report;
+mod admin_demotion;
 mod approvals;
+mod brain_deletion;
 mod brains;
 mod folder_access;
 mod folder_deletion;
+mod folder_key_rotation;
 mod invite_tokens;
 mod links;
 mod loading;
+mod member_removal;
 mod pending_wraps;
 mod schema;
 mod shared_folders;
@@ -35,6 +39,19 @@ pub use access_report::{
     IncomingMount, IncomingMountParticipant, MAX_ACCESS_REPORT_EVIDENCE_KEYS,
     MAX_ACCESS_REPORT_IDENTITIES, MAX_ACCESS_REPORT_OUTGOING_MOUNTS, ParticipationEvidence,
     ParticipationKind,
+};
+pub use admin_demotion::{AdminDemotionRequest, admin_demotion_rotation_folders};
+pub use brain_deletion::{
+    BRAIN_DELETION_DIGEST_PREFIX, BlockingMount, BrainDeletionOutcome, BrainDeletionPreview,
+    BrainDeletionReceipt, BrainDeletionRequest, DeletedBrainNotice,
+};
+pub use folder_key_rotation::{
+    FolderKeyRotationOutcome, FolderKeyRotationRequest, FolderKeyRotationTarget,
+    folder_key_required_recipients, stale_folder_key_holders,
+};
+pub use member_removal::{
+    MemberRemovalFolderRotation, MemberRemovalRotationReason, member_removal_folder_rotations,
+    member_removal_skipped_stale_grant_folders,
 };
 
 const GRANT_FORMAT_NIP59: &str = "NIP-59";
@@ -68,6 +85,9 @@ pub enum StoreError {
     MissingRequiredGrant { recipient_user_id: String },
     /// Stored state would violate Brain, member, admin, access, or grant rules.
     BrokenInvariant { reason: String },
+    /// The owner already has another Personal Brain, or the Agent is already
+    /// another Personal Brain's Personal Agent.
+    PersonalBrainConflict { reason: String },
     /// A sync record is malformed or violates request semantics.
     InvalidRecord { reason: String },
     /// A sync record lost optimistic concurrency.
@@ -85,6 +105,22 @@ pub enum StoreError {
         max: usize,
         current: usize,
     },
+    /// A Folder Key rotation does not target the next key version: another
+    /// admin rotated the Folder first (requested at or below current), or the
+    /// request skips versions (requested above current plus one).
+    StaleFolderKeyVersion {
+        folder_id: String,
+        current_key_version: u32,
+        requested_key_version: u32,
+    },
+    /// A roster change that must rotate Folder Keys was submitted with a
+    /// different set of rotations than the stored roster requires: the client
+    /// is too old to prepare them, or the roster changed after preparation.
+    FolderRotationSetMismatch {
+        operation: &'static str,
+        required_folder_ids: Vec<String>,
+        supplied_folder_ids: Vec<String>,
+    },
 }
 
 impl fmt::Display for StoreError {
@@ -101,6 +137,7 @@ impl fmt::Display for StoreError {
                 write!(f, "missing required grant for {recipient_user_id}")
             }
             Self::BrokenInvariant { reason } => write!(f, "broken invariant: {reason}"),
+            Self::PersonalBrainConflict { reason } => write!(f, "{reason}"),
             Self::InvalidRecord { reason } => write!(f, "invalid record: {reason}"),
             Self::Conflict {
                 reason,
@@ -123,6 +160,33 @@ impl fmt::Display for StoreError {
             } => write!(
                 f,
                 "capacity exceeded for {limit}: current {current}, maximum {max}"
+            ),
+            Self::StaleFolderKeyVersion {
+                folder_id,
+                current_key_version,
+                requested_key_version,
+            } if u64::from(*requested_key_version) > u64::from(*current_key_version) + 1 => write!(
+                f,
+                "Folder {folder_id} Key rotation skips versions: the request rotates to version {requested_key_version} but the Folder is at version {current_key_version}, so the next version is {}. The request was prepared incorrectly; prepare it again from the current version",
+                u64::from(*current_key_version) + 1
+            ),
+            Self::StaleFolderKeyVersion {
+                folder_id,
+                current_key_version,
+                requested_key_version,
+            } => write!(
+                f,
+                "Folder {folder_id} Key version changed while this rotation was prepared: the request rotates to version {requested_key_version} but the Folder is already at version {current_key_version}. Another admin changed this Folder first; prepare the rotation again"
+            ),
+            Self::FolderRotationSetMismatch {
+                operation,
+                required_folder_ids,
+                supplied_folder_ids,
+            } => write!(
+                f,
+                "{operation} must rotate exactly the Folder Keys of [{}], but the request rotates [{}]; nothing was changed. Prepare the change again with a current fbrain",
+                required_folder_ids.join(", "),
+                supplied_folder_ids.join(", ")
             ),
         }
     }
@@ -532,6 +596,15 @@ pub enum GrantFolderAccessOutcome {
     AlreadyHasAccess,
 }
 
+/// Result of opening a Restricted Folder to every Organization Brain Member.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum OpenFolderToAllMembersOutcome {
+    /// The Folder is now All-Members; these recipients received a new grant.
+    Opened { granted_recipients: Vec<UserId> },
+    /// The Folder was already All-Members; nothing was written.
+    AlreadyOpen,
+}
+
 /// Why a Principal gained Folder entitlement without a wrapped Folder Key.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum PendingGrantWrapReason {
@@ -621,6 +694,14 @@ pub struct FolderDeletionWork {
 pub struct FolderDeletionExpectation {
     pub folder_ids: BTreeSet<FolderId>,
     pub object_count: usize,
+}
+
+/// Server-computed scope shown to a client before destructive confirmation.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FolderDeletionPreview {
+    pub folder_ids: BTreeSet<FolderId>,
+    pub object_count: usize,
+    pub root_key_version: u32,
 }
 
 /// Retained facts needed to validate an exact retry after a Folder is gone.
@@ -761,7 +842,8 @@ pub struct EncryptedExportFolderAccess {
     pub user_ids: Vec<UserId>,
 }
 
-/// One Folder Key rotation prepared for atomic Member removal.
+/// One Folder Key rotation prepared for an atomic roster change: Member
+/// removal or admin demotion.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct MemberFolderRotation {
     pub folder_id: FolderId,
@@ -1686,16 +1768,16 @@ impl BrainStore {
         }
     }
 
-    fn rotate_shared_folder_access_removal<F>(
-        &mut self,
+    /// Validate and write one mounted source Folder rotation inside the
+    /// caller's write transaction; the caller finishes its own Mount writes
+    /// and commits.
+    fn rotate_shared_folder_access_removal(
+        &self,
+        tx: &Transaction<'_>,
         connection: &StoredSharedFolderConnection,
         actor_npub: &UserId,
         rotation: SharedFolderAccessRemoval<'_>,
-        after_rotation: F,
-    ) -> Result<(), StoreError>
-    where
-        F: FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StoreError>,
-    {
+    ) -> Result<(), StoreError> {
         if rotation.removed_user_ids.is_empty() {
             return Err(StoreError::BrokenInvariant {
                 reason: "shared folder access removal requires at least one target".to_owned(),
@@ -1754,7 +1836,6 @@ impl BrainStore {
             .collect::<Vec<_>>();
         validate_rotation_records(&live_objects, rotation.reencrypted_records)?;
 
-        let tx = self.conn.transaction()?;
         for removed in rotation.removed_user_ids {
             tx.execute(
                 "DELETE FROM folder_access WHERE brain_id = ?1 AND folder_id = ?2 AND user_id = ?3",
@@ -1774,29 +1855,27 @@ impl BrainStore {
             ],
         )?;
         invalidate_pending_email_bootstraps_for_rotated_folder(
-            &tx,
+            tx,
             &connection.source_brain_id,
             &connection.source_folder_id,
             rotation.updated_at,
         )?;
         for grant in rotation.grants {
-            insert_grant(&tx, &connection.source_brain_id, grant)?;
+            insert_grant(tx, &connection.source_brain_id, grant)?;
         }
         sync_records::append_sync_records(
-            &tx,
+            tx,
             &connection.source_brain_id,
             rotation.control_records,
         )?;
         for record in rotation.reencrypted_records {
             let input = SyncRecordInput::FolderObjectRevision(record.clone());
             sync_records::validate_sync_input(&input)?;
-            sync_records::validate_sync_conflict(&tx, &connection.source_brain_id, &input)?;
-            let sequence = sync_records::next_sequence(&tx, &connection.source_brain_id)?;
-            sync_records::insert_sync_record(&tx, &connection.source_brain_id, sequence, &input)?;
-            sync_records::project_sync_record(&tx, &connection.source_brain_id, &input)?;
+            sync_records::validate_sync_conflict(tx, &connection.source_brain_id, &input)?;
+            let sequence = sync_records::next_sequence(tx, &connection.source_brain_id)?;
+            sync_records::insert_sync_record(tx, &connection.source_brain_id, sequence, &input)?;
+            sync_records::project_sync_record(tx, &connection.source_brain_id, &input)?;
         }
-        after_rotation(&tx)?;
-        tx.commit()?;
         Ok(())
     }
 }
@@ -3170,7 +3249,7 @@ fn map_brain_insert_error(brain: &Brain) -> impl FnOnce(rusqlite::Error) -> Stor
                     .as_deref()
                     .is_some_and(|message| message.contains("brains.owner_user_id")) =>
         {
-            StoreError::BrokenInvariant {
+            StoreError::PersonalBrainConflict {
                 reason: "user already has a personal brain".to_owned(),
             }
         }
@@ -3391,10 +3470,17 @@ fn parse_folder_access(value: &str) -> Result<FolderAccessMode, StoreError> {
 mod tests {
     use super::*;
     use finite_brain_core::{
-        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, bootstrap_organization_brain, bootstrap_personal_brain,
+        MAX_FOLDER_ACCESS_REMOVAL_GRANTS, MAX_FOLDER_ACCESS_REMOVAL_RECORDS,
+        bootstrap_organization_brain, bootstrap_personal_brain,
     };
     use std::sync::{Arc, Barrier};
     use tempfile::TempDir;
+
+    mod admin_demotion_tests;
+    mod brain_deletion_tests;
+    mod folder_key_rotation_tests;
+    mod member_removal_tests;
+    mod open_folder_tests;
 
     #[test]
     fn exposes_store_crate_name() {
@@ -3505,6 +3591,57 @@ mod tests {
     }
 
     #[test]
+    fn one_agent_serves_one_personal_brain_and_retries_stay_idempotent() {
+        let temp = TempDir::new().unwrap();
+        let mut store = BrainStore::open(temp.path().join("one-agent.sqlite3")).unwrap();
+        let agent = UserId::new("npub-agent").unwrap();
+        let first_owner = UserId::new("npub-first-owner").unwrap();
+        let first =
+            bootstrap_personal_brain("personal-first", "First", "npub-first-owner").unwrap();
+        store
+            .create_personal_brain_bootstrap(
+                &first,
+                &[],
+                &agent,
+                &first_owner,
+                "2026-10-05T00:00:00Z",
+            )
+            .unwrap();
+        // A lost response retried with the same Brain and Agent succeeds again.
+        store
+            .create_personal_brain_bootstrap(
+                &first,
+                &[],
+                &agent,
+                &first_owner,
+                "2026-10-05T00:00:01Z",
+            )
+            .unwrap();
+
+        let second_owner = UserId::new("npub-second-owner").unwrap();
+        let second =
+            bootstrap_personal_brain("personal-second", "Second", "npub-second-owner").unwrap();
+        let error = store
+            .create_personal_brain_bootstrap(
+                &second,
+                &[],
+                &agent,
+                &second_owner,
+                "2026-10-05T00:00:02Z",
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            StoreError::PersonalBrainConflict { ref reason }
+                if reason == "agent is already the personal agent of another personal brain"
+        ));
+        assert!(matches!(
+            store.load_brain(&BrainId::new("personal-second").unwrap()),
+            Err(StoreError::MissingBrain { .. })
+        ));
+    }
+
+    #[test]
     fn competing_personal_bootstraps_leave_one_brain_and_one_truthful_loser() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("competing-personal-brain.sqlite3");
@@ -3548,7 +3685,7 @@ mod tests {
         assert!(results.iter().any(|result| {
             matches!(
                 result,
-                Err(StoreError::BrokenInvariant { reason })
+                Err(StoreError::PersonalBrainConflict { reason })
                     if reason == "user already has a personal brain"
             )
         }));
@@ -5155,6 +5292,150 @@ mod tests {
 
         assert_eq!(share.created_by_npub, agent);
         assert_eq!(share.status, LinkStatus::Pending);
+    }
+
+    #[test]
+    fn folder_deletion_preview_matches_the_scope_deletion_accepts() {
+        let mut store = store_with_strategy_folder();
+        let brain_id = BrainId::new("acme").unwrap();
+        let admin = UserId::new("npub-admin").unwrap();
+        let strategy = FolderId::new("strategy").unwrap();
+        let child = Folder {
+            id: FolderId::new("strategy-child").unwrap(),
+            name: DisplayName::new("folder_name", "Child").unwrap(),
+            parent_folder_id: Some(strategy.clone()),
+            path: SafeRelativePath::new("folder_path", "Strategy/Child").unwrap(),
+            ..strategy_folder()
+        };
+        store
+            .create_folder(
+                &brain_id,
+                &child,
+                &BTreeSet::new(),
+                &[grant(
+                    "grant-strategy-child-admin",
+                    "strategy-child",
+                    1,
+                    admin.as_str(),
+                    admin.as_str(),
+                )],
+            )
+            .unwrap();
+        for record in [
+            revision_record("event-live", "obj_000000000201", 1, None, "live"),
+            revision_record("event-gone", "obj_000000000202", 1, None, "gone"),
+            tombstone_record("event-gone-delete", "obj_000000000202", 2, 1),
+            revision_record_for(
+                "strategy-child",
+                "event-child-live",
+                "obj_000000000203",
+                1,
+                None,
+                "child",
+            ),
+            revision_record_for(
+                "team-notes",
+                "event-sibling-live",
+                "obj_000000000204",
+                1,
+                None,
+                "sibling",
+            ),
+        ] {
+            store.submit_sync_record(&brain_id, &record).unwrap();
+        }
+
+        // Tombstoned objects and objects outside the subtree are not counted.
+        let preview = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(
+            preview,
+            FolderDeletionPreview {
+                folder_ids: BTreeSet::from([strategy.clone(), child.id.clone()]),
+                object_count: 2,
+                root_key_version: 1,
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &strategy, &UserId::new("npub-member").unwrap())
+                .unwrap_err(),
+            StoreError::BrokenInvariant {
+                reason: "Folder deletion requires brain destructive authority".to_owned(),
+            }
+        );
+        assert_eq!(
+            store
+                .folder_deletion_preview(&brain_id, &FolderId::new("missing").unwrap(), &admin)
+                .unwrap_err(),
+            StoreError::MissingFolder {
+                folder_id: "missing".to_owned(),
+            }
+        );
+
+        // A write after the preview makes the echoed scope stale.
+        store
+            .submit_sync_record(
+                &brain_id,
+                &revision_record("event-late", "obj_000000000205", 1, None, "late"),
+            )
+            .unwrap();
+        let stale = FolderDeletionExpectation {
+            folder_ids: preview.folder_ids.clone(),
+            object_count: preview.object_count,
+        };
+        assert_eq!(
+            store
+                .delete_folder_subtree(
+                    &brain_id,
+                    &strategy,
+                    &admin,
+                    preview.root_key_version,
+                    "event-delete-stale-preview",
+                    r#"{"recordType":"folder_subtree_tombstone"}"#,
+                    "2026-06-23T00:00:00Z",
+                    APP_SPECIFIC_KIND,
+                    Some(&stale),
+                )
+                .unwrap_err(),
+            StoreError::Conflict {
+                reason: "Folder subtree changed after destructive confirmation".to_owned(),
+                current_revision: None,
+            }
+        );
+
+        let fresh = store
+            .folder_deletion_preview(&brain_id, &strategy, &admin)
+            .unwrap();
+        assert_eq!(fresh.object_count, 3);
+        let deleted = store
+            .delete_folder_subtree(
+                &brain_id,
+                &strategy,
+                &admin,
+                fresh.root_key_version,
+                "event-delete-fresh-preview",
+                r#"{"recordType":"folder_subtree_tombstone"}"#,
+                "2026-06-23T00:00:00Z",
+                APP_SPECIFIC_KIND,
+                Some(&FolderDeletionExpectation {
+                    folder_ids: fresh.folder_ids,
+                    object_count: fresh.object_count,
+                }),
+            )
+            .unwrap();
+        assert_eq!(deleted.folder_count, 2);
+        assert_eq!(deleted.object_count, 3);
+        let sibling = store
+            .load_current_object(
+                &brain_id,
+                &FolderId::new("team-notes").unwrap(),
+                &ObjectId::new("obj_000000000204").unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!sibling.deleted);
     }
 
     #[test]
@@ -7048,7 +7329,7 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(version, 30);
+        assert_eq!(version, 31);
         for (status, timestamp, eligible) in [
             ("accepted", Some(now), true),
             ("revoked", Some(now), true),
@@ -7124,6 +7405,54 @@ mod tests {
         assert_eq!(evidence.kind.as_str(), "authenticatedBrainAction");
         assert_eq!(evidence.recorded_at, applied_at);
         assert!(!after.verified_participation.contains_key(&agent));
+    }
+
+    #[test]
+    fn sync_delivered_folder_key_grants_are_not_participation() {
+        let mut store = store_with_strategy_folder();
+        let brain = BrainId::new("acme").unwrap();
+        let agent = UserId::new("npub-delivering-agent").unwrap();
+        store
+            .grant_admin_with_provenance(&brain, &agent, &MemberProvenance::direct())
+            .unwrap();
+
+        // Any key-holding client delivers pending wraps while it syncs, with no
+        // request from its owner, so these records never prove the key acted.
+        let mut delivered = grant(
+            "grant-delivered",
+            "strategy",
+            1,
+            agent.as_str(),
+            "npub-other",
+        );
+        delivered.created_at = "2026-06-24T00:00:00.000Z".to_owned();
+        store
+            .submit_sync_record(
+                &brain,
+                &folder_key_grant_control_record(&delivered, "event-delivered-wrap"),
+            )
+            .unwrap();
+        let after_wrap = store.access_report_snapshot(&brain, None, 100).unwrap();
+        assert!(!after_wrap.verified_participation.contains_key(&agent));
+
+        let mut note = revision_record_struct(
+            "event-agent-note",
+            "strategy",
+            "obj_000000000001",
+            1,
+            None,
+            "note",
+        );
+        note.actor_npub = agent.clone();
+        store
+            .submit_sync_record(&brain, &SyncRecordInput::FolderObjectRevision(note))
+            .unwrap();
+        let after_note = store.access_report_snapshot(&brain, None, 100).unwrap();
+        let evidence = after_note
+            .verified_participation
+            .get(&agent)
+            .expect("a record the Agent wrote is participation");
+        assert_eq!(evidence.kind.as_str(), "authenticatedBrainAction");
     }
 
     #[test]
@@ -8182,7 +8511,7 @@ mod tests {
     }
 
     #[test]
-    fn demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
+    fn legacy_demoted_admin_keeps_wrap_but_needs_explicit_restricted_folder_access() {
         let temp = TempDir::new().unwrap();
         let db = temp.path().join("brain.sqlite3");
         let mut store = BrainStore::open(&db).unwrap();
@@ -8202,7 +8531,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &old_grant)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         // Reopen persisted pre-repair state, as a server upgrade would.
         drop(store);
         let mut store = BrainStore::open(&db).unwrap();
@@ -8317,7 +8646,7 @@ mod tests {
         store
             .grant_folder_access(&brain_id, &folder_id, &member, &retained)
             .unwrap();
-        store.remove_admin(&brain_id, &member).unwrap();
+        store.remove_admin_keeping_wraps(&brain_id, &member);
         let repair = grant("repair", "strategy", 1, "npub-admin", member.as_str());
         let key_record = folder_key_grant_control_record(&repair, "repair-key-record");
         let access_record = folder_access_control_record(
@@ -8397,15 +8726,29 @@ mod tests {
         store.add_member(&brain_id, &member).unwrap();
         store.add_admin(&brain_id, &member).unwrap();
 
-        store.remove_admin(&brain_id, &member).unwrap();
-        assert_eq!(
-            store
-                .remove_admin(&brain_id, &UserId::new("npub-admin").unwrap())
-                .unwrap_err(),
-            StoreError::BrokenInvariant {
-                reason: "organization brain must keep at least one admin".to_owned()
-            }
-        );
+        let rotations = [MemberFolderRotation {
+            folder_id: FolderId::new("private-project").unwrap(),
+            new_key_version: 2,
+            grants: vec![grant(
+                "private-project-admin-v2",
+                "private-project",
+                2,
+                "npub-admin",
+                "npub-admin",
+            )],
+            reencrypted_records: Vec::new(),
+        }];
+        store
+            .remove_admin(
+                &brain_id,
+                AdminDemotionRequest {
+                    removed_user_id: &member,
+                    rotations: &rotations,
+                    updated_at: "2026-06-23T00:00:00.000Z",
+                    control_records: &[],
+                },
+            )
+            .unwrap();
 
         store.remove_member(&brain_id, &member).unwrap();
         let stored = store.load_brain(&brain_id).unwrap();
@@ -9312,6 +9655,107 @@ mod tests {
             ];
             self.grant_folder_access_with_control_records(
                 brain_id, folder_id, user_id, grant, &records,
+            )
+        }
+    }
+
+    /// Demote an admin the way Brain servers did before demotion rotated
+    /// Folder Keys: drop the role row and keep every wrap. Production Brains
+    /// still hold state written this way, so stale-wrap fixtures start here.
+    trait LegacyAdminDemotionTestExt {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId);
+    }
+
+    impl LegacyAdminDemotionTestExt for BrainStore {
+        fn remove_admin_keeping_wraps(&mut self, brain_id: &BrainId, user_id: &UserId) {
+            let removed = self
+                .conn
+                .execute(
+                    "DELETE FROM brain_admins WHERE brain_id = ?1 AND user_id = ?2",
+                    params![brain_id.as_str(), user_id.as_str()],
+                )
+                .unwrap();
+            assert_eq!(
+                removed, 1,
+                "legacy demotion fixture target must be an admin"
+            );
+        }
+    }
+
+    /// Explicit access removal through the one rotation boundary, keeping the
+    /// older positional shape these fixtures were written against.
+    trait BrainStoreAccessRemovalTestExt {
+        #[allow(clippy::too_many_arguments)]
+        fn rotate_folder_key_for_access_removal(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+        ) -> Result<FolderKeyRotationOutcome, StoreError>;
+
+        #[allow(clippy::too_many_arguments)]
+        fn rotate_folder_key_for_access_removal_with_control_records(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+            control_records: &[SyncRecordInput],
+        ) -> Result<FolderKeyRotationOutcome, StoreError>;
+    }
+
+    impl BrainStoreAccessRemovalTestExt for BrainStore {
+        fn rotate_folder_key_for_access_removal(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+        ) -> Result<FolderKeyRotationOutcome, StoreError> {
+            self.rotate_folder_key_for_access_removal_with_control_records(
+                brain_id,
+                folder_id,
+                removed_user_id,
+                new_key_version,
+                grants,
+                reencrypted_records,
+                updated_at,
+                &[],
+            )
+        }
+
+        fn rotate_folder_key_for_access_removal_with_control_records(
+            &mut self,
+            brain_id: &BrainId,
+            folder_id: &FolderId,
+            removed_user_id: &UserId,
+            new_key_version: u32,
+            grants: &[FolderKeyGrantMetadata],
+            reencrypted_records: &[FolderObjectRevisionSyncRecord],
+            updated_at: &str,
+            control_records: &[SyncRecordInput],
+        ) -> Result<FolderKeyRotationOutcome, StoreError> {
+            self.rotate_folder_key(
+                brain_id,
+                FolderKeyRotationTarget::RemoveAccess(removed_user_id),
+                FolderKeyRotationRequest {
+                    folder_id,
+                    new_key_version,
+                    grants,
+                    reencrypted_records,
+                    updated_at,
+                    control_records,
+                },
             )
         }
     }

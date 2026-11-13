@@ -13,7 +13,6 @@ use sha2::{Digest, Sha256};
 // environment or used against an external service.
 pub(super) const CORE_TOKEN: &str = "synthetic-core-description-credential";
 const DESCRIPTIONS_PATH: &str = "/api/core/internal/v1/brain-identity-descriptions";
-const DESCRIPTIONS_VERSION: &str = "finite-core-brain-identity-descriptions-v1";
 
 /// Exact-key descriptions the Core stub returns as `resolved`; everything
 /// else is `notShared`. `calls` records each request's requested keys.
@@ -21,6 +20,7 @@ const DESCRIPTIONS_VERSION: &str = "finite-core-brain-identity-descriptions-v1";
 pub(super) struct CoreFixture {
     pub(super) known: Arc<Mutex<BTreeMap<String, Value>>>,
     pub(super) calls: Arc<Mutex<Vec<Vec<String>>>>,
+    pub(super) participating: Arc<Mutex<Vec<Vec<String>>>>,
 }
 
 impl CoreFixture {
@@ -36,6 +36,16 @@ impl CoreFixture {
 
     pub(super) fn requested(&self) -> Vec<String> {
         self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    pub(super) fn eligible(&self) -> Vec<String> {
+        self.participating
             .lock()
             .unwrap()
             .iter()
@@ -128,17 +138,39 @@ pub(super) fn core_stub(fixture: CoreFixture) -> Server {
                             .map(|key| key.as_str().unwrap().to_owned())
                             .collect::<Vec<_>>();
                         fixture.calls.lock().unwrap().push(keys.clone());
+                        let participating =
+                            if request["version"] == "finite-core-brain-descriptions-v3" {
+                                request["participatingPublicKeysHex"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .map(|key| key.as_str().unwrap().to_owned())
+                                    .collect::<Vec<_>>()
+                            } else {
+                                keys.clone()
+                            };
+                        fixture
+                            .participating
+                            .lock()
+                            .unwrap()
+                            .push(participating.clone());
                         let known = fixture.known.lock().unwrap().clone();
                         let results = keys
                             .iter()
                             .map(|key| {
-                                known.get(key).cloned().unwrap_or_else(
-                                    || json!({"publicKeyHex": key, "state": "notShared"}),
-                                )
+                                participating
+                                    .contains(key)
+                                    .then(|| known.get(key))
+                                    .flatten()
+                                    .cloned()
+                                    .unwrap_or_else(
+                                        || json!({"publicKeyHex": key, "state": "notShared"}),
+                                    )
                             })
                             .collect::<Vec<_>>();
                         Ok(axum::Json(json!({
-                            "version": DESCRIPTIONS_VERSION,
+                            // A current Core answers in the version it was asked.
+                            "version": request["version"],
                             "brainId": request["brainId"],
                             "checkedAt": "2026-05-02T00:00:00Z",
                             "results": results,

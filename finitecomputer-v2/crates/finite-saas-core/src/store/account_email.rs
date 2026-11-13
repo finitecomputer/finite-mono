@@ -126,9 +126,8 @@ impl CoreStore {
             .start()
             .await
             .map_err(store_error)?;
-        let result = preview(&*tx, request).await?;
-        tx.commit().await.map_err(store_error)?;
-        Ok(result)
+        let result = preview(&*tx, request).await;
+        self.finish(tx, result).await
     }
 
     /// Persists intent only. WorkOS and Sites are separate operator-owned steps.
@@ -144,6 +143,7 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         lock_users(&*tx).await?;
         let result = preview(&*tx, request.clone()).await?;
         if !result.blockers.is_empty() {
@@ -159,8 +159,10 @@ impl CoreStore {
             return Err(conflict());
         }
         let result = preview(&*tx, request).await?;
-        self.finish(tx).await?;
         Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Finishes only the persisted intent, after a fresh server-side WorkOS
@@ -177,6 +179,7 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         lock_users(&*tx).await?;
         let before = preview(&*tx, request.clone()).await?;
         if !before.blockers.is_empty() {
@@ -209,8 +212,10 @@ impl CoreStore {
             _ => return Err(conflict()),
         }
         let result = preview(&*tx, request).await?;
-        self.finish(tx).await?;
         Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 
     /// Cancels only an uncommitted intent after WorkOS still/again verifies the
@@ -227,6 +232,7 @@ impl CoreStore {
         }
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
+        let result: CoreResult<_> = async {
         lock_users(&*tx).await?;
         let before = preview(&*tx, request.clone()).await?;
         if !matches!(before.status.as_str(), "prepared" | "cancelled") {
@@ -235,8 +241,10 @@ impl CoreStore {
         tx.execute("UPDATE account_email_changes SET status='cancelled', completed_by=$1, updated_at=now() WHERE id=$2 AND status='prepared'",
             &[&actor,&request.operation_id]).await.map_err(store_error)?;
         let result = preview(&*tx, request).await?;
-        self.finish(tx).await?;
         Ok(result)
+        }
+        .await;
+        self.finish(tx, result).await
     }
 }
 

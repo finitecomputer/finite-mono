@@ -1,3 +1,4 @@
+use crate::folder_key_rotation::begin_authoritative_write;
 use crate::*;
 
 impl BrainStore {
@@ -599,6 +600,40 @@ impl BrainStore {
         self.load_shared_folder_connection(connection_id)
     }
 
+    /// Authorize removing a participant from an active Mount: the actor
+    /// must control the destination Brain. Callers check this before doing
+    /// any expensive work on rotation material; the mutation checks it again.
+    pub fn authorize_mount_participant_removal(
+        &self,
+        connection_id: &str,
+        actor_npub: &UserId,
+    ) -> Result<StoredSharedFolderConnection, StoreError> {
+        let connection = self.load_shared_folder_connection(connection_id)?;
+        self.validate_destination_admin_for_connection(&connection, actor_npub)?;
+        Ok(connection)
+    }
+
+    /// Authorize revoking a Mount: the actor must control the source or the
+    /// destination Brain. Callers check this before doing any expensive work
+    /// on rotation material; the mutation checks it again.
+    pub fn authorize_mount_revocation(
+        &self,
+        connection_id: &str,
+        actor_npub: &UserId,
+    ) -> Result<StoredSharedFolderConnection, StoreError> {
+        let connection = self.load_shared_folder_connection(connection_id)?;
+        let source = self.load_brain(&connection.source_brain_id)?;
+        let destination = self.load_brain(&connection.destination_brain_id)?;
+        if !has_brain_operational_authority(&source, actor_npub)
+            && !has_brain_operational_authority(&destination, actor_npub)
+        {
+            return Err(StoreError::BrokenInvariant {
+                reason: "mount revocation requires source or destination brain control".to_owned(),
+            });
+        }
+        Ok(connection)
+    }
+
     /// Remove one destination member from a Shared Folder Connection with source key rotation.
     #[allow(clippy::too_many_arguments)]
     pub fn remove_shared_folder_connection_member(
@@ -612,8 +647,9 @@ impl BrainStore {
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
-        let connection = self.load_shared_folder_connection(connection_id)?;
-        self.validate_destination_admin_for_connection(&connection, actor_npub)?;
+        validate_mount_rotation_fanout(grants, reencrypted_records)?;
+        let tx = begin_authoritative_write(&self.conn)?;
+        let connection = self.authorize_mount_participant_removal(connection_id, actor_npub)?;
         if target_npub == &connection.destination_admin_npub {
             return Err(StoreError::BrokenInvariant {
                 reason:
@@ -626,54 +662,33 @@ impl BrainStore {
                 reason: "Mount Participant does not exist".to_owned(),
             });
         }
-        if !connection.managed_access_npubs.contains(target_npub) {
+        if connection.managed_access_npubs.contains(target_npub) {
+            let removed_user_ids = BTreeSet::from([target_npub.clone()]);
+            let rotation = SharedFolderAccessRemoval {
+                removed_user_ids: &removed_user_ids,
+                new_key_version,
+                grants,
+                control_records,
+                reencrypted_records,
+                updated_at,
+            };
+            self.rotate_shared_folder_access_removal(&tx, &connection, actor_npub, rotation)?;
+        } else {
             validate_folder_key_grant_control_records(grants, control_records)?;
-            let tx = self.conn.transaction()?;
-            delete_folder_access_source(
-                &tx,
-                &connection.source_brain_id,
-                &connection.source_folder_id,
-                target_npub,
-                "mount",
-                connection_id,
-            )?;
-            tx.execute(
-                "DELETE FROM shared_folder_connection_members
-                 WHERE connection_id = ?1 AND member_npub = ?2",
-                params![connection_id, target_npub.as_str()],
-            )?;
-            tx.commit()?;
-            return self.load_shared_folder_connection(connection_id);
         }
-        let removed_user_ids = BTreeSet::from([target_npub.clone()]);
-        let rotation = SharedFolderAccessRemoval {
-            removed_user_ids: &removed_user_ids,
-            new_key_version,
-            grants,
-            control_records,
-            reencrypted_records,
-            updated_at,
-        };
-        self.rotate_shared_folder_access_removal(
-            &connection,
-            actor_npub,
-            rotation,
-            |tx| {
-                delete_folder_access_source(
-                    tx,
-                    &connection.source_brain_id,
-                    &connection.source_folder_id,
-                    target_npub,
-                    "mount",
-                    connection_id,
-                )?;
-                tx.execute(
-                    "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
-                    params![connection_id, target_npub.as_str()],
-                )?;
-                Ok(())
-            },
+        delete_folder_access_source(
+            &tx,
+            &connection.source_brain_id,
+            &connection.source_folder_id,
+            target_npub,
+            "mount",
+            connection_id,
         )?;
+        tx.execute(
+            "DELETE FROM shared_folder_connection_members WHERE connection_id = ?1 AND member_npub = ?2",
+            params![connection_id, target_npub.as_str()],
+        )?;
+        tx.commit()?;
         self.load_shared_folder_connection(connection_id)
     }
 
@@ -689,49 +704,44 @@ impl BrainStore {
         reencrypted_records: &[FolderObjectRevisionSyncRecord],
         updated_at: &str,
     ) -> Result<StoredSharedFolderConnection, StoreError> {
-        let connection = self.load_shared_folder_connection(connection_id)?;
-        let source = self.load_brain(&connection.source_brain_id)?;
-        let destination = self.load_brain(&connection.destination_brain_id)?;
-        if !has_brain_operational_authority(&source, actor_npub)
-            && !has_brain_operational_authority(&destination, actor_npub)
-        {
-            return Err(StoreError::BrokenInvariant {
-                reason: "mount revocation requires source or destination brain control".to_owned(),
-            });
-        }
+        validate_mount_rotation_fanout(grants, reencrypted_records)?;
+        let tx = begin_authoritative_write(&self.conn)?;
+        let connection = self.authorize_mount_revocation(connection_id, actor_npub)?;
         if connection.managed_access_npubs.is_empty() {
             validate_folder_key_grant_control_records(grants, control_records)?;
-            let tx = self.conn.transaction()?;
-            delete_folder_access_sources_for_origin(&tx, "mount", connection_id)?;
-            tx.execute(
-                "UPDATE shared_folder_connections
-                 SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
-                params![connection_id, updated_at],
-            )?;
-            tx.commit()?;
-            return self.load_shared_folder_connection(connection_id);
+        } else {
+            let rotation = SharedFolderAccessRemoval {
+                removed_user_ids: &connection.managed_access_npubs,
+                new_key_version,
+                grants,
+                control_records,
+                reencrypted_records,
+                updated_at,
+            };
+            self.rotate_shared_folder_access_removal(&tx, &connection, actor_npub, rotation)?;
         }
-        let rotation = SharedFolderAccessRemoval {
-            removed_user_ids: &connection.managed_access_npubs,
-            new_key_version,
-            grants,
-            control_records,
-            reencrypted_records,
-            updated_at,
-        };
-        self.rotate_shared_folder_access_removal(
-            &connection,
-            actor_npub,
-            rotation,
-            |tx| {
-                delete_folder_access_sources_for_origin(tx, "mount", connection_id)?;
-                tx.execute(
-                    "UPDATE shared_folder_connections SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
-                    params![connection_id, updated_at],
-                )?;
-                Ok(())
-            },
+        delete_folder_access_sources_for_origin(&tx, "mount", connection_id)?;
+        tx.execute(
+            "UPDATE shared_folder_connections SET status = 'revoked', updated_at = ?2 WHERE id = ?1",
+            params![connection_id, updated_at],
         )?;
+        tx.commit()?;
         self.load_shared_folder_connection(connection_id)
     }
+}
+
+/// A Mount participant removal or Mount revocation rotates one source
+/// Folder, so it carries the single-Folder access-removal fan-out limits.
+fn validate_mount_rotation_fanout(
+    grants: &[FolderKeyGrantMetadata],
+    reencrypted_records: &[FolderObjectRevisionSyncRecord],
+) -> Result<(), StoreError> {
+    validate_folder_rotation_fanout(
+        FolderRotationOperation::FolderAccessRemoval,
+        [FolderRotationFanout {
+            grants: grants.len(),
+            reencrypted_records: reencrypted_records.len(),
+        }],
+    )?;
+    Ok(())
 }

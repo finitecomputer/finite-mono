@@ -200,7 +200,7 @@ def main() -> None:
         ROOT / "infra" / "nixos" / "modules" / "kata-runner-host.nix",
         ["FC_RUNNER_KATA_HOST_ADDRESS = cfg.kataHostAddress;"],
     )
-    for runner_host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
+    for runner_host in ("finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"):
         profile = contract["hosts"][runner_host]
         if "runner" not in profile["roles"]:
             raise SystemExit(f"{runner_host} must keep the runner role")

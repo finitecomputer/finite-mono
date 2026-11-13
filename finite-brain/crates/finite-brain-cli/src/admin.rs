@@ -8,14 +8,15 @@ use finite_brain_core::{
     SafeRelativePath, UserId, required_folder_key_recipients,
 };
 use finite_nostr::{NostrPublicKey, build_rumor, wrap_rumor};
-use nostr::{Kind, Tag};
+use nostr::{Keys, Kind, Tag};
 
 use crate::{
-    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, LocalSigner,
-    SessionFolderKeyring, deterministic_id, find_agent_state, load_signer, mutate_agent_state,
-    normalize_folder_access, open_brain_session_folder_keys_for_collaboration, read_agent_state,
-    read_working_tree_state, sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
-    write_working_tree_state,
+    APP_SPECIFIC_KIND, BrainMetadataView, CliEnvironment, CliError, FolderDeletionPreviewView,
+    LocalSigner, SessionFolderKeyring, deterministic_id, find_agent_state, load_signer,
+    mutate_agent_state, normalize_folder_access, open_brain_session_folder_keys,
+    open_brain_session_folder_keys_for_collaboration, read_agent_state, read_working_tree_state,
+    sign_event, signed_json_request, tag_vec, timestamp, unix_timestamp,
+    unsupported_on_older_server, write_working_tree_state,
 };
 
 pub(crate) fn fetch_brain_metadata(
@@ -26,6 +27,38 @@ pub(crate) fn fetch_brain_metadata(
     let path = format!("/v1/brains/{brain_id}/metadata");
     let response = signed_json_request(env, args, "GET", &path, None)?;
     serde_json::from_value(response).map_err(CliError::from)
+}
+
+/// Read the server's scope for a permanent Folder deletion. This replaces
+/// counting live objects out of the full sync bootstrap, which carries every
+/// object's ciphertext and exceeds the JSON response cap on real Brains.
+/// An older server has no such route: fail closed instead of falling back to
+/// the whole-Brain download.
+pub(crate) fn fetch_folder_deletion_preview(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+) -> Result<FolderDeletionPreviewView, CliError> {
+    let path = format!("/v1/brains/{brain_id}/folders/{folder_id}/deletion-preview");
+    let response = signed_json_request(env, args, "GET", &path, None).map_err(|error| {
+        unsupported_on_older_server(error, || unsupported_folder_deletion_preview(&path))
+    })?;
+    let preview: FolderDeletionPreviewView = serde_json::from_value(response).map_err(|_| {
+        CliError::HttpResponseDecode("Folder deletion preview response is malformed".to_owned())
+    })?;
+    if preview.brain_id != brain_id || preview.folder_id != folder_id {
+        return Err(CliError::HttpResponseDecode(
+            "Folder deletion preview describes a different Folder".to_owned(),
+        ));
+    }
+    Ok(preview)
+}
+
+fn unsupported_folder_deletion_preview(path: &str) -> CliError {
+    CliError::Unsupported(format!(
+        "this Brain server does not provide the Folder deletion preview (GET {path}). Upgrade the Brain server; fbrain no longer downloads the whole Brain to confirm a deletion, and nothing was deleted"
+    ))
 }
 
 /// Plan and submit one convergent Organization Brain collaboration request.
@@ -265,6 +298,123 @@ pub(crate) fn ensure_brain_access(
     Ok(receipt)
 }
 
+/// Open one Restricted Folder to every Member of an Organization Brain.
+///
+/// Wraps the current Folder Key for every reader of the opened Folder; the
+/// server keeps only the grants its holders lack and commits them with the
+/// access change and its signed audit record. One way: nothing here makes a
+/// Folder restricted again.
+pub(crate) fn open_folder_to_all_members(
+    env: &CliEnvironment,
+    args: &[String],
+    brain_id: &str,
+    folder_id: &str,
+) -> Result<serde_json::Value, CliError> {
+    let receipt = |outcome: &str, key_version: u32, granted: serde_json::Value| {
+        serde_json::json!({
+            "state": "complete",
+            "operation": "admin-folder-access-open",
+            "brainId": brain_id,
+            "folderId": folder_id,
+            "outcome": outcome,
+            "keyVersion": key_version,
+            "grantedRecipients": granted,
+        })
+    };
+    let metadata = fetch_brain_metadata(env, args, brain_id)?;
+    if metadata.kind != "organization" {
+        return Err(CliError::InvalidInput(
+            "only an Organization Brain Folder can be opened to all Members".to_owned(),
+        ));
+    }
+    let folder = metadata
+        .folders
+        .iter()
+        .find(|folder| folder.id == folder_id)
+        .ok_or_else(|| CliError::NotFound(format!("folder {folder_id}")))?;
+    match folder.access.as_str() {
+        "all_members" => {
+            return Ok(receipt(
+                "alreadyOpen",
+                folder.current_key_version,
+                serde_json::json!([]),
+            ));
+        }
+        "restricted" => {}
+        other => {
+            return Err(CliError::InvalidInput(format!(
+                "Folder {folder_id} is {other}; only a restricted Folder can be opened to all Members. Nothing was changed"
+            )));
+        }
+    }
+    let key_version = folder.current_key_version;
+    let recipients = folder_required_recipients(&metadata, "all_members", &folder.access_user_ids)?;
+    let keyring = open_brain_session_folder_keys(env, args, brain_id)?;
+    let folder_key = opened_folder_key(&keyring, brain_id, folder_id, key_version)?;
+    let auth = load_signer(env)?;
+    let grants = recipients
+        .iter()
+        .map(|recipient| {
+            folder_key_grant_request(
+                &auth,
+                brain_id,
+                folder_id,
+                key_version,
+                recipient,
+                &folder_key,
+                env,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let event = admin_access_change_event_with_note(
+        env,
+        brain_id,
+        AdminAccessAction::SetFolderAccessMode,
+        Some(folder_id),
+        None,
+        Some(key_version),
+        Some("all_members"),
+    )?;
+    let route = format!("/v1/admin/brains/{brain_id}/folders/{folder_id}/open-to-all-members");
+    let response = signed_json_request(
+        env,
+        args,
+        "POST",
+        &route,
+        Some(serde_json::json!({
+            "keyVersion": key_version,
+            "grants": grants,
+            "accessChangeEvent": event,
+        })),
+    )
+    .map_err(|error| {
+        unsupported_on_older_server(error, || {
+            CliError::Unsupported(format!(
+                "this Brain server cannot open a Folder to all Members (POST {route}). Upgrade the Brain server; nothing was changed"
+            ))
+        })
+    })?;
+    let authoritative: BrainMetadataView = serde_json::from_value(response.clone())?;
+    if !authoritative
+        .folders
+        .iter()
+        .any(|folder| folder.id == folder_id && folder.access == "all_members")
+    {
+        return Err(CliError::InvalidInput(format!(
+            "the server did not report Folder {folder_id} as open to all Members"
+        )));
+    }
+    let outcome = response["outcome"].as_str().unwrap_or("opened").to_owned();
+    let granted = response["grantedRecipients"].clone();
+    let summary = format!("Folder opened to all Members brain={brain_id} folder={folder_id}");
+    // Best effort: the local activity log exists only inside a Working Tree.
+    let _ = mutate_agent_state(env, |state, now| {
+        state.add_activity(now, "admin.folder_access.opened", summary.clone());
+        Ok(())
+    });
+    Ok(receipt(&outcome, key_version, granted))
+}
+
 pub(crate) fn resolve_identity_npub(
     env: &CliEnvironment,
     args: &[String],
@@ -499,32 +649,44 @@ pub(crate) fn admin_access_change_event_with_note(
         change_fields.push(&nonce);
     }
     let change_id = deterministic_id("access-change", &change_fields);
-    let validation = AdminAccessChangeValidation {
-        brain_id: BrainId::new(brain_id.to_owned())
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-        change_id,
-        action,
-        admin_npub: auth.npub,
-        folder_id: folder_id
-            .map(|id| FolderId::new(id.to_owned()))
-            .transpose()
-            .map_err(|error| CliError::InvalidInput(error.to_string()))?,
-        target_npub: target_npub.map(ToOwned::to_owned),
-        key_version,
-        note: note.map(ToOwned::to_owned),
-        // The signed event's Nostr timestamp is produced from the process
-        // clock in `sign_event`; derive the payload timestamp from that same
-        // clock so the server's canonical event validation cannot reject a
-        // stale `FBRAIN_NOW` test/config value.
-        created_at: crate::timestamp_from_unix(unix_timestamp()),
-    };
+    let brain_id = BrainId::new(brain_id.to_owned())
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    let folder_id = folder_id
+        .map(|id| FolderId::new(id.to_owned()))
+        .transpose()
+        .map_err(|error| CliError::InvalidInput(error.to_string()))?;
+    sign_admin_access_change(&keys, unix_timestamp(), |created_at| {
+        AdminAccessChangeValidation {
+            brain_id,
+            change_id,
+            action,
+            admin_npub: auth.npub,
+            folder_id,
+            target_npub: target_npub.map(ToOwned::to_owned),
+            key_version,
+            note: note.map(ToOwned::to_owned),
+            created_at,
+        }
+    })
+}
+
+/// Sign an access change at one process-clock second. The server expects the
+/// payload `createdAt` to be the event's Nostr `created_at`, so both come from
+/// `created_at_unix`: separate clock reads can straddle a second boundary, and
+/// a stale `FBRAIN_NOW` test/config value would never match.
+fn sign_admin_access_change(
+    keys: &Keys,
+    created_at_unix: u64,
+    validation_at: impl FnOnce(String) -> AdminAccessChangeValidation,
+) -> Result<serde_json::Value, CliError> {
+    let validation = validation_at(crate::timestamp_from_unix(created_at_unix));
     let payload = AdminAccessChangePayload::new(&validation);
     let event = sign_event(
-        &keys,
+        keys,
         Kind::Custom(APP_SPECIFIC_KIND),
         payload.canonical_json(),
         admin_access_change_tags(&validation)?,
-        unix_timestamp(),
+        created_at_unix,
         Some("admin-access-change"),
     )?;
     serde_json::from_str(&event.as_json()).map_err(CliError::from)
@@ -654,4 +816,55 @@ pub(crate) fn update_local_folders_after_delete(
         );
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use finite_brain_core::validate_admin_access_change_event;
+    use nostr::Event;
+    use time::OffsetDateTime;
+    use time::format_description::well_known::Rfc3339;
+
+    use super::*;
+
+    /// Far from the wall clock, so any other clock read disagrees with it.
+    const SIGNED_AT: u64 = 1_780_000_000;
+
+    /// `folder create --access restricted` for one Folder, stamped `created_at`.
+    fn set_folder_access(keys: &Keys, created_at: String) -> AdminAccessChangeValidation {
+        AdminAccessChangeValidation {
+            brain_id: BrainId::new("personal-a".to_owned()).unwrap(),
+            change_id: "access-change-0123456789abcdef".to_owned(),
+            action: AdminAccessAction::SetFolderAccessMode,
+            admin_npub: NostrPublicKey::from_protocol(keys.public_key())
+                .to_npub()
+                .unwrap(),
+            folder_id: Some(FolderId::new("control-folder".to_owned()).unwrap()),
+            target_npub: None,
+            key_version: Some(1),
+            note: None,
+            created_at,
+        }
+    }
+
+    #[test]
+    fn access_change_payload_and_event_share_one_clock_second() {
+        let keys = Keys::generate();
+        let signed = sign_admin_access_change(&keys, SIGNED_AT, |created_at| {
+            set_folder_access(&keys, created_at)
+        })
+        .unwrap();
+
+        // Rebuild the server's expectation: `createdAt` is the event's own
+        // Nostr `created_at`, never a separately sampled client clock.
+        let event: Event = serde_json::from_value(signed).unwrap();
+        let server_created_at =
+            OffsetDateTime::from_unix_timestamp(i64::try_from(event.created_at.as_secs()).unwrap())
+                .unwrap()
+                .format(&Rfc3339)
+                .unwrap();
+        validate_admin_access_change_event(&event, &set_folder_access(&keys, server_created_at))
+            .expect("the server accepts the signed access change");
+        assert_eq!(event.created_at.as_secs(), SIGNED_AT);
+    }
 }

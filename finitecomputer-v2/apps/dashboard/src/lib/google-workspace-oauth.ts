@@ -14,6 +14,13 @@ export const GOOGLE_WORKSPACE_SCOPES = [
   "https://www.googleapis.com/auth/userinfo.profile",
 ] as const;
 
+/** The callback binds the connected email through Google's userinfo endpoint. */
+const REQUIRED_IDENTITY_SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email"];
+const IDENTITY_SCOPES: ReadonlySet<string> = new Set([
+  ...REQUIRED_IDENTITY_SCOPES,
+  "https://www.googleapis.com/auth/userinfo.profile",
+]);
+
 const STATE_TTL_SECONDS = 15 * 60;
 
 export type GoogleWorkspaceOAuthConfig = {
@@ -27,6 +34,25 @@ type GoogleWorkspaceOAuthState = {
   workosUserId: string;
   issuedAtMs: number;
 };
+
+/**
+ * People may untick individual permissions on Google's consent screen. Accept
+ * any grant within the contract that keeps the account identity and some
+ * Workspace access, in contract order; agentd applies the same rule.
+ */
+export function acceptedGoogleWorkspaceScopes(scopeValue: string): string[] | null {
+  const granted = new Set(scopeValue.split(/\s+/u).filter(Boolean));
+  const contract: ReadonlySet<string> = new Set(GOOGLE_WORKSPACE_SCOPES);
+  const grantedScopes = [...granted];
+  if (
+    grantedScopes.some((scope) => !contract.has(scope)) ||
+    REQUIRED_IDENTITY_SCOPES.some((scope) => !granted.has(scope)) ||
+    grantedScopes.every((scope) => IDENTITY_SCOPES.has(scope))
+  ) {
+    return null;
+  }
+  return GOOGLE_WORKSPACE_SCOPES.filter((scope) => granted.has(scope));
+}
 
 export function googleWorkspaceOAuthConfigured(
   env: Record<string, string | undefined> = process.env

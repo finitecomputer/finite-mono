@@ -1346,7 +1346,7 @@ SELECT id,id,id,'owner',CASE WHEN id='pending' THEN NULL ELSE 'assigned' END,'ru
         # finite-lat-4 publishes .4; the old allowlist expected .3 and refused
         # every lat4 Agent before trying the request.
         principal = "npub1" + "q" * 58
-        for host in ("finite-lat-3", "finite-lat-4", "finite-lat-5"):
+        for host in ("finite-lat-3", "finite-lat-4", "finite-lat-5", "finite-lat-7"):
             nix = (ROOT / "infra" / "nixos" / "hosts" / host / "default.nix").read_text()
             published = re.search(r'kataHostAddress = "([0-9.]+)";', nix)[1]
             endpoint = f"http://{published}:49155/contact"
@@ -3223,7 +3223,8 @@ class BrainIdentityStatusTests(unittest.TestCase):
         self.assertEqual(exit.exception.code, 0)
         report = json.loads(stdout.getvalue())
         self.assertEqual(report["schema_version"], "finite.brain-identity-status.v1")
-        self.assertEqual(report["brain_identity"], identity)
+        self.assertEqual(report["brain_identity"], {**identity, "scoped_records": {
+            "state": "notChecked", "reason": "scoped record facts were not collected"}})
 
     def test_query_failure_or_invalid_json_is_a_collection_error(self):
         for completed in (
