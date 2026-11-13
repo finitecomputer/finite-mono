@@ -53,6 +53,18 @@ Notes:
   Runtime release and rollback use the usual digest-pinned image procedure;
   there is no data migration or manual lock cleanup for this fix.
 
+- The Telegram cold-start patch (`hermes-telegram-preserve-pending.patch`)
+  changes nothing by default. When `gateway.platforms.telegram.extra.preserve_pending_updates`
+  is true, a cold gateway start keeps the Bot API update queue instead of
+  dropping it, so messages sent while a bot was offline are still answered.
+  The legacy importer's full-fidelity mode sets the key and refuses a target
+  image without the patch. It is applied to both the sealed venv's `plugins/`
+  and the package's bundled `share/hermes-agent/plugins` (the image reads the
+  latter through `HERMES_BUNDLED_PLUGINS`). Proof:
+  `finitechat/tests/hermes/test_legacy_hermes_full_fidelity.py` queues an
+  update before the real gateway starts. Remove the patch when upstream keeps
+  the queue on an opt-in cold start.
+
 - The sealed Hermes environment also includes the bounded product inventory
   reader; full/minimal packages bundle Brain- and Sites-owned dashboard plugins.
   Their fixed native routes reuse Hermes authentication and existing CLI signer

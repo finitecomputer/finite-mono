@@ -347,6 +347,8 @@ class FullFidelityTests(unittest.TestCase):
         self.assertEqual(config["session_reset"]["idle_minutes"], 1440)
         self.assertEqual(config["tts"]["provider"], "edge")
         self.assertNotIn("api_key", config["tts"]["elevenlabs"])
+        self.assertEqual(config["tts"]["elevenlabs"]["voice_id"], "synthetic-voice")
+        self.assertEqual(config["human_delay"]["max_ms"], 2500)
         self.assertTrue(config["onboarding"]["seen"])
         self.assertTrue(config["cron"]["wrap_response"])
         self.assertEqual(

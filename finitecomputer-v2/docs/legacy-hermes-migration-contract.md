@@ -6,7 +6,7 @@ materializes only compatible state into active target paths. No owner decides
 the fate of individual files. Old machine identity, credentials, gateway
 ownership, and process state remain present in the sealed snapshot but inert.
 
-Use [the runbook](../../infra/runbooks/legacy-hermes-box1-to-lat3.md) for the
+Use [the runbook](../../infra/runbooks/legacy-hermes-box1-to-v2.md) for the
 operator procedure. `scripts/legacy-hermes-migration` is the executable
 contract.
 
@@ -146,6 +146,69 @@ own explicit Brain access and Folder Key Grants, then open and sync a fresh
 Working Tree. Imported memory documents remain preserved as source evidence; stale absolute
 paths must be checked before using imported content in the target environment.
 
+## Full-fidelity mode
+
+The default mode above is deliberately cautious, so a moved bot looks
+different to its person: Telegram is disconnected, cron and skills are
+review-only and the persona is the target default. The opt-in full-fidelity
+mode exists so an operator can move a box1 bot without the person noticing
+anything except a few minutes of silence. It is selected with
+`--mode full-fidelity` on both `manifest` and `install`; the install fails if
+the two disagree. Everything the default mode guarantees still holds: the
+sealed `source-home.tar`, the hash-verified manifest and receipt, unchanged
+target identity and Chat client hashes, an offline import into a stopped
+Runtime, rollback of a failed import, and no secret value in any inventory,
+manifest, receipt or error.
+
+`legacy_hermes_fidelity.py` derives a plan from the sealed bundle at manifest
+time. The plan holds names and counts only and is bound into the approved
+manifest; `verify` re-derives it and refuses a mismatch. The installer reads
+every activated file from the payload or the verified `source-home.tar`,
+preflights the stopped target before writing anything, and keeps the
+target's pre-import `config.yaml` and `SOUL.md` under
+`preimport-state/full-fidelity/`.
+
+| Source | Target | Rule |
+| --- | --- | --- |
+| `.hermes/SOUL.md` | `/data/agent/hermes-home/SOUL.md` | Replaces only an absent or Hermes-default target persona |
+| allowlisted `config.yaml` keys | target `config.yaml` | `personalities`, `personality`, `timezone`, `display` (not `display.platforms`), `tts`, `stt`, `voice`, `human_delay`, `session_reset`, `onboarding`, `agent.personality`, `cron.wrap_response` and the `memory` on/off and size limits; secret-shaped nested keys are dropped. The target keeps model credentials and routing, managed skill sources, terminal, gateway, plugins, security, approvals and delegation |
+| Telegram token and home channel | `gateway.platforms.telegram` | Exactly the block finite-agentd's `telegram_connect_offer` and `telegram_home_offer` write, plus `extra.preserve_pending_updates: true`. Token sources that disagree, a token without the Bot API shape and a non-numeric home channel fail closed |
+| `pairing/` and `platforms/pairing/` Telegram stores | the pairing dir target Hermes reads | Approved and pending entries are merged, `pairing/` wins a conflict as target Hermes merges; rate limits are not carried; a non-empty target store fails closed |
+| user-created skills | `/data/agent/hermes-home/skills` | Hermes-bundled skills (from `.bundled_manifest` and its origin hash) and box1 image-overlay skills (`.runtime-managed`) are not activated. A name already in the target's skills, Managed Skills Baseline or bundled set stays review-only and is listed |
+| `.hermes/scripts` | `/data/agent/hermes-home/scripts` | Collisions fail closed |
+| `cron/jobs.json` | `/data/agent/hermes-home/cron/jobs.json` | Enabled and paused states kept; recurring next runs recomputed from install time in the bot's timezone so nothing fires in a burst; an overdue one-shot, a job delivering to an inactive platform or a job whose script is missing is paused with a reason; per-job inference routes the target does not offer fall back to the target default; stale run claims are cleared; a target with jobs fails closed |
+| loose `/home/node` entries | `/data/workspace/legacy-box1/<name>` | Non-hidden top-level files and directories beside `workspace`, `dev` and `uploads`. `AGENTS.md` (box1 rewrites it from its platform render on every boot), the Brain working tree, `node_modules` and `__pycache__` are withheld; collisions fail closed; symlinks are kept only when they stay inside placed or active roots |
+
+`/home/node/<placed entry>` and `~/<placed entry>` become
+`/data/workspace/legacy-box1/<placed entry>`; `/home/node/.hermes/` paths for
+SOUL.md, memories, skills, scripts and cron become `/data/agent/hermes-home/`.
+These rewrites apply to SOUL.md, memories, skill and script text files, cron
+prompts, scripts and workdirs, and every string in imported sessions. Other
+legacy paths are left unchanged and counted.
+
+Target Hermes drops the Telegram update queue on every cold start, which would
+lose messages sent while the bot moves. The Runtime image's
+`hermes-telegram-preserve-pending.patch` keeps the queue when
+`extra.preserve_pending_updates` is true. The installer refuses a Telegram
+activation on a target whose Hermes lacks the patch. One gap remains: if a
+second poller makes Telegram return a 409 conflict at start, target Hermes
+still drops the queue to recover, so box1 must be frozen before the target
+starts.
+
+The receipt's `fidelity.installed` section, and the manifest's
+`fidelity.omitted` section, list what stays out: channels the target does not
+support (Matrix, Signal and others), every tool key in the legacy `.env` with
+whether the target supplies its own (none is copied), Google state (out of
+scope), Sites (recorded, not republished), and other inactive gateway state.
+
+The first message after cutover starts a new Hermes session, as after a
+session reset; older conversations stay searchable in the imported sessions.
+
+Proof: `scripts/tests/test_legacy_hermes_full_fidelity.py` (unit and contract,
+census-shaped fixture in `scripts/tests/legacy_box1_fixture.py`) and
+`finitechat/tests/hermes/test_legacy_hermes_full_fidelity.py`, which starts the
+real target gateway on an imported home against a fake Telegram Bot API.
+
 ## Transaction
 
 1. Create the target normally and record its exact Core/Runner binding and
@@ -220,8 +283,10 @@ either been retained under policy or decommissioned by separate approval.
   inactive during import;
 - the target passes Chat, memory, review-only skill, and workspace
   verification;
-- cron definitions exist only in the review-only area during the canary;
-- legacy skills exist only in the review-only area during the canary;
+- in default mode, cron definitions and legacy skills exist only in the
+  review-only area during the canary; in full-fidelity mode, the receipt lists
+  every activated, review-only and paused item and the target answers the
+  owner in the same Telegram chat;
 - cache-backed legacy media has an explicit preserved count, other unmapped
   source paths have a separate count, and the sampled media outcome is recorded;
 - Brain access is reauthorized and synced without copying legacy identity

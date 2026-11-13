@@ -86,7 +86,9 @@ CONFIG_MERGE_PATHS = (
 )
 CONFIG_DISPLAY_TARGET_OWNED = frozenset({"platforms"})
 _SECRET_KEY = re.compile(
-    r"(api_?key|token|secret|password|passwd|credential|auth)", re.I
+    r"^(api_?key|key|token|secret|password|passwd|auth|credentials?)$"
+    r"|_(key|token|secret|password|passwd|credentials?)$",
+    re.I,
 )
 
 # The v2 target's Telegram block, exactly as finite-agentd's
