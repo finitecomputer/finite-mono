@@ -1452,6 +1452,21 @@ class TelegramGateTests(unittest.TestCase):
                 self.assertIn(reason, verdict["reasons"])
                 self.assertIn("patched-call-sites-not-exercised", verdict["reasons"])
 
+    def test_a_missing_or_old_capability_marker_is_rejected(self) -> None:
+        import legacy_hermes_telegram_gate as gate
+
+        root = self.copy_adapter(
+            lambda text: text.replace(
+                '"finite.telegram.preserve-pending/2"',
+                '"finite.telegram.preserve-pending/1"',
+            )
+        )
+        verdict = gate.qualify_target_telegram(plugins_dir=root)
+        self.assertFalse(verdict["qualified"])
+        self.assertEqual(
+            verdict["reasons"], ["capability-marker-missing-or-wrong-version"]
+        )
+
     def test_a_marker_in_a_comment_is_not_a_capability(self) -> None:
         import legacy_hermes_telegram_gate as gate
 

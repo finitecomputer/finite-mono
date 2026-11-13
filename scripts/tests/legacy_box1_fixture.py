@@ -461,7 +461,11 @@ def _jobs(now: datetime) -> dict[str, Any]:
 
 
 def _session(
-    session_id: str, started: float, messages: list[dict[str, Any]], **extra
+    session_id: str,
+    started: float,
+    messages: list[tuple[str, Any]],
+    stamps: list[float] | None = None,
+    **extra,
 ) -> dict:
     session = {key: None for key in SESSION_KEYS}
     session.update(
@@ -490,7 +494,7 @@ def _session(
                 "session_id": session_id,
                 "role": role,
                 "content": content,
-                "timestamp": started + index,
+                "timestamp": stamps[index - 1] if stamps else started + index,
             }
         )
         rendered.append(message)
@@ -500,12 +504,25 @@ def _session(
 
 def sessions(now: datetime) -> list[dict[str, Any]]:
     started = (now - timedelta(days=3)).timestamp()
-    active_started = (now - timedelta(minutes=40)).timestamp()
+    # A long-running chat: started two days ago, last turn 20 minutes ago, so
+    # only its real last activity keeps it inside the bot's idle window.
+    active_started = (now - timedelta(days=2)).timestamp()
     return [
         _session(
             ACTIVE_SESSION_ID,
             active_started,
-            [("user", ACTIVE_USER_TEXT), ("assistant", ACTIVE_ASSISTANT_TEXT)],
+            [
+                ("user", "Morning! Can you help with the meetup?"),
+                ("assistant", "Of course."),
+                ("user", ACTIVE_USER_TEXT),
+                ("assistant", ACTIVE_ASSISTANT_TEXT),
+            ],
+            stamps=[
+                active_started + 1,
+                active_started + 2,
+                (now - timedelta(minutes=22)).timestamp(),
+                (now - timedelta(minutes=20)).timestamp(),
+            ],
             cwd="/home/node",
         ),
         _session(
@@ -544,7 +561,7 @@ def routing_index(now: datetime) -> dict[str, Any]:
         "user_id": str(OWNER_ID),
         "user_name": "Owner",
     }
-    active = (now - timedelta(minutes=38)).isoformat()
+    active = (now - timedelta(minutes=20)).isoformat()
     return {
         "_README": "routing index",
         f"agent:main:telegram:dm:{OWNER_ID}": {
