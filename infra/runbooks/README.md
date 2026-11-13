@@ -17,7 +17,7 @@ fresh read-only evidence establish observed state.
 | CLI releases and aliases | [CLI release](release-cli.md) |
 | Runtime image build, promotion and existing-Agent upgrade | [Runtime image](runtime-image.md) |
 | Stopped Runtime relocation | [Cold relocation](runtime-cold-relocation.md) |
-| Legacy Hermes import tool | [Legacy import](legacy-hermes-box1-to-lat3.md) |
+| Legacy Hermes import tool | [Legacy import](legacy-hermes-box1-to-v2.md) |
 | Phala operations | [Phala](phala-confidential-runner.md) |
 | Host installation from CI artifacts | [Host installation](install-host.md) |
 | New-agent qualification | [Targeted canary](targeted-agent-canary.md) |
