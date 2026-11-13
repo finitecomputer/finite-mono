@@ -353,37 +353,56 @@ class FullFidelityTests(unittest.TestCase):
             self.install(target, mode="full-fidelity")
         self.assertFalse((target / "migration").exists())
 
-    def test_cli_seals_and_installs_full_fidelity(self) -> None:
-        stdout = io.StringIO()
-        with redirect_stdout(stdout), redirect_stderr(io.StringIO()):
-            code = migration.main(
-                [
-                    "manifest",
-                    "--bundle",
-                    str(self.bundle),
-                    "--source-host-id",
-                    "box1",
-                    "--source-machine-id",
-                    "frankie",
-                    "--source-owner-email",
-                    "owner@example.invalid",
-                    "--source-hermes-version",
-                    "0.14.0",
-                    "--source-image-reference",
-                    self.metadata.image_reference,
-                    "--source-image-manifest-digest",
-                    self.metadata.image_manifest_digest,
-                    "--source-container-image-id",
-                    self.metadata.container_image_id,
-                    "--source-volume-inventory-sha256",
-                    self.metadata.source_inventory_sha256,
-                    "--mode",
-                    "full-fidelity",
-                ]
-            )
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(stdout.getvalue())["mode"], "full-fidelity")
-        target = fx.build_target(self.root)
+    def manifest_cli_args(self) -> list[str]:
+        return [
+            "manifest",
+            "--bundle",
+            str(self.bundle),
+            "--source-host-id",
+            "box1",
+            "--source-machine-id",
+            "frankie",
+            "--source-owner-email",
+            "owner@example.invalid",
+            "--source-hermes-version",
+            "0.14.0",
+            "--source-image-reference",
+            self.metadata.image_reference,
+            "--source-image-manifest-digest",
+            self.metadata.image_manifest_digest,
+            "--source-container-image-id",
+            self.metadata.container_image_id,
+            "--source-volume-inventory-sha256",
+            self.metadata.source_inventory_sha256,
+            "--mode",
+            "full-fidelity",
+        ]
+
+    def install_cli_args(self, target: Path) -> list[str]:
+        return [
+            "install",
+            "--bundle",
+            str(self.bundle),
+            "--target-root",
+            str(target),
+            "--expected-source-machine-id",
+            "frankie",
+            "--expected-manifest-sha256",
+            sha256(self.bundle / "manifest.json"),
+            "--expected-target-identity-sha256",
+            sha256(target / "agent/identity/identity.json"),
+            "--expected-target-chat-client-sha256",
+            sha256(target / "agent/client.sqlite3"),
+            "--mode",
+            "full-fidelity",
+            "--telegram",
+            "live",
+            "--expected-telegram-runtime-fingerprint",
+            QUALIFIED["fingerprint"],
+        ]
+
+    def run_cli(self, args: list[str]) -> tuple[int, str, str]:
+        """Run the importer CLI and keep both of its output streams."""
         install = functools.partial(
             migration.install_bundle,
             session_db_factory=FakeSessionDB,
@@ -396,36 +415,50 @@ class FullFidelityTests(unittest.TestCase):
             redirect_stdout(out),
             redirect_stderr(err),
         ):
-            code = migration.main(
-                [
-                    "install",
-                    "--bundle",
-                    str(self.bundle),
-                    "--target-root",
-                    str(target),
-                    "--expected-source-machine-id",
-                    "frankie",
-                    "--expected-manifest-sha256",
-                    sha256(self.bundle / "manifest.json"),
-                    "--expected-target-identity-sha256",
-                    sha256(target / "agent/identity/identity.json"),
-                    "--expected-target-chat-client-sha256",
-                    sha256(target / "agent/client.sqlite3"),
-                    "--mode",
-                    "full-fidelity",
-                    "--telegram",
-                    "live",
-                    "--expected-telegram-runtime-fingerprint",
-                    QUALIFIED["fingerprint"],
-                ]
-            )
-        self.assertEqual(code, 0, err.getvalue())
-        receipt = json.loads(out.getvalue())
+            code = migration.main(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_no_fixture_secret(self, *streams: str) -> None:
+        for stream in streams:
+            for secret in fx.SECRET_VALUES:
+                self.assertNotIn(secret, stream)
+
+    def test_cli_seals_and_installs_full_fidelity(self) -> None:
+        code, manifest_out, manifest_err = self.run_cli(self.manifest_cli_args())
+        self.assertEqual(code, 0, manifest_err)
+        self.assertEqual(json.loads(manifest_out)["mode"], "full-fidelity")
+        target = fx.build_target(self.root)
+        code, out, err = self.run_cli(self.install_cli_args(target))
+        self.assertEqual(code, 0, err)
+        receipt = json.loads(out)
         self.assertEqual(receipt["fidelity"]["installed"]["telegram"]["mode"], "live")
-        for secret in fx.SECRET_VALUES:
-            self.assertNotIn(secret, stdout.getvalue())
-            self.assertNotIn(secret, out.getvalue())
-            self.assertNotIn(secret, err.getvalue())
+        self.assert_no_fixture_secret(manifest_out, manifest_err, out, err)
+
+    def test_cli_rejected_setting_never_prints_its_value(self) -> None:
+        # Target Hermes quotes a rejected voice.submit_mode with repr(). A
+        # credential put there by mistake must not reach either CLI stream.
+        source_config = self.root / "source-home/.hermes/config.yaml"
+        original = yaml.safe_load(source_config.read_text())
+        for rejected in (
+            fx.SECRET_VALUES[0],
+            {"nested": {"credential": fx.SECRET_VALUES[2]}},
+        ):
+            with self.subTest(rejected=type(rejected).__name__):
+                config = dict(original)
+                config["voice"] = {"submit_mode": rejected}
+                self.rewrite_source_file(".hermes/config.yaml", yaml.safe_dump(config))
+                code, manifest_out, manifest_err = self.run_cli(
+                    self.manifest_cli_args()
+                )
+                self.assertEqual(code, 0, manifest_err)
+                target = fx.build_target(Path(tempfile.mkdtemp(dir=self.root)))
+                before = self.tree(target)
+                code, out, err = self.run_cli(self.install_cli_args(target))
+                self.assertEqual(code, 1, err)
+                self.assertIn("1 new error(s) in voice", err)
+                self.assertIn("values are not shown", err)
+                self.assert_no_fixture_secret(manifest_out, manifest_err, out, err)
+                self.assertEqual(self.tree(target), before)
 
     # -- activations -----------------------------------------------------------
 
@@ -1233,11 +1266,53 @@ class FullFidelityTests(unittest.TestCase):
                 {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
                 "home channel sources disagree",
             ),
+            (
+                {
+                    "gateway": {
+                        "platforms": {"telegram": {"enabled": True, "token": fx.TOKEN}},
+                        "telegram": {"enabled": False, "token": fx.TOKEN},
+                    }
+                },
+                {},
+                "enablement sources disagree: gateway.platforms.telegram.enabled=on, "
+                "gateway.telegram.enabled=off",
+            ),
+            (
+                {"platforms": {"telegram": "FALSE"}, "telegram": {"enabled": "TRUE"}},
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "enablement sources disagree",
+            ),
+            (
+                {"gateway": {"telegram": {"enabled": "sometimes"}}},
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "enablement gateway.telegram.enabled is not a boolean",
+            ),
         )
         for config, env, message in failing:
             with self.subTest(message=message, config=config):
                 with self.assertRaisesRegex(migration.MigrationError, message):
                     fidelity.telegram_source(config, env)
+        # Quoted booleans normalize once, in any case.
+        for word, expected in (("TRUE", True), (" True ", True), ("False", False)):
+            with self.subTest(word=word):
+                _, _, enabled, evidence = fidelity.telegram_source(
+                    {"gateway": {"platforms": {"telegram": {"enabled": word}}}},
+                    {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                )
+                self.assertIs(enabled, expected)
+                self.assertEqual(
+                    evidence["enablement_sources"],
+                    ["gateway.platforms.telegram.enabled"],
+                )
+        # The same value in two blocks is not a disagreement.
+        _, _, enabled, _ = fidelity.telegram_source(
+            {
+                "gateway": {"telegram": {"enabled": "true", "token": fx.TOKEN}},
+                "platforms": {"telegram": True},
+            },
+            {},
+        )
+        self.assertTrue(enabled)
         plan = fidelity._plan_config(
             {
                 "telegram": {"enabled": True},
@@ -1247,6 +1322,34 @@ class FullFidelityTests(unittest.TestCase):
         )
         for key in ("telegram", "platforms", "unauthorized_dm_behavior"):
             self.assertIn(key, plan["withheld_top_level_keys"])
+
+    def test_files_added_to_a_managed_skill_make_it_review_only(self) -> None:
+        # SKILL.md still matches its .runtime-managed record, but the bot added
+        # a support file beside it; a bundled skill with no recorded hash
+        # cannot be shown unmodified either.
+        for base in (self.root / "source-home/.hermes", self.bundle / "payload/hermes"):
+            (base / "skills/devops/overlay-helper/owner-added.py").write_text(
+                'print("owner implementation")\n'
+            )
+            (base / "skills/.bundled_manifest").write_text("apple-notes:\n")
+        self.rewrite_source_file(".hermes/skills/.bundled_manifest", "apple-notes:\n")
+        plan = self.manifest()["fidelity"]["skills"]
+        managed = {item["path"] for item in plan["managed_not_activated"]}
+        self.assertNotIn("devops/overlay-helper", managed)
+        self.assertNotIn(fx.BUNDLED_SKILL, managed)
+        review = {item["path"]: item for item in plan["review_only"]}
+        self.assertEqual(
+            review["devops/overlay-helper"]["reason"],
+            "box1-managed-skill-modified-in-source",
+        )
+        self.assertEqual(review["devops/overlay-helper"]["added_file_count"], "1")
+        self.assertEqual(review["devops/overlay-helper"]["modified_file_count"], "0")
+        self.assertEqual(
+            review[fx.BUNDLED_SKILL]["reason"], "hermes-bundled-unverified"
+        )
+        target, receipt = self.installed()
+        skills = target / "agent/hermes-home/skills"
+        self.assertFalse((skills / "devops/overlay-helper").exists())
 
     def test_missing_skill_layout_is_visible_and_activates_nothing(self) -> None:
         import shutil
@@ -1284,7 +1387,7 @@ class FullFidelityTests(unittest.TestCase):
 
         self.assert_fails_without_mutation(
             target,
-            "fail target Hermes config validation: synthetic rejection",
+            r"fail target Hermes config validation: 1 new error\(s\) in timezone;",
             hooks=self.make_hooks(validate_config=validate),
         )
         # The real target validator accepts the adopted census settings.
@@ -1293,6 +1396,23 @@ class FullFidelityTests(unittest.TestCase):
             receipt["fidelity"]["installed"]["config"]["validation"]["validated"],
             "target-validate_config_structure",
         )
+
+    def test_validator_exception_text_is_not_reported(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+
+        def validate(config: dict) -> list[dict]:
+            if config.get("timezone") == fx.TIMEZONE:
+                raise ValueError(f"cannot parse {fx.SECRET_VALUES[1]!r}")
+            return []
+
+        with self.assertRaises(migration.MigrationError) as raised:
+            self.install(target, hooks=self.make_hooks(validate_config=validate))
+        message = str(raised.exception)
+        self.assertIn("validation raised ValueError", message)
+        for secret in fx.SECRET_VALUES:
+            self.assertNotIn(secret, message)
+        self.assertIsNone(raised.exception.__cause__)
 
     def test_recent_pending_pairing_code_survives_and_is_approvable(self) -> None:
         self.rebuild(datetime.now(timezone.utc).replace(microsecond=0))
@@ -1315,13 +1435,14 @@ class FullFidelityTests(unittest.TestCase):
         self.manifest()
         target = fx.build_target(self.root)
         before = self.tree(target)
+        original_config = (target / "agent/hermes-home/config.yaml").read_bytes()
         real_replace = os.replace
-        calls = {"count": 0}
+        failed: list[tuple[Path, Path]] = []
 
         def flaky_replace(source, destination, *args, **kwargs):
             # Fail the first restore of a backed-up file during rollback.
-            if "preimport-state/full-fidelity" in str(source) and not calls["count"]:
-                calls["count"] += 1
+            if "preimport-state/full-fidelity" in str(source) and not failed:
+                failed.append((Path(source), Path(destination)))
                 raise OSError("synthetic restore failure")
             return real_replace(source, destination, *args, **kwargs)
 
@@ -1333,10 +1454,13 @@ class FullFidelityTests(unittest.TestCase):
             self.assertRaises(OSError) as raised,
         ):
             self.install(target)
-        self.assertEqual(calls["count"], 1)
-        self.assertTrue(
-            any("rollback incomplete" in note for note in raised.exception.__notes__)
-        )
+        self.assertEqual(len(failed), 1)
+        backup, original = failed[0]
+        self.assertEqual(original.name, "config.yaml")
+        note = next(n for n in raised.exception.__notes__ if "rollback incomplete" in n)
+        self.assertIn("kept in migration/legacy-hermes-v2/", note)
+        # The backup that failed to restore survives with the original bytes.
+        self.assertEqual(backup.read_bytes(), original_config)
         after = self.tree(target)
         # Placed files and the other restores still happened.
         self.assertFalse((target / "workspace/legacy-box1/Downloads").exists())
@@ -1345,14 +1469,79 @@ class FullFidelityTests(unittest.TestCase):
             key for key in set(before) | set(after) if before.get(key) != after.get(key)
         }
         self.assertTrue(
-            changed
-            <= {
-                "migration",
-                "agent/hermes-home/SOUL.md",
-                "agent/hermes-home/config.yaml",
-            },
+            {key for key in changed if not key.startswith("migration")}
+            <= {"agent/hermes-home/config.yaml"},
             changed,
         )
+        self.assertEqual(
+            after["agent/hermes-home/SOUL.md"], before["agent/hermes-home/SOUL.md"]
+        )
+        # A retry is refused until the operator restores the archive.
+        with self.assertRaisesRegex(
+            migration.MigrationError, "restore the pre-import archive before retrying"
+        ):
+            self.install(target)
+
+    def test_cli_reports_an_incomplete_rollback_on_stderr(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        real_replace = os.replace
+        failed: list[str] = []
+
+        def flaky_replace(source, destination, *args, **kwargs):
+            if "preimport-state/full-fidelity" in str(source) and not failed:
+                failed.append(str(source))
+                raise OSError("synthetic restore failure")
+            return real_replace(source, destination, *args, **kwargs)
+
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json",
+                side_effect=migration.MigrationError("synthetic receipt failure"),
+            ),
+            mock.patch("legacy_hermes_fidelity.os.replace", flaky_replace),
+        ):
+            code, out, err = self.run_cli(self.install_cli_args(target))
+        self.assertEqual(code, 1, err)
+        self.assertIn("error: synthetic receipt failure", err)
+        self.assertIn("note: rollback incomplete", err)
+        self.assertIn("kept in migration/legacy-hermes-v2/", err)
+        self.assert_no_fixture_secret(out, err)
+
+    def test_failed_database_restore_keeps_the_original_database(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        state_db = target / "agent/hermes-home/state.db"
+        with sqlite3.connect(state_db) as db:
+            db.execute("CREATE TABLE preimport_history(value TEXT)")
+            db.execute("INSERT INTO preimport_history VALUES ('target chat before')")
+        db.close()
+        original_bytes = state_db.read_bytes()
+        real_replace = os.replace
+        failed: list[Path] = []
+
+        def fail_database_restore(source, destination, *args, **kwargs):
+            if str(source).endswith("preimport-state/state.db"):
+                failed.append(Path(source))
+                raise OSError("synthetic database restore failure")
+            return real_replace(source, destination, *args, **kwargs)
+
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json", side_effect=OSError("disk")
+            ),
+            mock.patch("legacy_hermes_target.os.replace", fail_database_restore),
+            self.assertRaises(OSError) as raised,
+        ):
+            self.install(target)
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(
+            any("restore state.db" in note for note in raised.exception.__notes__)
+        )
+        # The original database is kept byte for byte where the note points,
+        # and no half-imported database is left active.
+        self.assertEqual(failed[0].read_bytes(), original_bytes)
+        self.assertFalse(state_db.exists())
 
     def test_poller_check_reports_codes_and_never_the_token(self) -> None:
         import threading
@@ -1406,6 +1595,31 @@ class FullFidelityTests(unittest.TestCase):
             self.assertEqual(exit_code, 0 if safe else 3)
             self.assertNotIn(fx.TOKEN, out.getvalue())
             self.assertNotIn(fx.TOKEN.split(":")[1], out.getvalue())
+
+
+class RunbookOutageTests(unittest.TestCase):
+    """The cutover runbook measures the outage from box1's stop request."""
+
+    RUNBOOK = ROOT / "infra/runbooks/legacy-hermes-box1-to-v2.md"
+
+    def test_outage_starts_before_the_source_stop_request(self) -> None:
+        text = self.RUNBOOK.read_text()
+        step5 = text[text.index("### 5. Freeze the bot on box1") :]
+        step5 = step5[: step5.index("### 6.")]
+        stop_request = step5.index("STOP_REQUESTED_AT=$(date -u")
+        scale = step5.index("kubectl scale")
+        deleted = step5.index("--for=delete")
+        stopped = step5.index("SOURCE_STOPPED_AT=$(date -u")
+        self.assertLess(stop_request, scale)
+        self.assertLess(deleted, stopped)
+        self.assertIn(
+            "outage is `FIRST_REPLY_AT` minus `STOP_REQUESTED_AT`",
+            " ".join(text.split()),
+        )
+        for mark in ("TARGET_READY_AT", "RESTART_AT", "FIRST_REPLY_AT"):
+            self.assertIn(mark, text)
+        self.assertNotIn("FREEZE_AT", text)
+        self.assertIn("source shutdown bound", " ".join(text.split()))
 
 
 class TelegramGateTests(unittest.TestCase):

@@ -342,6 +342,13 @@ def _dir_md5(directory: Path) -> str:
     return hasher.hexdigest()
 
 
+def _is_regular_file(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 def _scan_skill_dirs(root: Path) -> list[PurePosixPath]:
     """Top-most directories holding a SKILL.md, skipping hidden/support paths."""
     if not root.is_dir():
@@ -691,6 +698,46 @@ def _home_channel_value(value: Any) -> Any:
     return value
 
 
+_BOOLEAN_WORDS = {
+    "true": True,
+    "yes": True,
+    "on": True,
+    "1": True,
+    "false": False,
+    "no": False,
+    "off": False,
+    "0": False,
+}
+
+
+def _enablement_value(label: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str) and value.strip().lower() in _BOOLEAN_WORDS:
+        return _BOOLEAN_WORDS[value.strip().lower()]
+    raise MigrationError(f"legacy Telegram enablement {label} is not a boolean")
+
+
+def _telegram_enablement(config: dict[str, Any]) -> dict[str, bool]:
+    """Every explicit Telegram on/off value in the source config, by location."""
+    found: dict[str, bool] = {}
+    for path in TELEGRAM_CONFIG_BLOCKS:
+        label = ".".join(path)
+        block = _get(config, *path)
+        if isinstance(block, dict):
+            if block.get("enabled") is not None:
+                found[label + ".enabled"] = _enablement_value(
+                    label + ".enabled", block["enabled"]
+                )
+        elif block is not None and len(path) > 1:
+            # The census renders `platforms.telegram: true` (Lazarus) as a
+            # scalar.
+            found[label] = _enablement_value(label, block)
+    return found
+
+
 def telegram_source(
     config: dict[str, Any], env: dict[str, str]
 ) -> tuple[str | None, str | None, bool, dict[str, Any]]:
@@ -741,26 +788,26 @@ def telegram_source(
             "legacy Telegram home channel is not a numeric private chat id; "
             "finite-agentd cannot represent it"
         )
-    explicit = [_get(config, *path, "enabled") for path in TELEGRAM_CONFIG_BLOCKS]
-    # The census renders `platforms.telegram: true` (Lazarus) as a scalar.
-    explicit += [
-        _get(config, *path) for path in TELEGRAM_CONFIG_BLOCKS if len(path) > 1
-    ]
-    explicit = [
-        value
-        for value in explicit
-        if isinstance(value, bool)
-        or (isinstance(value, str) and value.lower() in ("true", "false"))
-    ]
-    explicit = [value is True or value == "true" for value in explicit]
-    if token is None and (unresolved or any(explicit)):
+    explicit = _telegram_enablement(config)
+    if len(set(explicit.values())) > 1:
+        # One block on and another off: which one box1 used is not knowable
+        # here, and guessing either way can move the bot without its channel.
+        raise MigrationError(
+            "legacy Telegram enablement sources disagree: "
+            + ", ".join(
+                f"{label}={'on' if value else 'off'}"
+                for label, value in sorted(explicit.items())
+            )
+        )
+    if token is None and (unresolved or any(explicit.values())):
         # An enabled or referenced Telegram block with no usable token would
         # silently move the bot without its channel.
         raise MigrationError(
             "legacy Telegram is configured but no token resolves: "
             + ", ".join(sorted(unresolved) or ["enabled-without-token"])
         )
-    enabled = token is not None and not any(value is False for value in explicit)
+    disabled = False in explicit.values()
+    enabled = token is not None and not disabled
     return (
         token,
         home,
@@ -768,7 +815,8 @@ def telegram_source(
         {
             "token_sources": sorted(tokens),
             "home_channel_sources": sorted(home_values),
-            "source_explicitly_disabled": any(value is False for value in explicit),
+            "enablement_sources": sorted(explicit),
+            "source_explicitly_disabled": disabled,
             "config_blocks": sorted(
                 ".".join(path)
                 for path in TELEGRAM_CONFIG_BLOCKS
@@ -894,34 +942,45 @@ def _plan_skills(payload: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
             if item == rel or item.startswith(rel + "/")
         }
         if overlay_files:
+            # Compare the skill's whole file set with the recorded one: a
+            # changed, missing or retyped tracked file, and any file the
+            # person or bot added beside them, make the skill review-only.
             modified = sorted(
                 item
                 for item, digest in overlay_files.items()
-                if not (root / item).is_file()
+                if not _is_regular_file(root / item)
+                or digest is None
                 or hashlib.sha256((root / item).read_bytes()).hexdigest() != digest
             )
-            if modified:
+            added = sorted(
+                f"{rel}/{path.relative_to(directory).as_posix()}"
+                for path in directory.rglob("*")
+                if path.is_symlink() or not path.is_dir()
+            )
+            added = [item for item in added if item not in overlay_files]
+            if modified or added:
                 review_only.append(
                     {
                         "path": rel,
                         "name": name,
                         "reason": "box1-managed-skill-modified-in-source",
                         "modified_file_count": str(len(modified)),
+                        "added_file_count": str(len(added)),
                     }
                 )
             else:
                 managed.append(
                     {"path": rel, "name": name, "reason": "box1-image-managed-overlay"}
                 )
-        elif name in manifest and (
-            not manifest[name] or manifest[name] == _dir_md5(directory)
-        ):
-            reason = (
-                "hermes-bundled-unmodified"
-                if manifest[name]
-                else "hermes-bundled-unverified"
+        elif name in manifest and manifest[name] == _dir_md5(directory):
+            managed.append(
+                {"path": rel, "name": name, "reason": "hermes-bundled-unmodified"}
             )
-            managed.append({"path": rel, "name": name, "reason": reason})
+        elif name in manifest and not manifest[name]:
+            # No recorded hash, so an edit cannot be ruled out: list it.
+            review_only.append(
+                {"path": rel, "name": name, "reason": "hermes-bundled-unverified"}
+            )
         elif name in manifest:
             review_only.append(
                 {
@@ -1961,22 +2020,56 @@ class FidelityInstall:
             "seed_staged": plan["seed"]["staged"],
         }
 
-    def _validate_config(self, config: dict[str, Any]) -> dict[str, Any]:
-        before = {
-            (issue["severity"], issue["message"])
-            for issue in self.hooks.validate_config(self.target_config)
-        }
-        after = self.hooks.validate_config(config)
-        new_errors = [
+    def _validation_issues(self, config: dict[str, Any]) -> list[dict[str, str]]:
+        try:
+            return self.hooks.validate_config(config)
+        except MigrationError:
+            raise
+        except Exception as exc:
+            # The exception text can quote a rejected value; name only its type.
+            raise MigrationError(
+                "target Hermes config validation raised "
+                f"{type(exc).__name__}; the setting values are not shown"
+            ) from None
+
+    def _new_errors(
+        self, config: dict[str, Any], before: set[tuple[str, str]]
+    ) -> list[str]:
+        return [
             issue["message"]
-            for issue in after
+            for issue in self._validation_issues(config)
             if issue["severity"] == "error"
             and (issue["severity"], issue["message"]) not in before
         ]
+
+    def _validate_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        before = {
+            (issue["severity"], issue["message"])
+            for issue in self._validation_issues(self.target_config)
+        }
+        after = self._validation_issues(config)
+        new_errors = self._new_errors(config, before)
         if new_errors:
+            # Upstream messages quote rejected values (voice.submit_mode uses
+            # repr), and a rejected value can be a mistakenly placed
+            # credential. Report only which top-level settings are implicated,
+            # found by putting each one back to the target's own value.
+            implicated = []
+            for key in sorted(set(config) | set(self.target_config)):
+                if config.get(key) == self.target_config.get(key):
+                    continue
+                probe = dict(config)
+                if key in self.target_config:
+                    probe[key] = self.target_config[key]
+                else:
+                    probe.pop(key)
+                if len(self._new_errors(probe, before)) < len(new_errors):
+                    implicated.append(key)
             raise MigrationError(
                 "adopted settings fail target Hermes config validation: "
-                + "; ".join(sorted(new_errors))
+                f"{len(new_errors)} new error(s) in "
+                + (", ".join(implicated) if implicated else "unattributed settings")
+                + "; the setting values are not shown"
             )
         return {
             "validated": "target-validate_config_structure",
