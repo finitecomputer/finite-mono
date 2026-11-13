@@ -35,16 +35,19 @@ fn brain_database(path: &Path) -> (BrainStore, rusqlite::Connection) {
     (store, writer)
 }
 
-fn files_of(dir: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
+/// The database's files and their bytes, but its `-shm`: every SQLite
+/// reader of a WAL database, a read-only one too, writes its read mark
+/// there (and the kernel stamps that mapped file's time when it likes), so
+/// what a reader must never change is the database and its WAL.
+fn files_of(dir: &Path) -> Vec<(String, Vec<u8>)> {
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| !entry.file_name().to_string_lossy().ends_with("-shm"))
         .map(|entry| {
-            let entry = entry.unwrap();
-            let metadata = entry.metadata().unwrap();
             (
                 entry.file_name().to_string_lossy().into_owned(),
-                metadata.len(),
-                metadata.modified().unwrap(),
+                std::fs::read(entry.path()).unwrap(),
             )
         })
         .collect();
