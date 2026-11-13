@@ -253,6 +253,9 @@ def main(argv: Iterable[str] | None = None) -> int:
             )
     except MigrationError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        # Notes are value-free; an incomplete rollback is reported in one.
+        for note in getattr(exc, "__notes__", ()):
+            print(f"note: {note}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

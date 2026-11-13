@@ -39,6 +39,11 @@ AGENTS_SEED = (
 )
 AGENTS_OWNER_ADDITION = "## Owner preferences\n- Always answer in short paragraphs."
 INTERVAL_MINUTES = 180
+# A recurring job whose migrated script, skill and Telegram delivery the live
+# test runs through the real gateway scheduler (it is never due on its own).
+PROBE_JOB_ID = "cellar-probe"
+PROBE_SCRIPT_MARKER = "CELLAR-PROBE-4471"
+PROBE_PROMPT = "Report the cellar probe result to Owner."
 MEMORY_MARKER = "MEMORY-MARKER-4410"
 USER_SKILL = "leisure/wine-guidance"
 CLASH_SKILL = "productivity/google-workspace-finite"
@@ -302,6 +307,25 @@ def _jobs(now: datetime) -> dict[str, Any]:
                 "deliver": "telegram",
                 "enabled": True,
                 "script": "/home/node/.hermes/scripts/check_inbox.py",
+                "workdir": "/home/node/dev/project",
+                "last_run_at": stale,
+                "next_run_at": stale,
+            },
+            {
+                **base,
+                "id": PROBE_JOB_ID,
+                "name": "Cellar probe",
+                "prompt": PROBE_PROMPT,
+                "schedule": {
+                    "kind": "interval",
+                    "minutes": INTERVAL_MINUTES,
+                    "display": f"every {INTERVAL_MINUTES}m",
+                },
+                "schedule_display": f"every {INTERVAL_MINUTES}m",
+                "deliver": "telegram",
+                "enabled": True,
+                "skills": [USER_SKILL],
+                "script": "/home/node/.hermes/scripts/cellar_probe.py",
                 "workdir": "/home/node/dev/project",
                 "last_run_at": stale,
                 "next_run_at": stale,
@@ -718,6 +742,13 @@ def build_source_home(root: Path, now: datetime) -> Path:
     _write(
         hermes / "scripts/check_inbox.py",
         "import pathlib\nprint(pathlib.Path('/home/node/workspace/notes.md').exists())\n",
+        0o755,
+    )
+    _write(
+        hermes / "scripts/cellar_probe.py",
+        "import pathlib\n"
+        "pathlib.Path(__file__).with_name('cellar-probe.out').write_text('ran\\n')\n"
+        f"print('{PROBE_SCRIPT_MARKER} cellar list: /home/node/workspace/cellar.md')\n",
         0o755,
     )
     _write(hermes / "cron/jobs.json", json.dumps(_jobs(now), indent=2))

@@ -104,10 +104,11 @@ target pre-import state in this runbook.
 
 ## Steps
 
-The outage runs from the freeze in step 5 to the first reply in step 10.
-Steps 1 to 4 happen while box1 still answers, so the bulk copy and the
+The outage runs from the stop request in step 5 (`STOP_REQUESTED_AT`, the
+earliest moment box1 can stop answering) to the target's first reply in step
+10. Steps 1 to 4 happen while box1 still answers, so the bulk copy and the
 target's rollback boundary are not part of the outage. Record the wall-clock
-time at each step marked **(time)**.
+time at each step marked **(time)**, in UTC (`date -u +%Y-%m-%dT%H:%M:%SZ`).
 
 ### 1. Create and identify the target
 
@@ -287,15 +288,22 @@ test "$(ssh box1 sudo k3s kubectl get pod \
   --namespace SOURCE_NAMESPACE SOURCE_NAMESPACE-0 \
   -o jsonpath='{.status.containerStatuses[0].imageID}')" \
   = 'SOURCE_CONTAINER_IMAGE_ID'
+# The outage starts here: box1 may stop answering as soon as the scale
+# request lands, so take the time before sending it.
+STOP_REQUESTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ssh box1 sudo k3s kubectl scale \
   --namespace SOURCE_NAMESPACE statefulset/SOURCE_NAMESPACE --replicas=0
 ssh box1 sudo k3s kubectl wait \
   --namespace SOURCE_NAMESPACE --for=delete pod/SOURCE_NAMESPACE-0 --timeout=120s
+SOURCE_STOPPED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ssh box1 sudo k3s kubectl get pvc \
   --namespace SOURCE_NAMESPACE home-SOURCE_NAMESPACE-0 -o wide
 ```
 
-**(time)** Record the freeze time as `FREEZE_AT`. Messages the person sends
+**(time)** Record `STOP_REQUESTED_AT` and `SOURCE_STOPPED_AT` as set above.
+`SOURCE_STOPPED_AT` is the freeze: the pod is gone and the PVC has a single
+writer again. The interval between the two is the source shutdown, and it
+counts toward the outage. Messages the person sends
 from now on wait in Telegram's queue (Telegram keeps them for 24 hours) and
 are answered when the target starts in full-fidelity mode. Do not manually
 restart box1 after this point. It is the rollback copy and must remain
@@ -607,6 +615,13 @@ continue, `cron.outcomes` and `cron.legacy_execution` cover every job, and
 `SOUL.md` and any empty `jobs.json` under
 `migration/legacy-hermes-v2/preimport-state/full-fidelity/`.
 
+If the install fails, it rolls the target back. If its error has a `note:
+rollback incomplete` line, the rollback could not restore everything: the
+importer then keeps `migration/legacy-hermes-v2/` with the backups it could
+not restore and refuses another install. Do not boot the target or retry.
+Copy that directory aside for diagnosis, restore the step 3 archive,
+re-check the step 3 hashes, and only then retry or roll back.
+
 In full-fidelity mode this step is when Telegram is connected: the token is
 written into the stopped target's `config.yaml` only now, after box1 is
 frozen. Nothing polls until step 10.
@@ -660,10 +675,15 @@ As the selected bot, submit the typed restart request:
 POST /api/core/v1/me/projects/<PROJECT_ID>/runtime/restart
 ```
 
-**(time)** Record `RESTART_AT`, then `FIRST_REPLY_AT`: the time of the
-target's first Telegram reply (the first `sendMessage` in the Runtime's
-gateway log, or the person's chat). The outage is `FIRST_REPLY_AT` minus
-`FREEZE_AT`; record it with the step times. Require every verification check
+**(time)** Record `RESTART_AT` when the request is accepted,
+`TARGET_READY_AT` at the target gateway's first Telegram `getUpdates` in the
+Runtime's gateway log, and `FIRST_REPLY_AT` at the target's first Telegram
+reply (the first `sendMessage` in that log, or the person's chat). The
+outage is `FIRST_REPLY_AT` minus `STOP_REQUESTED_AT`, the earliest
+loss-of-service boundary. Record it with its parts: source shutdown
+(`SOURCE_STOPPED_AT` minus `STOP_REQUESTED_AT`), frozen work (`RESTART_AT`
+minus `SOURCE_STOPPED_AT`), target boot (`TARGET_READY_AT` minus
+`RESTART_AT`) and first reply (`FIRST_REPLY_AT` minus `TARGET_READY_AT`). Require every verification check
 below. Keep box1 at zero replicas and keep both recovery archives through a
 minimum 24-hour observation window.
 
@@ -770,9 +790,14 @@ rehearsal copy must never hold or use the real bot token:
 - Measure the outage the real cutover will have: time the pre-sync (step 4,
   run once in full and once again as a delta), then steps 6, 7 and 8, the
   rehearsal target's restart to ready, and the offline check's
-  `first_reply_seconds`. The expected outage is the delta pre-sync plus steps
-  6 to 8, restart and first reply. If it is longer than the owner agreed,
-  schedule the cutover for a quiet period or shrink the data first.
+  `first_reply_seconds`. A rehearsal cannot stop box1, so take the source
+  shutdown bound from the StatefulSet's grace period (read only:
+  `kubectl get statefulset SOURCE_NAMESPACE -o
+  jsonpath='{.spec.template.spec.terminationGracePeriodSeconds}'`, default 30
+  seconds when unset) plus the pod deletion wait. The expected outage is the
+  source shutdown bound plus the delta pre-sync, steps 6 to 8, restart and
+  first reply. If it is longer than the owner agreed, schedule the cutover
+  for a quiet period or shrink the data first.
 
 ## Rollback
 

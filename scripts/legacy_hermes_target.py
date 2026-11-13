@@ -209,6 +209,13 @@ def install_bundle(
     receipt_path = target_root / RECEIPT_RELATIVE_PATH
     if receipt_path.exists():
         raise MigrationError(f"bundle is already installed: {receipt_path}")
+    if receipt_path.parent.exists():
+        # Only an incomplete rollback leaves this behind, with the backups it
+        # could not restore.
+        raise MigrationError(
+            f"an earlier install left {RECEIPT_RELATIVE_PATH.parent.as_posix()}/ "
+            "behind; restore the pre-import archive before retrying"
+        )
     target_hermes_version = _installed_hermes_version()
     if target_hermes_version not in SUPPORTED_TARGET_HERMES_VERSIONS:
         raise MigrationError(
@@ -512,7 +519,9 @@ def _install_bundle_files(
         )
         if failures:
             error.add_note(
-                "rollback incomplete; restore the pre-import archive: "
+                "rollback incomplete; restore the pre-import archive before any "
+                "boot or retry. The unrestored backups were kept in "
+                f"{migration_root.relative_to(target_root).as_posix()}/: "
                 + "; ".join(failures)
             )
         raise
@@ -541,13 +550,24 @@ def _rollback(
             failures.extend(transaction.rollback())
         except Exception as exc:
             failures.append(f"full-fidelity rollback: {type(exc).__name__}")
-    for database in reversed(swapped_databases):
-        attempt(f"remove {database.name}", lambda d=database: d.unlink(missing_ok=True))
+    # Put each original SQLite file back over the imported one (os.replace is
+    # atomic, so a restored database is never briefly absent). Only then
+    # remove imported databases that have no restored original.
+    restored: set[Path] = set()
     for backup, original in reversed(moved_state_files):
-        if backup.exists():
+        if not backup.exists():
+            continue
+        before = len(failures)
+        attempt(
+            f"restore {original.name}",
+            lambda b=backup, o=original: os.replace(b, o),
+        )
+        if len(failures) == before:
+            restored.add(original)
+    for database in reversed(swapped_databases):
+        if database not in restored:
             attempt(
-                f"restore {original.name}",
-                lambda b=backup, o=original: os.replace(b, o),
+                f"remove {database.name}", lambda d=database: d.unlink(missing_ok=True)
             )
     if moved_state_files:
         attempt("fsync state dir", lambda: _fsync_directory(target_db.parent))
@@ -558,5 +578,9 @@ def _rollback(
             path.rmdir()
         except OSError:
             pass
-    shutil.rmtree(migration_root, ignore_errors=True)
+    if not failures:
+        shutil.rmtree(migration_root, ignore_errors=True)
+    # Otherwise keep the whole migration directory: it holds every backup
+    # that failed to restore, and its presence blocks a retry until an
+    # operator restores the pre-import archive.
     return failures

@@ -77,6 +77,8 @@ CRON_PROMPT_MARKERS = (
     "Daily check",
     "Ping three times",
     "Already reminded",
+    fx.PROBE_PROMPT,
+    fx.PROBE_SCRIPT_MARKER,
 )
 TARGET_SETTINGS = {
     "FINITE_CONFIG_MODEL": "glm-5-3-flash",
@@ -446,6 +448,106 @@ class LegacyHermesFullFidelityLiveTest(unittest.TestCase):
             f"restart_to_first_reply_seconds={self.first_reply_seconds:.1f}",
             file=sys.stderr,
         )
+
+    def test_a_due_migrated_job_runs_its_script_and_skill_and_delivers_once(self) -> None:
+        """Positive cron proof: the real gateway scheduler dispatches a migrated job.
+
+        The job is made due with target Hermes's own run-now (`trigger_job`,
+        what `hermes cron run` does), so every other job keeps its future
+        schedule. The only harness edit maps this job's /data script and
+        workdir into the scratch target, as terminal.cwd is mapped.
+        """
+        target, hermes, _, _ = self.install()
+        jobs_file = hermes / "cron/jobs.json"
+        document = json.loads(jobs_file.read_text())
+        jobs = {job["id"]: job for job in document["jobs"]}
+        probe_job = jobs[fx.PROBE_JOB_ID]
+        self.assertEqual(probe_job["script"], "/data/agent/hermes-home/scripts/cellar_probe.py")
+        self.assertEqual(probe_job["workdir"], "/data/workspace/legacy-box1/dev/project")
+        self.assertEqual(probe_job["skills"], [fx.USER_SKILL])
+        self.assertTrue(probe_job["enabled"])
+        self.assertEqual(self.probe(hermes)["due"], [], "nothing is due before run-now")
+        script = target / probe_job["script"].removeprefix("/data/")
+        self.assertIn("/data/workspace/legacy-box1/workspace/cellar.md", script.read_text())
+        workdir = target / probe_job["workdir"].removeprefix("/data/")
+        probe_job["script"] = str(script)
+        probe_job["workdir"] = str(workdir)
+        jobs_file.write_text(json.dumps(document, indent=2))
+        triggered = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json, sys; from cron.jobs import get_due_jobs, trigger_job; "
+                "trigger_job(sys.argv[1]); print(json.dumps([j['id'] for j in get_due_jobs()]))",
+                fx.PROBE_JOB_ID,
+            ],
+            env=self.hermes_env(hermes),
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        self.assertEqual(triggered.returncode, 0, triggered.stderr[-4000:])
+        self.assertEqual(json.loads(triggered.stdout.splitlines()[-1]), [fx.PROBE_JOB_ID])
+        before = {job["id"]: job for job in json.loads(jobs_file.read_text())["jobs"]}
+
+        with FakeTelegramBotApi(fx.TOKEN) as telegram, StubModel(STUB_REPLY) as model:
+            self.point_at_fakes(target, hermes, telegram, model)
+            started = time.time()
+            with self.gateway(target, hermes, "gateway-cron-dispatch"):
+                delivered = telegram.wait_for_message(fx.OWNER_ID, 240)
+                self.assertTrue(delivered and STUB_REPLY in delivered[0], self.gateway_log())
+                # Let the next scheduler tick (60 s later) finish: still one
+                # delivery. A success stamp 30 s after the delivery cannot come
+                # from the tick that delivered.
+                next_tick = time.time() + 30
+                success = hermes / "cron/ticker_last_success"
+                deadline = time.time() + 150
+                while time.time() < deadline and not (
+                    success.exists() and success.stat().st_mtime >= next_tick
+                ):
+                    time.sleep(0.5)
+                self.assertGreaterEqual(success.stat().st_mtime, next_tick, self.gateway_log())
+                self.assertEqual(len(telegram.messages_to(fx.OWNER_ID)), 1, self.gateway_log())
+
+        # The migrated script ran (target Hermes runs an agent job's pre-run
+        # script from HERMES_HOME/scripts; the workdir is the agent's cwd and
+        # was accepted), and its output and the migrated skill reached the
+        # model in the job's turn.
+        self.assertEqual((script.parent / "cellar-probe.out").read_text(), "ran\n")
+        log = self.current_log.read_text(errors="replace")
+        self.assertNotIn("no longer exists", log)
+        turn = next((text for text in model.user_texts() if fx.PROBE_PROMPT in text), None)
+        self.assertIsNotNone(turn, self.gateway_log())
+        assert turn is not None
+        self.assertIn(fx.PROBE_SCRIPT_MARKER, turn)
+        self.assertIn("/data/workspace/legacy-box1/workspace/cellar.md", turn)
+        # skill_view loaded the migrated skill's body into the job's turn.
+        self.assertIn(f'invoked the \\"{fx.USER_SKILL}\\" skill', turn)
+        self.assertIn("Read /data/workspace/legacy-box1/workspace/cellar.md", turn)
+        self.assertNotIn("could not be found", turn)
+        for text in model.user_texts():
+            for marker in CRON_PROMPT_MARKERS[:-2]:
+                self.assertNotIn(marker, text, "only the run-now job may fire")
+        # Its schedule advanced once, from this run, and nothing else moved.
+        after = {job["id"]: job for job in json.loads(jobs_file.read_text())["jobs"]}
+        ran = after[fx.PROBE_JOB_ID]
+        self.assertEqual(ran.get("last_status"), "ok", ran)
+        self.assertGreaterEqual(datetime.fromisoformat(ran["last_run_at"]).timestamp(), started)
+        self.assertGreater(
+            datetime.fromisoformat(ran["next_run_at"]).timestamp(),
+            time.time() + (fx.INTERVAL_MINUTES - 5) * 60,
+        )
+        self.assertIsNone(ran.get("manual_run_at"))
+        self.assertEqual(
+            ran["repeat"]["completed"], before[fx.PROBE_JOB_ID]["repeat"]["completed"] + 1
+        )
+        for job_id, job in before.items():
+            if job_id == fx.PROBE_JOB_ID:
+                continue
+            for field in ("next_run_at", "last_run_at", "enabled"):
+                self.assertEqual(after[job_id].get(field), job.get(field), (job_id, field))
+        self.assertEqual(telegram.dropped_updates, 0)
 
     def test_queue_survives_conflicts_at_start_and_repeated_conflicts_later(self) -> None:
         target, hermes, _, _ = self.install()
