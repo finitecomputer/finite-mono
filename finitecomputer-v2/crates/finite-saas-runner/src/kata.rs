@@ -1,5 +1,7 @@
 use super::*;
+mod memory_admission;
 mod trial_archive;
+use memory_admission::MemoryAdmission;
 
 use crate::retirement::{
     RecoveryArtifactContext, VerifiedRecoveryZip, create_recovery_zip, source_manifest,
@@ -153,6 +155,8 @@ pub struct KataConfig {
     pub max_container_count: Option<u32>,
     pub drain_new_leases: bool,
     pub available_memory_bytes: Option<u64>,
+    /// Fail closed for new guests when RAM or /dev/shm headroom is unavailable.
+    pub memory_admission: bool,
     pub command_timeout: Duration,
     pub launch_timeout: Duration,
     pub readiness_timeout: Duration,
@@ -196,6 +200,7 @@ impl Default for KataConfig {
             max_container_count: None,
             drain_new_leases: false,
             available_memory_bytes: None,
+            memory_admission: true,
             command_timeout: DEFAULT_COMMAND_TIMEOUT,
             launch_timeout: DEFAULT_LAUNCH_TIMEOUT,
             readiness_timeout: DEFAULT_RUNTIME_READY_TIMEOUT,
@@ -2420,6 +2425,13 @@ impl KataLauncher {
         options: &RuntimeLaunchOptions,
         renew: &mut dyn FnMut() -> Result<(), RunnerError>,
     ) -> Result<u16, RunnerError> {
+        let _creation_lock = if self.config.memory_admission {
+            let lock = memory_admission::lock_creation(&self.config)?;
+            MemoryAdmission::read(&self.config.host_root).require_capacity()?;
+            Some(lock)
+        } else {
+            None
+        };
         self.prepare_plan(plan)?;
         // The host lock can wait beyond the original lease. The journal proves
         // provenance, never current launch or billing authority.
@@ -2535,12 +2547,22 @@ impl RuntimeLauncher for KataLauncher {
     }
 
     fn runner_capacity(&self) -> RunnerLeaseCapacity {
+        let memory = self
+            .config
+            .memory_admission
+            .then(|| MemoryAdmission::read(&self.config.host_root));
+        let memory_rejection = memory.as_ref().and_then(MemoryAdmission::rejection_reason);
+        if let Some(reason) = memory_rejection {
+            eprintln!("{reason}; new Agent admission paused");
+        }
         RunnerLeaseCapacity {
             runner_classes: vec![self.runner_class()],
-            draining: self.config.drain_new_leases,
+            draining: self.config.drain_new_leases || memory_rejection.is_some(),
             max_sandbox_count: self.config.max_container_count,
             active_sandbox_count: active_kata_container_count(&self.config),
-            available_memory_bytes: self.config.available_memory_bytes,
+            available_memory_bytes: memory.map_or(self.config.available_memory_bytes, |m| {
+                m.available_memory_bytes
+            }),
             runtime_capabilities: Some(self.runtime_capabilities()),
             supports_relocation_credentials: false,
         }
@@ -5209,6 +5231,7 @@ struct KataRecoveryHelper {
 
 #[cfg(test)]
 mod tests {
+    mod memory_admission;
     mod trial_archives;
     use super::*;
     use finite_saas_core::{
@@ -6052,6 +6075,7 @@ esac
             stop_timeout_secs: 30,
             durable_tree_quiescence_window: Duration::from_millis(50),
             host_root: fake_host_root(temp.path()),
+            memory_admission: false,
             failed_stop_settle_timeout: Duration::from_millis(300),
             ..KataConfig::default()
         };

@@ -4623,11 +4623,18 @@ mod tests {
     }
 
     #[test]
-    fn run_once_restarts_runtime_control_request_before_launch_work() {
+    fn run_once_restarts_runtime_control_request_even_when_admission_is_draining() {
         let runtime_control = sample_runtime_control_lease("runtime_ctl_123");
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
-            FakeLauncher::ready(RuntimeLaunchFacts::sample()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample()).with_runner_capacity(
+                RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::LocalDocker],
+                    draining: true,
+                    available_memory_bytes: Some(1024),
+                    ..RunnerLeaseCapacity::default()
+                },
+            ),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
             300,

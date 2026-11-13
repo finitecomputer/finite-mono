@@ -51,6 +51,7 @@ let
     FC_RUNNER_KATA_CONTAINER_PORT = "8080";
     FC_RUNNER_KATA_CPUS = "4";
     FC_RUNNER_KATA_MEMORY = "8G";
+    FC_RUNNER_KATA_MEMORY_ADMISSION = "true";
     FC_RUNNER_KATA_PULL_POLICY = "missing";
     # Raised from the stock 30s: stopping a busy Kata sandbox regularly
     # exceeds 30s, and the short timeout caused false upgrade failures.
