@@ -106,6 +106,9 @@ let
         exit 75
       }
 
+      # A completed root check with mismatches must not skip the data check.
+      # Keep the aggregate failure while preserving each array's safety gates.
+      check_status=0
       for name in root data; do
         device="/dev/md/$name"
         [[ -b "$device" ]]
@@ -113,16 +116,19 @@ let
         sys="/sys/block/$block/md"
         [[ "$(<"$sys/degraded")" == 0 ]]
         [[ "$(<"$sys/sync_action")" == idle ]]
+        echo "$device check starting"
         echo check >"$sys/sync_action"
         while [[ "$(<"$sys/sync_action")" != idle ]]; do
           sleep 30
         done
         mismatch="$(<"$sys/mismatch_cnt")"
+        echo "$device check completed: mismatch count is $mismatch"
         if [[ "$mismatch" != 0 ]]; then
           echo "$device mismatch count is $mismatch; refusing automatic repair" >&2
-          exit 1
+          check_status=1
         fi
       done
+      exit "$check_status"
     '';
   };
 
