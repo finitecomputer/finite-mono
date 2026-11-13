@@ -1094,6 +1094,26 @@ class FullFidelityTests(unittest.TestCase):
         self.assertEqual(json.loads(due.strip().splitlines()[-1]), [])
         self.assertFalse((hermes / "cron/persisted_error_recoveries.jsonl").exists())
 
+    def test_next_runs_are_computed_after_the_import_not_at_start(self) -> None:
+        # A long session import must not leave recurring jobs scheduled from
+        # a stale boundary: the second clock reading (at apply) wins.
+        readings = iter([self.now, self.now + timedelta(hours=2)])
+        self.hooks = self.make_hooks(now=lambda: next(readings))
+        target, receipt = self.installed()
+        later = self.now + timedelta(hours=2)
+        cron = receipt["fidelity"]["installed"]["cron"]
+        self.assertEqual(cron["scheduled_from"], later.isoformat())
+        jobs = {
+            job["id"]: job
+            for job in json.loads(
+                (target / "agent/hermes-home/cron/jobs.json").read_text()
+            )["jobs"]
+        }
+        self.assertEqual(
+            datetime.fromisoformat(jobs["inbox-check"]["next_run_at"]),
+            later + timedelta(minutes=fx.INTERVAL_MINUTES),
+        )
+
     def test_empty_target_cron_store_is_replaced_and_restored_on_failure(self) -> None:
         self.manifest()
         target = fx.build_target(self.root)
