@@ -158,6 +158,7 @@ REMAINING_NIX_CHECK_PATHS = {
     "scripts/tests/test_deploy_lat1_rollout.py",
     "scripts/tests/test_lat1_closure_artifact.py",
     "scripts/tests/test_lat3_closure_artifact.py",
+    "scripts/tests/test_lat3_md_check.py",
     "scripts/tests/test_lat2_closure_artifact.py",
     "scripts/tests/test_lat4_closure_artifact.py",
     "scripts/tests/test_nix_package_sources.py",

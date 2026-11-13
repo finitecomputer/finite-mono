@@ -117,10 +117,11 @@ lat1-rollout-contract:
     cd ../.. && python3 -m unittest scripts.tests.test_deploy_lat1_service_exes
 
 # Static manifest, build-host, dry-activation, Runner-fencing, and rollback
-# contract for finite-lat-3 closure rollouts.
+# contract for finite-lat-3 closure rollouts, plus synthetic MD scan behavior.
 lat3-runner-rollout-contract:
     cd ../.. && bash -n scripts/build-lat3-nixos-closure-artifact scripts/deploy-lat3-closure-cache
     cd ../.. && python3 -m unittest scripts.tests.test_lat3_closure_artifact scripts.tests.test_isolated_runner_release.Lat3IsolatedReleaseGateTests
+    cd ../.. && python3 -m unittest scripts.tests.test_lat3_md_check
 
 # Static manifest, install-input, build-host, dry-activation, app-plane
 # fence, and rollback contract for finite-lat-2 closure rollouts.
