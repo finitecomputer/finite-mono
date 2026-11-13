@@ -9,10 +9,12 @@ unavailable. Numes owns marketplace prices and customer billing.
 
 ## Configuration and capacity ownership
 
-No marketplace configuration is enabled in the checked-in serving candidate.
-Enabling it requires a reviewed image/configuration, sealed credentials and an
-explicitly authorized deployment. Do not give Numes an existing Finite subscriber
-key or the model server's internal key.
+The checked-in serving candidate pins the marketplace-capable limiter and starts
+with capacity zero. It requires sealed `NUMES_API_KEY` and
+`NUMES_CONTROL_API_KEY` credentials before deployment. Preparing or publishing
+this configuration does not change the running enclave; deployment needs explicit
+authorization and admission remains paused until the cap is raised. Do not give
+Numes an existing Finite subscriber key or the model server's internal key.
 
 | Variable | Meaning |
 | --- | --- |
