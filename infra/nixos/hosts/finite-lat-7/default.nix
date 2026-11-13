@@ -1,8 +1,8 @@
 # Dedicated lat7 Runner, captured 2026-10-14 in New York.
 # Delivered hardware: 192 GB RAM, two 480 GB SATA boot SSDs and two
-# 1.92 TB NVMe data drives. Eight 4-vCPU / 8-GiB guests leave conservative
-# CPU and shared-memory headroom. Bootstrap overrides admission to one
-# targeted canary until recovery and end-to-end qualification pass.
+# 1.92 TB NVMe data drives. The 32-slot ceiling permits memory overcommit;
+# Runner also gates creation on live RAM and /dev/shm headroom. Bootstrap
+# overrides admission to one targeted canary until qualification passes.
 {
   config,
   finitePackages,
@@ -42,6 +42,11 @@ in
 
   networking.hostName = "finite-lat-7";
 
+  # Kata uses /dev/shm for demand-allocated guest RAM. The default half-RAM
+  # limit can SIGBUS guests while physical RAM is still available. This is
+  # a limit, not a reservation; Runner's memory guard controls new admission.
+  boot.devShmSize = "160G";
+
   # This installs the host capability; Core still requires per-agent
   # enabled intent and readiness.
   finite.hostedHermes = {
@@ -66,7 +71,7 @@ in
     sourceHostId = "finite-lat-7";
     workRoot = "/data/finite-saas-runner";
     kataHostAddress = "10.254.3.6";
-    maxSandboxes = 8;
+    maxSandboxes = 32;
   };
 
   finite.metrics = {

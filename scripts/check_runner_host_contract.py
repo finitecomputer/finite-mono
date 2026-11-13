@@ -27,7 +27,7 @@ EXPECTED_MAX_SANDBOXES = {
     "finite-lat-3": "32",
     "finite-lat-4": "32",
     "finite-lat-5": "32",
-    "finite-lat-7": "8",  # Qualified host ceiling; bootstrap overrides to one.
+    "finite-lat-7": "32",  # Ceiling plus live memory admission; bootstrap uses one.
 }
 
 SHARED_ENV_PATH = "/etc/finite/runner-shared.env"
@@ -119,6 +119,8 @@ def parse_env(text: str) -> dict[str, str]:
 def check_shared_env(envs: dict[str, dict[str, str]]) -> None:
     reference, *others = HOSTS
     for host in HOSTS:
+        if envs[host].get("FC_RUNNER_KATA_MEMORY_ADMISSION") != "true":
+            raise SystemExit(f"{host}: Kata memory admission must be enabled")
         runtime_env = json.loads(envs[host]["FC_RUNNER_RUNTIME_ENV_JSON"])
         if runtime_env.get("FINITE_SITES_API") != "https://finite.site":
             raise SystemExit(

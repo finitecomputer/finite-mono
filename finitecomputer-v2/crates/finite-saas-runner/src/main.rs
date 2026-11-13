@@ -401,6 +401,7 @@ fn run_cycle() -> Result<RunOnceOutcome> {
                 max_container_count: optional_u32_value("FC_RUNNER_MAX_SANDBOXES")?,
                 drain_new_leases: optional_bool("FC_RUNNER_DRAIN", false)?,
                 available_memory_bytes: host_available_memory_bytes(),
+                memory_admission: optional_bool("FC_RUNNER_KATA_MEMORY_ADMISSION", true)?,
                 command_timeout: Duration::from_secs(optional_u64(
                     "FC_RUNNER_COMMAND_TIMEOUT_SECS",
                     15,

@@ -1325,8 +1325,8 @@ def collect_guest_memory_backing(
     Kata backs guest RAM with files under a configurable root, /dev/shm by
     default. The path is assumed: neither Kata configuration nor a running VM
     is read. That filesystem's block limit is separate from MemAvailable, and
-    Shmem can differ from statfs usage. Evidence only: thresholds are not
-    decided (FIN-176). It is not fault-time state or space reserved for a launch.
+    Shmem can differ from statfs usage. Evidence only: Runner owns admission
+    thresholds. It is not fault-time state or space reserved for a launch.
     """
     result: dict[str, Any] = {
         "path": str(path), "path_basis": "assumed-kata-default", "observed_at": isoformat(utc_now()),
@@ -1580,6 +1580,7 @@ def collect_host_health(hostname: str) -> dict[str, Any]:
             "FC_RUNNER_MAX_SANDBOXES",
             "FC_RUNNER_KATA_CPUS",
             "FC_RUNNER_KATA_MEMORY",
+            "FC_RUNNER_KATA_MEMORY_ADMISSION",
             runner["drain_variable"],
             runner["artifact_variable"],
             runner["base_url_variable"],
@@ -3795,6 +3796,7 @@ def build_host_health(
             "timer_status": timer_status,
             "drain": drain,
             "drain_status": drain_status,
+            "memory_admission_enabled": runner_env.get("FC_RUNNER_KATA_MEMORY_ADMISSION"),
             "artifact_pin": pin,
             "target_artifact_id": target_id,
             "pin_status": pin_status,
