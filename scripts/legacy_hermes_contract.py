@@ -973,9 +973,17 @@ def _integrations_summary(
     }
 
 
-def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
-    """Bind a complete source snapshot and compatible active payload."""
+def create_manifest(
+    bundle: Path, source: SourceMetadata, mode: str = "default"
+) -> dict[str, Any]:
+    """Bind a complete source snapshot and compatible active payload.
+
+    ``mode="full-fidelity"`` also binds the opt-in activation plan from
+    ``legacy_hermes_fidelity``; the default manifest is unchanged.
+    """
     bundle = Path(bundle)
+    if mode not in ("default", "full-fidelity"):
+        raise MigrationError(f"unsupported migration mode: {mode}")
     payload = bundle / "payload"
     source.validate()
     source_inventory = _source_inventory_summary(bundle)
@@ -1040,6 +1048,11 @@ def create_manifest(bundle: Path, source: SourceMetadata) -> dict[str, Any]:
         ],
         "preserved_inert": PRESERVED_INERT,
     }
+    if mode == "full-fidelity":
+        from legacy_hermes_fidelity import FIDELITY_MODE, build_plan
+
+        manifest["mode"] = FIDELITY_MODE
+        manifest["fidelity"] = build_plan(bundle, inventory, sites)
     _write_private_json(bundle / "manifest.json", manifest)
     return manifest
 
@@ -1144,6 +1157,17 @@ def verify_bundle(bundle: Path) -> dict[str, Any]:
         raise MigrationError("protected target state contract mismatch")
     if manifest.get("preserved_inert") != PRESERVED_INERT:
         raise MigrationError("preserved-inert contract mismatch")
+    mode = manifest.get("mode")
+    if mode is None:
+        if "fidelity" in manifest:
+            raise MigrationError("full-fidelity plan present without its mode")
+    elif mode == "full-fidelity":
+        from legacy_hermes_fidelity import build_plan
+
+        if manifest.get("fidelity") != build_plan(bundle, inventory, sites):
+            raise MigrationError("full-fidelity plan mismatch")
+    else:
+        raise MigrationError(f"unsupported migration mode in manifest: {mode}")
     return manifest
 
 
