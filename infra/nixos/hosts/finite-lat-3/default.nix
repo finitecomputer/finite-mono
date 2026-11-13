@@ -322,12 +322,11 @@ in
   boot.kernel.sysctl."vm.swappiness" = 20;
   zramSwap.enable = false;
 
-  # Kata keeps each Agent VM's guest RAM in /dev/shm, and a full tmpfs
-  # crashes VMs with SIGBUS (2026-10-15). 110 GiB (118.1 GB) gives the full
-  # sandbox ceiling more room than the NixOS default of 50% of RAM
-  # (100.8 GB here). Change this value rather than remounting by hand:
-  # every switch remounts /dev/shm with it.
-  boot.devShmSize = "110G";
+  # Kata uses /dev/shm for demand-allocated guest RAM. The 110 GiB cap
+  # left little headroom despite available physical RAM, risking guest SIGBUS.
+  # This is a limit, not a reservation; the shared Runner memory guard
+  # controls new admission. Every switch reapplies this mount limit.
+  boot.devShmSize = "160G";
 
   services.fstrim.enable = true;
   services.smartd = {
