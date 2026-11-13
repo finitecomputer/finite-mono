@@ -34,9 +34,7 @@ from legacy_hermes_contract import (
     _normalized_tar_member_path,
 )
 
-DEFAULT_MODE = "default"
 FIDELITY_MODE = "full-fidelity"
-MODES = (DEFAULT_MODE, FIDELITY_MODE)
 FIDELITY_SCHEMA = "finite.legacy-hermes-full-fidelity.v1"
 
 LEGACY_HOME = "/home/node"
@@ -1770,7 +1768,3 @@ def text_file_rewriter(
 ) -> tuple[Callable[[bytes], bytes], PathMap]:
     path_map = PathMap(plan["path_map"]["placed_home_entries"])
     return (lambda data: _rewrite_text_bytes(data, path_map)), path_map
-
-
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
