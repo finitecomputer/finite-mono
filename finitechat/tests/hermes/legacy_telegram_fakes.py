@@ -2,7 +2,11 @@
 
 `FakeTelegramBotApi` answers python-telegram-bot's calls for one token only,
 keeps a server-side update queue (dropped when `deleteWebhook` asks for it,
-as Telegram does) and records every message the bot sends. `StubModel` is an
+as Telegram does) and records every message the bot sends. Like Telegram, it
+confirms (removes) queued updates only when a later getUpdates offset passes
+them. `conflicts_left` makes the next getUpdates calls return 409 (another
+poller holds the token) and `network_failures_left` makes them drop the
+connection without an answer. `StubModel` is an
 OpenAI-compatible chat-completions endpoint that records each request.
 """
 
@@ -37,6 +41,10 @@ class FakeTelegramBotApi:
         self.dropped_updates = 0
         self.unauthorized_calls = 0
         self.message_id = 5000
+        self.conflicts_left = 0
+        self.conflicts_served = 0
+        self.network_failures_left = 0
+        self.network_failures_served = 0
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -71,6 +79,31 @@ class FakeTelegramBotApi:
                     return
                 with fake.condition:
                     fake.calls.append(parts[1])
+                    if parts[1] == "getUpdates" and fake.network_failures_left > 0:
+                        fake.network_failures_left -= 1
+                        fake.network_failures_served += 1
+                        fail = "network"
+                    elif parts[1] == "getUpdates" and fake.conflicts_left > 0:
+                        fake.conflicts_left -= 1
+                        fake.conflicts_served += 1
+                        fail = "conflict"
+                    else:
+                        fail = None
+                if fail == "network":
+                    self.close_connection = True
+                    return
+                if fail == "conflict":
+                    _reply(
+                        self,
+                        {
+                            "ok": False,
+                            "error_code": 409,
+                            "description": "Conflict: terminated by other getUpdates "
+                            "request; make sure that only one bot instance is running",
+                        },
+                        409,
+                    )
+                    return
                 _reply(self, {"ok": True, "result": fake.dispatch(parts[1], params)})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -148,6 +181,10 @@ class FakeTelegramBotApi:
             return []
         return True
 
+    def queued_update_ids(self) -> list[int]:
+        with self.condition:
+            return [item["update_id"] for item in self.queue]
+
     def messages_to(self, chat_id: int) -> list[str]:
         with self.condition:
             return [
@@ -155,6 +192,20 @@ class FakeTelegramBotApi:
                 for item in self.sent
                 if str(item.get("chat_id")) == str(chat_id)
             ]
+
+    def wait_for_count(self, chat_id: int, count: int, timeout: float) -> list[str]:
+        deadline = time.time() + timeout
+        with self.condition:
+            while time.time() < deadline:
+                found = [
+                    str(item.get("text", ""))
+                    for item in self.sent
+                    if str(item.get("chat_id")) == str(chat_id)
+                ]
+                if len(found) >= count:
+                    return found
+                self.condition.wait(min(0.5, max(0.0, deadline - time.time())))
+        return self.messages_to(chat_id)
 
     def wait_for_message(self, chat_id: int, timeout: float) -> list[str]:
         deadline = time.time() + timeout
@@ -263,6 +314,24 @@ class StubModel:
                 )
             )
         return prompts
+
+    def conversation_for(self, user_text: str) -> str | None:
+        """All message text of the agent turn that answers `user_text`.
+
+        Side requests (such as session title generation) also carry the user
+        text; the agent turn is the matching request with the most messages.
+        """
+        with self.lock:
+            requests = list(self.requests)
+        matches = []
+        for body in requests:
+            messages = body.get("messages", [])
+            users = [m for m in messages if m.get("role") == "user"]
+            if users and user_text in json.dumps(users[-1].get("content")):
+                matches.append(messages)
+        if not matches:
+            return None
+        return json.dumps([m.get("content") for m in max(matches, key=len)])
 
     def user_texts(self) -> list[str]:
         with self.lock:

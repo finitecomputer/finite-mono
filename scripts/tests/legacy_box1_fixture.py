@@ -25,7 +25,20 @@ TOKEN = "7012345678:AAHsyntheticLegacyFixtureToken_0123456789"
 OWNER_ID = 101  # approved in pairing/
 SECOND_ID = 303  # approved only in platforms/pairing/
 PENDING_ID = 404  # pending code in pairing/
+PENDING_CODE = "KQ7MZ2PX"  # plaintext only in the fixture; stored hashed
+PENDING_SALT = bytes(range(16))
 SOUL_MARKER = "FRANKIE-PERSONA-7731"
+# The active Telegram conversation when the bot moves (continuity proof).
+ACTIVE_SESSION_ID = "legacy-telegram-active"
+ACTIVE_USER_TEXT = "Please draft two poster versions for the meetup"
+ACTIVE_ASSISTANT_TEXT = "Here they are: version A-BLUE-5521 and version B-GREEN-8834."
+AGENTS_SEED = (
+    "# Agent Computer Runtime Notes\n"
+    "- Use `finitec publish` to publish Sites.\n"
+    "- Traefik routes *.finite.computer to your container.\n"
+)
+AGENTS_OWNER_ADDITION = "## Owner preferences\n- Always answer in short paragraphs."
+INTERVAL_MINUTES = 180
 MEMORY_MARKER = "MEMORY-MARKER-4410"
 USER_SKILL = "leisure/wine-guidance"
 CLASH_SKILL = "productivity/google-workspace-finite"
@@ -220,8 +233,19 @@ onboarding:
 """
 
 
+def _cron_expr(now: datetime, hours_ahead: int, minute: int) -> str:
+    """A daily expression whose slot is `hours_ahead` hours from `now` in the bot's
+    timezone, so no test run can cross a real slot (no wall-clock flake)."""
+    from zoneinfo import ZoneInfo
+
+    local = now.astimezone(ZoneInfo(TIMEZONE)) + timedelta(hours=hours_ahead)
+    return f"{minute} {local.hour} * * *"
+
+
 def _jobs(now: datetime) -> dict[str, Any]:
     origin = {"platform": "telegram", "chat_id": str(OWNER_ID), "chat_name": "Owner"}
+    briefing = _cron_expr(now, 8, 0)
+    pinned = _cron_expr(now, 10, 30)
     base = {
         "created_at": (now - timedelta(days=30)).isoformat(),
         "last_status": "ok",
@@ -253,10 +277,10 @@ def _jobs(now: datetime) -> dict[str, Any]:
                 "prompt": "Summarize /home/node/workspace/notes.md for Owner.",
                 "schedule": {
                     "kind": "cron",
-                    "expr": "0 8 * * *",
-                    "display": "0 8 * * *",
+                    "expr": briefing,
+                    "display": briefing,
                 },
-                "schedule_display": "0 8 * * *",
+                "schedule_display": briefing,
                 "deliver": "origin",
                 "enabled": True,
                 "last_run_at": (now - timedelta(days=1, hours=3)).isoformat(),
@@ -269,8 +293,12 @@ def _jobs(now: datetime) -> dict[str, Any]:
                 "id": "inbox-check",
                 "name": "Inbox check",
                 "prompt": "Run the check script and report changes.",
-                "schedule": {"kind": "interval", "minutes": 30, "display": "every 30m"},
-                "schedule_display": "every 30m",
+                "schedule": {
+                    "kind": "interval",
+                    "minutes": INTERVAL_MINUTES,
+                    "display": f"every {INTERVAL_MINUTES}m",
+                },
+                "schedule_display": f"every {INTERVAL_MINUTES}m",
                 "deliver": "telegram",
                 "enabled": True,
                 "script": "/home/node/.hermes/scripts/check_inbox.py",
@@ -339,17 +367,93 @@ def _jobs(now: datetime) -> dict[str, Any]:
                 "id": "openrouter-job",
                 "name": "Pinned route",
                 "prompt": "Draft a note in /home/node/Downloads.",
-                "schedule": {
-                    "kind": "cron",
-                    "expr": "30 18 * * *",
-                    "display": "30 18 * * *",
-                },
+                "schedule": {"kind": "cron", "expr": pinned, "display": pinned},
                 "deliver": "local",
                 "enabled": True,
                 "model": "anthropic/claude-sonnet-4.6",
                 "provider": "openrouter",
                 "base_url": "https://openrouter.ai/api/v1",
                 "next_run_at": stale,
+            },
+            # Execution and recovery states the box1 scheduler left behind.
+            {
+                **base,
+                "id": "errored-poll",
+                "name": "Errored poll",
+                "prompt": "Check the feed.",
+                "schedule": {
+                    "kind": "interval",
+                    "minutes": 120,
+                    "display": "every 120m",
+                },
+                "deliver": "origin",
+                "enabled": True,
+                "last_status": "error",
+                "last_error": "synthetic old failure",
+                "last_run_at": (now - timedelta(hours=6)).isoformat(),
+                "next_run_at": (now - timedelta(hours=5, minutes=30)).isoformat(),
+                "failure_streak": 3,
+            },
+            {
+                **base,
+                "id": "error-state-daily",
+                "name": "Error state daily",
+                "prompt": "Daily check.",
+                "schedule": {"kind": "cron", "expr": briefing, "display": briefing},
+                "deliver": "local",
+                "enabled": True,
+                "state": "error",
+                "last_status": "error",
+                "last_run_at": (now - timedelta(days=2)).isoformat(),
+                "next_run_at": None,
+            },
+            {
+                **base,
+                "id": "exhausted-interval",
+                "name": "Three times only",
+                "prompt": "Ping three times.",
+                "schedule": {"kind": "interval", "minutes": 60, "display": "every 60m"},
+                "deliver": "local",
+                "enabled": True,
+                "repeat": {"times": 3, "completed": 3},
+                "last_run_at": (now - timedelta(hours=4)).isoformat(),
+                "next_run_at": stale,
+            },
+            {
+                **base,
+                "id": "completed-oneshot",
+                "name": "Done reminder",
+                "prompt": "Already reminded.",
+                "schedule": {
+                    "kind": "once",
+                    "run_at": (now - timedelta(days=1)).isoformat(),
+                    "display": "once",
+                },
+                "deliver": "origin",
+                "enabled": False,
+                "state": "completed",
+                "repeat": {"times": 1, "completed": 1},
+                "last_run_at": (now - timedelta(days=1)).isoformat(),
+                "next_run_at": None,
+            },
+            {
+                **base,
+                "id": "claimed-oneshot",
+                "name": "Claimed reminder",
+                "prompt": "Remind Owner about the call.",
+                "schedule": {
+                    "kind": "once",
+                    "run_at": (now + timedelta(hours=20)).isoformat(),
+                    "display": "once",
+                },
+                "deliver": "origin",
+                "enabled": True,
+                "repeat": {"times": 1, "completed": 0},
+                "last_run_at": None,
+                "next_run_at": (now + timedelta(hours=20)).isoformat(),
+                "run_claim": {"by": "box1-dead-process", "at": now.isoformat()},
+                "fire_claim": {"by": "box1-dead-process", "at": now.isoformat()},
+                "manual_run_at": (now - timedelta(minutes=5)).isoformat(),
             },
         ],
         "updated_at": stale,
@@ -396,7 +500,14 @@ def _session(
 
 def sessions(now: datetime) -> list[dict[str, Any]]:
     started = (now - timedelta(days=3)).timestamp()
+    active_started = (now - timedelta(minutes=40)).timestamp()
     return [
+        _session(
+            ACTIVE_SESSION_ID,
+            active_started,
+            [("user", ACTIVE_USER_TEXT), ("assistant", ACTIVE_ASSISTANT_TEXT)],
+            cwd="/home/node",
+        ),
         _session(
             "legacy-telegram-session",
             started,
@@ -419,8 +530,64 @@ def sessions(now: datetime) -> list[dict[str, Any]]:
                 ),
             ],
             cwd="/home/node",
-        )
+        ),
     ]
+
+
+def routing_index(now: datetime) -> dict[str, Any]:
+    """box1's gateway sessions.json, in the SessionEntry shape Hermes loads."""
+    owner = {
+        "platform": "telegram",
+        "chat_id": str(OWNER_ID),
+        "chat_name": "Owner",
+        "chat_type": "dm",
+        "user_id": str(OWNER_ID),
+        "user_name": "Owner",
+    }
+    active = (now - timedelta(minutes=38)).isoformat()
+    return {
+        "_README": "routing index",
+        f"agent:main:telegram:dm:{OWNER_ID}": {
+            "session_key": f"agent:main:telegram:dm:{OWNER_ID}",
+            "session_id": ACTIVE_SESSION_ID,
+            "created_at": active,
+            "updated_at": active,
+            "origin": owner,
+            "display_name": "Owner",
+            "platform": "telegram",
+            "chat_type": "dm",
+            # Process claims of the frozen box1 gateway; never carried over.
+            "active_turn_token": "box1-stale-turn",
+            "active_turn_started_at": active,
+            "resume_pending": True,
+            "suspended": True,
+            "model_override": {"model": "anthropic/claude-sonnet-4.6"},
+        },
+        "agent:main:matrix:group:!room:matrix.invalid": {
+            "session_key": "agent:main:matrix:group:!room:matrix.invalid",
+            "session_id": "legacy-telegram-session",
+            "created_at": active,
+            "updated_at": active,
+            "origin": {
+                "platform": "matrix",
+                "chat_id": "!room:matrix.invalid",
+                "chat_type": "group",
+            },
+            "platform": "matrix",
+            "chat_type": "group",
+        },
+    }
+
+
+def pending_entry(now: datetime) -> dict[str, Any]:
+    """A pairing code issued just before the freeze, hashed as Hermes stores it."""
+    return {
+        "hash": hashlib.sha256(PENDING_SALT + PENDING_CODE.encode()).hexdigest(),
+        "salt": PENDING_SALT.hex(),
+        "user_id": str(PENDING_ID),
+        "user_name": "Pending",
+        "created_at": (now - timedelta(minutes=10)).timestamp(),
+    }
 
 
 def simple_memory_store(path: Path) -> int:
@@ -429,7 +596,8 @@ def simple_memory_store(path: Path) -> int:
             "CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, content TEXT)"
         )
         connection.execute(
-            "INSERT INTO facts VALUES (1, 'Owner hosts a recurring AI meetup')"
+            "INSERT INTO facts VALUES (1, 'Owner hosts a recurring AI meetup; "
+            "the notes are at /home/node/workspace/notes.md')"
         )
         connection.commit()
     return 1
@@ -439,9 +607,7 @@ def build_source_home(root: Path, now: datetime) -> Path:
     home = root / "source-home"
     hermes = home / ".hermes"
     # Loose home files and directories (census home_top).
-    _write(
-        home / "AGENTS.md", "# Agent Computer Runtime Notes\n- Use `finitec publish`.\n"
-    )
+    _write(home / "AGENTS.md", AGENTS_SEED + "\n" + AGENTS_OWNER_ADDITION + "\n")
     _write(home / "poster_final.jpg", b"\xff\xd8\xff\xe0synthetic-jpeg\x00\x01")
     _write(
         home / "make_post.py",
@@ -449,6 +615,8 @@ def build_source_home(root: Path, now: datetime) -> Path:
         0o755,
     )
     _write(home / "Downloads/memo.txt", "memo from Downloads\n")
+    # Binary file that mentions the old home: kept as is, listed in the receipt.
+    _write(home / "Downloads/cache.bin", b"\x00\x01/home/node/workspace/post.png\x00")
     # azadi has both Downloads/ and downloads/; a case-insensitive Mac test
     # filesystem cannot hold both, so the second loose dir is recipes/ (lavender).
     _write(home / "recipes/report.csv", "a,b\n1,2\n")
@@ -462,6 +630,7 @@ def build_source_home(root: Path, now: datetime) -> Path:
     _write(home / "__pycache__/make_post.cpython-312.pyc", b"\x00pyc")
     _write(home / "finitebrain/notes.md", "legacy brain working tree\n")
     _write(home / "workspace/notes.md", "workspace notes\n")
+    _write(home / "workspace/plan.md", "Final memo: /home/node/Downloads/memo.txt\n")
     _write(home / "dev/project/README.md", "project\n")
     (home / "dev/project/readme-link").symlink_to("README.md")
     _write(home / "uploads/photo.txt", "upload\n")
@@ -475,7 +644,7 @@ def build_source_home(root: Path, now: datetime) -> Path:
         f"You are Frankie, a warm and witty helper. {SOUL_MARKER}\n"
         "Keep drafts in /home/node/workspace and finished files in ~/Downloads.\n",
     )
-    _write(hermes / "AGENTS.md", "# Hermes runtime notes for box1\n")
+    _write(hermes / "AGENTS.md", AGENTS_SEED)
     _write(hermes / "config.yaml", _config_yaml())
     env_lines = [f"{name}=synthetic-tool-secret" for name in TOOL_KEYS]
     env_lines += [f"TELEGRAM_BOT_TOKEN={TOKEN}", f"TELEGRAM_HOME_CHANNEL={OWNER_ID}"]
@@ -502,9 +671,14 @@ def build_source_home(root: Path, now: datetime) -> Path:
         skills / CLASH_SKILL / "SKILL.md",
         "---\nname: google-workspace-finite\ndescription: Local override\n---\nLocal copy\n",
     )
+    overlay_text = (
+        b"---\nname: overlay-helper\n---\nShipped by the box1 image overlay\n"
+    )
+    _write(skills / "devops/overlay-helper/SKILL.md", overlay_text)
+    # A managed overlay skill the bot edited after the image shipped it.
     _write(
-        skills / "devops/overlay-helper/SKILL.md",
-        "---\nname: overlay-helper\n---\nShipped by the box1 image overlay\n",
+        skills / "devops/edited-helper/SKILL.md",
+        "---\nname: edited-helper\n---\nShipped, then edited by the bot\n",
     )
     _write(
         skills / ".archive/old-skill/SKILL.md", "---\nname: old-skill\n---\narchived\n"
@@ -513,10 +687,15 @@ def build_source_home(root: Path, now: datetime) -> Path:
         skills / ".bundled_manifest",
         f"apple-notes:{_dir_md5(skills / BUNDLED_SKILL)}\n",
     )
-    managed = (
-        hermes / ".runtime-managed/.hermes/skills/devops/overlay-helper/SKILL.md.sha256"
+    managed = hermes / ".runtime-managed/.hermes/skills/devops"
+    _write(
+        managed / "overlay-helper/SKILL.md.sha256",
+        hashlib.sha256(overlay_text).hexdigest() + "\n",
     )
-    _write(managed, hashlib.sha256(b"overlay").hexdigest() + "\n")
+    _write(
+        managed / "edited-helper/SKILL.md.sha256",
+        hashlib.sha256(b"the version the image shipped").hexdigest() + "\n",
+    )
     _write(hermes / ".runtime-managed/.hermes/config.yaml.sha256", "0" * 64 + "\n")
     _write(hermes / ".skills_prompt_snapshot.json", "{}\n")
     _write(
@@ -532,17 +711,7 @@ def build_source_home(root: Path, now: datetime) -> Path:
     )
     _write(
         hermes / "pairing/telegram-pending.json",
-        json.dumps(
-            {
-                "entry-1": {
-                    "code_hash": "0" * 64,
-                    "salt": "00" * 16,
-                    "user_id": str(PENDING_ID),
-                    "user_name": "Pending",
-                    "created_at": 1.0,
-                }
-            }
-        ),
+        json.dumps({"0123456789abcdef": pending_entry(now)}),
     )
     _write(
         hermes / "pairing/_rate_limits.json",
@@ -567,7 +736,10 @@ def build_source_home(root: Path, now: datetime) -> Path:
     _write(hermes / "channel_directory.json", "{}\n")
     _write(hermes / "gateway_state.json", "{}\n")
     _write(hermes / "kanban.db", b"SQLite format 3\x00synthetic")
-    _write(hermes / "sessions/sessions.json", "{}\n")
+    _write(hermes / "sessions/sessions.json", json.dumps(routing_index(now), indent=2))
+    _write(hermes / "plugins/owner-plugin/plugin.yaml", "name: owner-plugin\n")
+    _write(hermes / "hooks/on_start.sh", "#!/bin/sh\n", 0o755)
+    _write(hermes / "bin/helper", "#!/bin/sh\n", 0o755)
     _write(hermes / "state.db", b"SQLite format 3\x00synthetic-state")
     _write(hermes / "memory_store.db", b"SQLite format 3\x00synthetic-memory")
     _write(hermes / "venv/bin/python", "#!/bin/sh\n", 0o755)
@@ -583,6 +755,7 @@ def build_bundle(
     now: datetime | None = None,
     memory_store_writer: Callable[[Path], int] = simple_memory_store,
     sessions_writer: Callable[[Path, datetime], None] | None = None,
+    stage_agents_seed: bool = True,
 ) -> dict[str, Any]:
     """Build a bundle exactly as runbook step 5 stages it, then return evidence."""
     now = now or datetime.now(timezone.utc)
@@ -632,6 +805,9 @@ def build_bundle(
     shutil.copy2(hermes / "cron/jobs.json", payload / "hermes/cron/jobs.json")
     for name in ("workspace", "dev", "uploads"):
         shutil.copytree(home / name, payload / "home" / name, symlinks=True)
+    if stage_agents_seed:
+        # Runbook: the seed the box1 pod renders into /home/node/AGENTS.md.
+        _write(bundle / "box1-seed/AGENTS.md", AGENTS_SEED)
     if sessions_writer is None:
         with (payload / "sessions.jsonl").open("w", encoding="utf-8") as handle:
             for session in sessions(now):

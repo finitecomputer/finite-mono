@@ -48,10 +48,11 @@ REVIEW_ONLY_RELATIVE = PurePosixPath("migration/legacy-hermes-v2/review-only")
 PAYLOAD_HOME_ROOTS = ("workspace", "dev", "uploads")
 # Top-level home entries that are never placed in active target paths.
 WITHHELD_HOME_ENTRIES = {
-    # box1 rewrites both AGENTS.md copies from its cluster render on every
-    # boot (finitecomputer nix/agent-runtime/entrypoint.nix install_file), so
-    # they hold box1 platform instructions (finitec, Traefik), not the bot's.
-    "AGENTS.md": "box1-platform-seeded-review-only",
+    # box1 rewrites both AGENTS.md copies from its platform seed on every
+    # boot (finitecomputer nix/agent-runtime/entrypoint.nix install_file).
+    # Only the owner's additions around that seed are activated, separately,
+    # into the target's project context file (see _plan_agents).
+    "AGENTS.md": "box1-platform-seed-handled-by-persona-plan",
     "finitebrain": "brain-working-tree-reauthorize-and-sync",
     "node_modules": "generated-dependency-tree",
     "__pycache__": "generated-bytecode",
@@ -407,12 +408,13 @@ def build_plan(
                 "active_hermes_names": sorted(HERMES_ACTIVE_NAMES),
             },
             "home": home,
-            "persona": _plan_persona(snapshot),
+            "persona": _plan_persona(bundle, snapshot),
             "config": _plan_config(config),
             "telegram": _plan_telegram(snapshot, config, env),
             "skills": _plan_skills(payload, snapshot),
             "scripts": _plan_scripts(payload),
             "cron": _plan_cron(payload),
+            "routing": _plan_routing(snapshot),
             "omitted": _plan_omissions(snapshot, config, env, sites),
         }
         if plan["telegram"]["activate"]:
@@ -466,11 +468,94 @@ def _plan_home(snapshot: SourceSnapshot) -> dict[str, Any]:
     }
 
 
-def _plan_persona(snapshot: SourceSnapshot) -> dict[str, Any]:
+BOX1_AGENTS_SEED_RELATIVE = PurePosixPath("box1-seed/AGENTS.md")
+TARGET_AGENTS_PATH = "/data/workspace/AGENTS.md"
+AGENTS_ACTIVE_SOURCE = "AGENTS.md"  # box1 loads /home/node/AGENTS.md (cwd)
+
+
+def _normalize_text(text: str) -> str:
+    return text.replace("\r\n", "\n").strip()
+
+
+def split_agents_md(text: str, seed: str | None) -> tuple[str, str]:
+    """Return (status, owner additions) for one box1 AGENTS.md copy.
+
+    box1 rewrites both copies from its platform seed on every boot, so only
+    text around one verbatim seed block is the owner's. Anything else cannot
+    be split safely and stays review-only.
+    """
+    if seed is None:
+        return "seed-not-staged-review-only", ""
+    body = _normalize_text(text)
+    block = _normalize_text(seed)
+    if not block:
+        return "seed-empty-review-only", ""
+    if body == block:
+        return "box1-seed-excluded", ""
+    if body.count(block) != 1:
+        return "unknown-variant-review-only", ""
+    before, _, after = body.partition(block)
+    additions = "\n\n".join(part.strip() for part in (before, after) if part.strip())
+    if not additions:
+        return "box1-seed-excluded", ""
+    return "owner-additions", additions
+
+
+def _agents_seed(bundle: Path) -> bytes | None:
+    path = bundle / Path(BOX1_AGENTS_SEED_RELATIVE.as_posix())
+    if path.is_symlink() or not path.exists():
+        return None
+    if not path.is_file():
+        raise MigrationError("staged box1 AGENTS.md seed is not a regular file")
+    return path.read_bytes()
+
+
+def _plan_agents(bundle: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
+    seed_bytes = _agents_seed(bundle)
+    seed = None
+    if seed_bytes is not None:
+        try:
+            seed = seed_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MigrationError("staged box1 AGENTS.md seed is not UTF-8") from exc
+    files = []
+    activate = False
+    for path in ("AGENTS.md", ".hermes/AGENTS.md"):
+        if not snapshot.is_file(path):
+            continue
+        status, additions = split_agents_md(
+            snapshot.read_text(path, f"legacy {path}"), seed
+        )
+        if status == "owner-additions":
+            if path == AGENTS_ACTIVE_SOURCE:
+                status = "owner-additions-activated"
+                activate = True
+            else:
+                status = "owner-additions-review-only-hermes-copy-not-loaded"
+        files.append(
+            {
+                "path": path,
+                "status": status,
+                "addition_sha256": hashlib.sha256(additions.encode()).hexdigest()
+                if additions
+                else None,
+            }
+        )
+    return {
+        "seed": {
+            "staged": seed_bytes is not None,
+            "path": BOX1_AGENTS_SEED_RELATIVE.as_posix(),
+            "sha256": hashlib.sha256(seed_bytes).hexdigest() if seed_bytes else None,
+        },
+        "files": files,
+        "paths": [item["path"] for item in files],
+        "target": TARGET_AGENTS_PATH if activate else None,
+        "review_copy": (REVIEW_ONLY_RELATIVE / "agents").as_posix() if files else None,
+    }
+
+
+def _plan_persona(bundle: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
     soul = ".hermes/SOUL.md"
-    agents = [
-        path for path in ("AGENTS.md", ".hermes/AGENTS.md") if snapshot.is_file(path)
-    ]
     return {
         "soul": {
             "present": snapshot.is_file(soul),
@@ -479,11 +564,7 @@ def _plan_persona(snapshot: SourceSnapshot) -> dict[str, Any]:
             else None,
             "target": f"{TARGET_HERMES_HOME}/SOUL.md",
         },
-        "agents_md": {
-            "paths": agents,
-            "policy": WITHHELD_HOME_ENTRIES["AGENTS.md"],
-            "target": (REVIEW_ONLY_RELATIVE / "agents").as_posix() if agents else None,
-        },
+        "agents_md": _plan_agents(bundle, snapshot),
     }
 
 
@@ -565,7 +646,7 @@ def _plan_config(config: dict[str, Any]) -> dict[str, Any]:
     adopted_keys = set(_flatten_keys(adopted))
     withheld = []
     for key, value in config.items():
-        if key in CONFIG_REPLACE_KEYS or key in ("platforms", "telegram"):
+        if key in CONFIG_REPLACE_KEYS:
             continue
         if key in ("display", "agent", "cron", "memory") and isinstance(value, dict):
             withheld.extend(
@@ -594,27 +675,39 @@ def _plan_config(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Every place a box1 Hermes v0.14 config could hold its Telegram block (the
+# census shows Lazarus with gateway.telegram, telegram and platforms.telegram).
+TELEGRAM_CONFIG_BLOCKS = (
+    ("gateway", "platforms", "telegram"),
+    ("gateway", "telegram"),
+    ("platforms", "telegram"),
+    ("telegram",),
+)
+
+
+def _home_channel_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return value.get("chat_id")
+    return value
+
+
 def telegram_source(
     config: dict[str, Any], env: dict[str, str]
 ) -> tuple[str | None, str | None, bool, dict[str, Any]]:
     """Return (token, home_chat_id, enabled, evidence-without-values)."""
-    candidates = [
-        ("env:TELEGRAM_BOT_TOKEN", env.get("TELEGRAM_BOT_TOKEN")),
-        (
-            "config:gateway.platforms.telegram.token",
-            _get(config, "gateway", "platforms", "telegram", "token"),
-        ),
-        (
-            "config:platforms.telegram.token",
-            _get(config, "platforms", "telegram", "token"),
-        ),
-        ("config:telegram.token", _get(config, "telegram", "token")),
-    ]
+    candidates = [("env:TELEGRAM_BOT_TOKEN", env.get("TELEGRAM_BOT_TOKEN"))]
+    for path in TELEGRAM_CONFIG_BLOCKS:
+        candidates.append(
+            ("config:" + ".".join(path) + ".token", _get(config, *path, "token"))
+        )
     tokens: dict[str, str] = {}
+    unresolved: list[str] = []
     for label, raw in candidates:
         resolved = _resolve_env_reference(raw, env)
         if resolved:
             tokens[label] = resolved
+        elif isinstance(raw, str) and raw.strip():
+            unresolved.append(label)
     if len(set(tokens.values())) > 1:
         raise MigrationError(
             "legacy Telegram token sources disagree: " + ", ".join(sorted(tokens))
@@ -625,17 +718,14 @@ def telegram_source(
         raise MigrationError(
             "legacy Telegram bot token does not have the Bot API shape"
         )
-    homes = [
-        ("env:TELEGRAM_HOME_CHANNEL", env.get("TELEGRAM_HOME_CHANNEL")),
-        (
-            "config:gateway.platforms.telegram.home_channel",
-            _get(config, "gateway", "platforms", "telegram", "home_channel", "chat_id"),
-        ),
-        (
-            "config:platforms.telegram.home_channel",
-            _get(config, "platforms", "telegram", "home_channel", "chat_id"),
-        ),
-    ]
+    homes = [("env:TELEGRAM_HOME_CHANNEL", env.get("TELEGRAM_HOME_CHANNEL"))]
+    for path in TELEGRAM_CONFIG_BLOCKS:
+        homes.append(
+            (
+                "config:" + ".".join(path) + ".home_channel",
+                _home_channel_value(_get(config, *path, "home_channel")),
+            )
+        )
     home_values = {
         label: str(value).strip() for label, value in homes if value not in (None, "")
     }
@@ -651,11 +741,25 @@ def telegram_source(
             "legacy Telegram home channel is not a numeric private chat id; "
             "finite-agentd cannot represent it"
         )
-    explicit = [
-        _get(config, "gateway", "platforms", "telegram", "enabled"),
-        _get(config, "platforms", "telegram", "enabled"),
-        _get(config, "telegram", "enabled"),
+    explicit = [_get(config, *path, "enabled") for path in TELEGRAM_CONFIG_BLOCKS]
+    # The census renders `platforms.telegram: true` (Lazarus) as a scalar.
+    explicit += [
+        _get(config, *path) for path in TELEGRAM_CONFIG_BLOCKS if len(path) > 1
     ]
+    explicit = [
+        value
+        for value in explicit
+        if isinstance(value, bool)
+        or (isinstance(value, str) and value.lower() in ("true", "false"))
+    ]
+    explicit = [value is True or value == "true" for value in explicit]
+    if token is None and (unresolved or any(explicit)):
+        # An enabled or referenced Telegram block with no usable token would
+        # silently move the bot without its channel.
+        raise MigrationError(
+            "legacy Telegram is configured but no token resolves: "
+            + ", ".join(sorted(unresolved) or ["enabled-without-token"])
+        )
     enabled = token is not None and not any(value is False for value in explicit)
     return (
         token,
@@ -665,6 +769,11 @@ def telegram_source(
             "token_sources": sorted(tokens),
             "home_channel_sources": sorted(home_values),
             "source_explicitly_disabled": any(value is False for value in explicit),
+            "config_blocks": sorted(
+                ".".join(path)
+                for path in TELEGRAM_CONFIG_BLOCKS
+                if _get(config, *path) is not None
+            ),
         },
     )
 
@@ -727,7 +836,31 @@ def _plan_telegram(
     }
 
 
+RUNTIME_MANAGED_SKILLS = ".hermes/.runtime-managed/.hermes/skills/"
+_SHA256_TOKEN = re.compile(r"\b[0-9a-f]{64}\b")
+
+
+def _overlay_records(snapshot: SourceSnapshot) -> dict[str, str | None]:
+    """box1 image-overlay skill files: relative path -> recorded sha256."""
+    records: dict[str, str | None] = {}
+    for path in snapshot.members:
+        if path.startswith(RUNTIME_MANAGED_SKILLS) and path.endswith(".sha256"):
+            relative = path.removeprefix(RUNTIME_MANAGED_SKILLS).removesuffix(".sha256")
+            match = _SHA256_TOKEN.search(
+                snapshot.read_bytes(path).decode("ascii", errors="replace")
+            )
+            records[relative] = match.group(0) if match else None
+    return records
+
+
 def _plan_skills(payload: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
+    """Split user skills from the old managed baseline, with the evidence used.
+
+    The two markers come from the box1 image and Hermes v0.14 (`.bundled_manifest`
+    and `.runtime-managed/.hermes/skills/<file>.sha256`). Neither is confirmed
+    on real data yet, so a missing marker is reported, and with neither marker
+    present every skill stays review-only instead of being guessed active.
+    """
     root = payload / "hermes/skills"
     manifest: dict[str, str] = {}
     manifest_path = root / ".bundled_manifest"
@@ -737,24 +870,49 @@ def _plan_skills(payload: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
             if line:
                 name, _, digest = line.partition(":")
                 manifest[name.strip()] = digest.strip()
-    managed_state = {
-        path.removeprefix(".hermes/.runtime-managed/.hermes/skills/").removesuffix(
-            ".sha256"
-        )
-        for path in snapshot.members
-        if path.startswith(".hermes/.runtime-managed/.hermes/skills/")
-        and path.endswith(".sha256")
+    overlay = _overlay_records(snapshot)
+    layout = {
+        "bundled_manifest": manifest_path.is_file(),
+        "runtime_managed_overlay": bool(overlay),
     }
+    if all(layout.values()):
+        layout["status"] = "confirmed"
+    elif any(layout.values()):
+        layout["status"] = "partial-unlisted-managed-skills-may-look-user-created"
+    else:
+        layout["status"] = "unconfirmed-every-skill-review-only"
     user: list[dict[str, str]] = []
     managed: list[dict[str, str]] = []
+    review_only: list[dict[str, str]] = []
     for relative in _scan_skill_dirs(root):
         directory = root / Path(relative.as_posix())
         name = _skill_name((directory / "SKILL.md").read_bytes(), relative.name)
         rel = relative.as_posix()
-        if any(item == rel or item.startswith(rel + "/") for item in managed_state):
-            managed.append(
-                {"path": rel, "name": name, "reason": "box1-image-managed-overlay"}
+        overlay_files = {
+            item: digest
+            for item, digest in overlay.items()
+            if item == rel or item.startswith(rel + "/")
+        }
+        if overlay_files:
+            modified = sorted(
+                item
+                for item, digest in overlay_files.items()
+                if not (root / item).is_file()
+                or hashlib.sha256((root / item).read_bytes()).hexdigest() != digest
             )
+            if modified:
+                review_only.append(
+                    {
+                        "path": rel,
+                        "name": name,
+                        "reason": "box1-managed-skill-modified-in-source",
+                        "modified_file_count": str(len(modified)),
+                    }
+                )
+            else:
+                managed.append(
+                    {"path": rel, "name": name, "reason": "box1-image-managed-overlay"}
+                )
         elif name in manifest and (
             not manifest[name] or manifest[name] == _dir_md5(directory)
         ):
@@ -764,6 +922,18 @@ def _plan_skills(payload: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
                 else "hermes-bundled-unverified"
             )
             managed.append({"path": rel, "name": name, "reason": reason})
+        elif name in manifest:
+            review_only.append(
+                {
+                    "path": rel,
+                    "name": name,
+                    "reason": "hermes-bundled-skill-modified-in-source",
+                }
+            )
+        elif layout["status"].startswith("unconfirmed"):
+            review_only.append(
+                {"path": rel, "name": name, "reason": "skill-layout-unconfirmed"}
+            )
         else:
             user.append({"path": rel, "name": name})
     hidden = (
@@ -776,8 +946,10 @@ def _plan_skills(payload: Path, snapshot: SourceSnapshot) -> dict[str, Any]:
         else []
     )
     return {
+        "layout": layout,
         "user": user,
         "managed_not_activated": managed,
+        "review_only": review_only,
         "hidden_review_only": hidden,
         "target": f"{TARGET_HERMES_HOME}/skills",
         "clash_policy": "target-baseline-wins-source-copy-review-only",
@@ -864,6 +1036,123 @@ def _deliver_platforms(job: dict[str, Any]) -> set[str]:
         else:
             platforms.add(token.split(":", 1)[0].lower())
     return platforms
+
+
+SOURCE_ROUTING_PATH = ".hermes/sessions/sessions.json"
+
+
+def source_routing_entries(snapshot: SourceSnapshot) -> dict[str, dict[str, Any]]:
+    """The v0.14 gateway routing index: session key -> SessionEntry dict."""
+    if not snapshot.is_file(SOURCE_ROUTING_PATH):
+        return {}
+    try:
+        value = json.loads(snapshot.read_bytes(SOURCE_ROUTING_PATH))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError("legacy gateway sessions.json is not JSON") from exc
+    if not isinstance(value, dict):
+        raise MigrationError("legacy gateway sessions.json must be an object")
+    entries = {}
+    for key, entry in value.items():
+        if not isinstance(key, str) or key.startswith("_"):
+            continue
+        if not isinstance(entry, dict):
+            raise MigrationError("legacy gateway sessions.json has a non-object entry")
+        entries[key] = entry
+    return entries
+
+
+def routing_platform(entry: dict[str, Any]) -> str:
+    origin = entry.get("origin") if isinstance(entry.get("origin"), dict) else {}
+    return str(origin.get("platform") or entry.get("platform") or "unknown").lower()
+
+
+def _plan_routing(snapshot: SourceSnapshot) -> dict[str, Any]:
+    counts: dict[str, int] = {}
+    for entry in source_routing_entries(snapshot).values():
+        platform = routing_platform(entry)
+        counts[platform] = counts.get(platform, 0) + 1
+    return {
+        "source": SOURCE_ROUTING_PATH,
+        "entries_by_platform": dict(sorted(counts.items())),
+        "policy": "telegram-routes-rebound-to-imported-sessions-through-target-SessionDB",
+        "carried": ["session_key", "origin"],
+        "not_carried": [
+            "active turn tokens",
+            "resume and suspend flags",
+            "model overrides",
+            "token counters",
+            "Finite Chat routes",
+        ],
+    }
+
+
+# What happens to each top-level Hermes-home entry in full-fidelity mode.
+HERMES_HOME_DISPOSITIONS = {
+    "SOUL.md": "activated",
+    "AGENTS.md": "see-persona-agents-md",
+    "config.yaml": "user-facing-settings-adopted-rest-target-owned",
+    ".env": "telegram-token-only-tool-keys-not-copied",
+    "memories": "activated",
+    "skills": "user-skills-activated-rest-review-only",
+    "scripts": "activated",
+    "cron": "jobs-json-activated-run-output-sealed",
+    "pairing": "telegram-merged-other-platforms-inactive",
+    "platforms": "telegram-pairing-merged-rest-sealed",
+    "sessions": "telegram-routing-rebound-rest-sealed",
+    "state.db": "converted-sessions-imported",
+    "memory_store.db": "converted-facts-imported",
+}
+
+
+def _entry_counts(snapshot: SourceSnapshot, prefix: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for path in snapshot.members:
+        if prefix and not path.startswith(prefix):
+            continue
+        rest = path.removeprefix(prefix)
+        if not rest:
+            continue
+        head = rest.split("/", 1)[0]
+        counts.setdefault(head, 0)
+        member = snapshot.members[path]
+        if not member.isdir():
+            counts[head] += 1
+    return counts
+
+
+def _sqlite_family(name: str) -> str:
+    for suffix in ("-wal", "-shm", "-journal"):
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
+    return name
+
+
+def _plan_hermes_home(snapshot: SourceSnapshot) -> list[dict[str, Any]]:
+    rendered = []
+    for name, count in sorted(_entry_counts(snapshot, ".hermes/").items()):
+        disposition = HERMES_HOME_DISPOSITIONS.get(_sqlite_family(name))
+        rendered.append(
+            {
+                "name": name,
+                "file_count": count,
+                "disposition": disposition or "sealed-not-activated",
+            }
+        )
+    return rendered
+
+
+def _plan_hidden_home(snapshot: SourceSnapshot) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": name,
+            "file_count": count,
+            "disposition": "quarantined-identity-sealed"
+            if name == ".finite"
+            else "sealed-not-activated",
+        }
+        for name, count in sorted(_entry_counts(snapshot, "").items())
+        if name.startswith(".") and name != ".hermes"
+    ]
 
 
 def _plan_omissions(
@@ -958,6 +1247,8 @@ def _plan_omissions(
             "target_state": "recorded-not-republished",
         },
         "other_inactive_state": inactive_state,
+        "hermes_home": _plan_hermes_home(snapshot),
+        "hidden_home_entries": _plan_hidden_home(snapshot),
     }
 
 
@@ -1060,17 +1351,32 @@ class Transaction:
     def relative(self, path: Path) -> str:
         return path.relative_to(self.target_root).as_posix()
 
-    def rollback(self) -> None:
+    def rollback(self) -> list[str]:
+        """Undo every step that can be undone; return the steps that failed.
+
+        One failed step never stops the rest: a restore that raises must not
+        leave the created files or directories behind.
+        """
+        failures: list[str] = []
         for backup, original in reversed(self.replaced):
-            if backup.exists():
-                os.replace(backup, original)
+            try:
+                if backup.exists():
+                    os.replace(backup, original)
+            except OSError as exc:
+                failures.append(
+                    f"restore {self.relative(original)}: {type(exc).__name__}"
+                )
         for path in reversed(self.created_files):
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                failures.append(f"remove {self.relative(path)}: {type(exc).__name__}")
         for path in reversed(self.created_directories):
             try:
                 path.rmdir()
             except OSError:
                 pass
+        return failures
 
 
 @dataclass
@@ -1079,16 +1385,20 @@ class FidelityHooks:
 
     is_default_soul: Callable[[str], bool]
     bundled_skill_names: Callable[[], dict[str, PurePosixPath]]
-    telegram_preserves_pending_updates: Callable[[], bool]
+    telegram_qualification: Callable[[], dict[str, Any]]
     now: Callable[[], datetime]
+    validate_config: Callable[[dict[str, Any]], list[dict[str, str]]] = field(
+        default=lambda config: _target_validate_config(config)
+    )
 
 
 def default_hooks() -> FidelityHooks:
     return FidelityHooks(
         is_default_soul=_target_default_soul,
         bundled_skill_names=_target_bundled_skill_names,
-        telegram_preserves_pending_updates=_target_telegram_preserves_pending,
+        telegram_qualification=_target_telegram_qualification,
         now=lambda: datetime.now(timezone.utc),
+        validate_config=_target_validate_config,
     )
 
 
@@ -1119,18 +1429,23 @@ def _target_bundled_skill_names() -> dict[str, PurePosixPath]:
     return names
 
 
-def _target_telegram_preserves_pending() -> bool:
+def _target_telegram_qualification() -> dict[str, Any]:
+    """Behavioral probe of the adapter the target gateway loads."""
+    from legacy_hermes_telegram_gate import qualify_target_telegram
+
+    return qualify_target_telegram()
+
+
+def _target_validate_config(config: dict[str, Any]) -> list[dict[str, str]]:
+    """Target Hermes's own config.yaml validation (`hermes config` library)."""
     try:
-        from hermes_cli.plugins import get_bundled_plugins_dir
-    except Exception:
-        return False
-    adapter = get_bundled_plugins_dir() / "platforms/telegram/adapter.py"
-    try:
-        return "_preserve_pending_updates_on_start" in adapter.read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return False
+        from hermes_cli.config import validate_config_structure
+    except Exception as exc:
+        raise MigrationError("target Hermes config validation is unavailable") from exc
+    return [
+        {"severity": str(issue.severity), "message": str(issue.message)}
+        for issue in validate_config_structure(copy.deepcopy(config))
+    ]
 
 
 def _target_path(target_root: Path, absolute: str) -> Path:
@@ -1139,14 +1454,88 @@ def _target_path(target_root: Path, absolute: str) -> Path:
     return target_root / absolute.removeprefix("/data/")
 
 
-def _rewrite_text_bytes(data: bytes, path_map: PathMap) -> bytes:
-    if len(data) > TEXT_REWRITE_LIMIT_BYTES or b"\0" in data:
-        return data
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
-        return data
-    return path_map.rewrite_text(text).encode("utf-8")
+_LEGACY_HOME_BYTES = LEGACY_HOME.encode()
+
+
+class TextRewriter:
+    """Rewrite legacy path references in activated text, and record the rest.
+
+    Binary, oversized and non-UTF-8 files that mention `/home/node` keep their
+    bytes and are listed as unrewritable, so the receipt names every activated
+    file that may still point at the old home.
+    """
+
+    def __init__(self, placed_home_names: Iterable[str]):
+        self.path_map = PathMap(placed_home_names)
+        self.files_rewritten = 0
+        self.unrewritable: list[dict[str, str]] = []
+
+    def __call__(self, data: bytes, label: str | None = None) -> bytes:
+        if _LEGACY_HOME_BYTES not in data and b"~/" not in data:
+            return data
+        reason = None
+        if len(data) > TEXT_REWRITE_LIMIT_BYTES:
+            reason = "too-large-to-rewrite"
+        elif b"\0" in data:
+            reason = "binary"
+        else:
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                reason = "not-utf-8"
+        if reason is not None:
+            if _LEGACY_HOME_BYTES in data:
+                self.unrewritable.append({"path": label or "-", "reason": reason})
+            return data
+        rewritten = self.path_map.rewrite_text(text)
+        if rewritten != text:
+            self.files_rewritten += 1
+        return rewritten.encode("utf-8")
+
+    def note_stream(self, label: str, contains_legacy_home: bool) -> None:
+        if contains_legacy_home:
+            self.unrewritable.append({"path": label, "reason": "too-large-to-rewrite"})
+
+    def counts(self) -> dict[str, Any]:
+        return {
+            **self.path_map.counts(),
+            "files_rewritten": self.files_rewritten,
+            "unrewritable_files": len(self.unrewritable),
+        }
+
+
+class _MarkerScanningReader:
+    """Pass a stream through while noting whether it mentions `/home/node`."""
+
+    def __init__(self, handle: Any):
+        self.handle = handle
+        self.found = False
+        self._tail = b""
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self.handle.read(size)
+        if chunk and not self.found:
+            window = self._tail + chunk
+            self.found = _LEGACY_HOME_BYTES in window
+            self._tail = window[-(len(_LEGACY_HOME_BYTES) - 1) :]
+        return chunk
+
+
+TELEGRAM_MODES = ("rehearsal", "live")
+TELEGRAM_REHEARSAL_KEY = "finite_legacy_rehearsal"
+# Execution and recovery state that belongs to the box1 scheduler process.
+# The sealed snapshot keeps the original jobs.json; the receipt records what
+# each job carried.
+CRON_EXECUTION_FIELDS_REMOVED = (
+    "run_claim",
+    "fire_claim",
+    "execution_id",
+    "manual_run_at",
+    "manual_run_prompt",
+    "preflight_alerted",
+    "failure_streak",
+)
+CRON_STATUS_FIELDS_CLEARED = ("last_status", "last_error", "last_delivery_error")
 
 
 class FidelityInstall:
@@ -1159,16 +1548,27 @@ class FidelityInstall:
         target_root: Path,
         inventory: dict[str, Any],
         hooks: FidelityHooks,
+        *,
+        telegram_mode: str = "rehearsal",
+        expected_telegram_fingerprint: str | None = None,
     ):
+        if telegram_mode not in TELEGRAM_MODES:
+            raise MigrationError(f"unsupported Telegram mode: {telegram_mode}")
         self.plan = plan
+        self.bundle = bundle
         self.payload = bundle / "payload"
         self.target_root = target_root
         self.inventory = inventory
         self.hooks = hooks
+        self.telegram_mode = telegram_mode
+        self.expected_telegram_fingerprint = expected_telegram_fingerprint
         self.now = hooks.now().astimezone(timezone.utc).replace(microsecond=0)
-        self.path_map = PathMap(plan["path_map"]["placed_home_entries"])
+        self.rewriter = TextRewriter(plan["path_map"]["placed_home_entries"])
+        self.path_map = self.rewriter.path_map
         self.hermes_home = target_root / Path(TARGET_HERMES_RELATIVE.as_posix())
         self.result: dict[str, Any] = {}
+        self.telegram_qualification: dict[str, Any] | None = None
+        self.cron_existing_empty = False
         self.snapshot = SourceSnapshot(
             self.payload / Path(SOURCE_SNAPSHOT_RELATIVE_PATH.as_posix()), inventory
         )
@@ -1193,9 +1593,13 @@ class FidelityInstall:
         self.telegram = telegram_source(self.source_config, self.source_env)
         self._preflight_telegram()
         self._preflight_soul()
+        self._preflight_agents()
         self._preflight_cron()
         self.skill_decisions = self._preflight_skills()
         self._preflight_home()
+        # Built and validated by target Hermes before anything is written.
+        self.new_config, self.config_result = self._build_config()
+        self.routes, self.routing_not_mapped, self.routing_rekeyed = self._plan_routes()
 
     def _preflight_telegram(self) -> None:
         if not self.plan["telegram"]["activate"]:
@@ -1211,11 +1615,37 @@ class FidelityInstall:
             raise MigrationError(
                 "target already has a Telegram connection; refusing to replace it"
             )
-        if not self.hooks.telegram_preserves_pending_updates():
+        qualification = self.hooks.telegram_qualification()
+        if not qualification.get("qualified"):
             raise MigrationError(
-                "target Hermes drops queued Telegram updates on a cold start; "
-                "use a Runtime image with hermes-telegram-preserve-pending.patch"
+                "target Hermes drops queued Telegram updates (failed the "
+                "pending-update qualification: "
+                + ", ".join(
+                    qualification.get("reasons") or [str(qualification.get("reason"))]
+                )
+                + "); use a Runtime image with hermes-telegram-preserve-pending.patch"
             )
+        expected = self.expected_telegram_fingerprint
+        if self.telegram_mode == "live" and not expected:
+            raise MigrationError(
+                "a live Telegram activation needs --expected-telegram-runtime-fingerprint "
+                "from the qualification run inside the Runtime image Core will boot"
+            )
+        if expected and qualification.get("fingerprint") != expected:
+            raise MigrationError(
+                "this importer's target Hermes is not the qualified Runtime image "
+                "Core will boot (Telegram adapter fingerprint differs)"
+            )
+        self.telegram_qualification = {
+            key: qualification.get(key)
+            for key in (
+                "fingerprint",
+                "capability",
+                "hermes_version",
+                "adapter_path",
+                "adapter_sha256",
+            )
+        }
         self.pairing_dir = self._target_pairing_dir()
         for directory in {
             self.hermes_home / "pairing",
@@ -1254,8 +1684,20 @@ class FidelityInstall:
                     "target SOUL.md was customized; refusing to replace it"
                 )
 
+    def _preflight_agents(self) -> None:
+        target = self.plan["persona"]["agents_md"]["target"]
+        if target is None:
+            return
+        path = _target_path(self.target_root, target)
+        if path.exists() or path.is_symlink():
+            raise MigrationError(
+                "destination collision: workspace/AGENTS.md already exists on the target"
+            )
+
     def _preflight_cron(self) -> None:
         jobs_path = self.hermes_home / "cron/jobs.json"
+        if jobs_path.is_symlink():
+            raise MigrationError("target cron jobs.json is a symlink")
         if not jobs_path.exists():
             return
         try:
@@ -1265,6 +1707,9 @@ class FidelityInstall:
         jobs = document.get("jobs") if isinstance(document, dict) else document
         if jobs:
             raise MigrationError("target already has scheduled jobs; refusing to merge")
+        # A verified empty store is replaced inside the transaction, which keeps
+        # its bytes for rollback.
+        self.cron_existing_empty = True
 
     def _target_skill_names(self) -> dict[str, str]:
         names: dict[str, str] = {}
@@ -1314,18 +1759,153 @@ class FidelityInstall:
                     f"destination collision: agent/hermes-home/scripts/{relative}"
                 )
 
+    # -- conversation routing (runs on the rebuilt state.db before the swap) --
+
+    def _session_isolation(self) -> tuple[bool, bool]:
+        def coerce(value: Any, default: bool) -> bool:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.strip().lower() in ("true", "false"):
+                return value.strip().lower() == "true"
+            return default
+
+        return (
+            coerce(self.target_config.get("group_sessions_per_user"), True),
+            coerce(self.target_config.get("thread_sessions_per_user"), False),
+        )
+
+    def _plan_routes(
+        self,
+    ) -> tuple[dict[str, tuple[str, Any, Any]], dict[str, int], int]:
+        """Map each source Telegram chat or topic to the session it was using.
+
+        Uses the target's own SessionEntry parser and session-key builder.
+        Two sessions claiming one chat, or one session claiming two chats,
+        fail closed before anything is written.
+        """
+        entries = source_routing_entries(self.snapshot)
+        not_mapped: dict[str, int] = {}
+
+        def skip(reason: str) -> None:
+            not_mapped[reason] = not_mapped.get(reason, 0) + 1
+
+        telegram = {}
+        for key, raw in sorted(entries.items()):
+            platform = routing_platform(raw)
+            if platform == "telegram" and self.plan["telegram"]["activate"]:
+                telegram[key] = raw
+            else:
+                skip(f"platform-not-active:{platform}")
+        routes: dict[str, tuple[str, Any, Any]] = {}
+        if not telegram:
+            return routes, not_mapped, 0
+        from gateway.session import SessionEntry, build_session_key
+
+        group, thread = self._session_isolation()
+        claimed: dict[str, str] = {}
+        rekeyed = 0
+        for key, raw in telegram.items():
+            try:
+                entry = SessionEntry.from_dict({"session_key": key, **raw})
+            except Exception as exc:
+                raise MigrationError(
+                    "legacy Telegram routing entry is not in a format target Hermes reads"
+                ) from exc
+            origin = entry.origin
+            if origin is None or not (origin.chat_id or origin.user_id):
+                skip("no-origin")
+                continue
+            target_key = build_session_key(
+                origin, group_sessions_per_user=group, thread_sessions_per_user=thread
+            )
+            if target_key in routes and routes[target_key][0] != entry.session_id:
+                raise MigrationError(
+                    "ambiguous legacy Telegram routing: two sessions claim one chat"
+                )
+            if claimed.get(entry.session_id, target_key) != target_key:
+                raise MigrationError(
+                    "ambiguous legacy Telegram routing: one session claims two chats"
+                )
+            rekeyed += int(target_key != key)
+            routes[target_key] = (entry.session_id, entry, origin)
+            claimed[entry.session_id] = target_key
+        return routes, not_mapped, rekeyed
+
+    def apply_routing(
+        self,
+        database_path: Path,
+        session_db_factory: Callable[[Path], Any],
+        sessions_path: Path,
+    ) -> dict[str, Any]:
+        """Bind the planned routes through the target SessionDB routing APIs.
+
+        The target gateway's durable session recovery then resumes the
+        imported conversation on the first message, under the bot's own
+        session_reset policy. No process claim or Finite identity is carried.
+        """
+        not_mapped = dict(self.routing_not_mapped)
+
+        def skip(reason: str) -> None:
+            not_mapped[reason] = not_mapped.get(reason, 0) + 1
+
+        sessions = _session_activity(
+            sessions_path, {route[0] for route in self.routes.values()}
+        )
+        mapped = []
+        if self.routes:
+            database = session_db_factory(database_path)
+            try:
+                for target_key, (session_id, entry, origin) in sorted(
+                    self.routes.items()
+                ):
+                    state = sessions.get(session_id)
+                    if state is None:
+                        skip("session-not-in-export")
+                        continue
+                    if state["ended"]:
+                        skip("session-ended-in-source")
+                        continue
+                    database.record_gateway_session_peer(
+                        session_id,
+                        source="telegram",
+                        user_id=origin.user_id,
+                        session_key=target_key,
+                        chat_id=origin.chat_id,
+                        chat_type=origin.chat_type,
+                        thread_id=origin.thread_id,
+                        display_name=entry.display_name or origin.chat_name,
+                        origin_json=json.dumps(origin.to_dict()),
+                    )
+                    if state["last_activity"] is not None:
+                        database.touch_session_activity(
+                            session_id, ts=state["last_activity"]
+                        )
+                        database.clear_session_activity_labels(session_id)
+                    mapped.append(session_id)
+            finally:
+                database.close()
+        return {
+            "mapped_session_ids": sorted(mapped),
+            "rekeyed_count": self.routing_rekeyed,
+            "not_mapped": not_mapped,
+        }
+
     # -- apply -------------------------------------------------------------
 
     def apply(self, transaction: Transaction) -> dict[str, Any]:
+        # The scheduling boundary is taken here, after the long session and
+        # database import, not when the installer started.
+        self.now = self.hooks.now().astimezone(timezone.utc).replace(microsecond=0)
         self._apply_soul(transaction)
-        self._apply_agents_review(transaction)
+        self._apply_agents(transaction)
         self._apply_config(transaction)
         self._apply_pairing(transaction)
         self._apply_skills(transaction)
         self._apply_scripts(transaction)
         self._apply_cron(transaction)
         self._apply_home(transaction)
-        self.result["path_rewrites"] = self.path_map.counts()
+        self.result["path_rewrites"] = self.rewriter.counts()
+        self.result["unrewritable_references"] = self.rewriter.unrewritable
         return self.result
 
     def _apply_soul(self, transaction: Transaction) -> None:
@@ -1337,19 +1917,87 @@ class FidelityInstall:
             raise MigrationError("source SOUL.md does not match the approved plan")
         transaction.replace(
             self.hermes_home / "SOUL.md",
-            _rewrite_text_bytes(data, self.path_map),
+            self.rewriter(data, ".hermes/SOUL.md"),
             0o600,
         )
         self.result["soul"] = "activated"
 
-    def _apply_agents_review(self, transaction: Transaction) -> None:
+    def _apply_agents(self, transaction: Transaction) -> None:
+        plan = self.plan["persona"]["agents_md"]
+        seed_bytes = _agents_seed(self.bundle)
+        expected = plan["seed"]["sha256"]
+        actual = hashlib.sha256(seed_bytes).hexdigest() if seed_bytes else None
+        if actual != expected:
+            raise MigrationError("staged box1 AGENTS.md seed does not match the plan")
+        seed = seed_bytes.decode("utf-8") if seed_bytes is not None else None
         review = self.target_root / Path(REVIEW_ONLY_RELATIVE.as_posix()) / "agents"
-        for path in self.plan["persona"]["agents_md"]["paths"]:
+        for item in plan["files"]:
+            path = item["path"]
+            data = self.snapshot.read_bytes(path)
             name = "home-AGENTS.md" if path == "AGENTS.md" else "hermes-AGENTS.md"
-            transaction.write_new(review / name, self.snapshot.read_bytes(path), 0o600)
-        self.result["agents_md"] = self.plan["persona"]["agents_md"]["policy"]
+            transaction.write_new(review / name, data, 0o600)
+            if item["status"] != "owner-additions-activated":
+                continue
+            _, additions = split_agents_md(data.decode("utf-8"), seed)
+            if (
+                hashlib.sha256(additions.encode()).hexdigest()
+                != item["addition_sha256"]
+            ):
+                raise MigrationError(
+                    "source AGENTS.md does not match the approved plan"
+                )
+            text = (
+                "<!-- Moved from box1 /home/node/AGENTS.md: the owner's additions. "
+                "The box1 platform notes were left out. -->\n\n" + additions + "\n"
+            )
+            transaction.write_new(
+                _target_path(self.target_root, TARGET_AGENTS_PATH),
+                self.rewriter(text.encode("utf-8"), "AGENTS.md"),
+                0o644,
+            )
+        self.result["agents_md"] = {
+            "files": {item["path"]: item["status"] for item in plan["files"]},
+            "target": plan["target"],
+            "seed_staged": plan["seed"]["staged"],
+        }
+
+    def _validate_config(self, config: dict[str, Any]) -> dict[str, Any]:
+        before = {
+            (issue["severity"], issue["message"])
+            for issue in self.hooks.validate_config(self.target_config)
+        }
+        after = self.hooks.validate_config(config)
+        new_errors = [
+            issue["message"]
+            for issue in after
+            if issue["severity"] == "error"
+            and (issue["severity"], issue["message"]) not in before
+        ]
+        if new_errors:
+            raise MigrationError(
+                "adopted settings fail target Hermes config validation: "
+                + "; ".join(sorted(new_errors))
+            )
+        return {
+            "validated": "target-validate_config_structure",
+            "warning_count": sum(1 for issue in after if issue["severity"] != "error"),
+        }
 
     def _apply_config(self, transaction: Transaction) -> None:
+        mode = stat.S_IMODE((self.hermes_home / "config.yaml").stat().st_mode)
+        rendered = _yaml().safe_dump(
+            self.new_config, sort_keys=False, allow_unicode=True
+        )
+        transaction.replace(
+            self.hermes_home / "config.yaml", rendered.encode("utf-8"), mode
+        )
+        self.result["config"] = self.config_result
+        self.result["telegram"] = {
+            "mode": self.telegram_mode if self.plan["telegram"]["activate"] else None,
+            "qualification": self.telegram_qualification,
+        }
+
+    def _build_config(self) -> tuple[dict[str, Any], dict[str, Any]]:
         config = copy.deepcopy(self.target_config)
         adopted, _ = adopted_settings(self.source_config)
         adopted = self.path_map.rewrite_value(adopted)
@@ -1372,6 +2020,7 @@ class FidelityInstall:
         else:
             model_outcome = "target-default"
         token, home, enabled, _ = self.telegram
+        telegram_outcome = "not-configured-in-source"
         if self.plan["telegram"]["activate"]:
             if not enabled or token is None:
                 raise MigrationError(
@@ -1382,12 +2031,21 @@ class FidelityInstall:
             if not isinstance(gateway, dict) or not isinstance(platforms, dict):
                 raise MigrationError("target gateway platforms are not a mapping")
             telegram = dict(platforms.get("telegram") or {})
-            telegram.update(
-                {"enabled": True, "token": token, **AGENTD_TELEGRAM_DEFAULTS}
-            )
             extra = dict(telegram.get("extra") or {})
             extra["dm_policy"] = "pairing"
             extra[TELEGRAM_PRESERVE_PENDING_KEY] = True
+            if self.telegram_mode == "live":
+                telegram.update(
+                    {"enabled": True, "token": token, **AGENTD_TELEGRAM_DEFAULTS}
+                )
+                telegram_outcome = "connected"
+            else:
+                # Rehearsal: the same block with no token and Telegram off, so
+                # a rehearsal copy can never poll the bot box1 still runs.
+                telegram.pop("token", None)
+                telegram.update({"enabled": False, **AGENTD_TELEGRAM_DEFAULTS})
+                extra[TELEGRAM_REHEARSAL_KEY] = True
+                telegram_outcome = "rehearsal-disabled-no-token"
             telegram["extra"] = extra
             if home is not None:
                 telegram["home_channel"] = {
@@ -1395,22 +2053,14 @@ class FidelityInstall:
                     "chat_id": home,
                     "name": "Telegram",
                 }
+                telegram_outcome += "-with-home-channel"
             platforms["telegram"] = telegram
-        mode = stat.S_IMODE((self.hermes_home / "config.yaml").stat().st_mode)
-        rendered = _yaml().safe_dump(config, sort_keys=False, allow_unicode=True)
-        transaction.replace(
-            self.hermes_home / "config.yaml", rendered.encode("utf-8"), mode
-        )
-        self.result["config"] = {
+        validation = self._validate_config(config)
+        return config, {
             "adopted_keys": self.plan["config"]["adopted_keys"],
             "model": model_outcome,
-            "telegram": "connected-with-home-channel"
-            if self.plan["telegram"]["activate"] and home
-            else (
-                "connected"
-                if self.plan["telegram"]["activate"]
-                else "not-configured-in-source"
-            ),
+            "telegram": telegram_outcome,
+            "validation": validation,
         }
 
     def _apply_pairing(self, transaction: Transaction) -> None:
@@ -1462,7 +2112,7 @@ class FidelityInstall:
             elif stat.S_ISREG(info.st_mode):
                 data = path.read_bytes()
                 if rewrite:
-                    data = _rewrite_text_bytes(data, self.path_map)
+                    data = self.rewriter(data, transaction.relative(destination))
                 transaction.write_new(destination, data, stat.S_IMODE(info.st_mode))
             else:
                 raise MigrationError(
@@ -1481,6 +2131,7 @@ class FidelityInstall:
                 transaction, source_root / relative, destination, rewrite=True
             )
         self.result["skills"] = {
+            "layout": self.plan["skills"]["layout"],
             "activated": sorted(
                 d["path"] for d in self.skill_decisions if d["outcome"] == "activated"
             ),
@@ -1489,6 +2140,7 @@ class FidelityInstall:
                 for d in self.skill_decisions
                 if d["outcome"] != "activated"
             ],
+            "review_only_source_edits": self.plan["skills"]["review_only"],
             "managed_not_activated": len(self.plan["skills"]["managed_not_activated"]),
             "hidden_review_only": self.plan["skills"]["hidden_review_only"],
         }
@@ -1513,8 +2165,12 @@ class FidelityInstall:
             return
         timezone_name = self._effective_timezone()
         outcomes: dict[str, list[str]] = {}
+        legacy: dict[str, dict[str, Any]] = {}
         transformed = []
         for job in jobs:
+            record = _legacy_execution_record(job)
+            if record:
+                legacy[job["id"]] = record
             new_job, outcome = self._transform_job(job, timezone_name)
             transformed.append(new_job)
             outcomes.setdefault(outcome, []).append(job["id"])
@@ -1523,11 +2179,18 @@ class FidelityInstall:
             "utf-8"
         )
         transaction.make_directory(self.hermes_home / "cron", 0o700)
-        transaction.write_new(self.hermes_home / "cron/jobs.json", data, 0o600)
+        jobs_path = self.hermes_home / "cron/jobs.json"
+        if self.cron_existing_empty:
+            transaction.replace(jobs_path, data, 0o600)
+        else:
+            transaction.write_new(jobs_path, data, 0o600)
         self.result["cron"] = {
             "count": len(jobs),
             "timezone": timezone_name or "server-local",
+            "scheduled_from": self.now.isoformat(),
+            "replaced_empty_target_store": self.cron_existing_empty,
             "outcomes": {key: sorted(value) for key, value in sorted(outcomes.items())},
+            "legacy_execution": legacy,
         }
 
     def _effective_timezone(self) -> str | None:
@@ -1554,8 +2217,14 @@ class FidelityInstall:
         self, job: dict[str, Any], timezone_name: str | None
     ) -> tuple[dict[str, Any], str]:
         job = json.loads(json.dumps(job))
-        for key in ("run_claim", "fire_claim"):
+        # The box1 scheduler's execution and recovery state does not carry
+        # over: a stale `last_status: error` would make the target's
+        # stale-error recovery re-arm the job to now on the first tick.
+        for key in CRON_EXECUTION_FIELDS_REMOVED:
             job.pop(key, None)
+        for key in CRON_STATUS_FIELDS_CLEARED:
+            if key in job:
+                job[key] = None
         for key in ("prompt", "workdir", "script"):
             if isinstance(job.get(key), str):
                 job[key] = self.path_map.rewrite_text(job[key])
@@ -1577,16 +2246,48 @@ class FidelityInstall:
             and not job.get("paused_at")
             and job.get("state") != "paused"
         )
+        repeat = job.get("repeat") if isinstance(job.get("repeat"), dict) else {}
+        times = repeat.get("times")
+        completed = repeat.get("completed") or 0
+        exhausted = (
+            isinstance(times, int)
+            and not isinstance(times, bool)
+            and times > 0
+            and isinstance(completed, int)
+            and completed >= times
+        )
+        if job.get("state") == "completed" or (exhausted and kind != "once"):
+            # Terminal on box1: keep the record, never let it fire again.
+            job["enabled"] = False
+            job["state"] = "completed"
+            job["next_run_at"] = None
+            outcome = (
+                "kept-completed:repeat-exhausted"
+                if exhausted and kind != "once"
+                else "kept-completed"
+            )
+            return job, outcome + ("+inference-route-normalized" if notes else "")
         if pause_reason and enabled:
             self._pause(job, pause_reason)
             return job, f"paused:{pause_reason.split(':', 1)[0]}"
+        if not enabled:
+            job["enabled"] = False
         outcome = "kept-disabled" if not enabled else "scheduled"
         if kind in ("cron", "interval") and enabled:
+            was_error = job.get("state") == "error"
             job["next_run_at"] = _next_run(schedule, self.now, timezone_name)
-            outcome = "recurring-next-run-recomputed"
+            job["state"] = "scheduled"
+            outcome = (
+                "recurring-error-state-rescheduled"
+                if was_error
+                else "recurring-next-run-recomputed"
+            )
         elif kind == "once" and enabled:
             run_at = schedule.get("run_at")
-            if job.get("last_run_at") or job.get("state") == "completed":
+            if job.get("last_run_at") or exhausted:
+                job["enabled"] = False
+                job["state"] = "completed"
+                job["next_run_at"] = None
                 outcome = "oneshot-already-ran-kept"
             elif not isinstance(run_at, str):
                 self._pause(job, "legacy-migration: one-shot has no run_at")
@@ -1605,6 +2306,7 @@ class FidelityInstall:
                     outcome = "paused:oneshot-missed-during-cutover"
                 else:
                     job["next_run_at"] = run_at
+                    job["state"] = "scheduled"
                     outcome = "oneshot-scheduled"
         if notes:
             outcome += "+inference-route-normalized"
@@ -1668,7 +2370,17 @@ class FidelityInstall:
                         raise MigrationError(
                             f"source snapshot file cannot be read: {path}"
                         )
-                    transaction.copy_stream(destination, handle, member.mode)
+                    label = transaction.relative(destination)
+                    if member.size <= TEXT_REWRITE_LIMIT_BYTES:
+                        transaction.write_new(
+                            destination,
+                            self.rewriter(handle.read(), label),
+                            member.mode,
+                        )
+                    else:
+                        reader = _MarkerScanningReader(handle)
+                        transaction.copy_stream(destination, reader, member.mode)
+                        self.rewriter.note_stream(label, reader.found)
                 elif member.issym():
                     link = self._placed_link(path, member.linkname)
                     if link is None:
@@ -1702,6 +2414,60 @@ class FidelityInstall:
         if resolved.parts and resolved.parts[0] in self.plan["home"]["placed"]:
             return link
         return None
+
+
+def _legacy_execution_record(job: dict[str, Any]) -> dict[str, Any]:
+    """What the box1 scheduler left on a job, without error text."""
+    record: dict[str, Any] = {}
+    for key in ("last_status", "last_run_at", "state", "failure_streak"):
+        if job.get(key) not in (None, "", 0):
+            record[key] = job[key]
+    for key in ("last_error", "last_delivery_error"):
+        if job.get(key):
+            record[f"had_{key}"] = True
+    claims = sorted(
+        key for key in ("run_claim", "fire_claim", "manual_run_at") if job.get(key)
+    )
+    if claims:
+        record["cleared"] = claims
+    repeat = job.get("repeat")
+    if isinstance(repeat, dict) and repeat.get("times"):
+        record["repeat"] = {
+            "times": repeat.get("times"),
+            "completed": repeat.get("completed"),
+        }
+    return record
+
+
+def _session_activity(
+    sessions_path: Path, wanted: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Last activity and end state of the wanted sessions in sessions.jsonl."""
+    found: dict[str, dict[str, Any]] = {}
+    if not wanted:
+        return found
+    with sessions_path.open("rb") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            session = json.loads(line)
+            session_id = str(session.get("id") or "")
+            if session_id not in wanted:
+                continue
+            stamps = [
+                float(message["timestamp"])
+                for message in session.get("messages") or []
+                if isinstance(message, dict)
+                and isinstance(message.get("timestamp"), (int, float))
+            ]
+            started = session.get("started_at")
+            if isinstance(started, (int, float)):
+                stamps.append(float(started))
+            found[session_id] = {
+                "last_activity": max(stamps) if stamps else None,
+                "ended": session.get("ended_at") is not None,
+            }
+    return found
 
 
 def _parents(path: str) -> list[str]:
@@ -1763,8 +2529,6 @@ def session_rewriter(
     return rewrite, path_map
 
 
-def text_file_rewriter(
-    plan: dict[str, Any],
-) -> tuple[Callable[[bytes], bytes], PathMap]:
-    path_map = PathMap(plan["path_map"]["placed_home_entries"])
-    return (lambda data: _rewrite_text_bytes(data, path_map)), path_map
+def text_file_rewriter(plan: dict[str, Any]) -> TextRewriter:
+    """Rewriter for activated payload files (memories, workspace roots)."""
+    return TextRewriter(plan["path_map"]["placed_home_entries"])

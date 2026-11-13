@@ -74,10 +74,23 @@ def _prepare_memory_store(
     source_database: Path,
     imported_database: Path,
     memory_store_factory: Callable[[Path], Any],
+    transform_fact: Callable[[str], str] | None = None,
 ) -> int:
     _copy_sqlite(source_database, imported_database)
     store = memory_store_factory(imported_database)
     try:
+        if transform_fact is not None:
+            # Full fidelity: rewrite legacy paths in fact content through the
+            # target MemoryStore before its vectors are rebuilt.
+            facts = store.list_facts(
+                limit=_memory_database_fact_count(imported_database) + 1
+            )
+            for fact in facts:
+                content = fact.get("content")
+                if isinstance(content, str):
+                    rewritten = transform_fact(content)
+                    if rewritten != content:
+                        store.update_fact(int(fact["fact_id"]), content=rewritten)
         store.rebuild_all_vectors()
     finally:
         store.close()
@@ -181,10 +194,15 @@ def install_bundle(
     memory_store_factory: Callable[[Path], Any] = _default_memory_store_factory,
     mode: str = "default",
     fidelity_hooks: Any = None,
+    telegram_mode: str = "rehearsal",
+    expected_telegram_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Install a verified bundle into one stopped, freshly-created target root.
 
-    ``mode`` must equal the mode the approved manifest was sealed with.
+    ``mode`` must equal the mode the approved manifest was sealed with. In
+    full-fidelity mode ``telegram_mode`` defaults to ``rehearsal``, which
+    writes the Telegram block without a token; only ``live`` writes the real
+    token and it requires the qualified Runtime fingerprint.
     """
     bundle = Path(bundle)
     target_root = Path(target_root)
@@ -224,10 +242,11 @@ def install_bundle(
         )
 
     fidelity = None
-    transform_memory: Callable[[bytes], bytes] | None = None
+    transform_memory: Callable[..., bytes] | None = None
     rewrite_session = None
     session_paths = None
     memory_paths = None
+    workspace_paths = None
     if manifest_mode == "full-fidelity":
         from legacy_hermes_fidelity import (
             FidelityInstall,
@@ -242,9 +261,13 @@ def install_bundle(
             target_root,
             _read_source_inventory(bundle),
             fidelity_hooks or default_hooks(),
+            telegram_mode=telegram_mode,
+            expected_telegram_fingerprint=expected_telegram_fingerprint,
         )
         rewrite_session, session_paths = session_rewriter(manifest["fidelity"])
-        transform_memory, memory_paths = text_file_rewriter(manifest["fidelity"])
+        memory_paths = text_file_rewriter(manifest["fidelity"])
+        workspace_paths = text_file_rewriter(manifest["fidelity"])
+        transform_memory = memory_paths
     try:
         return _install_bundle_files(
             bundle,
@@ -261,7 +284,7 @@ def install_bundle(
             fidelity,
             transform_memory,
             rewrite_session,
-            (session_paths, memory_paths),
+            (session_paths, memory_paths, workspace_paths),
         )
     finally:
         if fidelity is not None:
@@ -281,9 +304,9 @@ def _install_bundle_files(
     session_db_factory: Callable[[Path], Any],
     memory_store_factory: Callable[[Path], Any],
     fidelity: Any,
-    transform_memory: Callable[[bytes], bytes] | None,
+    transform_memory: Callable[..., bytes] | None,
     rewrite_session: Callable[[dict[str, Any]], dict[str, Any]] | None,
-    path_counters: tuple[Any, Any],
+    path_counters: tuple[Any, Any, Any],
 ) -> dict[str, Any]:
     payload = bundle / "payload"
     created_files: list[Path] = []
@@ -301,7 +324,16 @@ def _install_bundle_files(
             and record["kind"] == "file"
             and record["target"].startswith("agent/hermes-home/memories/")
         ):
-            content = transform_memory(source.read_bytes())
+            content = transform_memory(source.read_bytes(), record["target"])
+            expected_sha256 = hashlib.sha256(content).hexdigest()
+        elif (
+            path_counters[2] is not None
+            and record["kind"] == "file"
+            and record["target"].startswith("workspace/legacy-box1/")
+        ):
+            # Full fidelity: activated workspace, dev and uploads files get
+            # the same path rewrite; binary ones are listed in the receipt.
+            content = path_counters[2](source.read_bytes(), record["target"])
             expected_sha256 = hashlib.sha256(content).hexdigest()
         try:
             target.resolve(strict=False).relative_to(target_root.resolve())
@@ -352,12 +384,25 @@ def _install_bundle_files(
         sessions_result = _import_sessions(
             payload / "sessions.jsonl", imported_db, session_db_factory, rewrite_session
         )
+        routing_result = None
+        if fidelity is not None:
+            routing_result = fidelity.apply_routing(
+                imported_db, session_db_factory, payload / "sessions.jsonl"
+            )
         _checkpoint_and_check(imported_db, "state.db")
+        fact_rewriter = None
+        if fidelity is not None:
+            fact_paths = path_counters[1]
+
+            def fact_rewriter(text: str) -> str:
+                return fact_paths.path_map.rewrite_text(text)
+
         if source_memory_db.exists():
             memory_fact_count = _prepare_memory_store(
                 source_memory_db,
                 imported_memory_db,
                 memory_store_factory,
+                fact_rewriter,
             )
             if memory_fact_count != manifest["memory"]["fact_count"]:
                 raise MigrationError("not every structured memory fact was imported")
@@ -435,35 +480,83 @@ def _install_bundle_files(
             "status": "installed-offline-awaiting-runtime-verification",
         }
         if fidelity is not None:
-            session_paths, memory_paths = path_counters
+            session_paths, memory_paths, workspace_paths = path_counters
             receipt["mode"] = manifest["mode"]
             receipt["fidelity"] = {
                 "plan": manifest["fidelity"],
                 "installed": {
                     **fidelity_result,
+                    "routing": routing_result,
                     "session_path_rewrites": session_paths.counts(),
                     "memory_path_rewrites": memory_paths.counts(),
+                    "workspace_path_rewrites": workspace_paths.counts(),
+                    "unrewritable_references": fidelity_result[
+                        "unrewritable_references"
+                    ]
+                    + memory_paths.unrewritable
+                    + workspace_paths.unrewritable,
                 },
             }
         shutil.rmtree(work_root, ignore_errors=True)
         _write_private_json(receipt_path, receipt)
         return receipt
-    except BaseException:
-        if transaction is not None:
-            transaction.rollback()
-        for database in reversed(swapped_databases):
-            database.unlink(missing_ok=True)
-        for backup, original in reversed(moved_state_files):
-            if backup.exists():
-                os.replace(backup, original)
-        if moved_state_files:
-            _fsync_directory(target_db.parent)
-        for path in reversed(created_files):
-            path.unlink(missing_ok=True)
-        for path in reversed(created_directories):
-            try:
-                path.rmdir()
-            except OSError:
-                pass
-        shutil.rmtree(migration_root, ignore_errors=True)
+    except BaseException as error:
+        failures = _rollback(
+            transaction,
+            swapped_databases,
+            moved_state_files,
+            target_db,
+            created_files,
+            created_directories,
+            migration_root,
+        )
+        if failures:
+            error.add_note(
+                "rollback incomplete; restore the pre-import archive: "
+                + "; ".join(failures)
+            )
         raise
+
+
+def _rollback(
+    transaction: Any,
+    swapped_databases: list[Path],
+    moved_state_files: list[tuple[Path, Path]],
+    target_db: Path,
+    created_files: list[Path],
+    created_directories: list[Path],
+    migration_root: Path,
+) -> list[str]:
+    """Undo a failed install step by step; one failing step never skips the rest."""
+    failures: list[str] = []
+
+    def attempt(label: str, action: Callable[[], Any]) -> None:
+        try:
+            action()
+        except Exception as exc:
+            failures.append(f"{label}: {type(exc).__name__}")
+
+    if transaction is not None:
+        try:
+            failures.extend(transaction.rollback())
+        except Exception as exc:
+            failures.append(f"full-fidelity rollback: {type(exc).__name__}")
+    for database in reversed(swapped_databases):
+        attempt(f"remove {database.name}", lambda d=database: d.unlink(missing_ok=True))
+    for backup, original in reversed(moved_state_files):
+        if backup.exists():
+            attempt(
+                f"restore {original.name}",
+                lambda b=backup, o=original: os.replace(b, o),
+            )
+    if moved_state_files:
+        attempt("fsync state dir", lambda: _fsync_directory(target_db.parent))
+    for path in reversed(created_files):
+        attempt(f"remove {path.name}", lambda p=path: p.unlink(missing_ok=True))
+    for path in reversed(created_directories):
+        try:
+            path.rmdir()
+        except OSError:
+            pass
+    shutil.rmtree(migration_root, ignore_errors=True)
+    return failures
