@@ -29,6 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 mod apple_container;
+mod creation_admission;
+pub use creation_admission::CreationAdmissionGuard;
 pub mod health_reports;
 pub mod hosted_hermes_caddy;
 mod hosted_hermes_guard;
@@ -277,6 +279,8 @@ pub enum RunnerError {
     CoreRequest(String),
     #[error("runtime Core bootstrap is temporarily unavailable; operation remains retryable")]
     RuntimeBootstrapUnavailable,
+    #[error("creation admission deferred: {0}")]
+    CreationAdmissionDeferred(String),
     #[error("Core returned HTTP {status}: {body}")]
     CoreStatus { status: u16, body: String },
     #[error("Core response was invalid JSON: {0}")]
@@ -397,6 +401,10 @@ pub enum RunOnceOutcome {
     LaunchFailed {
         request_id: String,
         failure_message: String,
+    },
+    LaunchDeferred {
+        request_id: String,
+        reason: String,
     },
     RuntimeRestarted {
         request_id: String,
@@ -682,6 +690,17 @@ where
                 failure_message: "Trial restore paused pending billing authorization".into(),
             });
         }
+        // Admit before issuing any launch credentials. A temporary refusal
+        // leaves the existing lease to expire, so current and older Core can
+        // reclaim the same request without a terminal failure or orphaned key.
+        // Keep the host guard through launch and completion, including errors.
+        let _admission = match self.launcher.admit_creation(&lease) {
+            Ok(guard) => guard,
+            Err(RunnerError::CreationAdmissionDeferred(reason)) => {
+                return Ok(RunOnceOutcome::LaunchDeferred { request_id, reason });
+            }
+            Err(error) => return Err(error),
+        };
         let launch_options = match self.runtime_launch_options(&lease, &lease_token) {
             Ok(options) => options,
             Err(error @ RunnerError::RuntimeBootstrapUnavailable) => return Err(error),
@@ -1526,6 +1545,14 @@ where
 }
 
 pub trait RuntimeLauncher {
+    /// Recheck admission after leasing and before provisioning credentials or
+    /// changing compute. The caller must hold the returned guard through launch.
+    fn admit_creation(
+        &self,
+        _lease: &AgentCreationLease,
+    ) -> Result<CreationAdmissionGuard, RunnerError> {
+        Ok(CreationAdmissionGuard::default())
+    }
     fn archive_trial(
         &mut self,
         _lease: &RuntimeControlLease,
@@ -1674,6 +1701,12 @@ impl<L> RuntimeLauncher for Box<L>
 where
     L: RuntimeLauncher + ?Sized,
 {
+    fn admit_creation(
+        &self,
+        lease: &AgentCreationLease,
+    ) -> Result<CreationAdmissionGuard, RunnerError> {
+        (**self).admit_creation(lease)
+    }
     fn archive_trial(
         &mut self,
         l: &RuntimeControlLease,

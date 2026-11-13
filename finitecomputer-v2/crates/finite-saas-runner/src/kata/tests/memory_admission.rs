@@ -51,11 +51,8 @@ fn memory_admission_rechecks_before_replacing_compute_or_writing_launch_state() 
         &"0".repeat(64),
         true,
     );
-    let error = launcher
-        .run_fresh(&plan, &lease, &RuntimeLaunchOptions::default(), &mut || {
-            Ok(())
-        })
-        .unwrap_err();
+    let error = launcher.admit_creation(&lease).err().unwrap();
+    assert!(matches!(error, RunnerError::CreationAdmissionDeferred(_)));
     assert!(error.to_string().contains("memory observation unavailable"));
     assert!(provider_mutations(&fake).is_empty());
     assert_eq!(

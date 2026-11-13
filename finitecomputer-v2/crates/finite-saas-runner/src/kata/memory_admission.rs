@@ -1,7 +1,7 @@
 //! Admission headroom for the fleet's 8-GiB Kata guests. These observations
 //! prevent starting another guest under pressure; they do not reserve memory
 //! against subsequent growth of existing guests or guarantee 32 full guests.
-use super::{KataConfig, KataRuntimeOperationLock, RunnerError};
+use super::{CreationAdmissionGuard, KataConfig, RunnerError};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 #[cfg(unix)]
@@ -13,6 +13,9 @@ const GIB: u64 = 1024 * 1024 * 1024;
 // shared-memory headroom. /dev/shm can fill while MemAvailable remains high.
 const MIN_AVAILABLE_MEMORY: u64 = 24 * GIB;
 const MIN_AVAILABLE_SHARED_MEMORY: u64 = 16 * GIB;
+
+#[cfg(test)]
+mod core_tests;
 
 #[derive(Debug)]
 pub(super) struct MemoryAdmission {
@@ -58,7 +61,7 @@ impl MemoryAdmission {
 
     pub fn require_capacity(&self) -> Result<(), RunnerError> {
         self.rejection_reason().map_or(Ok(()), |reason| {
-            Err(RunnerError::RuntimeLaunch(reason.into()))
+            Err(RunnerError::CreationAdmissionDeferred(reason.into()))
         })
     }
 }
@@ -77,20 +80,31 @@ fn parse_available_memory(text: &str) -> Option<u64> {
 /// admit guests from the same pre-launch observation. Refuse contention instead
 /// of waiting past a creation lease. Existing lifecycle operations do not wait
 /// on this lock and can still free resources.
-pub(super) fn lock_creation(config: &KataConfig) -> Result<KataRuntimeOperationLock, RunnerError> {
+pub(super) fn admit(
+    config: &KataConfig,
+    observe: impl FnOnce() -> MemoryAdmission,
+) -> Result<CreationAdmissionGuard, RunnerError> {
+    let lock = lock_creation(config)?;
+    observe().require_capacity()?;
+    Ok(CreationAdmissionGuard::with_host_lock(lock))
+}
+
+pub(super) fn lock_creation(config: &KataConfig) -> Result<File, RunnerError> {
     std::fs::create_dir_all(&config.work_root)
-        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        .map_err(|error| RunnerError::CreationAdmissionDeferred(error.to_string()))?;
     let mut options = OpenOptions::new();
     options.create(true).truncate(false).read(true).write(true);
     #[cfg(unix)]
     options.mode(0o600);
     let file = options
         .open(config.work_root.join("kata-creation.lock"))
-        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        .map_err(|error| RunnerError::CreationAdmissionDeferred(error.to_string()))?;
     file.try_lock().map_err(|_| {
-        RunnerError::RuntimeLaunch("Kata memory admission: another creation is in progress".into())
+        RunnerError::CreationAdmissionDeferred(
+            "Kata memory admission: another creation is in progress".into(),
+        )
     })?;
-    Ok(KataRuntimeOperationLock { file })
+    Ok(file)
 }
 
 #[cfg(test)]

@@ -2425,13 +2425,6 @@ impl KataLauncher {
         options: &RuntimeLaunchOptions,
         renew: &mut dyn FnMut() -> Result<(), RunnerError>,
     ) -> Result<u16, RunnerError> {
-        let _creation_lock = if self.config.memory_admission {
-            let lock = memory_admission::lock_creation(&self.config)?;
-            MemoryAdmission::read(&self.config.host_root).require_capacity()?;
-            Some(lock)
-        } else {
-            None
-        };
         self.prepare_plan(plan)?;
         // The host lock can wait beyond the original lease. The journal proves
         // provenance, never current launch or billing authority.
@@ -2469,6 +2462,17 @@ impl KataLauncher {
 }
 
 impl RuntimeLauncher for KataLauncher {
+    fn admit_creation(
+        &self,
+        _lease: &AgentCreationLease,
+    ) -> Result<CreationAdmissionGuard, RunnerError> {
+        if !self.config.memory_admission {
+            return Ok(CreationAdmissionGuard::default());
+        }
+        memory_admission::admit(&self.config, || {
+            MemoryAdmission::read(&self.config.host_root)
+        })
+    }
     fn archive_trial(
         &mut self,
         lease: &RuntimeControlLease,
