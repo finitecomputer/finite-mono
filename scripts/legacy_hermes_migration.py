@@ -4,7 +4,9 @@
 The target installer is deliberately offline. It imports conversation history
 through the target Hermes version, preserves the complete source home in an
 inert sealed archive, activates only compatible state, and hash-fences the
-newly-created Finite identity and Chat client store.
+newly-created Finite identity and Chat client store. The opt-in
+``--mode full-fidelity`` also activates the bot's persona, Telegram connection,
+skills, scheduled jobs and home files (see legacy_hermes_fidelity.py).
 """
 
 from __future__ import annotations
@@ -97,6 +99,12 @@ def _parser() -> argparse.ArgumentParser:
     manifest.add_argument("--source-image-manifest-digest", required=True)
     manifest.add_argument("--source-container-image-id", required=True)
     manifest.add_argument("--source-volume-inventory-sha256", required=True)
+    manifest.add_argument(
+        "--mode",
+        choices=("default", "full-fidelity"),
+        default="default",
+        help="full-fidelity also activates persona, Telegram, skills, cron and home files",
+    )
 
     verify = subparsers.add_parser(
         "verify", help="verify a sealed bundle without mutation"
@@ -112,6 +120,12 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--expected-manifest-sha256", required=True)
     install.add_argument("--expected-target-identity-sha256", required=True)
     install.add_argument("--expected-target-chat-client-sha256", required=True)
+    install.add_argument(
+        "--mode",
+        choices=("default", "full-fidelity"),
+        default="default",
+        help="must match the mode the approved manifest was sealed with",
+    )
     return parser
 
 
@@ -169,6 +183,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                     container_image_id=args.source_container_image_id,
                     source_inventory_sha256=args.source_volume_inventory_sha256,
                 ),
+                mode=args.mode,
             )
         elif args.command == "verify":
             result = verify_bundle(args.bundle)
@@ -180,6 +195,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 expected_manifest_sha256=args.expected_manifest_sha256,
                 expected_identity_sha256=args.expected_target_identity_sha256,
                 expected_chat_client_sha256=args.expected_target_chat_client_sha256,
+                mode=args.mode,
             )
     except MigrationError as exc:
         print(f"error: {exc}", file=sys.stderr)

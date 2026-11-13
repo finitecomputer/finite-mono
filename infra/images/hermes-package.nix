@@ -40,6 +40,13 @@ upstream.override {
             mv "$site/agent-patched" "$site/agent"
             chmod -R u+w "$site/agent"
             ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-finite-inference.patch}
+            test -L "$site/plugins"
+            cp -RL "$site/plugins" "$site/plugins-patched"
+            rm "$site/plugins"
+            mv "$site/plugins-patched" "$site/plugins"
+            chmod -R u+w "$site/plugins"
+            ${pkgs.patch}/bin/patch --fuzz=0 -d "$site" -p1 < ${./patches/hermes-telegram-preserve-pending.patch}
+            rm -f "$site/plugins/platforms/telegram/__pycache__/adapter."*.pyc
             rm -f "$site/gateway/__pycache__/run."*.pyc
             rm -f "$site/gateway/__pycache__/slash_commands."*.pyc "$site/hermes_cli/__pycache__/runtime_provider."*.pyc
             rm -f "$site/agent/__pycache__/auxiliary_client."*.pyc

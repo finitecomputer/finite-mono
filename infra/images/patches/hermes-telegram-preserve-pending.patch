@@ -1,0 +1,31 @@
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -2870,6 +2870,16 @@
+         self._background_tasks.add(self._polling_error_task)
+         self._polling_error_task.add_done_callback(self._background_tasks.discard)
+ 
++    def _preserve_pending_updates_on_start(self) -> bool:
++        """Finite: keep the Bot API queue on a cold start when opted in.
++
++        ``extra.preserve_pending_updates: true`` is set when a bot moves to a
++        new host, so messages sent while it was offline are still answered.
++        Without the key, a cold start drops the stale queue as upstream does.
++        """
++        value = (self.config.extra or {}).get("preserve_pending_updates")
++        return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
++
+     async def _delete_webhook_best_effort(
+         self, *, require_success: bool = False
+     ) -> bool:
+@@ -4984,7 +4994,10 @@
+                     # On a cold first boot drop the stale Bot API queue; on a
+                     # watcher reconnect after an outage preserve it so messages
+                     # sent while the bot was offline are delivered (#46621).
+-                    drop_pending_updates=not is_reconnect,
++                    drop_pending_updates=(
++                        not is_reconnect
++                        and not self._preserve_pending_updates_on_start()
++                    ),
+                     error_callback=_polling_error_callback,
+                     require_progress=not is_reconnect,
+                 )
