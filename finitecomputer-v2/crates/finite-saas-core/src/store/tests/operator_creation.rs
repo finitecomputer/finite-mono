@@ -159,7 +159,14 @@ async fn a_committed_creation_always_carries_the_owner_identity() {
         ] {
             let mut bad_input = input("lock@example.com", "lock");
             bad_input.owner_identity = Some(bad);
-            assert!(db.admin_create_agent_for_owner(bad_input).await.is_err());
+            let error = db
+                .admin_create_agent_for_owner(bad_input)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, CoreError::OperatorOwnerIdentityRequired),
+                "{error:?}"
+            );
         }
         assert!(db.all("operator_agent_creations").await.is_empty());
         assert_eq!(db.all("users").await.len(), 1, "nothing was written");
@@ -306,6 +313,18 @@ async fn operator_creation_refuses_ambiguous_or_trial_owners() {
         let agent_email = agent.project.agent_email.clone().unwrap();
         let error = db
             .admin_create_agent_for_owner(input(&agent_email.to_uppercase(), "agent-address"))
+            .await
+            .unwrap_err();
+        assert!(refusal(error).contains("Agent's own address"));
+        // A mixed-case address an older or imported row holds still matches.
+        db.query_json(
+            "UPDATE projects SET agent_email = 'Legacy.Bot@Finite.Chat' WHERE id = $1
+             RETURNING to_jsonb(id)",
+            &[&agent.project.id],
+        )
+        .await;
+        let error = db
+            .admin_create_agent_for_owner(input("legacy.bot@finite.chat", "legacy-address"))
             .await
             .unwrap_err();
         assert!(refusal(error).contains("Agent's own address"));

@@ -317,67 +317,114 @@ async fn an_org_holding_an_operator_agent_can_never_start_an_event_trial() {
     .await;
 }
 
+/// Lease and complete the oldest requested creation through the normal
+/// Runner path, so the operator Agent has an active runtime link.
+async fn launch(db: &TestDb, runner: &str) -> AgentCreationRequest {
+    db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+        id: "artifact-trial".into(),
+        kind: RuntimeArtifactKind::OciImage,
+        reference: format!(
+            "ghcr.io/finitecomputer/agent-runtime:t@sha256:{}",
+            "c".repeat(64)
+        ),
+        version_label: "t".into(),
+        source_git_sha: None,
+        finitec_version: None,
+        hermes_source_ref: None,
+        finite_platform_plugin_ref: None,
+        state_schema_version: "state-v1".into(),
+        base_image: None,
+        canary_runtime_id: None,
+        recover_known_good_chat: false,
+        promoted: true,
+        now: None,
+    })
+    .await
+    .unwrap();
+    let request = lease(db, runner).await;
+    let capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+        restart: true,
+        recover_known_good_chat: false,
+        runtime_upgrade: true,
+        stop: true,
+        runtime_retirement: false,
+        trial_archive: false,
+    });
+    db.complete_agent_creation_request(CompleteAgentCreationRequestInput {
+        request_id: request.id.clone(),
+        runner_id: runner.into(),
+        lease_token: format!("lease-{runner}"),
+        source_host_id: format!("host-{runner}"),
+        source_machine_id: format!("machine-{runner}"),
+        runtime_artifact_id: Some("artifact-trial".into()),
+        state_schema_version: Some("state-v1".into()),
+        provider_runtime_handle: None,
+        contact_endpoint: None,
+        runtime_capabilities: Some(capabilities),
+        display_name: None,
+        hostname: None,
+        runtime_host: Some(format!("host-{runner}")),
+        runtime_status: Some(RuntimeSummaryStatus::Online),
+        active_inference_profile: None,
+        hermes_available: Some(true),
+        published_app_urls: Vec::new(),
+        agent_npub: None,
+        now: None,
+    })
+    .await
+    .unwrap();
+    request
+}
+
+/// A launched operator Agent (an active runtime link, not a pending
+/// request) is left out of the count too, through a lapse and recovery.
+#[tokio::test]
+async fn a_running_operator_agent_never_uses_the_owners_allowance() {
+    with_isolated_postgres(|db| async move {
+        link(&db, ADMIN_EMAIL, ADMIN_WORKOS).await;
+        activate_billing(&db, "running@example.com", "workos_running", "running").await;
+        db.admin_create_agent_for_owner(confirmed(
+            "running@example.com",
+            "workos_running",
+            "op-running",
+        ))
+        .await
+        .unwrap();
+        launch(&db, "running").await;
+        let links = db
+            .query_json("SELECT to_jsonb(active) FROM project_runtime_links", &[])
+            .await;
+        assert_eq!(links, vec![serde_json::json!(true)]);
+        set_subscription(
+            &db,
+            "running@example.com",
+            "running",
+            BillingSubscriptionStatus::Canceled,
+            "lapse",
+        )
+        .await;
+        set_subscription(
+            &db,
+            "running@example.com",
+            "running",
+            BillingSubscriptionStatus::Active,
+            "back",
+        )
+        .await;
+        exactly_one_own_agent(&db, "running@example.com", "workos_running", "running").await;
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_trial_never_stops_an_operator_agent() {
     with_isolated_postgres(|db| async move {
         link(&db, ADMIN_EMAIL, ADMIN_WORKOS).await;
-        db.upsert_runtime_artifact(UpsertRuntimeArtifactInput {
-            id: "artifact-trial".into(),
-            kind: RuntimeArtifactKind::OciImage,
-            reference: format!(
-                "ghcr.io/finitecomputer/agent-runtime:t@sha256:{}",
-                "c".repeat(64)
-            ),
-            version_label: "t".into(),
-            source_git_sha: None,
-            finitec_version: None,
-            hermes_source_ref: None,
-            finite_platform_plugin_ref: None,
-            state_schema_version: "state-v1".into(),
-            base_image: None,
-            canary_runtime_id: None,
-            recover_known_good_chat: false,
-            promoted: true,
-            now: None,
-        })
-        .await
-        .unwrap();
         let org = customer(&db, "stopped").await;
         db.admin_create_agent_for_owner(confirmed("stopped@example.com", "stopped", "stopped"))
             .await
             .unwrap();
-        let request = lease(&db, "trial").await;
-        let capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
-            restart: true,
-            recover_known_good_chat: false,
-            runtime_upgrade: true,
-            stop: true,
-            runtime_retirement: false,
-            trial_archive: false,
-        });
-        db.complete_agent_creation_request(CompleteAgentCreationRequestInput {
-            request_id: request.id.clone(),
-            runner_id: "trial".into(),
-            lease_token: "lease-trial".into(),
-            source_host_id: "host-trial".into(),
-            source_machine_id: "machine-trial".into(),
-            runtime_artifact_id: Some("artifact-trial".into()),
-            state_schema_version: Some("state-v1".into()),
-            provider_runtime_handle: None,
-            contact_endpoint: None,
-            runtime_capabilities: Some(capabilities),
-            display_name: None,
-            hostname: None,
-            runtime_host: Some("host-trial".into()),
-            runtime_status: Some(RuntimeSummaryStatus::Online),
-            active_inference_profile: None,
-            hermes_available: Some(true),
-            published_app_urls: Vec::new(),
-            agent_npub: None,
-            now: None,
-        })
-        .await
-        .unwrap();
+        launch(&db, "trial").await;
         // A redeemed, unpaid, past-deadline trial written as older Core
         // could have written it: the org's access is blocked.
         db.query_json(
