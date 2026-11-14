@@ -166,6 +166,12 @@ async fn operator_creation_is_admin_only_and_needs_the_hosted_device() {
         let unconfigured = admin_router(db.store.clone());
         let (status, refused) = send_json(&unconfigured, "POST", PATH, &admin(), Some(body)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{refused}");
+        assert!(
+            refused["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("hosted chat device")),
+            "{refused}"
+        );
         assert!(db.all("projects").await.is_empty());
         assert!(db.all("operator_agent_creations").await.is_empty());
         assert!(
