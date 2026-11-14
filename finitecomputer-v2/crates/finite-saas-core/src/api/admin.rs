@@ -189,3 +189,70 @@ pub(super) async fn admin_request_runtime_upgrade(
         .await?;
     Ok(Json(RuntimeControlRequestView::from(request)))
 }
+
+/// Operator creation of an ordinary Agent for the account named by
+/// `ownerEmail`. Optional fields default to a self-created Standard Agent.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct AdminCreateAgentForOwnerRequest {
+    owner_email: String,
+    display_name: String,
+    reason: String,
+    idempotency_key: String,
+    #[serde(default)]
+    hosting_tier: Option<HostingTier>,
+    #[serde(default)]
+    runtime_resource_class: Option<crate::RuntimeResourceClass>,
+    #[serde(default)]
+    target_source_host_id: Option<String>,
+    #[serde(default)]
+    owner_chat_account_id: Option<String>,
+    #[serde(default)]
+    profile_picture_url: Option<String>,
+}
+
+pub(super) async fn admin_create_agent_for_owner(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+    Json(input): Json<AdminCreateAgentForOwnerRequest>,
+) -> Result<Json<OperatorCreateAgentResult>, ApiError> {
+    let identity = require_admin_identity(&state, &headers).await?;
+    if let Some(host) = input.target_source_host_id.as_deref()
+        && !state.auth.has_kata_host(&normalize_source_host_id(host)?)
+    {
+        return Err(ApiError::conflict(
+            "target host must match an active host-bound Kata credential",
+        ));
+    }
+    Ok(Json(
+        state
+            .store
+            .admin_create_agent_for_owner(OperatorCreateAgentInput {
+                admin: OperatorIdentity {
+                    email: identity.email,
+                    workos_user_id: identity.workos_user_id,
+                },
+                surface: OperatorCreationSurface::AdminApi,
+                owner_email: input.owner_email,
+                display_name: input.display_name,
+                reason: input.reason,
+                idempotency_key: input.idempotency_key,
+                hosting_tier: input.hosting_tier,
+                runtime_resource_class: input.runtime_resource_class,
+                target_source_host_id: input.target_source_host_id,
+                owner_chat_account_id: input.owner_chat_account_id,
+                profile_picture_url: input.profile_picture_url,
+                placement_override: state.agent_creation_placement,
+                now: None,
+            })
+            .await?,
+    ))
+}
+
+pub(super) async fn admin_operator_agent_creations(
+    State(state): State<CoreApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<OperatorAgentCreation>>, ApiError> {
+    require_admin_identity(&state, &headers).await?;
+    Ok(Json(state.store.operator_agent_creations().await?))
+}

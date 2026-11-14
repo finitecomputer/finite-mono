@@ -369,6 +369,7 @@ fn schema_is_postgres_first_and_contains_first_bridge_tables() {
         "finite_private_daily_resets",
         "finite_private_notice_claims",
         "runner_capacity_fences",
+        "operator_agent_creations",
     ] {
         assert!(CORE_SCHEMA_SQL.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")));
     }

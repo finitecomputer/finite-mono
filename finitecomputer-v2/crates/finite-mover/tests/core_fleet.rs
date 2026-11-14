@@ -691,3 +691,146 @@ fn the_mover_role_reads_only_what_core_role_sql_grants() {
         None
     );
 }
+
+/// An Agent an operator created for a never-signed-in person, through
+/// Core's own store and lease path: the roster leaves it off until the
+/// person signs in with that email, then lists it under their email.
+#[test]
+fn an_operator_created_agent_is_listed_under_its_owner_once_they_sign_in() {
+    use finite_saas_core::store::CoreStore;
+    use finite_saas_core::*;
+
+    let db = CoreDb::new();
+    let project_id = block_on(async {
+        let store = CoreStore::connect(&db.url).await.unwrap();
+        store
+            .link_verified_user(LinkVerifiedUserInput {
+                verified_email: "admin@finite.vip".into(),
+                workos_user_id: "user_admin".into(),
+                now: None,
+            })
+            .await
+            .unwrap();
+        store
+            .upsert_runtime_artifact(UpsertRuntimeArtifactInput {
+                id: "artifact-mover".into(),
+                kind: RuntimeArtifactKind::OciImage,
+                reference: format!(
+                    "ghcr.io/finitecomputer/agent-runtime:m@sha256:{}",
+                    "e".repeat(64)
+                ),
+                version_label: "m".into(),
+                source_git_sha: None,
+                finitec_version: None,
+                hermes_source_ref: None,
+                finite_platform_plugin_ref: None,
+                state_schema_version: "state-v1".into(),
+                base_image: None,
+                canary_runtime_id: None,
+                recover_known_good_chat: false,
+                promoted: true,
+                now: None,
+            })
+            .await
+            .unwrap();
+        let created = store
+            .admin_create_agent_for_owner(OperatorCreateAgentInput {
+                admin: OperatorIdentity {
+                    email: "admin@finite.vip".into(),
+                    workos_user_id: "user_admin".into(),
+                },
+                surface: OperatorCreationSurface::Cli,
+                owner_email: "frankie@example.test".into(),
+                display_name: "Frankie Bot".into(),
+                reason: "box1 migration".into(),
+                idempotency_key: "mover-roster".into(),
+                hosting_tier: None,
+                runtime_resource_class: None,
+                target_source_host_id: None,
+                owner_chat_account_id: None,
+                profile_picture_url: None,
+                placement_override: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        let capabilities = RuntimeCapabilitiesEnvelope::V1(RuntimeCapabilitiesV1 {
+            restart: true,
+            recover_known_good_chat: false,
+            runtime_upgrade: true,
+            stop: true,
+            runtime_retirement: false,
+            trial_archive: false,
+        });
+        let lease = store
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "runner-lat-a".into(),
+                lease_token: "lease-mover".into(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    runtime_capabilities: Some(capabilities.clone()),
+                    ..RunnerLeaseCapacity::default()
+                }),
+                source_host_id: Some("lat-a".into()),
+                now: None,
+            })
+            .await
+            .unwrap()
+            .expect("the operator creation leases");
+        assert_eq!(lease.request.id, created.request.id);
+        store
+            .complete_agent_creation_request(CompleteAgentCreationRequestInput {
+                request_id: lease.request.id.clone(),
+                runner_id: "runner-lat-a".into(),
+                lease_token: "lease-mover".into(),
+                source_host_id: "lat-a".into(),
+                source_machine_id: "machine-frankie".into(),
+                runtime_artifact_id: Some("artifact-mover".into()),
+                state_schema_version: Some("state-v1".into()),
+                provider_runtime_handle: None,
+                contact_endpoint: None,
+                runtime_capabilities: Some(capabilities),
+                display_name: None,
+                hostname: None,
+                runtime_host: Some("lat-a".into()),
+                runtime_status: Some(RuntimeSummaryStatus::Online),
+                active_inference_profile: None,
+                hermes_available: Some(true),
+                published_app_urls: Vec::new(),
+                agent_npub: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        created.project.id
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"), brains());
+    let roster = fleet.roster().unwrap();
+    assert!(
+        roster.people.is_empty(),
+        "a pending owner has no WorkOS user"
+    );
+
+    block_on(async {
+        CoreStore::connect(&db.url)
+            .await
+            .unwrap()
+            .link_verified_user(LinkVerifiedUserInput {
+                verified_email: "Frankie@example.test".into(),
+                workos_user_id: "user_frankie".into(),
+                now: None,
+            })
+            .await
+            .unwrap();
+    });
+    let roster = fleet.roster().unwrap();
+    assert_eq!(roster.people.len(), 1);
+    let person = &roster.people[0];
+    assert_eq!(person.workos_id, "user_frankie");
+    assert_eq!(person.email, "frankie@example.test");
+    assert_eq!(person.agents.len(), 1);
+    assert_eq!(person.agents[0].old, project_id);
+    assert_eq!(person.agents[0].name, "Frankie Bot");
+}

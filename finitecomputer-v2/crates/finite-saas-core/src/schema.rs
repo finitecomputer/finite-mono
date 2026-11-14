@@ -91,7 +91,9 @@ pub const CORE_SCHEMA_SQL: &str = concat!(
     "\n",
     include_str!("../migrations/0045_runtime_moves_npub_optional.sql"),
     "\n",
-    include_str!("../migrations/0046_runtime_move_holds.sql")
+    include_str!("../migrations/0046_runtime_move_holds.sql"),
+    "\n",
+    include_str!("../migrations/0047_operator_agent_creations.sql")
 );
 
 pub const RUNTIME_UPGRADE_ROLLBACK_RESCUE_SQL: &str =

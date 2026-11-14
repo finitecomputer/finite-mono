@@ -236,6 +236,16 @@ pub enum CoreError {
         "account email change conflicts with current identity, destination, or operation state"
     )]
     AccountEmailChangeConflict,
+    #[error("owner email must be one address with an @ and no spaces")]
+    InvalidOperatorOwnerEmail,
+    #[error("operator reason is required and at most 2000 characters")]
+    InvalidOperatorReason,
+    /// The admin named by the CLI or session is not one linked Core account.
+    #[error("operator must be a linked Core account with this exact email and WorkOS user")]
+    OperatorIdentityMismatch,
+    /// Fail-closed refusal of an operator creation; the text names the case.
+    #[error("{0}")]
+    OperatorAgentCreationRefused(&'static str),
     #[error("failed to format current time")]
     TimeFormat(#[from] time::error::Format),
     #[error("store error: {0}")]
