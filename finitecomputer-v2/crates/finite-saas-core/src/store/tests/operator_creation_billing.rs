@@ -416,6 +416,77 @@ async fn a_running_operator_agent_never_uses_the_owners_allowance() {
     .await;
 }
 
+/// A cold relocation queues a new creation request for the same Project.
+/// Requested or launching, it is still the operator Agent, so it must not
+/// take the owner's paid slot; the owner's own creations stay limited.
+#[tokio::test]
+async fn a_relocating_operator_agent_never_uses_the_owners_allowance() {
+    with_isolated_postgres(|db| async move {
+        link(&db, ADMIN_EMAIL, ADMIN_WORKOS).await;
+        activate_billing(&db, "moving@example.com", "workos_moving", "moving").await;
+        let created = db
+            .admin_create_agent_for_owner(confirmed(
+                "moving@example.com",
+                "workos_moving",
+                "op-moving",
+            ))
+            .await
+            .unwrap();
+        launch(&db, "moving").await;
+        let runtime = db.all("agent_runtimes").await.remove(0);
+        let relocation = db
+            .admin_request_runtime_relocate_exact(AdminRuntimeRelocateExactInput {
+                admin_verified_email: ADMIN_EMAIL.into(),
+                admin_workos_user_id: ADMIN_WORKOS.into(),
+                project_id: created.project.id.clone(),
+                expected_agent_runtime_id: runtime["id"].as_str().unwrap().into(),
+                expected_source_host_id: "host-moving".into(),
+                expected_source_machine_id: "machine-moving".into(),
+                target_source_host_id: "host-moving-target".into(),
+                expected_agent_npub: format!("npub1{}", "q".repeat(58)),
+                durable_state_manifest_sha256: "a".repeat(64),
+                operator_observed_compute_absent: true,
+                now: None,
+            })
+            .await
+            .unwrap();
+        assert_ne!(relocation.id, created.request.id);
+        assert_eq!(relocation.project_id, created.project.id);
+
+        // Requested: the owner's one paid Agent is still available.
+        self_serve(&db, "moving@example.com", "workos_moving", "own-moving-1")
+            .await
+            .unwrap();
+        // Launching: the relocation's target host leases it.
+        let leased = db
+            .lease_agent_creation_request(LeaseAgentCreationRequestInput {
+                runner_id: "moving-target".into(),
+                lease_token: "lease-moving-target".into(),
+                lease_seconds: Some(300),
+                runner_capacity: Some(RunnerLeaseCapacity {
+                    runner_classes: vec![RunnerClass::Kata],
+                    ..RunnerLeaseCapacity::default()
+                }),
+                source_host_id: Some("host-moving-target".into()),
+                now: None,
+            })
+            .await
+            .unwrap()
+            .expect("the relocation leases on its target host")
+            .request;
+        assert_eq!(leased.id, relocation.id);
+        // Control: the owner's own creations are still limited to one.
+        let error = self_serve(&db, "moving@example.com", "workos_moving", "own-moving-2")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, CoreError::AgentCreationEntitlementExhausted),
+            "{error:?}"
+        );
+    })
+    .await;
+}
+
 #[tokio::test]
 async fn a_trial_never_stops_an_operator_agent() {
     with_isolated_postgres(|db| async move {
