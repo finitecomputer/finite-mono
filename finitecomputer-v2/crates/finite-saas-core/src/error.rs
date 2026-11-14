@@ -240,6 +240,17 @@ pub enum CoreError {
     InvalidOperatorOwnerEmail,
     #[error("operator reason is required and at most 2000 characters")]
     InvalidOperatorReason,
+    #[error("operator idempotency key must be at most 128 characters")]
+    InvalidOperatorIdempotencyKey,
+    /// Self-serve keys may not use the operator creation prefix.
+    #[error("agent creation idempotency keys must not start with operator:")]
+    ReservedAgentCreationIdempotencyKey,
+    /// Open chat admission is never allowed for an operator creation.
+    #[error("operator creation requires the owner's provisioned WorkOS user and chat account")]
+    OperatorOwnerIdentityRequired,
+    /// WorkOS or the hosted chat device could not provision the owner.
+    #[error("owner sign-in identity unavailable: {0}")]
+    OwnerIdentityUnavailable(String),
     /// The admin named by the CLI or session is not one linked Core account.
     #[error("operator must be a linked Core account with this exact email and WorkOS user")]
     OperatorIdentityMismatch,

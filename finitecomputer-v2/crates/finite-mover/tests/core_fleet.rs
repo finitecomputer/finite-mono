@@ -694,7 +694,8 @@ fn the_mover_role_reads_only_what_core_role_sql_grants() {
 
 /// An Agent an operator created for a never-signed-in person, through
 /// Core's own store and lease path: the roster leaves it off until the
-/// person signs in with that email, then lists it under their email.
+/// person signs in with that email as the provisioned WorkOS user, then
+/// lists it under their email.
 #[test]
 fn an_operator_created_agent_is_listed_under_its_owner_once_they_sign_in() {
     use finite_saas_core::store::CoreStore;
@@ -747,7 +748,14 @@ fn an_operator_created_agent_is_listed_under_its_owner_once_they_sign_in() {
                 hosting_tier: None,
                 runtime_resource_class: None,
                 target_source_host_id: None,
-                owner_chat_account_id: None,
+                // The operator path provisions this WorkOS user and its
+                // hosted-chat account before creating the Agent.
+                owner_identity: Some(OwnerSignInIdentity {
+                    workos_user_id: "user_frankie".into(),
+                    chat_account_id: "f".repeat(64),
+                }),
+                existing_account_confirmed: false,
+                cli_os_user: Some("root".into()),
                 profile_picture_url: None,
                 placement_override: None,
                 now: None,

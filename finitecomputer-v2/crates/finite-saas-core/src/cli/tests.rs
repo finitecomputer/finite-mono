@@ -6,6 +6,7 @@ use finite_saas_core::{
 use std::sync::Mutex;
 mod arguments;
 mod finite_private;
+mod operator_creation;
 mod optional_listener;
 mod rollout_execution;
 mod rollout_planning;

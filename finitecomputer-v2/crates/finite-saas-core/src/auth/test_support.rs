@@ -392,3 +392,57 @@ pub(crate) fn generate_key(kid: &str) -> TestKey {
         },
     }
 }
+
+/// The shared WorkOS test registry as the user-management API would list
+/// it, for the operator-creation backend: every user with this email.
+pub(crate) fn registry_users_by_email(email: &str) -> Vec<crate::owner_identity::WorkosUserRecord> {
+    source()
+        .users
+        .read()
+        .expect("test WorkOS user registry should not be poisoned")
+        .values()
+        .filter(|user| user.email.trim().eq_ignore_ascii_case(email.trim()))
+        .map(registry_record)
+        .collect()
+}
+
+pub(crate) fn registry_user(id: &str) -> Option<crate::owner_identity::WorkosUserRecord> {
+    source()
+        .users
+        .read()
+        .expect("test WorkOS user registry should not be poisoned")
+        .get(id)
+        .map(registry_record)
+}
+
+/// Create (or replace) a WorkOS user in the shared registry.
+pub(crate) fn registry_put_user(id: &str, email: &str, email_verified: bool) {
+    register_user_record(id, id, email, email_verified);
+}
+
+/// What WorkOS does once the person proves the inbox at first sign-in.
+pub(crate) fn registry_verify_email(id: &str) {
+    if let Some(user) = source()
+        .users
+        .write()
+        .expect("test WorkOS user registry should not be poisoned")
+        .get_mut(id)
+    {
+        user.email_verified = true;
+    }
+}
+
+/// A session token for an existing registry user, as AuthKit issues one
+/// after sign-in. Unlike `access_token_with_subject` it never rewrites the
+/// user record.
+pub(crate) fn session_token_for(subject: &str, organization_id: Option<&str>) -> String {
+    encode_claims(TestClaims::valid(subject, organization_id), key())
+}
+
+fn registry_record(user: &WorkosUser) -> crate::owner_identity::WorkosUserRecord {
+    crate::owner_identity::WorkosUserRecord {
+        id: user.id.clone(),
+        email: user.email.clone(),
+        email_verified: user.email_verified,
+    }
+}

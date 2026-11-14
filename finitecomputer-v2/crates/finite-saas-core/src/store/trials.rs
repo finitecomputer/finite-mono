@@ -141,6 +141,8 @@ impl CoreStore {
                 "Trials are available to new subscription accounts only.",
             ));
         }
+        // The org row lock above serializes this with operator creation.
+        refuse_operator_org(&*tx, &input.customer_org_id).await?;
         if let Some(existing) = tx.query_opt("SELECT campaign_id,stripe_session_id,state FROM trial_redemptions WHERE customer_org_id=$1 AND state <> 'expired'", &[&input.customer_org_id]).await.map_err(store_error)? {
             if existing.get::<_, String>(0) != id || existing.get::<_, String>(2) != "reserved" {
                 return Err(CoreError::TrialUnavailable("This account has already used a trial."));
@@ -246,6 +248,7 @@ pub(super) async fn redeem<C: GenericClient + Sync>(
 ) -> CoreResult<()> {
     let row = tx.query_opt("SELECT id,stripe_subscription_id,state FROM trial_redemptions WHERE attempt_id=$1 AND customer_org_id=$2 FOR UPDATE", &[&attempt,&account.customer_org_id]).await.map_err(store_error)?
         .ok_or(CoreError::TrialUnavailable("Trial checkout has no reserved seat."))?;
+    refuse_operator_org(tx, &account.customer_org_id).await?;
     let previous: Option<String> = row.get(1);
     if row.get::<_, String>(2) == "expired"
         || previous
@@ -258,5 +261,24 @@ pub(super) async fn redeem<C: GenericClient + Sync>(
     }
     tx.execute("UPDATE trial_redemptions SET state='redeemed',stripe_subscription_id=$2,redeemed_at=COALESCE(redeemed_at,CURRENT_TIMESTAMP) WHERE id=$1",
         &[&row.get::<_, String>(0),&account.stripe_subscription_id]).await.map_err(store_error)?;
+    Ok(())
+}
+
+/// An org that holds an operator-created Agent never takes an event trial:
+/// a trial that ends unpaid stops every Agent in its org (migration 0047).
+async fn refuse_operator_org<C: GenericClient + Sync>(tx: &C, org: &str) -> CoreResult<()> {
+    let operator: bool = tx
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM operator_agent_creations WHERE customer_org_id = $1)",
+            &[&org],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0);
+    if operator {
+        return Err(CoreError::TrialUnavailable(
+            "This account holds an Agent an operator created for it and cannot use a trial.",
+        ));
+    }
     Ok(())
 }
