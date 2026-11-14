@@ -1,0 +1,51 @@
+name: Code map
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - infra/code-map/**
+      - .github/workflows/code-map.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: code-map-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: depot-ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      NIX_CONFIG: access-tokens = github.com=${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: Test snapshot metrics
+        run: nix develop .#code-map -c python3 infra/code-map/test_metrics.py
+      - name: Build static output
+        run: nix develop .#code-map -c python3 infra/code-map/build.py --output "$RUNNER_TEMP/code-map-site"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: code-map-${{ github.sha }}
+          path: ${{ runner.temp }}/code-map-site
+          retention-days: 30
+      - name: Publish private Finite Sites output
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          FINITE_CODE_MAP_GIT_USERNAME: ${{ secrets.FINITE_CODE_MAP_GIT_USERNAME }}
+          FINITE_CODE_MAP_GIT_PASSWORD: ${{ secrets.FINITE_CODE_MAP_GIT_PASSWORD }}
+          FINITE_CODE_MAP_GIT_REMOTE: ${{ vars.FINITE_CODE_MAP_GIT_REMOTE }}
+        run: |
+          test -n "$FINITE_CODE_MAP_GIT_USERNAME" || { echo 'Missing scoped Sites username'; exit 1; }
+          test -n "$FINITE_CODE_MAP_GIT_PASSWORD" || { echo 'Missing scoped Sites password'; exit 1; }
+          test -n "$FINITE_CODE_MAP_GIT_REMOTE" || { echo 'Missing Sites Project remote'; exit 1; }
+          nix develop .#code-map -c python3 infra/code-map/publish.py \
+            --site "$RUNNER_TEMP/code-map-site" --remote "$FINITE_CODE_MAP_GIT_REMOTE"
