@@ -631,3 +631,94 @@ async fn migration_0047_is_additive_reapplies_and_constrains_its_record() {
     })
     .await;
 }
+
+/// A request Core refuses from rows that already exist never reaches WorkOS
+/// or the hosted device through the entry point: no WorkOS user is created
+/// and no chat identity is read or minted for it.
+#[tokio::test]
+async fn an_ineligible_request_never_reaches_workos_or_hosted_chat() {
+    with_isolated_postgres(|db| async move {
+        let (provisioner, backend) = crate::owner_identity::test_support::test_provisioner();
+        let untouched = |case: &str| {
+            assert!(backend.created().is_empty(), "{case}: WorkOS user created");
+            assert!(
+                backend.chat_reads.lock().unwrap().is_empty(),
+                "{case}: hosted chat called"
+            );
+        };
+
+        // A verified WorkOS operator with no matching linked Core admin.
+        let error = crate::owner_identity::operator_create_agent(
+            &db,
+            &provisioner,
+            input("no-admin@example.com", "no-admin"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, CoreError::OperatorIdentityMismatch), "{error:?}");
+        untouched("admin");
+        link(&db, ADMIN_EMAIL, ADMIN_WORKOS).await;
+
+        // A pending owner whose Finite Private grant an admin revoked.
+        let grant = db
+            .approve_finite_private_grant(ApproveFinitePrivateGrantInput {
+                verified_email: "revoked@example.com".into(),
+                workos_user_id: None,
+                limit_profile_id: None,
+                now: None,
+            })
+            .await
+            .unwrap();
+        db.query_json(
+            "UPDATE finite_private_grants SET status = 'revoked' WHERE id = $1 RETURNING to_jsonb(id)",
+            &[&grant.id],
+        )
+        .await;
+        let error = crate::owner_identity::operator_create_agent(
+            &db,
+            &provisioner,
+            input("revoked@example.com", "revoked"),
+        )
+        .await
+        .unwrap_err();
+        assert!(refusal(error).contains("Finite Private"));
+        untouched("revoked grant");
+
+        // A confirmed, signed-in owner on a live event trial.
+        link(&db, "trial@example.com", "workos_trial").await;
+        let trial_org = org_of(&db, "trial@example.com").await;
+        db.query_json(
+            "WITH campaign AS (
+               INSERT INTO trial_campaigns (id, name, code_hash, seat_limit, created_by_workos_user_id)
+               VALUES ('campaign', 'Workshop', 'hash', 5, 'w') RETURNING id)
+             INSERT INTO trial_redemptions
+               (id, campaign_id, customer_org_id, attempt_id, stripe_session_id, state, checkout_expires_at, redeemed_at)
+             SELECT 'redemption', id, $1, 'attempt', 'cs_trial', 'reserved', NOW(), NULL FROM campaign
+             RETURNING to_jsonb(id)",
+            &[&trial_org],
+        )
+        .await;
+        let error = crate::owner_identity::operator_create_agent(
+            &db,
+            &provisioner,
+            confirmed("trial@example.com", "workos_trial", "trial"),
+        )
+        .await
+        .unwrap_err();
+        assert!(refusal(error).contains("event trial"));
+        untouched("trial");
+        assert!(db.all("operator_agent_creations").await.is_empty());
+
+        // The counters see an eligible request: one WorkOS user, one chat read.
+        crate::owner_identity::operator_create_agent(
+            &db,
+            &provisioner,
+            input("eligible@example.com", "eligible"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(backend.created().len(), 1);
+        assert_eq!(backend.chat_reads.lock().unwrap().len(), 1);
+    })
+    .await;
+}
