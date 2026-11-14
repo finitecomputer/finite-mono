@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::Parser;
-use finite_private_limiter::{AdmissionMode, LimiterConfig, WatchdogConfig, app};
+use finite_private_limiter::{AdmissionMode, LimiterConfig, NumesConfig, WatchdogConfig, app};
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -68,6 +68,7 @@ fn config_from_env() -> Result<LimiterConfig> {
         "UPSTREAM_STREAM_IDLE_TIMEOUT_SECS",
         config.upstream_stream_idle_timeout,
     )?;
+    config.numes = NumesConfig::from_env()?;
     config.watchdog = WatchdogConfig {
         enabled: bool_env("FINITE_PRIVATE_WATCHDOG_ENABLED")?,
         interval: duration_env(

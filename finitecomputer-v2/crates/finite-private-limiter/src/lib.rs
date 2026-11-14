@@ -16,7 +16,9 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::{sleep, timeout};
 
 mod metrics;
+mod numes;
 use metrics::{LimiterMetrics, RequestTimer, TerminalOutcome};
+pub use numes::NumesConfig;
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
 const DEFAULT_MODEL: &str = "glm-5-3-flash";
@@ -67,6 +69,8 @@ pub struct LimiterConfig {
     /// When set, omitted `chat_template_kwargs.enable_thinking` /
     /// `chat_template_kwargs.thinking` is filled. Explicit client values win.
     pub default_enable_thinking: Option<bool>,
+    /// Independent marketplace admission. Absent by default; never uses Core grants.
+    pub numes: Option<NumesConfig>,
 }
 
 /// Admission operating mode. See [`LimiterConfig`](struct.LimiterConfig.html)
@@ -116,6 +120,7 @@ impl LimiterConfig {
             metrics_auth_token: None,
             default_reasoning_effort: None,
             default_enable_thinking: None,
+            numes: None,
         }
     }
 }
@@ -151,6 +156,7 @@ struct AppState {
     upstream_client: Client,
     metrics: LimiterMetrics,
     diagnostic_slots: Arc<Semaphore>,
+    numes: Option<numes::Admission>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -163,6 +169,8 @@ pub enum LimiterConfigError {
     HttpClient(String),
     #[error("invalid model routing: {0}")]
     InvalidModelRouting(String),
+    #[error("invalid Numes configuration: {0}")]
+    InvalidNumesConfig(String),
 }
 
 impl LimiterConfig {
@@ -212,6 +220,35 @@ impl LimiterConfig {
 
 pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
     validate_config(&config)?;
+    if let Some(numes) = &config.numes {
+        numes.validate()?;
+        if !config
+            .default_model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.:/".contains(&b))
+            || config
+                .upstream_model
+                .as_ref()
+                .is_some_and(|model| model != &config.default_model)
+        {
+            return Err(LimiterConfigError::InvalidNumesConfig(
+                "Numes requires one canonical, header-safe upstream model".into(),
+            ));
+        }
+        if [
+            &config.finite_usage_api_service_key,
+            &config.vllm_internal_api_key,
+        ]
+        .into_iter()
+        .chain(config.metrics_auth_token.iter())
+        .chain(config.admission_allowlist.iter())
+        .any(|key| key == &numes.api_key || key == &numes.control_api_key)
+        {
+            return Err(LimiterConfigError::InvalidNumesConfig(
+                "Numes credentials must be dedicated".into(),
+            ));
+        }
+    }
     let http_client = |connect_timeout| {
         Client::builder()
             .connect_timeout(connect_timeout)
@@ -224,6 +261,7 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
     let state = AppState {
         client: http_client(HTTP_CONNECT_TIMEOUT)?,
         upstream_client: http_client(upstream_connect_timeout(config.upstream_first_byte_timeout))?,
+        numes: config.numes.as_ref().map(numes::Admission::new),
         config: Arc::new(config),
         metrics: LimiterMetrics::default(),
         diagnostic_slots: Arc::new(Semaphore::new(DIAGNOSTIC_WRITE_CONCURRENCY)),
@@ -238,6 +276,10 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         .route("/metrics", get(metrics))
         .route("/v1/chat/completions", post(proxy_openai))
         .route("/v1/responses", post(proxy_openai))
+        .route(
+            "/admin/numes/capacity",
+            get(numes::capacity).post(numes::set_capacity),
+        )
         .with_state(state))
 }
 
@@ -350,7 +392,15 @@ async fn metrics(State(state): State<AppState>, headers: HeaderMap) -> Response 
     }
     (
         [("content-type", "text/plain; version=0.0.4")],
-        state.metrics.render(state.config.admission_mode.as_str()),
+        format!(
+            "{}{}",
+            state.metrics.render(state.config.admission_mode.as_str()),
+            state
+                .numes
+                .as_ref()
+                .map(numes::Admission::metrics)
+                .unwrap_or_default()
+        ),
     )
         .into_response()
 }
@@ -621,6 +671,11 @@ async fn proxy_openai(
             "missing_authorization",
         );
     };
+    if let Some(admission) = &state.numes
+        && admission.authenticates(&presented_api_key)
+    {
+        return numes::serve(state.clone(), admission.clone(), uri, headers, body).await;
+    }
     // Single decode of the request body; every consumer below reads the parsed
     // value or the extracted facts instead of re-parsing. Unparseable bodies
     // decode to Null so they are still forwarded (fail-open).

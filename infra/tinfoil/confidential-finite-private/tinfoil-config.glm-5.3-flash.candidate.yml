@@ -75,7 +75,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "ghcr.io/finitecomputer/private-limiter@sha256:a0138304201310299b948827ac21ce1d5ada124330624e405f897e98a60f5f5e"
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:b4883cfef5f48cf667a6acd438ab0aa36ed5cd473c7aa480fc8ea35b52499db5"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"
@@ -96,10 +96,15 @@ containers:
       - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
       - UPSTREAM_BODY_TIMEOUT_SECS: "600"
       - UPSTREAM_STREAM_IDLE_TIMEOUT_SECS: "600"
+      - NUMES_MAX_CONCURRENT: "0"
+      - NUMES_MAX_OUTPUT_TOKENS: "4096"
+      - NUMES_REQUEST_TIMEOUT_SECS: "120"
     secrets:
       - FINITE_PRIVATE_METRICS_TOKEN
       - FINITE_USAGE_API_SERVICE_KEY
       - VLLM_INTERNAL_API_KEY
+      - NUMES_API_KEY
+      - NUMES_CONTROL_API_KEY
     networks: [model-net, core-api]
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8002/live"]
