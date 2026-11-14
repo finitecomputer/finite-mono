@@ -119,7 +119,7 @@ where
                  WHERE requests.customer_org_id = $1
                    AND requests.status IN ('requested', 'launching')
                    AND NOT EXISTS (SELECT 1 FROM operator_agent_creations operator
-                                   WHERE operator.agent_creation_request_id = requests.id))
+                                   WHERE operator.project_id = requests.project_id))
              )::BIGINT",
             &[&customer_org_id],
         )
