@@ -42,6 +42,36 @@ def temporary_repository(
 
 
 class FinitePrivateGlm53CandidateTests(unittest.TestCase):
+    def test_health_callers_cannot_cut_off_the_engine_health_window(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        for old, new in (
+            ('SGLANG_HEALTH_CHECK_TIMEOUT: "20"', 'SGLANG_HEALTH_CHECK_TIMEOUT: "30"'),
+            ('READINESS_TIMEOUT_SECS: "25"', 'READINESS_TIMEOUT_SECS: "5"'),
+            ('      timeout: 25s', '      timeout: 5s'),
+        ):
+            with self.subTest(setting=old):
+                with temporary_repository(
+                    main_text=original.replace(old, new)
+                ) as directory:
+                    violations = check_repository(Path(directory), release_ready=True)
+                self.assertTrue(
+                    any("health budget" in item for item in violations), violations
+                )
+
+    def test_model_health_budget_cannot_be_declared_on_the_limiter(self) -> None:
+        original = (ROOT / MAIN_CANDIDATE).read_text(encoding="utf-8")
+        text = original.replace('      - SGLANG_HEALTH_CHECK_TIMEOUT: "20"\n', '')
+        text = text.replace(
+            '      - READINESS_TIMEOUT_SECS: "25"',
+            '      - SGLANG_HEALTH_CHECK_TIMEOUT: "20"\n'
+            '      - READINESS_TIMEOUT_SECS: "25"',
+        )
+        with temporary_repository(main_text=text) as directory:
+            violations = check_repository(Path(directory), release_ready=True)
+        self.assertTrue(
+            any("model health budget" in item for item in violations), violations
+        )
+
     def test_checked_in_preparation_contract_passes(self) -> None:
         self.assertEqual(check_repository(ROOT), [])
 

@@ -83,7 +83,7 @@ status() {
 http_status() {
   local path="$1"
   local status_code
-  status_code="$(curl -sS --max-time 10 -o /dev/null -w '%{http_code}' "$ENDPOINT$path" 2>/dev/null || true)"
+  status_code="$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' "$ENDPOINT$path" 2>/dev/null || true)"
   if [ -z "$status_code" ]; then
     status_code="curl_error"
   fi
@@ -96,7 +96,7 @@ probe_endpoint() {
   local body_file
   local status_code
   body_file="$(mktemp)"
-  status_code="$(curl -sS --max-time 10 -o "$body_file" -w '%{http_code}' "$ENDPOINT$path" || true)"
+  status_code="$(curl -sS --max-time 30 -o "$body_file" -w '%{http_code}' "$ENDPOINT$path" || true)"
   cat "$body_file"
   printf '\n'
   rm -f "$body_file"

@@ -24,7 +24,7 @@ parse_status() {
       and (.id | type == "string" and test("^[a-zA-Z0-9-]+$"))
       and (.status | type == "string" and length > 0)
       and (.gpus | type == "number" and . >= 0 and . == floor)
-    then [.id, (if .status == "ready" then 1 else 0 end), .gpus] | @tsv
+    then [.id, (if (.status == "ready" or .status == "running") then 1 else 0 end), .gpus] | @tsv
     else error("invalid container status") end'
 }
 
@@ -99,7 +99,7 @@ main() {
     fi
   fi
   # 503 is a valid dependency report; transport errors, redirects and HTML are not.
-  if http_code="$(curl -sS --max-time 10 -o "$tmp/health.json" -w '%{http_code}' -- "$HEALTH_URL" 2>/dev/null)" \
+  if http_code="$(curl -sS --max-time 30 -o "$tmp/health.json" -w '%{http_code}' -- "$HEALTH_URL" 2>/dev/null)" \
     && [[ "$http_code" == 200 || "$http_code" == 503 ]] \
     && components="$(parse_health "$(date +%s)" < "$tmp/health.json")"; then
     i=0
