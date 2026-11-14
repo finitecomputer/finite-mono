@@ -32,15 +32,17 @@ impl CoreStore {
     }
 
     /// Read-only: how the operator path gets the owner's sign-in identity.
-    /// Refuses early what the transaction would refuse anyway (bad input,
-    /// an ambiguous email, a signed-in account without confirmation) so
-    /// nothing is created at WorkOS for it.
+    /// Runs every refusal the transaction would make from rows that exist
+    /// now, in the same order, so nothing is created at WorkOS or the hosted
+    /// device for a request Core refuses anyway. The transaction repeats
+    /// each check under its locks for races.
     pub async fn operator_owner_identity_plan(
         &self,
         input: &OperatorCreateAgentInput,
     ) -> CoreResult<OwnerIdentityPlan> {
         let wanted = normalize(input)?;
         let client = self.connection().await?;
+        linked_admin_user_id(&**client, &input.admin).await?;
         if let Some(existing) = select_record_by_key(&**client, &wanted.idempotency_key).await? {
             return Ok(OwnerIdentityPlan::Reuse(OwnerSignInIdentity {
                 workos_user_id: existing.owner.workos_user_id,
@@ -48,17 +50,24 @@ impl CoreStore {
             }));
         }
         refuse_ambiguous_owner_email(&**client, &wanted.owner_email).await?;
-        match select_user_by_email(&**client, &wanted.owner_email).await? {
-            Some(user) if user.status == UserLinkStatus::Linked => {
-                refuse_unconfirmed_existing_account(input)?;
-                Ok(OwnerIdentityPlan::Linked {
-                    workos_user_id: user
-                        .workos_user_id
-                        .ok_or_else(|| CoreError::Store("linked user has no WorkOS user".into()))?,
-                })
-            }
-            _ => Ok(OwnerIdentityPlan::Unlinked),
+        let Some(owner) = select_user_by_email(&**client, &wanted.owner_email).await? else {
+            return Ok(OwnerIdentityPlan::Unlinked);
+        };
+        if owner.status == UserLinkStatus::Linked {
+            refuse_unconfirmed_existing_account(input)?;
         }
+        if let Some(org) = select_personal_org_by_owner(&**client, &owner.id).await? {
+            refuse_trial_org(&**client, &org).await?;
+        }
+        refuse_inactive_private_grant(&**client, &owner).await?;
+        if owner.status != UserLinkStatus::Linked {
+            return Ok(OwnerIdentityPlan::Unlinked);
+        }
+        Ok(OwnerIdentityPlan::Linked {
+            workos_user_id: owner
+                .workos_user_id
+                .ok_or_else(|| CoreError::Store("linked user has no WorkOS user".into()))?,
+        })
     }
 
     /// Create an ordinary Agent owned by the account named by
