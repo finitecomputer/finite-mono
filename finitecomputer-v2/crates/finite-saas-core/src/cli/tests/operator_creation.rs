@@ -274,8 +274,20 @@ async fn the_preview_commits_nothing_anywhere_and_execute_commits_once() {
     assert_eq!(count(&url, "operator_agent_creations").await, 1);
     assert_eq!(backend.created.load(Ordering::SeqCst), 1);
 
-    // The admin is verified with WorkOS before Core is touched.
+    // The admin is verified with WorkOS, not just found in Core: a linked
+    // Core account outside the operator org is refused.
+    CoreStore::connect(&url)
+        .await
+        .unwrap()
+        .link_verified_user(LinkVerifiedUserInput {
+            verified_email: "member@finite.vip".into(),
+            workos_user_id: "user_member".into(),
+            now: None,
+        })
+        .await
+        .unwrap();
     let mut impostor = parse(&["--execute"]);
+    impostor.admin_email = "member@finite.vip".into();
     impostor.admin_workos_user_id = "user_member".into();
     impostor.idempotency_key = "impostor".into();
     let error = run_agent_create_for_owner(&impostor, &url, &provisioner, "austin".into(), None)

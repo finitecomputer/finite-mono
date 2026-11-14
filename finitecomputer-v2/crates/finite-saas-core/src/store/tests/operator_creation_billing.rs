@@ -6,7 +6,7 @@ use super::operator_creation::{
     ADMIN_EMAIL, ADMIN_WORKOS, confirmed, input, link, org_of, owner_workos,
 };
 use super::*;
-use crate::store::trials_tests::{customer, reservation};
+use crate::store::trials_tests::{customer, reservation, subscription};
 use crate::trials::CreateTrialCampaign;
 
 async fn set_subscription(
@@ -282,6 +282,28 @@ async fn an_org_holding_an_operator_agent_can_never_start_an_event_trial() {
             "{error:?}"
         );
         assert!(db.all("trial_redemptions").await.is_empty());
+        // A seat an older Core reserved is never redeemed either: the trial
+        // checkout's subscription sync is refused and the seat stays put.
+        db.query_json(
+            "INSERT INTO trial_redemptions
+               (id, campaign_id, customer_org_id, attempt_id, stripe_session_id, state, checkout_expires_at)
+             VALUES ('seat_old', $1, $2, 'barred-old', 'cs_barred_old', 'reserved', NOW() + INTERVAL '1 hour')
+             RETURNING to_jsonb(id)",
+            &[&campaign.id, &org],
+        )
+        .await;
+        let error = db
+            .sync_trial_stripe_subscription(
+                subscription(&org, "barred", BillingSubscriptionStatus::Trialing, 10),
+                Some("barred-old"),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, CoreError::TrialUnavailable(message) if message.contains("operator")),
+            "{error:?}"
+        );
+        assert_eq!(db.row("trial_redemptions", "seat_old").await.unwrap()["state"], "reserved");
 
         // An eligible neighbour still can.
         let open = customer(&db, "open").await;
