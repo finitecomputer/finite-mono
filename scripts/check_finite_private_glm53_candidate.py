@@ -161,6 +161,28 @@ def _check_main(text: str, *, release_ready: bool) -> list[str]:
         violations.append(
             "GLM model container must declare private IPC and 256g shared memory exactly once"
         )
+    # The pinned SGLang /health waits up to 20s for scheduler output. Both
+    # callers must allow that result to arrive instead of timing out at 5s
+    # while ordinary inference is still making progress.
+    violations.extend(
+        _require_once(
+            model_container.group() if model_container else "",
+            ('SGLANG_HEALTH_CHECK_TIMEOUT: "20"', "      timeout: 25s"),
+            "GLM model health budget",
+        )
+    )
+    limiter_container = re.search(
+        r'^  - name: "finite-private-limiter"\n.*?(?=^  - |^\S|\Z)',
+        containers,
+        re.MULTILINE | re.DOTALL,
+    )
+    violations.extend(
+        _require_once(
+            limiter_container.group() if limiter_container else "",
+            ('READINESS_TIMEOUT_SECS: "25"',),
+            "GLM limiter health budget",
+        )
+    )
     image_lines = re.findall(r'^\s+image: "([^"]+)"$', text, re.MULTILINE)
     if len(image_lines) != 2:
         violations.append(

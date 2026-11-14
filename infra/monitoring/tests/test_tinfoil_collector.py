@@ -29,10 +29,13 @@ class CollectorTest(unittest.TestCase):
               test "$2 $3 $4 $5 $6 $7" = "metrics test-container --time 1h --output json" || exit 8
               cat "$FIXTURE/usage.json"
             fi""",
-            "curl": '''while [ "$#" -gt 0 ]; do
+            "curl": '''limit=0
+            while [ "$#" -gt 0 ]; do
               if [ "$1" = -o ]; then cp "$FIXTURE/health.json" "$2"; fi
+              if [ "$1" = --max-time ]; then limit="$2"; fi
               shift
             done
+            test "${TEST_HEALTH_SECONDS:-0}" -le "$limit" || exit 28
             printf %s "${TEST_HTTP_CODE:-200}"''',
         }.items():
             p = self.root / name
@@ -103,6 +106,27 @@ class CollectorTest(unittest.TestCase):
         self.assertEqual(
             self.value(v, "component_probe_duration_seconds", ',component="usage_api"'),
             "0.12",
+        )
+
+    def test_current_running_status_and_nonserving_states(self):
+        for status, expected in [
+            ("running", "1"), ("ready", "1"),
+            ("started", "0"), ("failed", "0"), ("stopped", "0"),
+        ]:
+            with self.subTest(status=status):
+                self.status["status"] = status
+                self.assertEqual(self.value(self.cycle(), "container_ready"), expected)
+
+    def test_health_client_waits_for_the_engine_health_window(self):
+        self.env["TEST_HEALTH_SECONDS"] = "21"
+        self.health["components"]["upstream"]["latencyMs"] = 19500
+        values = self.cycle()
+        self.assertEqual(
+            self.value(values, "component_ready", ',component="upstream"'), "1"
+        )
+        self.assertEqual(
+            self.value(values, "component_probe_duration_seconds", ',component="upstream"'),
+            "19.5",
         )
 
     def test_usage_failure_does_not_refresh_source_timestamp_or_repeat_values(self):

@@ -60,6 +60,15 @@ Rolling back to an unpatched CVM restores its vulnerabilities and incurs another
 cold start. Readiness timeouts are decision points, not automatic rollback
 instructions or a bound on total recovery time.
 
+The pinned SGLang health endpoint waits up to 20 seconds for scheduler output,
+including while the model is processing requests. The measured configuration
+sets that budget explicitly and gives both the model container check and the
+limiter readiness check 25 seconds. Operator and monitoring clients allow 30
+seconds. Keep these deadlines ordered: a five-second outer timeout can report
+an unavailable model while real chat still completes. An unhealthy model or
+Core response still fails readiness; this does not replace the inference probe
+with process-only liveness.
+
 The candidate pins CVM 0.14.17, which includes the CVE-2026-98432 kernel fix.
 Multi-GPU H200/Hopper enclaves also require the measured top-level setting
 `security.allow-unencrypted-nvlink: true`; without it this CVM refuses to boot.

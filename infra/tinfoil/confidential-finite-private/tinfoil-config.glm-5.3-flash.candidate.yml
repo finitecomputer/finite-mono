@@ -28,6 +28,8 @@ containers:
     gpus: all
     ipc: private
     shm_size: 256g
+    env:
+      - SGLANG_HEALTH_CHECK_TIMEOUT: "20"
     restart: always
     command:
       [
@@ -71,7 +73,7 @@ containers:
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
       interval: 30s
-      timeout: 5s
+      timeout: 25s
       start_period: 45m
 
   - name: "finite-private-limiter"
@@ -91,7 +93,7 @@ containers:
       - FINITE_PRIVATE_DEFAULT_REASONING_EFFORT: "high"
       - FINITE_PRIVATE_DEFAULT_ENABLE_THINKING: "true"
       - DASHBOARD_URL: "https://finite.computer/dashboard"
-      - READINESS_TIMEOUT_SECS: "5"
+      - READINESS_TIMEOUT_SECS: "25"
       - FINITE_USAGE_API_TIMEOUT_SECS: "15"
       - UPSTREAM_FIRST_BYTE_TIMEOUT_SECS: "120"
       - UPSTREAM_BODY_TIMEOUT_SECS: "600"
