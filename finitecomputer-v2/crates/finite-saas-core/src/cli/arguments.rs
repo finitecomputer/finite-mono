@@ -61,6 +61,11 @@ pub(crate) enum Command {
         #[arg(long)]
         execute: bool,
     },
+    /// Root-only: create an ordinary Agent owned by the account named by
+    /// email, minting a pending account when Core has none. Audited and
+    /// idempotent; default rolls back all writes.
+    #[command(name = "agent-create-for-owner-exact")]
+    AgentCreateForOwnerExact(AgentCreateForOwnerExactCliArgs),
     /// Root-only: end an exact canary reservation for shared-pool admission.
     #[command(name = "launch-host-release-exact")]
     LaunchHostReleaseExact {

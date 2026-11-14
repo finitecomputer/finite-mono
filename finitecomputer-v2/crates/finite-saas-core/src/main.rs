@@ -53,6 +53,9 @@ async fn main() -> Result<()> {
             expected_manifest_sha256,
             execute,
         } => brain_scoped_records_command(manifest, expected_manifest_sha256, execute).await,
+        Command::AgentCreateForOwnerExact(args) => {
+            print_json(&agent_create_for_owner_exact_command(args).await?)
+        }
         Command::Serve => serve().await,
         Command::RuntimeArtifactUpsert {
             artifact_id,

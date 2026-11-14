@@ -21,8 +21,9 @@ use crate::{
     FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
     FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    LinkStripeCustomerRequest, LinkVerifiedUserInput, OperatorAgentCreation,
+    OperatorCreateAgentInput, OperatorCreateAgentResult, OperatorCreationSurface, OperatorIdentity,
+    Project, ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
     RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
@@ -306,6 +307,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(record_finite_private_request_diagnostic),
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
+        .route(
+            "/api/core/v1/admin/operator-agent-creations",
+            get(admin_operator_agent_creations).post(admin_create_agent_for_owner),
+        )
         .route(
             "/api/core/v1/admin/account-email-target",
             post(admin_account_email_target),

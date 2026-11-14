@@ -279,6 +279,7 @@ mod launch_codes;
 mod launch_targets;
 mod lifecycle_migration;
 mod offboarding;
+mod operator_creation;
 mod private_usage;
 mod provider_operations;
 mod relocation_absence;

@@ -381,3 +381,70 @@ fn mark_moved_cli_takes_only_migrated_or_archived() {
     assert!(Args::try_parse_from(common.into_iter().chain(["--moved", "archived"])).is_ok());
     assert!(Args::try_parse_from(common.into_iter().chain(["--moved", "deleted"])).is_err());
 }
+
+#[test]
+fn agent_create_for_owner_requires_reason_admin_and_key_and_defaults_to_preview() {
+    let args = [
+        "finite-saas-core",
+        "agent-create-for-owner-exact",
+        "--owner-email",
+        "frankie@finite.vip",
+        "--display-name",
+        "Frankie Bot",
+        "--reason",
+        "box1 migration",
+        "--idempotency-key",
+        "box1-frankie",
+        "--admin-email",
+        "austin@finite.vip",
+        "--admin-workos-user-id",
+        "user_admin",
+    ];
+    let Some(Command::AgentCreateForOwnerExact(parsed)) =
+        Args::try_parse_from(args).unwrap().command
+    else {
+        panic!("expected agent-create-for-owner-exact");
+    };
+    assert!(!parsed.execute);
+    let input = operator_create_input(parsed, None).unwrap();
+    assert_eq!(
+        input.surface,
+        finite_saas_core::OperatorCreationSurface::Cli
+    );
+    assert_eq!(input.admin.workos_user_id, "user_admin");
+    assert_eq!(input.hosting_tier, None);
+    for required in [
+        "--owner-email",
+        "--display-name",
+        "--reason",
+        "--idempotency-key",
+        "--admin-email",
+        "--admin-workos-user-id",
+    ] {
+        let position = args.iter().position(|arg| *arg == required).unwrap();
+        let without: Vec<_> = args
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != position && *index != position + 1)
+            .map(|(_, arg)| *arg)
+            .collect();
+        assert!(Args::try_parse_from(without).is_err(), "{required}");
+    }
+    let Some(Command::AgentCreateForOwnerExact(tiered)) =
+        Args::try_parse_from(args.into_iter().chain([
+            "--hosting-tier",
+            "confidential",
+            "--execute",
+        ]))
+        .unwrap()
+        .command
+    else {
+        panic!("expected agent-create-for-owner-exact");
+    };
+    assert!(tiered.execute);
+    assert_eq!(
+        operator_create_input(tiered, None).unwrap().hosting_tier,
+        Some(finite_saas_core::HostingTier::Confidential)
+    );
+    assert!(Args::try_parse_from(args.into_iter().chain(["--hosting-tier", "premium"])).is_err());
+}

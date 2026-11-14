@@ -146,6 +146,8 @@ impl From<CoreError> for ApiError {
             | CoreError::InvalidProviderOperationFacts
             | CoreError::MissingAgentRuntimeId
             | CoreError::InvalidRuntimeHealthReport
+            | CoreError::InvalidOperatorOwnerEmail
+            | CoreError::InvalidOperatorReason
             | CoreError::InvalidTimestamp => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: error.to_string(),
@@ -166,7 +168,10 @@ impl From<CoreError> for ApiError {
             // the dashboard says the agent is moving instead.
             CoreError::RuntimeMoving => Self::locked(error.to_string()),
             CoreError::BillingRequired => Self::payment_required(error.to_string()),
-            CoreError::HostingTierNotAuthorized => Self::forbidden(error.to_string()),
+            CoreError::HostingTierNotAuthorized | CoreError::OperatorIdentityMismatch => {
+                Self::forbidden(error.to_string())
+            }
+            CoreError::OperatorAgentCreationRefused(message) => Self::conflict(message),
             CoreError::AccountEmailChangeConflict
             | CoreError::AgentCreationEntitlementExhausted
             | CoreError::AgentCreationRequestUnavailable
