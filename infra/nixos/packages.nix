@@ -372,6 +372,8 @@ rec {
         finite-brain
         fsite
         fbrain
+        # docker-saas hosted Hermes ingress, as in modules/hosted-hermes.nix.
+        pkgs.caddy
         pkgs.curl
         pkgs.git
         pkgs.jq

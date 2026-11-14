@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+mod development_ingress;
+pub use development_ingress::DevelopmentIngress;
 #[cfg(test)]
 mod tests;
 
@@ -21,6 +23,7 @@ pub struct HostedSession {
 #[derive(Clone, Default)]
 pub struct NativeSessions {
     entries: Arc<Mutex<BTreeMap<String, Arc<Mutex<Cached>>>>>,
+    development_ingress: Option<DevelopmentIngress>,
     #[cfg(test)]
     test_client: Option<Client>,
 }
@@ -42,6 +45,14 @@ impl Default for Cached {
 }
 
 impl NativeSessions {
+    /// Local-harness transport only; see [`DevelopmentIngress`].
+    pub fn with_development_ingress(ingress: DevelopmentIngress) -> Self {
+        Self {
+            development_ingress: Some(ingress),
+            ..Self::default()
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_test_client(client: Client) -> Self {
         Self {
@@ -55,11 +66,12 @@ impl NativeSessions {
         if let Some(client) = &self.test_client {
             return self.grant_with_client(binding, client).await;
         }
-        let client = Client::builder()
-            .timeout(Duration::from_secs(8))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|_| "native client unavailable")?;
+        let client = match &self.development_ingress {
+            Some(ingress) => ingress.client(&binding.base_url)?,
+            None => native_client_builder()
+                .build()
+                .map_err(|_| "native client unavailable")?,
+        };
         self.grant_with_client(binding, &client).await
     }
 
@@ -180,6 +192,12 @@ impl NativeSessions {
             expires_at,
         })
     }
+}
+
+fn native_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .timeout(Duration::from_secs(8))
+        .redirect(reqwest::redirect::Policy::none())
 }
 
 // The protected native read already proves the token is currently accepted.

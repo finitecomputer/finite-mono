@@ -147,6 +147,79 @@ Stack-starting Devfinity commands run through the Nix `devfinity` wrapper,
 which puts the Nix-built service binaries on `PATH`. Devfinity no longer builds
 or launches host services through per-service Cargo fallbacks.
 
+## Linux Docker SaaS profile
+
+`--docker-runtime` runs the same product spine with the Runner's local Docker
+provider (one runtime, `FC_RUNNER_MAX_SANDBOXES=1`). It needs a reachable
+Docker daemon and an inference credential as above; a digest-pinned image
+skips the local image build:
+
+```sh
+nix run .#devfinity -- --state-dir .local-state/dfd up --docker-runtime \
+  --prebuilt-runtime-image ghcr.io/finitecomputer/agent-runtime@sha256:<digest> --headless
+nix run .#devfinity -- --state-dir .local-state/dfd exec -- scripts/devfinity-saas-smoke
+```
+
+For a parallel stack, use its own `--state-dir` and `DEVFINITY_PORT_OFFSET=<n>`.
+The offset shifts every host port and, for this profile, the source host
+(`devfinity-docker-<n>`): Runners count Docker runtimes by source-host label,
+so stacks sharing one would refuse each other's capacity. Also set
+`DEVFINITY_APPLE_CONTAINER_NAME_PREFIX` to keep the startup probe container
+name distinct.
+
+### Hosted Hermes access
+
+This profile serves the production native Hermes path:
+`POST /api/core/v1/me/runtimes/{id}/hosted-hermes-session` returns
+`{baseUrl, accessToken}`, and `${baseUrl}api/...` with that bearer reaches the
+runtime through a Runner-rendered ingress that strips `/runtimes/<id>` and sets
+`X-Forwarded-Prefix`. Ports at offset 0:
+
+| Port | Listener |
+| --- | --- |
+| 14201 | Core runtime router (`FC_CORE_RUNTIME_BIND`, container-reachable) |
+| 18642 | Runtime native Hermes 8642, published on loopback |
+| 18643 | Hosted Hermes ingress, `https://agents.devfinity.test:18643` on loopback |
+
+- Core maps the stack's source host to that origin
+  (`FC_CORE_HOSTED_HERMES_ORIGINS_JSON`) and, as on configured production
+  hosts, prepares native serving when the Runner provisions a new agent's
+  credential (`FC_RUNNER_RUNTIME_CORE_URL`).
+- agentd accepts cleartext Core only on its own loopback. The
+  `runtime-core-bridge` process runs a sidecar in each runtime's network
+  namespace (the runtime image's Python) forwarding that port to the host.
+- `hosted-hermes-ingress` follows the Runner lifecycle: Core route targets,
+  ownership labels, the saved loopback port and `/api/status`, then
+  `finite-saas-runner render-hosted-hermes-caddy`. Only PKI differs: Caddy's
+  local CA issues the synthetic host's certificate. Caddy restarts on every
+  route change; production's address-reuse fence is out of scope locally.
+- Core trusts exactly that CA for the native session exchange through the
+  development-only `FC_CORE_HOSTED_HERMES_DEV_INGRESS_JSON` (loopback address
+  only). No system trust store is changed.
+
+Clients reach the ingress like a browser would, using the generated env. Keep
+bearer values in header files (`-H @file`), not argv; the native access token
+can contain `"`, so do not paste it into a quoted curl `--config` value:
+
+```sh
+. .local-state/dfd/runs/default/env
+umask 077
+printf 'authorization: Bearer %s\n' \
+  "$(cat .local-state/dfd/runs/default/workos-fixture/dashboard-customer.jwt)" >customer.h
+curl -fsS -H @customer.h -X POST \
+  "$FC_CORE_URL/api/core/v1/me/runtimes/$runtime_id/hosted-hermes-session" >grant.json
+printf 'authorization: Bearer %s\n' "$(jq -r .accessToken grant.json)" >native.h
+curl --resolve "$DEVFINITY_HOSTED_HERMES_HOST:$DEVFINITY_HOSTED_HERMES_PORT:127.0.0.1" \
+  --cacert "$DEVFINITY_HOSTED_HERMES_CA_FILE" -H @native.h "$(jq -r .baseUrl grant.json)api/skills"
+```
+
+To use dashboard pages such as `/dashboard/skills?machine=<runtime>` in a
+browser, start a separate Chromium profile with
+`--host-resolver-rules="MAP agents.devfinity.test 127.0.0.1"` and trust the CA
+file only in that profile. Stopping the stack removes the bridges; a detached
+runtime keeps its last applied native configuration and reconnects on the next
+`up`. The Apple Container profile does not enable this path.
+
 ## Managed test commands
 
 `devfinity run -- <command> [args...]` is the general test-command wrapper. It
@@ -326,4 +399,5 @@ The default SaaS profile requires:
   process-compose for stack startup.
 
 The services-only profile is portable and does not require Apple Container or
-an inference credential.
+an inference credential. The Docker SaaS profile requires Docker instead of
+Apple Container; the wrapper supplies Caddy.
