@@ -369,14 +369,60 @@ async fn operator_creation_refuses_ambiguous_or_trial_owners() {
     .await;
 }
 
+/// Retries of one key that all pass the early key lookup before any of
+/// them commits: the owner's row lock holds them until every one is waiting,
+/// so all but the first meet the committed claim and reuse it.
 #[tokio::test]
 async fn concurrent_retries_of_one_key_create_one_agent() {
     with_isolated_postgres(|db| async move {
         link(&db, ADMIN_EMAIL, ADMIN_WORKOS).await;
-        let attempts =
-            (0..4).map(|_| db.admin_create_agent_for_owner(input("race@example.com", "race")));
-        let results = futures_util::future::join_all(attempts).await;
-        let results: Vec<_> = results.into_iter().map(Result::unwrap).collect();
+        db.query_json(
+            "INSERT INTO users (id, normalized_email, link_status, created_at, updated_at)
+             VALUES ('user_race', 'race@example.com', 'pending', NOW(), NOW())
+             RETURNING to_jsonb(id)",
+            &[],
+        )
+        .await;
+        let mut holder = db.connection().await.unwrap();
+        let hold = holder.transaction().await.unwrap();
+        hold.execute(
+            "SELECT id FROM users WHERE id = 'user_race' FOR UPDATE",
+            &[],
+        )
+        .await
+        .unwrap();
+        let attempts: Vec<_> = (0..4)
+            .map(|_| {
+                let store = db.store.clone();
+                tokio::spawn(async move {
+                    store
+                        .admin_create_agent_for_owner(input("race@example.com", "race"))
+                        .await
+                })
+            })
+            .collect();
+        let waiting = || async {
+            db.query_json(
+                "SELECT to_jsonb(count(*)) FROM pg_stat_activity
+                 WHERE datname = current_database() AND wait_event_type = 'Lock'",
+                &[],
+            )
+            .await[0]
+                .as_i64()
+                .unwrap()
+        };
+        for _ in 0..500 {
+            if waiting().await >= 4 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(waiting().await, 4, "every retry passed the early lookup");
+        hold.commit().await.unwrap();
+        let mut results = Vec::new();
+        for attempt in attempts {
+            results.push(attempt.await.unwrap().unwrap());
+        }
         assert_eq!(results.iter().filter(|result| !result.reused).count(), 1);
         assert!(
             results
