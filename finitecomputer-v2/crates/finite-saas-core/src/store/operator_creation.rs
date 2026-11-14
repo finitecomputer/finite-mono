@@ -1,32 +1,72 @@
 //! Operator-created Agents (migration 0047). One transaction resolves or
-//! mints the owner's pending account and personal org, records an explicit
-//! operator admission, and writes the same Project, creation request and
-//! owner membership rows self-serve creation writes. The lease, launch,
-//! Agent Principal and chat identity then follow Core's normal path.
+//! mints the owner's pending account and personal org, checks the owner's
+//! provisioned sign-in identity, records an explicit operator admission, and
+//! writes the same Project, creation request and owner membership rows
+//! self-serve creation writes. The lease, launch, Agent Principal and chat
+//! identity then follow Core's normal path.
 
 use super::*;
+use crate::owner_identity::OwnerIdentityPlan;
 use crate::{
-    MAX_OPERATOR_CREATION_REASON_CHARS, OperatorAgentCreation, OperatorCreateAgentInput,
-    OperatorCreateAgentResult, OperatorCreationAdmission, OperatorIdentity, UserLinkStatus,
-    generate_surrogate_id, parse_operator_creation_admission, parse_operator_creation_surface,
+    MAX_OPERATOR_CREATION_REASON_CHARS, MAX_OPERATOR_IDEMPOTENCY_KEY_CHARS,
+    OPERATOR_REQUEST_KEY_PREFIX, OperatorAgentCreation, OperatorAgentCreationListing,
+    OperatorCreateAgentInput, OperatorCreateAgentResult, OperatorCreationActor,
+    OperatorCreationAdmission, OperatorCreationOwner, OperatorIdentity, OwnerSignInIdentity,
+    UserLinkStatus, generate_surrogate_id,
 };
 
-/// Request idempotency keys of operator creations carry this prefix, so a
-/// later self-serve submission by the owner can never reuse one.
-pub(crate) const OPERATOR_REQUEST_KEY_PREFIX: &str = "operator:";
+mod guards;
+mod records;
+use guards::*;
+use records::*;
 
-const RECORD_COLUMNS: &str = "id, idempotency_key, owner_email, owner_user_id,
-    owner_account_created, customer_org_id, customer_org_created, project_id,
-    agent_creation_request_id, display_name, hosting_tier, placement_runner_class,
-    runtime_resource_class, target_source_host_id, owner_chat_account_id, admission,
-    reason, admin_user_id, admin_email, admin_workos_user_id, surface,
-    core_rfc3339(created_at) AS created_at";
+/// What a rollback-only preview records in place of an identity it did not
+/// provision. Never committed: only a dry-run store accepts it.
+const PREVIEW_WORKOS_USER_ID: &str = "preview-not-provisioned";
+const PREVIEW_CHAT_ACCOUNT_ID: &str =
+    "0000000000000000000000000000000000000000000000000000000000000000";
 
 impl CoreStore {
+    pub fn is_dry_run(&self) -> bool {
+        self.dry_run
+    }
+
+    /// Read-only: how the operator path gets the owner's sign-in identity.
+    /// Refuses early what the transaction would refuse anyway (bad input,
+    /// an ambiguous email, a signed-in account without confirmation) so
+    /// nothing is created at WorkOS for it.
+    pub async fn operator_owner_identity_plan(
+        &self,
+        input: &OperatorCreateAgentInput,
+    ) -> CoreResult<OwnerIdentityPlan> {
+        let wanted = normalize(input)?;
+        let client = self.connection().await?;
+        if let Some(existing) = select_record_by_key(&**client, &wanted.idempotency_key).await? {
+            return Ok(OwnerIdentityPlan::Reuse(OwnerSignInIdentity {
+                workos_user_id: existing.owner.workos_user_id,
+                chat_account_id: existing.owner.chat_account_id,
+            }));
+        }
+        refuse_ambiguous_owner_email(&**client, &wanted.owner_email).await?;
+        match select_user_by_email(&**client, &wanted.owner_email).await? {
+            Some(user) if user.status == UserLinkStatus::Linked => {
+                refuse_unconfirmed_existing_account(input)?;
+                Ok(OwnerIdentityPlan::Linked {
+                    workos_user_id: user
+                        .workos_user_id
+                        .ok_or_else(|| CoreError::Store("linked user has no WorkOS user".into()))?,
+                })
+            }
+            _ => Ok(OwnerIdentityPlan::Unlinked),
+        }
+    }
+
     /// Create an ordinary Agent owned by the account named by
     /// `input.owner_email`, minting a pending account when none exists.
     /// Retrying the same idempotency key with the same input returns the
     /// same creation; any difference, or an ambiguous owner, is refused.
+    /// Callers resolve `input.owner_identity` first
+    /// (`owner_identity::operator_create_agent`).
     pub async fn admin_create_agent_for_owner(
         &self,
         input: OperatorCreateAgentInput,
@@ -39,7 +79,9 @@ impl CoreStore {
         );
         let mut client = self.connection().await?;
         let tx = client.transaction().await.map_err(store_error)?;
-        let result = create_for_owner(&*tx, input).instrument(span).await;
+        let result = create_for_owner(&*tx, input, self.dry_run)
+            .instrument(span)
+            .await;
         if let Err(error) = &result {
             tracing::error!(operation = "admin_create_agent_for_owner", error = %error,
                 "operator agent creation refused or failed");
@@ -47,21 +89,25 @@ impl CoreStore {
         self.finish(tx, result).await
     }
 
-    /// Every operator creation, newest first, for operators to read back.
-    pub async fn operator_agent_creations(&self) -> CoreResult<Vec<OperatorAgentCreation>> {
+    /// Every operator creation, newest first, with the owner as they are now.
+    pub async fn operator_agent_creations(&self) -> CoreResult<Vec<OperatorAgentCreationListing>> {
         let client = self.connection().await?;
         client
             .query(
                 &format!(
-                    "SELECT {RECORD_COLUMNS} FROM operator_agent_creations
-                     ORDER BY created_at DESC, id DESC"
+                    "SELECT {RECORD_COLUMNS}, owner.normalized_email AS owner_current_email,
+                            owner.link_status AS owner_link_status,
+                            owner.workos_user_id AS owner_current_workos_user_id
+                     FROM operator_agent_creations o
+                     JOIN users owner ON owner.id = o.owner_user_id
+                     ORDER BY o.created_at DESC, o.id DESC"
                 ),
                 &[],
             )
             .await
             .map_err(store_error)?
             .iter()
-            .map(record_from_row)
+            .map(listing_from_row)
             .collect()
     }
 }
@@ -76,7 +122,6 @@ struct Normalized {
     hosting_tier: HostingTier,
     placement: RuntimePlacement,
     target_source_host_id: Option<String>,
-    owner_chat_account_id: Option<String>,
     profile_picture_url: Option<String>,
 }
 
@@ -94,6 +139,10 @@ fn normalize(input: &OperatorCreateAgentInput) -> CoreResult<Normalized> {
     let reason = trim_to_option(Some(&input.reason))
         .filter(|reason| reason.chars().count() <= MAX_OPERATOR_CREATION_REASON_CHARS)
         .ok_or(CoreError::InvalidOperatorReason)?;
+    // Refuse rather than cut: two long keys sharing a prefix are two keys.
+    if input.idempotency_key.trim().chars().count() > MAX_OPERATOR_IDEMPOTENCY_KEY_CHARS {
+        return Err(CoreError::InvalidOperatorIdempotencyKey);
+    }
     let idempotency_key = normalize_idempotency_key(&input.idempotency_key)
         .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
     let hosting_tier = input.hosting_tier.unwrap_or(HostingTier::Standard);
@@ -121,70 +170,108 @@ fn normalize(input: &OperatorCreateAgentInput) -> CoreResult<Normalized> {
         hosting_tier,
         placement,
         target_source_host_id,
-        owner_chat_account_id: normalize_owner_chat_account_id(
-            input.owner_chat_account_id.as_deref(),
-        )?,
         profile_picture_url: normalize_profile_picture_url(input.profile_picture_url.as_deref())?,
     })
+}
+
+/// The owner identity this creation binds the Agent to. Open admission is
+/// never allowed: without one, only a rollback-only preview proceeds.
+fn owner_identity(
+    input: &OperatorCreateAgentInput,
+    dry_run: bool,
+) -> CoreResult<Option<OwnerSignInIdentity>> {
+    let Some(identity) = &input.owner_identity else {
+        return if dry_run {
+            Ok(None)
+        } else {
+            Err(CoreError::OperatorOwnerIdentityRequired)
+        };
+    };
+    let workos_user_id = identity.workos_user_id.trim();
+    let chat_account_id = normalize_owner_chat_account_id(Some(&identity.chat_account_id))?;
+    match chat_account_id {
+        Some(chat_account_id) if !workos_user_id.is_empty() => Ok(Some(OwnerSignInIdentity {
+            workos_user_id: workos_user_id.to_string(),
+            chat_account_id,
+        })),
+        _ => Err(CoreError::OperatorOwnerIdentityRequired),
+    }
 }
 
 async fn create_for_owner<C>(
     client: &C,
     input: OperatorCreateAgentInput,
+    dry_run: bool,
 ) -> CoreResult<OperatorCreateAgentResult>
 where
     C: GenericClient + Sync,
 {
     let wanted = normalize(&input)?;
+    let identity = owner_identity(&input, dry_run)?;
     let now = match input.now.clone() {
         Some(now) => now,
         None => current_time_iso()?,
     };
     let admin_user_id = linked_admin_user_id(client, &input.admin).await?;
     if let Some(existing) = select_record_by_key(client, &wanted.idempotency_key).await? {
-        return reuse_existing(client, existing, &wanted, &now).await;
+        return reuse_existing(client, existing, &wanted, identity.as_ref(), &now).await;
     }
 
     refuse_ambiguous_owner_email(client, &wanted.owner_email).await?;
-    let existing_user = select_user_by_email(client, &wanted.owner_email).await?;
-    let owner_account_created = existing_user.is_none();
-    let owner = match existing_user {
-        Some(user) => user,
-        None => ensure_pending_user_row(client, &wanted.owner_email, &now).await?,
-    };
-    let existing_org = select_personal_org_by_owner(client, &owner.id).await?;
-    let customer_org_created = existing_org.is_none();
-    let org = match existing_org {
-        Some(org) => org,
-        None => ensure_personal_org_row(client, &owner, BillingClass::Sponsored, &now).await?,
-    };
+    let (owner, account_created) = upsert_pending_owner(client, &wanted.owner_email, &now).await?;
+    if let Some(identity) = &identity {
+        refuse_mismatched_owner_identity(client, &owner, identity).await?;
+    }
+    if owner.status == UserLinkStatus::Linked {
+        refuse_unconfirmed_existing_account(&input)?;
+    }
+    // The upsert row-locks the org, serializing this with trial reservation
+    // (which locks it too), so a trial and an operator Agent never meet.
+    let (org, customer_org_created) = upsert_sponsored_org(client, &owner, &now).await?;
     refuse_trial_org(client, &org).await?;
+    refuse_inactive_private_grant(client, &owner).await?;
+    let request_key = format!("{OPERATOR_REQUEST_KEY_PREFIX}{}", wanted.idempotency_key);
 
+    let provisioned = identity.is_some();
+    let identity = identity.unwrap_or_else(|| OwnerSignInIdentity {
+        workos_user_id: PREVIEW_WORKOS_USER_ID.to_string(),
+        chat_account_id: PREVIEW_CHAT_ACCOUNT_ID.to_string(),
+    });
     let project_id = new_self_service_project_id()?;
     let request_id = new_agent_creation_request_id()?;
     let record = OperatorAgentCreation {
         id: generate_surrogate_id("operator_creation")?,
         idempotency_key: wanted.idempotency_key.clone(),
-        owner_email: wanted.owner_email.clone(),
-        owner_user_id: owner.id.clone(),
-        owner_account_created,
-        customer_org_id: org.id.clone(),
-        customer_org_created,
+        owner: OperatorCreationOwner {
+            email: wanted.owner_email.clone(),
+            user_id: owner.id.clone(),
+            account_created,
+            customer_org_id: org.id.clone(),
+            customer_org_created,
+            workos_user_id: identity.workos_user_id.clone(),
+            chat_account_id: identity.chat_account_id.clone(),
+            existing_account_confirmed: input.existing_account_confirmed,
+        },
         project_id: project_id.clone(),
         agent_creation_request_id: request_id.clone(),
         display_name: wanted.display_name.clone(),
         hosting_tier: wanted.hosting_tier,
         placement: wanted.placement,
         target_source_host_id: wanted.target_source_host_id.clone(),
-        owner_chat_account_id: wanted.owner_chat_account_id.clone(),
         admission: OperatorCreationAdmission::OperatorSponsored,
         reason: wanted.reason.clone(),
-        admin_user_id,
-        admin: OperatorIdentity {
-            email: normalize_owner_email(Some(&input.admin.email)).unwrap_or_default(),
-            workos_user_id: input.admin.workos_user_id.trim().to_string(),
+        actor: OperatorCreationActor {
+            admin_user_id,
+            admin: OperatorIdentity {
+                email: normalize_owner_email(Some(&input.admin.email)).unwrap_or_default(),
+                workos_user_id: input.admin.workos_user_id.trim().to_string(),
+            },
+            surface: input.surface,
+            cli_os_user: input
+                .cli_os_user
+                .as_deref()
+                .and_then(|user| trim_to_option(Some(user))),
         },
-        surface: input.surface,
         created_at: now.clone(),
     };
     // Claim the key before any non-idempotent write. A concurrent retry of
@@ -195,9 +282,20 @@ where
         let existing = select_record_by_key(client, &wanted.idempotency_key)
             .await?
             .ok_or_else(|| CoreError::Store("operator creation claim lost its row".into()))?;
-        return reuse_existing(client, existing, &wanted, &now).await;
+        let identity = provisioned.then_some(identity);
+        return reuse_existing(client, existing, &wanted, identity.as_ref(), &now).await;
     }
-    grant_operator_entitlement(client, &org, wanted.hosting_tier, &now).await?;
+    // This transaction owns the key now. A request already holding the
+    // operator-prefixed key was written by self-serve before the prefix was
+    // reserved: a clear conflict, never a unique-index error.
+    if select_agent_creation_request_by_idempotency(client, &owner.id, &request_key)
+        .await?
+        .is_some()
+    {
+        return Err(CoreError::OperatorAgentCreationRefused(
+            "the owner already has a creation request with this operator key",
+        ));
+    }
 
     let project = Project {
         id: project_id.clone(),
@@ -217,7 +315,7 @@ where
         customer_org_id: org.id,
         owner_user_id: owner.id.clone(),
         project_id: project_id.clone(),
-        idempotency_key: format!("{OPERATOR_REQUEST_KEY_PREFIX}{}", wanted.idempotency_key),
+        idempotency_key: request_key,
         display_name: wanted.display_name,
         runner_class: wanted.placement.runner_class,
         hosting_tier: Some(wanted.hosting_tier),
@@ -227,7 +325,8 @@ where
         target_source_host_id: wanted.target_source_host_id,
         relocation: None,
         profile_picture_url: wanted.profile_picture_url,
-        owner_chat_account_id: wanted.owner_chat_account_id,
+        // Becomes FINITECHAT_OWNER_NPUBS at lease: the Agent admits only it.
+        owner_chat_account_id: Some(identity.chat_account_id),
         status: AgentCreationRequestStatus::Requested,
         requested_launch_code: None,
         agent_runtime_id: None,
@@ -245,8 +344,8 @@ where
         record_id = %record.id,
         project_id = %record.project_id,
         request_id = %record.agent_creation_request_id,
-        owner_user_id = %record.owner_user_id,
-        owner_account_created,
+        owner_user_id = %record.owner.user_id,
+        account_created,
         "operator created an agent for an owner"
     );
     Ok(OperatorCreateAgentResult {
@@ -255,134 +354,15 @@ where
         request,
         reused: false,
         owner_linked: owner.status == UserLinkStatus::Linked,
+        owner_identity_provisioned: provisioned,
     })
-}
-
-/// The admin must already be one linked Core account with exactly this
-/// email and WorkOS user. Unlike the older admin paths this never creates
-/// or relinks the admin's own account.
-async fn linked_admin_user_id<C>(client: &C, admin: &OperatorIdentity) -> CoreResult<String>
-where
-    C: GenericClient + Sync,
-{
-    let email = normalize_owner_email(Some(&admin.email)).ok_or(CoreError::MissingVerifiedEmail)?;
-    let workos_user_id = admin.workos_user_id.trim();
-    if workos_user_id.is_empty() {
-        return Err(CoreError::MissingWorkosUserId);
-    }
-    client
-        .query_opt(
-            "SELECT id FROM users
-             WHERE normalized_email = $1 AND workos_user_id = $2 AND link_status = 'linked'",
-            &[&email, &workos_user_id],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| row.get("id"))
-        .ok_or(CoreError::OperatorIdentityMismatch)
-}
-
-/// An email that an account email change moved away from, or one an
-/// in-flight change involves, could name two people. An Agent's own Finite
-/// identity is never a person. Refuse rather than pick one.
-async fn refuse_ambiguous_owner_email<C>(client: &C, email: &str) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let row = client
-        .query_one(
-            "SELECT
-               EXISTS (SELECT 1 FROM account_email_changes
-                       WHERE (status = 'prepared' AND (old_email = $1 OR new_email = $1))
-                          OR (status = 'completed' AND old_email = $1)) AS email_change,
-               EXISTS (SELECT 1 FROM projects WHERE lower(agent_email) = $1) AS agent_identity",
-            &[&email],
-        )
-        .await
-        .map_err(store_error)?;
-    if row.get::<_, bool>("email_change") {
-        return Err(CoreError::OperatorAgentCreationRefused(
-            "owner email is part of an account email change; resolve it before creating an agent",
-        ));
-    }
-    if row.get::<_, bool>("agent_identity") {
-        return Err(CoreError::OperatorAgentCreationRefused(
-            "owner email is an Agent's own address, not a person's account",
-        ));
-    }
-    Ok(())
-}
-
-/// An event-trial org's Agents stop when the trial ends unpaid. An operator
-/// creation must not leave the person that surprise, so it is refused.
-async fn refuse_trial_org<C>(client: &C, org: &CustomerOrganization) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    if org.billing_class != BillingClass::Standard {
-        return Ok(());
-    }
-    let on_trial: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM trial_redemptions
-                            WHERE customer_org_id = $1 AND state <> 'expired')",
-            &[&org.id],
-        )
-        .await
-        .map_err(store_error)?
-        .get(0);
-    if on_trial {
-        return Err(CoreError::OperatorAgentCreationRefused(
-            "owner's account is on an event trial whose end would stop the agent",
-        ));
-    }
-    Ok(())
-}
-
-/// The explicit admission: one more Agent for this org, so the operator
-/// Agent never uses up the person's own self-serve allowance. The Launch
-/// Code and tier the org already holds are left as they are. Self-serve
-/// creation treats a standard org with no entitlement row as allowed one
-/// Agent once billing is active, so that first row starts at two.
-async fn grant_operator_entitlement<C>(
-    client: &C,
-    org: &CustomerOrganization,
-    hosting_tier: HostingTier,
-    now: &str,
-) -> CoreResult<()>
-where
-    C: GenericClient + Sync,
-{
-    let first_allowance: i32 = if org.billing_class == BillingClass::Standard {
-        2
-    } else {
-        1
-    };
-    client
-        .execute(
-            "INSERT INTO agent_creation_entitlements
-               (id, customer_org_id, hosting_tier, allowed_new_agent_runtimes, launch_code, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, NULL, $5::text::timestamptz, $5::text::timestamptz)
-             ON CONFLICT (customer_org_id) DO UPDATE SET
-               allowed_new_agent_runtimes = agent_creation_entitlements.allowed_new_agent_runtimes + 1,
-               updated_at = EXCLUDED.updated_at",
-            &[
-                &agent_creation_entitlement_id_for(&org.id),
-                &org.id,
-                &hosting_tier.as_str(),
-                &first_allowance,
-                &now,
-            ],
-        )
-        .await
-        .map_err(store_error)?;
-    Ok(())
 }
 
 async fn reuse_existing<C>(
     client: &C,
     record: OperatorAgentCreation,
     wanted: &Normalized,
+    identity: Option<&OwnerSignInIdentity>,
     now: &str,
 ) -> CoreResult<OperatorCreateAgentResult>
 where
@@ -390,7 +370,7 @@ where
 {
     let request = select_agent_creation_request_by_idempotency(
         client,
-        &record.owner_user_id,
+        &record.owner.user_id,
         &format!("{OPERATOR_REQUEST_KEY_PREFIX}{}", record.idempotency_key),
     )
     .await?
@@ -402,22 +382,25 @@ where
         ))
     })?;
     let stored = Normalized {
-        owner_email: record.owner_email.clone(),
+        owner_email: record.owner.email.clone(),
         display_name: record.display_name.clone(),
         reason: record.reason.clone(),
         idempotency_key: record.idempotency_key.clone(),
         hosting_tier: record.hosting_tier,
         placement: record.placement,
         target_source_host_id: record.target_source_host_id.clone(),
-        owner_chat_account_id: record.owner_chat_account_id.clone(),
         profile_picture_url: request.profile_picture_url.clone(),
     };
-    if &stored != wanted {
+    let same_identity = identity.is_none_or(|identity| {
+        identity.workos_user_id == record.owner.workos_user_id
+            && identity.chat_account_id == record.owner.chat_account_id
+    });
+    if &stored != wanted || !same_identity {
         return Err(CoreError::OperatorAgentCreationRefused(
             "idempotency key already names a different operator creation",
         ));
     }
-    let owner = select_user_by_id(client, &record.owner_user_id)
+    let owner = select_user_by_id(client, &record.owner.user_id)
         .await?
         .ok_or_else(|| {
             CoreError::Store(format!("operator creation {} lost its owner", record.id))
@@ -432,112 +415,6 @@ where
         request,
         reused: true,
         owner_linked: owner.status == UserLinkStatus::Linked,
-    })
-}
-
-async fn select_record_by_key<C>(client: &C, key: &str) -> CoreResult<Option<OperatorAgentCreation>>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .query_opt(
-            &format!(
-                "SELECT {RECORD_COLUMNS} FROM operator_agent_creations WHERE idempotency_key = $1"
-            ),
-            &[&key],
-        )
-        .await
-        .map_err(store_error)?
-        .map(|row| record_from_row(&row))
-        .transpose()
-}
-
-/// Insert the record unless its idempotency key exists; true when inserted.
-async fn claim_record<C>(client: &C, record: &OperatorAgentCreation) -> CoreResult<bool>
-where
-    C: GenericClient + Sync,
-{
-    client
-        .execute(
-            "INSERT INTO operator_agent_creations
-               (id, idempotency_key, owner_email, owner_user_id, owner_account_created,
-                customer_org_id, customer_org_created, project_id, agent_creation_request_id,
-                display_name, hosting_tier, placement_runner_class, runtime_resource_class,
-                target_source_host_id, owner_chat_account_id, admission, reason, admin_user_id,
-                admin_email, admin_workos_user_id, surface, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                     $17, $18, $19, $20, $21, $22::text::timestamptz)
-             ON CONFLICT (idempotency_key) DO NOTHING",
-            &[
-                &record.id,
-                &record.idempotency_key,
-                &record.owner_email,
-                &record.owner_user_id,
-                &record.owner_account_created,
-                &record.customer_org_id,
-                &record.customer_org_created,
-                &record.project_id,
-                &record.agent_creation_request_id,
-                &record.display_name,
-                &record.hosting_tier.as_str(),
-                &record.placement.runner_class.as_str(),
-                &record.placement.runtime_resource_class.as_str(),
-                &record.target_source_host_id,
-                &record.owner_chat_account_id,
-                &record.admission.as_str(),
-                &record.reason,
-                &record.admin_user_id,
-                &record.admin.email,
-                &record.admin.workos_user_id,
-                &record.surface.as_str(),
-                &record.created_at,
-            ],
-        )
-        .await
-        .map_err(store_error)
-        .map(|inserted| inserted == 1)
-}
-
-fn record_from_row(row: &Row) -> CoreResult<OperatorAgentCreation> {
-    let invalid = |column: &str, value: &str| {
-        CoreError::Store(format!("invalid operator creation {column} {value}"))
-    };
-    let text = |column: &str| -> String { row.get(column) };
-    let tier = text("hosting_tier");
-    let runner_class = text("placement_runner_class");
-    let resource_class = text("runtime_resource_class");
-    let admission = text("admission");
-    let surface = text("surface");
-    Ok(OperatorAgentCreation {
-        id: text("id"),
-        idempotency_key: text("idempotency_key"),
-        owner_email: text("owner_email"),
-        owner_user_id: text("owner_user_id"),
-        owner_account_created: row.get("owner_account_created"),
-        customer_org_id: text("customer_org_id"),
-        customer_org_created: row.get("customer_org_created"),
-        project_id: text("project_id"),
-        agent_creation_request_id: text("agent_creation_request_id"),
-        display_name: text("display_name"),
-        hosting_tier: parse_hosting_tier(&tier).ok_or_else(|| invalid("tier", &tier))?,
-        placement: RuntimePlacement {
-            runner_class: parse_runner_class(&runner_class)
-                .ok_or_else(|| invalid("runner class", &runner_class))?,
-            runtime_resource_class: parse_runtime_resource_class(&resource_class)
-                .ok_or_else(|| invalid("resource class", &resource_class))?,
-        },
-        target_source_host_id: row.get("target_source_host_id"),
-        owner_chat_account_id: row.get("owner_chat_account_id"),
-        admission: parse_operator_creation_admission(&admission)
-            .ok_or_else(|| invalid("admission", &admission))?,
-        reason: text("reason"),
-        admin_user_id: text("admin_user_id"),
-        admin: OperatorIdentity {
-            email: text("admin_email"),
-            workos_user_id: text("admin_workos_user_id"),
-        },
-        surface: parse_operator_creation_surface(&surface)
-            .ok_or_else(|| invalid("surface", &surface))?,
-        created_at: text("created_at"),
+        owner_identity_provisioned: true,
     })
 }

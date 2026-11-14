@@ -69,7 +69,11 @@ impl CoreStore {
         let blocked = access.blocked;
         let rows = tx
             .query(
-                "SELECT id FROM projects WHERE customer_org_id = $1 ORDER BY id",
+                // A trial never stops an operator-created Agent (0047).
+                "SELECT id FROM projects WHERE customer_org_id = $1
+                   AND NOT EXISTS (SELECT 1 FROM operator_agent_creations o
+                                   WHERE o.project_id = projects.id)
+                 ORDER BY id",
                 &[&org],
             )
             .await

@@ -148,6 +148,8 @@ impl From<CoreError> for ApiError {
             | CoreError::InvalidRuntimeHealthReport
             | CoreError::InvalidOperatorOwnerEmail
             | CoreError::InvalidOperatorReason
+            | CoreError::InvalidOperatorIdempotencyKey
+            | CoreError::ReservedAgentCreationIdempotencyKey
             | CoreError::InvalidTimestamp => Self {
                 status: StatusCode::BAD_REQUEST,
                 message: error.to_string(),
@@ -172,6 +174,8 @@ impl From<CoreError> for ApiError {
                 Self::forbidden(error.to_string())
             }
             CoreError::OperatorAgentCreationRefused(message) => Self::conflict(message),
+            CoreError::OperatorOwnerIdentityRequired => Self::conflict(error.to_string()),
+            CoreError::OwnerIdentityUnavailable(_) => Self::service_unavailable(error.to_string()),
             CoreError::AccountEmailChangeConflict
             | CoreError::AgentCreationEntitlementExhausted
             | CoreError::AgentCreationRequestUnavailable

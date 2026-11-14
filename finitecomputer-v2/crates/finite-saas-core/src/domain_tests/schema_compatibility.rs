@@ -108,6 +108,17 @@ fn enum_serde_as_str_and_parse_encodings_agree() {
     );
 
     assert_wire_encodings_agree!(
+        crate::parse_operator_creation_surface,
+        crate::OperatorCreationSurface::AdminApi,
+        crate::OperatorCreationSurface::Cli,
+    );
+
+    assert_wire_encodings_agree!(
+        crate::parse_operator_creation_admission,
+        crate::OperatorCreationAdmission::OperatorSponsored,
+    );
+
+    assert_wire_encodings_agree!(
         parse_project_membership_role,
         ProjectMembershipRole::Owner,
         ProjectMembershipRole::Admin,

@@ -1,17 +1,23 @@
 //! Root-only operator creation of an ordinary Agent for an account named by
 //! email (migration 0047). Without `--execute` it is a rollback-only preview
-//! that runs no schema DDL, so it needs Core with 0047 already applied.
+//! that creates nothing at WorkOS or the hosted chat device either. Neither
+//! mode runs schema DDL: the Core service owns migrations, so 0047 must be
+//! applied (Core deployed) first.
 
 use super::*;
+use finite_saas_core::owner_identity::{
+    OperatorCreateAgentOutcome, OwnerIdentityProvisioner, operator_create_agent,
+};
 use finite_saas_core::{
-    OperatorCreateAgentInput, OperatorCreateAgentResult, OperatorCreationSurface, OperatorIdentity,
-    parse_hosting_tier, parse_runtime_resource_class,
+    OperatorCreateAgentInput, OperatorCreationSurface, OperatorIdentity, parse_hosting_tier,
+    parse_runtime_resource_class,
 };
 
 #[derive(Debug, clap::Args)]
 pub(crate) struct AgentCreateForOwnerExactCliArgs {
-    /// The person's account email. A pending account is created when Core
-    /// has none; their later WorkOS sign-in with it makes them the owner.
+    /// The person's account email. Core finds or creates their WorkOS user
+    /// and hosted-chat identity, and a pending Core account when it has
+    /// none; their later sign-in with that email makes them the owner.
     #[arg(long)]
     pub(crate) owner_email: String,
     #[arg(long)]
@@ -29,38 +35,38 @@ pub(crate) struct AgentCreateForOwnerExactCliArgs {
     /// Kata only: lease on this exact registered host.
     #[arg(long)]
     pub(crate) target_source_host_id: Option<String>,
-    /// The owner's hosted-chat account id (64 hex), when known.
-    #[arg(long)]
-    pub(crate) owner_chat_account_id: Option<String>,
     #[arg(long)]
     pub(crate) profile_picture_url: Option<String>,
-    /// The acting admin: an existing linked Core account with exactly this
-    /// email and WorkOS user.
+    /// The acting admin. WorkOS must report this verified email for this
+    /// user and an active operator-org membership, and Core must hold one
+    /// linked account with both.
     #[arg(long)]
     pub(crate) admin_email: String,
     #[arg(long)]
     pub(crate) admin_workos_user_id: String,
+    /// Required to add an Agent to an account that has already signed in.
+    #[arg(long)]
+    pub(crate) existing_account_confirmed: bool,
     /// Commit the creation. Omit for a rollback-only preview.
     #[arg(long)]
     pub(crate) execute: bool,
-    #[arg(long)]
-    pub(crate) now: Option<String>,
 }
 
 pub(crate) fn operator_create_input(
-    args: AgentCreateForOwnerExactCliArgs,
+    args: &AgentCreateForOwnerExactCliArgs,
+    cli_os_user: String,
     placement_override: Option<RuntimePlacement>,
 ) -> Result<OperatorCreateAgentInput> {
     Ok(OperatorCreateAgentInput {
         admin: OperatorIdentity {
-            email: args.admin_email,
-            workos_user_id: args.admin_workos_user_id,
+            email: args.admin_email.clone(),
+            workos_user_id: args.admin_workos_user_id.clone(),
         },
         surface: OperatorCreationSurface::Cli,
-        owner_email: args.owner_email,
-        display_name: args.display_name,
-        reason: args.reason,
-        idempotency_key: args.idempotency_key,
+        owner_email: args.owner_email.clone(),
+        display_name: args.display_name.clone(),
+        reason: args.reason.clone(),
+        idempotency_key: args.idempotency_key.clone(),
         hosting_tier: args
             .hosting_tier
             .as_deref()
@@ -73,11 +79,13 @@ pub(crate) fn operator_create_input(
                 parse_runtime_resource_class(class).context("unknown --runtime-resource-class")
             })
             .transpose()?,
-        target_source_host_id: args.target_source_host_id,
-        owner_chat_account_id: args.owner_chat_account_id,
-        profile_picture_url: args.profile_picture_url,
+        target_source_host_id: args.target_source_host_id.clone(),
+        owner_identity: None,
+        existing_account_confirmed: args.existing_account_confirmed,
+        cli_os_user: Some(cli_os_user),
+        profile_picture_url: args.profile_picture_url.clone(),
         placement_override,
-        now: args.now,
+        now: None,
     })
 }
 
@@ -85,21 +93,62 @@ pub(crate) fn operator_create_input(
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AgentCreateForOwnerOutput {
     pub(crate) dry_run: bool,
-    pub(crate) result: OperatorCreateAgentResult,
+    #[serde(flatten)]
+    pub(crate) outcome: OperatorCreateAgentOutcome,
 }
 
 pub(crate) async fn agent_create_for_owner_exact_command(
     args: AgentCreateForOwnerExactCliArgs,
 ) -> Result<AgentCreateForOwnerOutput> {
+    // The effective OS uid, read directly: neither PATH nor the environment
+    // is an authority. Checked before any configuration or database access.
+    if !rustix::process::geteuid().is_root() {
+        bail!("agent-create-for-owner-exact requires OS root");
+    }
+    let provisioner = OwnerIdentityProvisioner::from_env()?.context(
+        "agent-create-for-owner-exact needs FC_HOSTED_WEB_DEVICE_URL and \
+         FINITECHAT_HOSTED_API_TOKEN (load /etc/finite/hosted-web-device.env)",
+    )?;
     if let Some(host) = args.target_source_host_id.as_deref() {
         let host = finite_saas_core::normalize_source_host_id(host)?;
         if !CoreAuth::from_env()?.has_kata_host(&host) {
             bail!("target must match an active host-bound Kata credential");
         }
     }
-    let dry_run = !args.execute;
-    let input = operator_create_input(args, optional_agent_creation_placement()?)?;
-    let store = postgres_store_from_env(ImportMode::from_dry_run(dry_run)).await?;
-    let result = store.admin_create_agent_for_owner(input).await?;
-    Ok(AgentCreateForOwnerOutput { dry_run, result })
+    let database_url = required_env("FC_CORE_DATABASE_URL")?;
+    let cli_os_user = env::var("SUDO_USER")
+        .ok()
+        .map(|user| user.trim().to_string())
+        .filter(|user| !user.is_empty())
+        .unwrap_or_else(|| "root".to_string());
+    let placement = optional_agent_creation_placement()?;
+    run_agent_create_for_owner(&args, &database_url, &provisioner, cli_os_user, placement).await
+}
+
+/// Everything after the root and environment checks, so tests can drive the
+/// real preview/execute wiring against a test database and backend.
+pub(crate) async fn run_agent_create_for_owner(
+    args: &AgentCreateForOwnerExactCliArgs,
+    database_url: &str,
+    provisioner: &OwnerIdentityProvisioner,
+    cli_os_user: String,
+    placement_override: Option<RuntimePlacement>,
+) -> Result<AgentCreateForOwnerOutput> {
+    let input = operator_create_input(args, cli_os_user, placement_override)?;
+    provisioner.verify_operator(&input.admin).await?;
+    let timeout = optional_duration_secs("FC_CORE_POSTGRES_CONNECT_TIMEOUT_SECS", 60)?;
+    let store = tokio::time::timeout(timeout, async {
+        if args.execute {
+            CoreStore::connect(database_url).await
+        } else {
+            CoreStore::connect_dry_run(database_url).await
+        }
+    })
+    .await
+    .context("Core Postgres connection timed out")??;
+    let outcome = operator_create_agent(&store, provisioner, input).await?;
+    Ok(AgentCreateForOwnerOutput {
+        dry_run: !args.execute,
+        outcome,
+    })
 }

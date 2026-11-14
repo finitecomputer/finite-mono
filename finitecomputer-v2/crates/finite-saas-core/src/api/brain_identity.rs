@@ -41,6 +41,7 @@ pub fn brain_identity_router(
         runtime_retirement_enabled: false,
         hosted_hermes_origins: HostedHermesOrigins::default(),
         native_sessions: Default::default(),
+        owner_identity: None,
     };
     Router::new()
         .route(
