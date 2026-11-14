@@ -108,6 +108,17 @@ fn enum_serde_as_str_and_parse_encodings_agree() {
     );
 
     assert_wire_encodings_agree!(
+        crate::parse_operator_creation_surface,
+        crate::OperatorCreationSurface::AdminApi,
+        crate::OperatorCreationSurface::Cli,
+    );
+
+    assert_wire_encodings_agree!(
+        crate::parse_operator_creation_admission,
+        crate::OperatorCreationAdmission::OperatorSponsored,
+    );
+
+    assert_wire_encodings_agree!(
         parse_project_membership_role,
         ProjectMembershipRole::Owner,
         ProjectMembershipRole::Admin,
@@ -369,6 +380,7 @@ fn schema_is_postgres_first_and_contains_first_bridge_tables() {
         "finite_private_daily_resets",
         "finite_private_notice_claims",
         "runner_capacity_fences",
+        "operator_agent_creations",
     ] {
         assert!(CORE_SCHEMA_SQL.contains(&format!("CREATE TABLE IF NOT EXISTS {table}")));
     }

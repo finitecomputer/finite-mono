@@ -91,6 +91,13 @@ where
         trim_to_option(Some(&input.display_name)).ok_or(CoreError::MissingAgentDisplayName)?;
     let idempotency_key = normalize_idempotency_key(&input.idempotency_key)
         .ok_or(CoreError::MissingAgentCreationIdempotencyKey)?;
+    // Operator creation requests own this prefix (migration 0047).
+    if idempotency_key
+        .to_ascii_lowercase()
+        .starts_with(crate::OPERATOR_REQUEST_KEY_PREFIX)
+    {
+        return Err(CoreError::ReservedAgentCreationIdempotencyKey);
+    }
     let profile_picture_url =
         normalize_profile_picture_url(configuration.profile_picture_url.as_deref())?;
     let owner_chat_account_id =

@@ -24,6 +24,8 @@ mod identity_authorization;
 mod key_alias_browser;
 mod key_aliases;
 mod launch_code_tiers;
+mod operator_creation;
+mod operator_sign_in;
 mod public_contracts;
 mod relocation_credential;
 mod runner_authorization;

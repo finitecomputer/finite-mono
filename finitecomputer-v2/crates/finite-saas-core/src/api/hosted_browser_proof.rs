@@ -61,6 +61,7 @@ async fn hosted_browser_composition() {
             runtime_upgrades_enabled: false, runtime_retirement_enabled: false,
             hosted_hermes_origins: origins.clone(),
             native_sessions: crate::hosted_hermes_session::NativeSessions::with_test_client(client),
+            owner_identity: None,
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let core_url = format!("http://{}", listener.local_addr().unwrap());

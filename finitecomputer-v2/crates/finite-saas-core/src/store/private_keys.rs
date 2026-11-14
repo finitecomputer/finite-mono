@@ -142,13 +142,25 @@ where
     if input.trial_restore_key.is_some() {
         return Err(CoreError::InvalidFinitePrivateApiKey);
     }
-    let grant = approve_finite_private_grant_row(
-        client,
-        &user,
-        crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE,
-        &now,
-    )
-    .await?;
+    // An operator-created Agent must never change the owner's existing
+    // grant (profile, status, usage window); self-serve keeps approving.
+    let grant = if is_operator_created_project(client, &project.id).await? {
+        ensure_finite_private_grant_row(
+            client,
+            &user,
+            crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE,
+            &now,
+        )
+        .await?
+    } else {
+        approve_finite_private_grant_row(
+            client,
+            &user,
+            crate::DEFAULT_FINITE_PRIVATE_LIMIT_PROFILE,
+            &now,
+        )
+        .await?
+    };
     let raw_api_key = generate_finite_private_api_key()?;
     let api_key = issue_finite_private_api_key_row(
         client,
@@ -390,3 +402,17 @@ where
 }
 
 mod trial_restore;
+
+async fn is_operator_created_project<C>(client: &C, project_id: &str) -> CoreResult<bool>
+where
+    C: GenericClient + Sync,
+{
+    Ok(client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM operator_agent_creations WHERE project_id = $1)",
+            &[&project_id],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0))
+}

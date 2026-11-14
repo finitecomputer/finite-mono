@@ -179,6 +179,7 @@ mod launch_codes;
 mod move_holds;
 use move_holds::*;
 mod offboarding;
+mod operator_creation;
 #[cfg(test)]
 mod trial_access_gates_tests;
 mod trial_archives;

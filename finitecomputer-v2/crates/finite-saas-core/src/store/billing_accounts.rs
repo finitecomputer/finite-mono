@@ -94,8 +94,9 @@ where
 
 /// Mirrors `active_agent_creation_entitlement_count`: active self-serve runtime
 /// links plus pending (`requested`/`launching`) self-serve requests for the org,
-/// all row-scoped. Imported legacy runtimes remain visible but do not consume a
-/// hosted/self-serve launch entitlement.
+/// all row-scoped. Imported legacy runtimes and operator-created Agents
+/// (migration 0047) remain visible but do not consume a hosted/self-serve
+/// launch entitlement, so Stripe sync never trades one for the other.
 pub(super) async fn postgres_active_agent_creation_entitlement_count<C>(
     client: &C,
     customer_org_id: &str,
@@ -110,10 +111,15 @@ where
                  JOIN projects projects ON projects.id = links.project_id
                  WHERE projects.customer_org_id = $1
                    AND projects.import_candidate_id IS NULL
-                   AND links.active = TRUE)
+                   AND links.active = TRUE
+                   AND NOT EXISTS (SELECT 1 FROM operator_agent_creations operator
+                                   WHERE operator.project_id = projects.id))
                 +
-                (SELECT COUNT(*) FROM agent_creation_requests
-                 WHERE customer_org_id = $1 AND status IN ('requested', 'launching'))
+                (SELECT COUNT(*) FROM agent_creation_requests requests
+                 WHERE requests.customer_org_id = $1
+                   AND requests.status IN ('requested', 'launching')
+                   AND NOT EXISTS (SELECT 1 FROM operator_agent_creations operator
+                                   WHERE operator.project_id = requests.project_id))
              )::BIGINT",
             &[&customer_org_id],
         )

@@ -99,7 +99,9 @@ in
       #   FC_CORE_RUNNER_API_TOKEN       Runner-only lifecycle work capability
       #   FC_FINITE_PRIVATE_USAGE_API_TOKEN  (pairs with the Tinfoil-sealed
       #                         FINITE_USAGE_API_SERVICE_KEY — do NOT rotate at cutover)
-      #   WORKOS_API_KEY                 Read-only user lookup after JWT validation
+      #   WORKOS_API_KEY                 User lookup after JWT validation; the root CLI
+      #                                  agent-create-for-owner-exact also finds or
+      #                                  creates the owner's WorkOS user with it
       #   WORKOS_CLIENT_ID               Expected AuthKit client_id/JWKS selector
       #   FC_WORKOS_OPERATOR_ORG_ID      Exact org_id required by admin routes
       #   Optional Brain identity listener (FIN-122), all four or none:

@@ -80,6 +80,67 @@ where
     Ok(())
 }
 
+/// Make sure the user has a grant without changing one they already have:
+/// an existing grant keeps its profile, status and usage window. A new one
+/// starts active on `limit_profile_id`, as approval would create it.
+pub(super) async fn ensure_finite_private_grant_row<C>(
+    client: &C,
+    user: &CoreUser,
+    limit_profile_id: &str,
+    now: &str,
+) -> CoreResult<FinitePrivateGrant>
+where
+    C: GenericClient + Sync,
+{
+    ensure_finite_private_limit_profile_row(client, limit_profile_id, now).await?;
+    let grant_id = finite_private_grant_id_for_user(&user.id);
+    let inserted = client
+        .execute(
+            "INSERT INTO finite_private_grants (
+               id, user_id, limit_profile_id, status, current_window_started_at,
+               current_window_used_units, burst_window_epoch, created_at, updated_at
+             )
+             VALUES ($1, $2, $3, 'active', NULL, 0, 0, $4::text::timestamptz, $4::text::timestamptz)
+             ON CONFLICT (user_id) DO NOTHING",
+            &[&grant_id, &user.id, &limit_profile_id, &now],
+        )
+        .await
+        .map_err(store_error)?
+        == 1;
+    let grant_id: String = client
+        .query_one(
+            "SELECT id FROM finite_private_grants WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .map_err(store_error)?
+        .get(0);
+    let grant = select_finite_private_grant(client, &grant_id, false)
+        .await?
+        .ok_or(CoreError::FinitePrivateGrantNotActive)?;
+    if inserted {
+        insert_finite_private_admin_audit_event(
+            client,
+            FinitePrivateAdminAuditInsert {
+                action: "finite_private.grant.approve",
+                target_type: "grant",
+                target_id: &grant.id,
+                grant_id: Some(&grant.id),
+                api_key_id: None,
+                actor: None,
+                metadata: json!({
+                "userId": grant.user_id.clone(),
+                "limitProfileId": grant.limit_profile_id.clone(),
+                "verifiedEmail": user.email.clone()
+                }),
+                now,
+            },
+        )
+        .await?;
+    }
+    Ok(grant)
+}
+
 pub(super) async fn approve_finite_private_grant_row<C>(
     client: &C,
     user: &CoreUser,

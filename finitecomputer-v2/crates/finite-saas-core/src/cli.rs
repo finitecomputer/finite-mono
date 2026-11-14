@@ -11,6 +11,8 @@ mod rollout;
 pub(super) use rollout::*;
 mod finite_private;
 pub(super) use finite_private::*;
+mod operator_creation;
+pub(super) use operator_creation::*;
 #[cfg(test)]
 mod tests;
 

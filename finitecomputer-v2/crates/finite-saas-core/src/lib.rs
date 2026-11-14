@@ -8,6 +8,7 @@ pub mod brain_identity;
 pub mod hosted_hermes;
 pub mod hosted_hermes_session;
 pub mod launch_codes;
+pub mod owner_identity;
 pub mod store;
 pub mod trials;
 
@@ -28,6 +29,7 @@ mod agent_creation;
 mod error;
 mod finite_private;
 mod identity;
+mod operator_creation;
 mod provider_operations;
 mod runner_capacity;
 mod runtime;
@@ -87,6 +89,14 @@ pub use finite_private::{
 
 pub use identity::{
     canonical_agent_email, normalize_owner_email, normalize_source_host_id, source_import_key,
+};
+
+pub use operator_creation::{
+    MAX_OPERATOR_CREATION_REASON_CHARS, MAX_OPERATOR_IDEMPOTENCY_KEY_CHARS,
+    OPERATOR_REQUEST_KEY_PREFIX, OperatorAgentCreation, OperatorAgentCreationListing,
+    OperatorCreateAgentInput, OperatorCreateAgentResult, OperatorCreationActor,
+    OperatorCreationAdmission, OperatorCreationOwner, OperatorCreationSurface, OperatorIdentity,
+    OwnerSignInIdentity, parse_operator_creation_admission, parse_operator_creation_surface,
 };
 
 pub use provider_operations::{

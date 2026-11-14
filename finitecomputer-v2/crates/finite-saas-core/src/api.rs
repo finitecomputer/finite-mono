@@ -21,8 +21,9 @@ use crate::{
     FinitePrivateGrant, FinitePrivateSettlementKind, FinitePrivateUsageDecision,
     FinitePrivateUsageStatus, HostingTier, IssueFinitePrivateApiKeyInput,
     LeaseAgentCreationRequestInput, LeaseRuntimeControlRequestInput, LinkStripeCustomerInput,
-    LinkStripeCustomerRequest, LinkVerifiedUserInput, Project, ProviderOperationEnvelope,
-    ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
+    LinkStripeCustomerRequest, LinkVerifiedUserInput, OperatorAgentCreationListing,
+    OperatorCreateAgentInput, OperatorCreateAgentResult, OperatorCreationSurface, OperatorIdentity,
+    Project, ProviderOperationEnvelope, ProviderOperationTransition, ProviderRuntimeHandleEnvelope,
     ProvisionFinitePrivateRuntimeKeyInput, ProvisionFinitePrivateRuntimeKeyResult,
     RecordFinitePrivateRequestDiagnosticInput, RecordProviderOperationTransitionInput,
     RecordRuntimeHealthReportInput, RegisterAgentCreationRuntimeInput,
@@ -102,6 +103,9 @@ pub struct CoreApiState {
     runtime_retirement_enabled: bool,
     hosted_hermes_origins: HostedHermesOrigins,
     native_sessions: crate::hosted_hermes_session::NativeSessions,
+    /// Operator creation provisions the owner's WorkOS user and chat
+    /// account through this; without it the route refuses.
+    owner_identity: Option<crate::owner_identity::OwnerIdentityProvisioner>,
 }
 
 pub fn router(store: CoreStore, auth: CoreAuth) -> Router {
@@ -202,8 +206,38 @@ fn router_with_runtime_upgrades_and_agent_creation_placement(
         runtime_retirement_enabled,
         hosted_hermes_origins,
         native_sessions: Default::default(),
+        owner_identity: owner_identity_from_env(),
     };
     router_from_state(state)
+}
+
+fn owner_identity_from_env() -> Option<crate::owner_identity::OwnerIdentityProvisioner> {
+    crate::owner_identity::OwnerIdentityProvisioner::from_env()
+        .inspect_err(|error| {
+            tracing::error!(%error, "operator agent creation disabled: owner identity misconfigured");
+        })
+        .ok()
+        .flatten()
+}
+
+/// The admin router with a test owner-identity backend.
+#[cfg(test)]
+pub(crate) fn router_with_owner_identity(
+    store: CoreStore,
+    auth: CoreAuth,
+    owner_identity: crate::owner_identity::OwnerIdentityProvisioner,
+) -> Router {
+    router_from_state(CoreApiState {
+        store,
+        auth,
+        standard_stripe_price_id: None,
+        agent_creation_placement: None,
+        runtime_upgrades_enabled: true,
+        runtime_retirement_enabled: true,
+        hosted_hermes_origins: HostedHermesOrigins::default(),
+        native_sessions: Default::default(),
+        owner_identity: Some(owner_identity),
+    })
 }
 
 fn router_from_state(state: CoreApiState) -> Router {
@@ -306,6 +340,10 @@ fn router_from_state(state: CoreApiState) -> Router {
             post(record_finite_private_request_diagnostic),
         )
         .route("/api/core/v1/admin/runtimes", get(admin_runtimes))
+        .route(
+            "/api/core/v1/admin/operator-agent-creations",
+            get(admin_operator_agent_creations).post(admin_create_agent_for_owner),
+        )
         .route(
             "/api/core/v1/admin/account-email-target",
             post(admin_account_email_target),
