@@ -245,8 +245,62 @@ class SourceSnapshot:
     def under(self, prefix: str) -> list[str]:
         return sorted(path for path in self.members if path.startswith(prefix + "/"))
 
+    def resolve_link(self, path: str, link: str) -> str | None:
+        """The home-relative real destination of the symlink at `path`.
+
+        Walks `link` one component at a time the way the kernel would inside
+        the source home, following every intermediate and final symlink
+        through this snapshot, so `alias/..` leaves the directory `alias`
+        points at, not the one holding the link. `~` is a literal name, as
+        the kernel reads it. None when the walk leaves the home, loops, or
+        passes through a missing entry or a non-directory.
+        """
+        start = _link_start(link, path.split("/")[:-1])
+        if start is None:
+            return None
+        stack, pending = start
+        hops = 0
+        while pending:
+            part = pending.pop(0)
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not stack:
+                    return None
+                stack.pop()
+                continue
+            member = self.members.get("/".join([*stack, part]))
+            if member is not None and member.issym():
+                hops += 1
+                if hops > MAX_SYMLINK_HOPS:
+                    return None
+                start = _link_start(member.linkname, stack)
+                if start is None:
+                    return None
+                stack, rest = start
+                pending = rest + pending
+                continue
+            if pending and (member is None or not member.isdir()):
+                return None
+            stack.append(part)
+        return "/".join(stack) or None
+
     def top_level(self) -> list[str]:
         return sorted({path.split("/", 1)[0] for path in self.members})
+
+
+MAX_SYMLINK_HOPS = 40  # Linux MAXSYMLINKS
+_LEGACY_HOME_LINK = re.compile(r"^/+home/+node(?=/|$)")
+
+
+def _link_start(link: str, base: list[str]) -> tuple[list[str], list[str]] | None:
+    """Where a symlink's walk starts (home-relative) and its components."""
+    if link.startswith("/"):
+        match = _LEGACY_HOME_LINK.match(link)
+        if match is None:
+            return None
+        return [], link[match.end() :].split("/")
+    return list(base), link.split("/")
 
 
 # --------------------------------------------------------------------------
@@ -2644,23 +2698,15 @@ class FidelityInstall:
     def _placed_link(self, path: str, link: str) -> str | None:
         """Where a placed home symlink should point, or None to skip it.
 
-        Absolute and relative links get the same admitted-root mapping: the
-        normalized destination must stay inside the source home and land in a
-        placed entry, a payload home root or an active Hermes path. A relative
-        link stays relative while its destination keeps its place under the
-        legacy root; a destination that moves to Hermes home is rewritten.
+        The source snapshot resolves the link to the real file it reads
+        (SourceSnapshot.resolve_link); that destination then gets the same
+        admitted-root mapping as any path: a placed entry, a payload home
+        root or an active Hermes path. A relative link stays relative while
+        its destination keeps its place under the legacy root; a destination
+        that moves to Hermes home, or an absolute link, gets the mapped path.
         """
-        relative = not (link.startswith("/") or link.startswith("~/"))
-        if relative:
-            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), link))
-        elif link.startswith("~/"):
-            resolved = posixpath.normpath(link[2:])
-        else:
-            absolute = posixpath.normpath(link)
-            if not absolute.startswith(LEGACY_HOME + "/"):
-                return None
-            resolved = absolute[len(LEGACY_HOME) + 1 :]
-        if resolved in (".", "..") or resolved.startswith("../"):
+        resolved = self.snapshot.resolve_link(path, link)
+        if resolved is None:
             return None
         mapped = self.path_map.map_path(f"{LEGACY_HOME}/{resolved}", exact=True)
         if mapped is None:
@@ -2669,9 +2715,9 @@ class FidelityInstall:
             return mapped
         if not mapped.startswith(TARGET_LEGACY_ROOT + "/"):
             return None
-        if relative:
-            return posixpath.relpath(resolved, posixpath.dirname(path) or ".")
-        return mapped
+        if link.startswith("/"):
+            return mapped
+        return posixpath.relpath(resolved, posixpath.dirname(path) or ".")
 
 
 def _legacy_execution_record(job: dict[str, Any]) -> dict[str, Any]:

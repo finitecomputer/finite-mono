@@ -18,6 +18,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -810,13 +811,28 @@ class FullFidelityTests(unittest.TestCase):
             "lessons/relative-withheld": "../finitebrain/notes.md",
             "lessons/relative-hidden": "../.codex/config.toml",
             "lessons/absolute-script": "/home/node/.hermes/scripts/check_inbox.py",
+            # An intermediate symlink followed by `..` leaves the directory the
+            # symlink points at: both read the home-root report.txt.
+            "lessons/alias": "../recipes",
+            "lessons/report-link": "alias/../report.txt",
+            "lessons/report-abs": "/home/node/lessons/alias/../report.txt",
+            "lessons/chain": "latest",
         }
 
         def edit(home: Path) -> None:
+            (home / "report.txt").write_text("home root report\n")
+            (home / "lessons/report.txt").write_text("lessons report\n")
             for name, link in links.items():
                 (home / name).symlink_to(link)
 
         self.rebuild(self.now, customize_home=edit)
+        source = self.root / "source-home"
+        # The source filesystem's own answer, which the import must keep. An
+        # absolute link names /home/node, which this machine does not have,
+        # so the identity check below follows it from the source home instead.
+        self.assertEqual(
+            (source / "lessons/report-link").read_text(), "home root report\n"
+        )
         target, receipt = self.installed()
         legacy = target / "workspace/legacy-box1"
         expected = {
@@ -826,57 +842,136 @@ class FullFidelityTests(unittest.TestCase):
             "lessons/relative-dev": "../dev/project/README.md",
             "lessons/relative-loose": "../recipes/report.csv",
             "lessons/absolute-script": "/data/agent/hermes-home/scripts/check_inbox.py",
+            "lessons/alias": "../recipes",
+            "lessons/report-link": "../report.txt",
+            "lessons/report-abs": "/data/workspace/legacy-box1/report.txt",
+            "lessons/chain": "week1.md",
         }
         for name, link in expected.items():
             with self.subTest(link=name):
                 # os.readlink: pathlib would drop a leading "./" from the text.
                 self.assertEqual(os.readlink(legacy / name), link)
-        # Relative links that stay under the legacy root resolve in place.
+                # Identity: the target link reads the target copy of the very
+                # file the source link reads.
+                text = os.readlink(source / name)
+                followed = (
+                    source / text.removeprefix("/home/node/")
+                    if text.startswith("/home/node/")
+                    else source / name
+                )
+                real = Path(os.path.realpath(followed)).relative_to(source.resolve())
+                if real.parts[0] == ".hermes":
+                    copy = target / "agent/hermes-home" / real.relative_to(".hermes")
+                else:
+                    copy = legacy / real
+                self.assertTrue(copy.exists(), copy)
+                self.assertTrue(
+                    self._target_link_path(target, legacy / name).samefile(copy)
+                )
+        for name in ("lessons/report-link", "lessons/report-abs"):
+            with self.subTest(content=name):
+                self.assertEqual(
+                    self._target_link_path(target, legacy / name).read_text(),
+                    "home root report\n",
+                )
         self.assertEqual(
             (legacy / "lessons/relative-workspace").read_text(), "workspace notes\n"
         )
-        self.assertEqual((legacy / "lessons/relative-dev").read_text(), "project\n")
-        self.assertTrue((target / "agent/hermes-home/scripts/check_inbox.py").is_file())
         for name in links.keys() - expected.keys():
             with self.subTest(skipped=name):
                 self.assertFalse((legacy / name).is_symlink())
                 self.assertFalse((legacy / name).exists())
         home = receipt["fidelity"]["installed"]["home"]
-        # The fixture's own inactive link plus the three rejected above.
+        # The fixture's own inactive link plus the three rejected above. Loops
+        # never reach a bundle (the source inventory stops on them); the
+        # snapshot test below covers them.
         self.assertEqual(home["skipped_symlink_count"], 1 + 3)
         # Existing relative links inside one placed entry keep their text.
-        self.assertEqual(str((legacy / "lessons/latest").readlink()), "week1.md")
+        self.assertEqual(os.readlink(legacy / "lessons/latest"), "week1.md")
 
-    def test_links_that_escape_the_source_home_are_never_placed(self) -> None:
-        # The source inventory already blocks these; the installer refuses
-        # them again rather than trusting that.
+    @staticmethod
+    def _target_link_path(target: Path, link: Path) -> Path:
+        """The path a placed link names, with the target's /data at `target`."""
+        text = os.readlink(link)
+        if text.startswith("/data/"):
+            return target / text.removeprefix("/data/")
+        return link.parent / text
+
+    def test_link_resolution_follows_the_source_snapshot(self) -> None:
+        home = Path(tempfile.mkdtemp(dir=self.root)) / "home"
+        for name, text in {
+            "report.txt": "home root report\n",
+            "lessons/report.txt": "lessons report\n",
+            "lessons/week1.md": "lesson one\n",
+            "recipes/report.csv": "a,b\n",
+            "workspace/notes.md": "workspace notes\n",
+            "workspace/sub/keep": "",
+            ".hermes/scripts/check_inbox.py": "print(1)\n",
+            ".hermes/logs/gateway.log": "log\n",
+        }.items():
+            (home / name).parent.mkdir(parents=True, exist_ok=True)
+            (home / name).write_text(text)
+        for name, link in {
+            "lessons/alias": "../recipes",
+            "lessons/up": "../..",
+            "lessons/out": "/etc",
+            "lessons/loop-a": "loop-b",
+            "lessons/loop-b": "loop-a",
+            "lessons/self": "self",
+            "lessons/hs": "../.hermes/scripts",
+            "lessons/latest": "week1.md",
+        }.items():
+            (home / name).symlink_to(link)
+        archive = home.parent / "source-home.tar"
+        with tarfile.open(archive, "w") as handle:
+            handle.add(home, arcname=".", recursive=True)
+        snapshot = fidelity.SourceSnapshot(archive, {"entries": []})
+        self.addCleanup(snapshot.close)
         install = mock.Mock(
-            path_map=fidelity.PathMap(["lessons", "workspace", "dev", "uploads"])
+            path_map=fidelity.PathMap(
+                ["lessons", "recipes", "report.txt", "workspace", "dev", "uploads"]
+            ),
+            snapshot=snapshot,
         )
         cases = {
+            # The review's case, relative and absolute: home-root report.txt.
+            ("lessons/report-link", "alias/../report.txt"): "../report.txt",
+            ("lessons/report-abs", "/home/node/lessons/alias/../report.txt"): (
+                "/data/workspace/legacy-box1/report.txt"
+            ),
+            ("lessons/local", "report.txt"): "report.txt",
+            ("lessons/chain", "latest"): "week1.md",
+            ("lessons/hs-link", "hs/check_inbox.py"): (
+                "/data/agent/hermes-home/scripts/check_inbox.py"
+            ),
+            ("lessons/normalized", "../workspace/./sub/../notes.md"): (
+                "../workspace/notes.md"
+            ),
+            ("lessons/dangling", "../workspace/missing.md"): "../workspace/missing.md",
+            ("top-link", "workspace/notes.md"): "workspace/notes.md",
+            # Escapes, cycles and broken walks are never placed.
             ("lessons/relative-escape", "../../etc/passwd"): None,
-            ("lessons/deep/escape", "../../../home/node/workspace/notes.md"): None,
+            ("lessons/escape-via", "up/etc/passwd"): None,
+            ("lessons/out-via", "out/passwd"): None,
+            ("lessons/loop-link", "loop-a"): None,
+            ("lessons/self-link", "self/x"): None,
+            ("lessons/thru-file", "week1.md/x"): None,
+            ("lessons/missing-dir", "../workspace/nope/../notes.md"): None,
             ("lessons/home-root", ".."): None,
-            (
-                "lessons/absolute-escape",
-                "/home/node/workspace/../../../etc/passwd",
-            ): None,
+            ("lessons/home-abs", "/home/node"): None,
+            ("lessons/other-home", "/home/nodereport.txt"): None,
+            # Leaving the home and coming back by name is still an escape.
+            ("lessons/escape-to-placed", "../../report.txt"): None,
+            ("lessons/escape-via-up", "up/node/report.txt"): None,
+            ("lessons/absolute-escape", "/home/node/workspace/../../../etc/passwd"): (
+                None
+            ),
             ("lessons/outside", "/etc/passwd"): None,
-            ("lessons/tilde-escape", "~/../root/.ssh/id_ed25519"): None,
+            # The kernel reads `~` as a literal directory name.
+            ("lessons/tilde", "~/workspace/notes.md"): None,
             ("lessons/punctuated", "../workspace."): None,
             ("lessons/inactive-hermes", "../.hermes/logs/gateway.log"): None,
             ("lessons/hermes-root", "../.hermes"): None,
-            (
-                "lessons/normalized",
-                "../workspace/./x/../notes.md",
-            ): "../workspace/notes.md",
-            ("lessons/tilde", "~/workspace/notes.md"): (
-                "/data/workspace/legacy-box1/workspace/notes.md"
-            ),
-            ("lessons/skill", "../.hermes/skills/wine/SKILL.md"): (
-                "/data/agent/hermes-home/skills/wine/SKILL.md"
-            ),
-            ("top-link", "workspace/notes.md"): "workspace/notes.md",
         }
         for (path, link), expected in cases.items():
             with self.subTest(path=path, link=link):
