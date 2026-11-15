@@ -22,6 +22,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from unittest import mock
 
@@ -545,6 +546,7 @@ class FullFidelityTests(unittest.TestCase):
             {
                 "approved_count": 2,
                 "pending_count": 1,
+                "allowlisted_users_added": 0,
                 "target_dir": "agent/hermes-home/platforms/pairing",
             },
         )
@@ -558,6 +560,330 @@ class FullFidelityTests(unittest.TestCase):
         self.install(target)
         self.assertTrue((legacy / "telegram-approved.json").is_file())
         self.assertFalse((target / "agent/hermes-home/platforms/pairing").exists())
+
+    # -- round 4: Telegram access outside the pairing store, relative links ----
+
+    def authorized(self, hermes_home: Path, users: list[str], env=None) -> list:
+        """Ask the target gateway's own authorization method about DM senders."""
+        code = (
+            "import json, sys; from gateway.config import Platform, "
+            "load_gateway_config; from gateway.pairing import PairingStore; "
+            "from gateway.run import GatewayRunner; "
+            "from gateway.session import SessionSource; "
+            "r = object.__new__(GatewayRunner); r.config = load_gateway_config(); "
+            "r.pairing_store = PairingStore(); r.adapters = {}; "
+            "print(json.dumps([r._is_user_authorized(SessionSource("
+            "platform=Platform.TELEGRAM, chat_id=u, chat_type='dm', user_id=u)) "
+            f"for u in {users!r}]))"
+        )
+        scratch = Path(tempfile.mkdtemp(dir=self.root))
+        if env:
+            code = f"import os; os.environ.update({env!r}); " + code
+        output = run_hermes(hermes_home, scratch, code)
+        return json.loads(output.strip().splitlines()[-1])
+
+    def test_allowlisted_but_unpaired_owner_keeps_telegram_access(self) -> None:
+        allowlisted = "707"
+
+        def env_form(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(env.read_text() + f"TELEGRAM_ALLOWED_USERS={allowlisted}\n")
+
+        def yaml_form(*path: str, value) -> Callable[[Path], None]:
+            def edit(home: Path) -> None:
+                config_path = home / ".hermes/config.yaml"
+                config = yaml.safe_load(config_path.read_text())
+                holder = config
+                for part in path[:-1]:
+                    holder = holder.setdefault(part, {})
+                holder[path[-1]] = value
+                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+            return edit
+
+        forms = (
+            ("env:TELEGRAM_ALLOWED_USERS", env_form),
+            (
+                "config:telegram.allow_from",
+                yaml_form("telegram", "allow_from", value=[int(allowlisted)]),
+            ),
+            (
+                "config:platforms.telegram.extra.allow_from",
+                yaml_form(
+                    "platforms", "telegram", "extra", "allow_from", value=allowlisted
+                ),
+            ),
+        )
+        # Control: the source allowlist alone admits the owner in target Hermes.
+        empty_home = Path(tempfile.mkdtemp(dir=self.root))
+        self.assertEqual(
+            self.authorized(
+                empty_home,
+                [allowlisted],
+                env={"TELEGRAM_ALLOWED_USERS": allowlisted},
+            ),
+            [True],
+        )
+        for label, edit in forms:
+            with self.subTest(source=label):
+                self.rebuild(self.now, customize_home=edit)
+                manifest = self.manifest()
+                telegram = manifest["fidelity"]["telegram"]
+                self.assertEqual(
+                    telegram["allowlist"],
+                    {
+                        "sources": [label],
+                        "unpaired_user_count": 1,
+                        "target": "approved-pairing-entries",
+                    },
+                )
+                self.assertNotIn(allowlisted, json.dumps(telegram))
+                target = fx.build_target(self.root)
+                receipt = self.install(target)
+                hermes = target / "agent/hermes-home"
+                approved = json.loads(
+                    (hermes / "platforms/pairing/telegram-approved.json").read_text()
+                )
+                self.assertEqual(
+                    sorted(approved),
+                    sorted([str(fx.OWNER_ID), str(fx.SECOND_ID), allowlisted]),
+                )
+                self.assertEqual(
+                    approved[allowlisted]["approved_via"], "legacy-telegram-allowlist"
+                )
+                self.assertEqual(approved[str(fx.OWNER_ID)]["user_name"], "Owner")
+                pairing = receipt["fidelity"]["installed"]["pairing"]
+                self.assertEqual(
+                    (pairing["approved_count"], pairing["allowlisted_users_added"]),
+                    (3, 1),
+                )
+                config = yaml.safe_load((hermes / "config.yaml").read_text())
+                self.assertEqual(
+                    config["gateway"]["platforms"]["telegram"]["extra"]["dm_policy"],
+                    "pairing",
+                )
+                # The target's own authorization: the owner and both paired
+                # users get in without a new pairing step; a stranger does not.
+                self.assertEqual(
+                    self.authorized(
+                        hermes,
+                        [allowlisted, str(fx.OWNER_ID), str(fx.SECOND_ID), "999"],
+                    ),
+                    [True, True, True, False],
+                )
+
+    def test_allowlisted_user_already_paired_is_not_duplicated(self) -> None:
+        def edit(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(
+                env.read_text() + f"TELEGRAM_ALLOWED_USERS={fx.OWNER_ID}, \n"
+            )
+
+        self.rebuild(self.now, customize_home=edit)
+        manifest = self.manifest()
+        self.assertEqual(
+            manifest["fidelity"]["telegram"]["allowlist"]["unpaired_user_count"], 0
+        )
+        target = fx.build_target(self.root)
+        receipt = self.install(target)
+        approved = json.loads(
+            (
+                target / "agent/hermes-home/platforms/pairing/telegram-approved.json"
+            ).read_text()
+        )
+        self.assertEqual(approved[str(fx.OWNER_ID)]["user_name"], "Owner")
+        self.assertNotIn("approved_via", approved[str(fx.OWNER_ID)])
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["pairing"]["allowlisted_users_added"], 0
+        )
+
+    def test_telegram_grants_without_a_target_equivalent_fail_closed(self) -> None:
+        token = {"TELEGRAM_BOT_TOKEN": fx.TOKEN}
+        failing = (
+            (
+                {"TELEGRAM_ALLOWED_USERS": "*"},
+                {},
+                "env:TELEGRAM_ALLOWED_USERS (allows everyone)",
+            ),
+            (
+                {"TELEGRAM_ALLOWED_USERS": "707,@owner_handle"},
+                {},
+                "env:TELEGRAM_ALLOWED_USERS (entry is not a numeric Telegram user id)",
+            ),
+            ({"TELEGRAM_ALLOW_ALL_USERS": "true"}, {}, "env:TELEGRAM_ALLOW_ALL_USERS"),
+            ({"GATEWAY_ALLOW_ALL_USERS": "1"}, {}, "env:GATEWAY_ALLOW_ALL_USERS"),
+            ({"GATEWAY_ALLOWED_USERS": "707"}, {}, "env:GATEWAY_ALLOWED_USERS"),
+            (
+                {"TELEGRAM_GROUP_ALLOWED_CHATS": "-100123"},
+                {},
+                "env:TELEGRAM_GROUP_ALLOWED_CHATS",
+            ),
+            ({"TELEGRAM_ALLOW_BOTS": "all"}, {}, "env:TELEGRAM_ALLOW_BOTS"),
+            (
+                {},
+                {"telegram": {"allow_from": ["*"]}},
+                "config:telegram.allow_from (allows everyone)",
+            ),
+            (
+                {},
+                {"gateway": {"telegram": {"allow_from": "${MISSING}"}}},
+                "config:gateway.telegram.allow_from (unresolved reference)",
+            ),
+            (
+                {},
+                {"platforms": {"telegram": {"extra": {"dm_policy": "open"}}}},
+                "config:platforms.telegram.extra.dm_policy",
+            ),
+            (
+                {},
+                {"gateway": {"platforms": {"telegram": {"group_allow_from": [5]}}}},
+                "config:gateway.platforms.telegram.group_allow_from",
+            ),
+            (
+                {},
+                {"telegram": {"extra": {"group_allowed_chats": "-100123"}}},
+                "config:telegram.extra.group_allowed_chats",
+            ),
+        )
+        for env, config, message in failing:
+            with self.subTest(message=message):
+                with self.assertRaises(migration.MigrationError) as raised:
+                    fidelity.telegram_access(config, {**token, **env})
+                text = str(raised.exception)
+                self.assertIn("no target equivalent", text)
+                self.assertIn(message, text)
+                for value in ("707", "@owner_handle", "-100123", fx.TOKEN):
+                    self.assertNotIn(value, text)
+        # Off values and the target's own policies are not grants.
+        users, sources = fidelity.telegram_access(
+            {
+                "telegram": {"allow_bots": "none", "dm_policy": "pairing"},
+                "platforms": {"telegram": {"extra": {"dm_policy": "allowlist"}}},
+                "gateway": {"telegram": {"allow_from": "${OWNERS}"}},
+            },
+            {
+                **token,
+                "TELEGRAM_ALLOW_ALL_USERS": "false",
+                "GATEWAY_ALLOW_ALL_USERS": "",
+                "TELEGRAM_ALLOW_BOTS": "none",
+                "OWNERS": "12, 7",
+            },
+        )
+        self.assertEqual(users, ["7", "12"])
+        self.assertEqual(sources, ["config:gateway.telegram.allow_from"])
+
+        # End to end: the manifest is refused before cutover, nothing is planned.
+        def allow_all(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(env.read_text() + "TELEGRAM_ALLOW_ALL_USERS=true\n")
+
+        self.rebuild(self.now, customize_home=allow_all)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "no target equivalent.*TELEGRAM_ALLOW_ALL_USERS"
+        ):
+            self.manifest()
+        self.assertFalse((self.bundle / "manifest.json").exists())
+
+    def test_telegram_grants_are_ignored_when_telegram_does_not_move(self) -> None:
+        def disabled(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(
+                env.read_text()
+                .replace(f"TELEGRAM_BOT_TOKEN={fx.TOKEN}\n", "")
+                .replace(f"TELEGRAM_HOME_CHANNEL={fx.OWNER_ID}\n", "")
+                + "TELEGRAM_ALLOW_ALL_USERS=true\n"
+            )
+
+        self.rebuild(self.now, customize_home=disabled)
+        telegram = self.manifest()["fidelity"]["telegram"]
+        self.assertFalse(telegram["activate"])
+        self.assertEqual(telegram["allowlist"]["sources"], [])
+
+    def test_relative_links_map_to_every_activated_root(self) -> None:
+        links = {
+            "lessons/relative-workspace": "../workspace/notes.md",
+            "lessons/relative-script": "../.hermes/scripts/check_inbox.py",
+            "lessons/relative-uploads": "./../uploads/photo.txt",
+            "lessons/relative-dev": "../dev/project/README.md",
+            "lessons/relative-loose": "../recipes/report.csv",
+            "lessons/relative-inactive": "../.hermes/audio_cache/voice.ogg",
+            "lessons/relative-withheld": "../finitebrain/notes.md",
+            "lessons/relative-hidden": "../.codex/config.toml",
+            "lessons/absolute-script": "/home/node/.hermes/scripts/check_inbox.py",
+        }
+
+        def edit(home: Path) -> None:
+            for name, link in links.items():
+                (home / name).symlink_to(link)
+
+        self.rebuild(self.now, customize_home=edit)
+        target, receipt = self.installed()
+        legacy = target / "workspace/legacy-box1"
+        expected = {
+            "lessons/relative-workspace": "../workspace/notes.md",
+            "lessons/relative-script": "/data/agent/hermes-home/scripts/check_inbox.py",
+            "lessons/relative-uploads": "../uploads/photo.txt",
+            "lessons/relative-dev": "../dev/project/README.md",
+            "lessons/relative-loose": "../recipes/report.csv",
+            "lessons/absolute-script": "/data/agent/hermes-home/scripts/check_inbox.py",
+        }
+        for name, link in expected.items():
+            with self.subTest(link=name):
+                # os.readlink: pathlib would drop a leading "./" from the text.
+                self.assertEqual(os.readlink(legacy / name), link)
+        # Relative links that stay under the legacy root resolve in place.
+        self.assertEqual(
+            (legacy / "lessons/relative-workspace").read_text(), "workspace notes\n"
+        )
+        self.assertEqual((legacy / "lessons/relative-dev").read_text(), "project\n")
+        self.assertTrue((target / "agent/hermes-home/scripts/check_inbox.py").is_file())
+        for name in links.keys() - expected.keys():
+            with self.subTest(skipped=name):
+                self.assertFalse((legacy / name).is_symlink())
+                self.assertFalse((legacy / name).exists())
+        home = receipt["fidelity"]["installed"]["home"]
+        # The fixture's own inactive link plus the three rejected above.
+        self.assertEqual(home["skipped_symlink_count"], 1 + 3)
+        # Existing relative links inside one placed entry keep their text.
+        self.assertEqual(str((legacy / "lessons/latest").readlink()), "week1.md")
+
+    def test_links_that_escape_the_source_home_are_never_placed(self) -> None:
+        # The source inventory already blocks these; the installer refuses
+        # them again rather than trusting that.
+        install = mock.Mock(
+            path_map=fidelity.PathMap(["lessons", "workspace", "dev", "uploads"])
+        )
+        cases = {
+            ("lessons/relative-escape", "../../etc/passwd"): None,
+            ("lessons/deep/escape", "../../../home/node/workspace/notes.md"): None,
+            ("lessons/home-root", ".."): None,
+            (
+                "lessons/absolute-escape",
+                "/home/node/workspace/../../../etc/passwd",
+            ): None,
+            ("lessons/outside", "/etc/passwd"): None,
+            ("lessons/tilde-escape", "~/../root/.ssh/id_ed25519"): None,
+            ("lessons/punctuated", "../workspace."): None,
+            ("lessons/inactive-hermes", "../.hermes/logs/gateway.log"): None,
+            ("lessons/hermes-root", "../.hermes"): None,
+            (
+                "lessons/normalized",
+                "../workspace/./x/../notes.md",
+            ): "../workspace/notes.md",
+            ("lessons/tilde", "~/workspace/notes.md"): (
+                "/data/workspace/legacy-box1/workspace/notes.md"
+            ),
+            ("lessons/skill", "../.hermes/skills/wine/SKILL.md"): (
+                "/data/agent/hermes-home/skills/wine/SKILL.md"
+            ),
+            ("top-link", "workspace/notes.md"): "workspace/notes.md",
+        }
+        for (path, link), expected in cases.items():
+            with self.subTest(path=path, link=link):
+                self.assertEqual(
+                    fidelity.FidelityInstall._placed_link(install, path, link),
+                    expected,
+                )
 
     def test_user_skills_activate_and_baseline_clashes_stay_review_only(self) -> None:
         target, receipt = self.installed()

@@ -804,10 +804,16 @@ def build_bundle(
     memory_store_writer: Callable[[Path], int] = simple_memory_store,
     sessions_writer: Callable[[Path, datetime], None] | None = None,
     stage_agents_seed: bool = True,
+    customize_home: Callable[[Path], None] | None = None,
 ) -> dict[str, Any]:
-    """Build a bundle exactly as runbook step 5 stages it, then return evidence."""
+    """Build a bundle exactly as runbook step 5 stages it, then return evidence.
+
+    `customize_home` edits the synthetic source home before it is inventoried.
+    """
     now = now or datetime.now(timezone.utc)
     home = build_source_home(root, now)
+    if customize_home is not None:
+        customize_home(home)
     bundle = root / "bundle"
     payload = bundle / "payload"
     (payload / "hermes").mkdir(parents=True)

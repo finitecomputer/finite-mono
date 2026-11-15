@@ -17,6 +17,7 @@ import copy
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -146,7 +147,9 @@ class PathMap:
         self.rewritten = 0
         self.unmapped = 0
 
-    def map_path(self, value: str) -> str | None:
+    def map_path(self, value: str, *, exact: bool = False) -> str | None:
+        """Map one legacy path; `exact` (a link target) keeps trailing punctuation."""
+        name = (lambda part: part) if exact else _strip_punctuation
         if value.startswith("~/"):
             rest = value[1:]
         elif value == LEGACY_HOME or value.startswith(LEGACY_HOME + "/"):
@@ -162,10 +165,10 @@ class PathMap:
             if not tail.strip("/"):
                 return TARGET_HERMES_HOME + tail
             hermes_head = tail.lstrip("/").split("/", 1)[0]
-            if _strip_punctuation(hermes_head) in HERMES_ACTIVE_NAMES:
+            if name(hermes_head) in HERMES_ACTIVE_NAMES:
                 return TARGET_HERMES_HOME + tail
             return None
-        if _strip_punctuation(head) in self.placed:
+        if name(head) in self.placed:
             return f"{TARGET_LEGACY_ROOT}/{head}{tail}"
         return None
 
@@ -854,11 +857,126 @@ def merged_pairing(snapshot: SourceSnapshot) -> dict[str, dict[str, Any]]:
     return merged
 
 
+# Target Hermes authorizes a Telegram user who is paired OR on an allowlist
+# (gateway/authz_mixin.py _is_user_authorized), and the v2 target admits only
+# paired users (finite-agentd sets dm_policy: pairing). A per-user allowlist
+# entry is therefore carried as an approved pairing entry. Grants that are not
+# per-user have no faithful target equivalent and stop the import.
+TELEGRAM_ALLOWLIST_ENV = ("TELEGRAM_ALLOWED_USERS",)
+TELEGRAM_ALLOWLIST_KEYS = ("allow_from", "allowed_users")
+TELEGRAM_UNSUPPORTED_ACCESS_ENV = (
+    "TELEGRAM_ALLOW_ALL_USERS",
+    "GATEWAY_ALLOW_ALL_USERS",
+    "GATEWAY_ALLOWED_USERS",
+    "TELEGRAM_GROUP_ALLOWED_USERS",
+    "TELEGRAM_GROUP_ALLOWED_CHATS",
+    "TELEGRAM_ALLOW_BOTS",
+)
+TELEGRAM_UNSUPPORTED_ACCESS_KEYS = (
+    "group_allow_from",
+    "group_allowed_chats",
+    "allow_bots",
+)
+TELEGRAM_CARRIED_DM_POLICIES = frozenset({"pairing", "allowlist"})
+_OFF_WORDS = frozenset({"", "false", "no", "off", "0", "none"})
+_TELEGRAM_USER_ID = re.compile(r"^[0-9]{1,64}$")
+TELEGRAM_ALLOWLIST_APPROVAL = "legacy-telegram-allowlist"
+
+
+def _grants_access(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return str(value).strip().lower() not in _OFF_WORDS
+
+
+def telegram_access(
+    config: dict[str, Any], env: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Return (allowlisted user ids, allowlist sources) the source granted.
+
+    Raises before cutover, naming each setting and never its value, when the
+    source admits Telegram users in a way the target cannot represent.
+    """
+    users: set[str] = set()
+    sources: set[str] = set()
+    unsupported: set[str] = set()
+
+    def allowlist(label: str, raw: Any) -> None:
+        if raw is None:
+            return
+        value = raw
+        if isinstance(raw, str):
+            value = _resolve_env_reference(raw, env)
+            if value is None:
+                if raw.strip():
+                    unsupported.add(f"{label} (unresolved reference)")
+                return
+        items = value if isinstance(value, list) else str(value).split(",")
+        entries = [str(item).strip() for item in items if str(item).strip()]
+        if not entries:
+            return
+        sources.add(label)
+        for entry in entries:
+            if _TELEGRAM_USER_ID.fullmatch(entry):
+                users.add(entry)
+            elif entry == "*":
+                unsupported.add(f"{label} (allows everyone)")
+            else:
+                unsupported.add(f"{label} (entry is not a numeric Telegram user id)")
+
+    for name in TELEGRAM_ALLOWLIST_ENV:
+        allowlist(f"env:{name}", env.get(name))
+    for name in TELEGRAM_UNSUPPORTED_ACCESS_ENV:
+        if _grants_access(env.get(name)):
+            unsupported.add(f"env:{name}")
+    for path in TELEGRAM_CONFIG_BLOCKS:
+        block = _get(config, *path)
+        if not isinstance(block, dict):
+            continue
+        label = "config:" + ".".join(path)
+        for scope, holder in ((label, block), (label + ".extra", block.get("extra"))):
+            if not isinstance(holder, dict):
+                continue
+            for key in TELEGRAM_ALLOWLIST_KEYS:
+                allowlist(f"{scope}.{key}", holder.get(key))
+            for key in TELEGRAM_UNSUPPORTED_ACCESS_KEYS:
+                if _grants_access(holder.get(key)):
+                    unsupported.add(f"{scope}.{key}")
+            policy = holder.get("dm_policy")
+            if (
+                policy is not None
+                and str(policy).strip().lower() not in TELEGRAM_CARRIED_DM_POLICIES
+            ):
+                unsupported.add(f"{scope}.dm_policy")
+    if unsupported:
+        raise MigrationError(
+            "legacy Telegram access policy has no target equivalent (the target "
+            "admits only paired users): " + ", ".join(sorted(unsupported))
+        )
+    return sorted(users, key=int), sorted(sources)
+
+
+def telegram_grants(
+    snapshot: SourceSnapshot, config: dict[str, Any], env: dict[str, str]
+) -> tuple[dict[str, dict[str, Any]], list[str], list[str]]:
+    """Merged pairing store, allowlisted users not yet paired, allowlist sources."""
+    pairing = merged_pairing(snapshot)
+    users, sources = telegram_access(config, env)
+    unpaired = [user for user in users if user not in pairing["approved"]]
+    return pairing, unpaired, sources
+
+
 def _plan_telegram(
     snapshot: SourceSnapshot, config: dict[str, Any], env: dict[str, str]
 ) -> dict[str, Any]:
     token, home, enabled, evidence = telegram_source(config, env)
-    pairing = merged_pairing(snapshot) if enabled else {"approved": {}, "pending": {}}
+    pairing: dict[str, dict[str, Any]] = {"approved": {}, "pending": {}}
+    unpaired: list[str] = []
+    allowlist_sources: list[str] = []
+    if enabled:
+        pairing, unpaired, allowlist_sources = telegram_grants(snapshot, config, env)
     sources = [
         directory
         for directory in ("pairing", "platforms/pairing")
@@ -880,6 +998,13 @@ def _plan_telegram(
             "approved_count": len(pairing["approved"]),
             "pending_count": len(pairing["pending"]),
             "rate_limits": "not-carried",
+        },
+        # Allowlisted users keep access as approved pairing entries; unknown
+        # DMs get the pairing handshake, which no one passes without approval.
+        "allowlist": {
+            "sources": allowlist_sources,
+            "unpaired_user_count": len(unpaired),
+            "target": "approved-pairing-entries" if allowlist_sources else None,
         },
     }
 
@@ -1150,7 +1275,7 @@ HERMES_HOME_DISPOSITIONS = {
     "SOUL.md": "activated",
     "AGENTS.md": "see-persona-agents-md",
     "config.yaml": "user-facing-settings-adopted-rest-target-owned",
-    ".env": "telegram-token-only-tool-keys-not-copied",
+    ".env": "telegram-token-and-allowlist-carried-tool-keys-not-copied",
     "memories": "activated",
     "skills": "user-skills-activated-rest-review-only",
     "scripts": "activated",
@@ -1674,6 +1799,16 @@ class FidelityInstall:
             raise MigrationError(
                 "target already has a Telegram connection; refusing to replace it"
             )
+        self.telegram_grants = telegram_grants(
+            self.snapshot, self.source_config, self.source_env
+        )
+        planned = self.plan["telegram"].get("allowlist") or {}
+        if len(self.telegram_grants[1]) != planned.get(
+            "unpaired_user_count", 0
+        ) or self.telegram_grants[2] != planned.get("sources", []):
+            raise MigrationError(
+                "source Telegram allowlist does not match the approved plan"
+            )
         qualification = self.hooks.telegram_qualification()
         if not qualification.get("qualified"):
             raise MigrationError(
@@ -2158,9 +2293,29 @@ class FidelityInstall:
 
     def _apply_pairing(self, transaction: Transaction) -> None:
         if not self.plan["telegram"]["activate"]:
-            self.result["pairing"] = {"approved_count": 0, "pending_count": 0}
+            self.result["pairing"] = {
+                "approved_count": 0,
+                "pending_count": 0,
+                "allowlisted_users_added": 0,
+            }
             return
-        merged = merged_pairing(self.snapshot)
+        pairing, unpaired, _ = self.telegram_grants
+        if (len(pairing["approved"]), len(pairing["pending"])) != (
+            self.plan["telegram"]["pairing"]["approved_count"],
+            self.plan["telegram"]["pairing"]["pending_count"],
+        ):
+            raise MigrationError(
+                "source pairing store does not match the approved plan"
+            )
+        merged = {"approved": dict(pairing["approved"]), "pending": pairing["pending"]}
+        for user in unpaired:
+            # The shape PairingStore._approve_user writes, marked so the
+            # owner can tell a carried allowlist grant from a pairing code.
+            merged["approved"][user] = {
+                "user_name": "",
+                "approved_at": self.now.timestamp(),
+                "approved_via": TELEGRAM_ALLOWLIST_APPROVAL,
+            }
         for suffix, value in merged.items():
             if not value:
                 continue
@@ -2168,18 +2323,10 @@ class FidelityInstall:
             transaction.replace(
                 self.pairing_dir / f"telegram-{suffix}.json", data, 0o600
             )
-        approved = len(merged["approved"])
-        pending = len(merged["pending"])
-        if (approved, pending) != (
-            self.plan["telegram"]["pairing"]["approved_count"],
-            self.plan["telegram"]["pairing"]["pending_count"],
-        ):
-            raise MigrationError(
-                "source pairing store does not match the approved plan"
-            )
         self.result["pairing"] = {
-            "approved_count": approved,
-            "pending_count": pending,
+            "approved_count": len(merged["approved"]),
+            "pending_count": len(merged["pending"]),
+            "allowlisted_users_added": len(unpaired),
             "target_dir": transaction.relative(self.pairing_dir),
         }
 
@@ -2495,18 +2642,36 @@ class FidelityInstall:
         }
 
     def _placed_link(self, path: str, link: str) -> str | None:
-        if link.startswith("/") or link.startswith("~/"):
-            mapped = self.path_map.map_path(link)
-            if mapped and (
-                mapped.startswith(TARGET_LEGACY_ROOT + "/")
-                or mapped.startswith(TARGET_HERMES_HOME + "/")
-            ):
-                return mapped
+        """Where a placed home symlink should point, or None to skip it.
+
+        Absolute and relative links get the same admitted-root mapping: the
+        normalized destination must stay inside the source home and land in a
+        placed entry, a payload home root or an active Hermes path. A relative
+        link stays relative while its destination keeps its place under the
+        legacy root; a destination that moves to Hermes home is rewritten.
+        """
+        relative = not (link.startswith("/") or link.startswith("~/"))
+        if relative:
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), link))
+        elif link.startswith("~/"):
+            resolved = posixpath.normpath(link[2:])
+        else:
+            absolute = posixpath.normpath(link)
+            if not absolute.startswith(LEGACY_HOME + "/"):
+                return None
+            resolved = absolute[len(LEGACY_HOME) + 1 :]
+        if resolved in (".", "..") or resolved.startswith("../"):
             return None
-        resolved = PurePosixPath(os.path.normpath(PurePosixPath(path).parent / link))
-        if resolved.parts and resolved.parts[0] in self.plan["home"]["placed"]:
-            return link
-        return None
+        mapped = self.path_map.map_path(f"{LEGACY_HOME}/{resolved}", exact=True)
+        if mapped is None:
+            return None
+        if mapped.startswith(TARGET_HERMES_HOME + "/"):
+            return mapped
+        if not mapped.startswith(TARGET_LEGACY_ROOT + "/"):
+            return None
+        if relative:
+            return posixpath.relpath(resolved, posixpath.dirname(path) or ".")
+        return mapped
 
 
 def _legacy_execution_record(job: dict[str, Any]) -> dict[str, Any]:
