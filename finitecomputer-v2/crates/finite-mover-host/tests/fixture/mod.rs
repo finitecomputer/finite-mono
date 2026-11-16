@@ -103,12 +103,23 @@ pub const REDACTED_TEXT: &[(&str, &str, &str)] = &[
         "likes tea\nkey sk-proj4abcdefghijklmnop, keep it safe\n",
         "likes tea\nkey [REDACTED], keep it safe\n",
     ),
+    // A whole private key: the block goes, BEGIN through END, and the
+    // text after it stays.
     (
         "agent/hermes-home/skills/deploy/SKILL.md",
-        "# Deploy\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
-        "# Deploy\n[REDACTED]\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+        "# Deploy\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAAKEYPAYLOAD1\nAAAAKEYPAYLOAD2==\n-----END OPENSSH PRIVATE KEY-----\nThen run deploy.sh\n",
+        "# Deploy\n[REDACTED]\nThen run deploy.sh\n",
+    ),
+    // A key cut short, with no END: everything from BEGIN on goes.
+    (
+        "agent/hermes-home/memories/half-a-key.md",
+        "pasted half a key:\n-----BEGIN RSA PRIVATE KEY-----\nProc-Type: 4,ENCRYPTED\nMIIEKEYPAYLOAD3\nKEYPAYLOAD4\n",
+        "pasted half a key:\n[REDACTED]",
     ),
 ];
+
+/// What every private key's body in `REDACTED_TEXT` holds: never staged.
+pub const KEY_PAYLOAD: &str = "KEYPAYLOAD";
 
 /// What is staged, with its class.
 pub const STAGED: &[(&str, &str)] = &[

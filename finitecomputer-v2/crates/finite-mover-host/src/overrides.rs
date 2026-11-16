@@ -7,11 +7,12 @@
 //!
 //! A path covers itself and everything under it. The longest path that
 //! covers an entry decides it; the same path in both is left. The secret
-//! and link rules always win: a credential, a link or a name a zip can't
-//! carry is never staged. The files the stage writes itself (the config
+//! and link rules always win: a credential, a link (or a file with a
+//! second name) or a name a zip can't carry is never staged, inside a
+//! carried cache or build folder too. The files the stage writes itself (the config
 //! copy, a brain's name file, SimpleX) are not walked, so neither applies.
 
-use crate::classify::{Class, Verdict, Why};
+use crate::classify::{Class, EntryKind, Verdict, Why, uncarriable};
 use crate::error::HostError;
 
 /// The most overrides one operation may name.
@@ -45,8 +46,9 @@ impl Overrides {
         Ok(())
     }
 
-    /// `verdict`, the rules' answer for `parts`, as the overrides change it.
-    pub fn apply(&self, parts: &[&[u8]], verdict: Verdict) -> Verdict {
+    /// `verdict`, the rules' answer for `parts` (an entry of `kind`), as the
+    /// overrides change it.
+    pub fn apply(&self, parts: &[&[u8]], kind: EntryKind, verdict: Verdict) -> Verdict {
         let covering = self
             .0
             .iter()
@@ -65,6 +67,10 @@ impl Overrides {
                 depth: path.len(),
             },
             Some((Override::Carry, _)) if carriable(verdict.why) => {
+                // The cache rules come before the link and name rules.
+                if let Some(uncarriable) = uncarriable(parts, kind) {
+                    return uncarriable;
+                }
                 let (class, why) = if parts[0] == b"agent" {
                     (Class::History, Why::History)
                 } else {
@@ -127,7 +133,11 @@ mod tests {
 
     fn class(overrides: &Overrides, path: &str) -> (Class, Why) {
         let parts: Vec<&[u8]> = path.split('/').map(str::as_bytes).collect();
-        let verdict = overrides.apply(&parts, classify(&parts, EntryKind::File, None));
+        let verdict = overrides.apply(
+            &parts,
+            EntryKind::File,
+            classify(&parts, EntryKind::File, None),
+        );
         (verdict.class, verdict.why)
     }
 
@@ -187,9 +197,49 @@ mod tests {
         ] {
             assert_eq!(class(&set, path), expected, "{path}");
         }
-        let parts: Vec<&[u8]> = vec![b"agent", b"hermes-home", b"sessions", b"link"];
-        let link = set.apply(&parts, classify(&parts, EntryKind::Other, None));
-        assert_eq!(link.why, Why::NotAFile, "a link is never carried");
+        // A link, or a name a zip can't carry, is never carried: neither
+        // under a carried folder of the runtime nor of a cache.
+        for (path, kind, why) in [
+            (
+                &[&b"agent"[..], b"hermes-home", b"sessions", b"link"][..],
+                EntryKind::Other,
+                Why::NotAFile,
+            ),
+            (
+                &[b"workspace", b"app", b"node_modules", b".bin", b"tsc"],
+                EntryKind::Other,
+                Why::NotAFile,
+            ),
+            (
+                &[b"workspace", b"app", b"node_modules", b"bad\xffname.js"],
+                EntryKind::File,
+                Why::UncarriedName,
+            ),
+            (
+                &[b"workspace", b"app", b"node_modules", b"new\nline.js"],
+                EntryKind::File,
+                Why::UncarriedName,
+            ),
+        ] {
+            let verdict = set.apply(path, kind, classify(path, kind, None));
+            assert_eq!(
+                (verdict.class, verdict.why),
+                (Class::Runtime, why),
+                "{path:?}"
+            );
+        }
+        let output: Vec<&[u8]> = vec![b"workspace", b"app", b"dist", b"link.js"];
+        let carried = overrides(&[(Override::Carry, "workspace/app/dist")]);
+        let verdict = carried.apply(
+            &output,
+            EntryKind::Other,
+            classify(&output, EntryKind::Other, Some(3)),
+        );
+        assert_eq!(
+            verdict.why,
+            Why::NotAFile,
+            "nor under a carried build folder"
+        );
     }
 
     #[test]

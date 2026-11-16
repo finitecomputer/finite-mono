@@ -302,13 +302,22 @@ pub fn classify(parts: &[&[u8]], kind: EntryKind, build_output: Option<usize>) -
     if let Some(depth) = build_output {
         return verdict(Class::Cache, Why::BuildOutput, depth);
     }
-    if kind == EntryKind::Other {
-        return verdict(Class::Runtime, Why::NotAFile, len);
-    }
-    if let Some(index) = parts.iter().position(|part| !carried_name(part)) {
-        return verdict(Class::Runtime, Why::UncarriedName, index + 1);
+    if let Some(uncarriable) = uncarriable(parts, kind) {
+        return uncarriable;
     }
     allow_list(parts)
+}
+
+/// Rule 3: a link, socket, pipe or device, or a name a zip can't carry.
+/// The cache rules come before it, so a whole cache is one `left` line;
+/// whatever stages a cache's file anyway (an operator's `carry`) must ask
+/// this first.
+pub fn uncarriable(parts: &[&[u8]], kind: EntryKind) -> Option<Verdict> {
+    if kind == EntryKind::Other {
+        return Some(verdict(Class::Runtime, Why::NotAFile, parts.len()));
+    }
+    let index = parts.iter().position(|part| !carried_name(part))?;
+    Some(verdict(Class::Runtime, Why::UncarriedName, index + 1))
 }
 
 /// The secret rules, in the order of the design's list. Directory rules

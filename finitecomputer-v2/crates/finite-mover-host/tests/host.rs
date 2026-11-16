@@ -17,8 +17,8 @@ use finite_mover_host::error::HostError;
 use finite_mover_host::stage::SUMMARY_ENTRY;
 use finite_mover_host::summary::Tally;
 use fixture::{
-    AGENT_KEY, BRAINS, Fixture, ID, MARKER, OPENROUTER_KEY, PERSON_KEY, REDACTED_TEXT, SECRET_HEX,
-    STAGED, TELEGRAM_TOKEN, name_file,
+    AGENT_KEY, BRAINS, Fixture, ID, KEY_PAYLOAD, MARKER, OPENROUTER_KEY, PERSON_KEY, REDACTED_TEXT,
+    SECRET_HEX, STAGED, TELEGRAM_TOKEN, name_file,
 };
 use serde_json::Value;
 
@@ -91,6 +91,7 @@ fn the_stage_holds_no_secret() {
         SECRET_HEX,
         "ghp_",
         "PRIVATE KEY",
+        KEY_PAYLOAD,
         "root:",
     ] {
         assert!(
@@ -484,6 +485,77 @@ fn the_operators_overrides_carry_and_leave_but_never_a_secret() {
             "{class}"
         );
     }
+}
+
+/// A carried cache or build folder keeps the link and name rules: its
+/// regular files come, and a symbolic link, a file with a second name and
+/// a name a zip can't carry stay behind, listed; the stream completes.
+#[test]
+fn a_carried_cache_or_build_folder_still_leaves_links_and_odd_names() {
+    use std::os::unix::ffi::OsStrExt;
+    let fixture = fixture::build();
+    let folders = [
+        ("workspace/app/node_modules", "pkg/lib.js"),
+        ("workspace/app/dist", "chunk.js"),
+        ("workspace/py/.venv", "lib/site.py"),
+    ];
+    for (index, (folder, regular)) in folders.iter().enumerate() {
+        let root = fixture.tree.join(folder);
+        let file = root.join(regular);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, format!("{folder} code\n")).unwrap();
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::os::unix::fs::symlink(&file, root.join("bin/tool")).unwrap();
+        std::os::unix::fs::symlink("/usr/bin/python3", root.join("bin/python3")).unwrap();
+        let outside = fixture.work_root.join(format!("outside-{index}.txt"));
+        std::fs::write(&outside, format!("{MARKER}-hard-{index}\n")).unwrap();
+        std::fs::hard_link(&outside, root.join("hard.js")).unwrap();
+        for name in [&b"bad\xffname.js"[..], b"new\nline.js"] {
+            std::fs::write(root.join(std::ffi::OsStr::from_bytes(name)), b"odd\n").unwrap();
+        }
+    }
+    let carry = folders
+        .iter()
+        .map(|(folder, _)| format!("--carry {}", hex::encode(folder)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let stage = run_bytes(&fixture, &format!("stream {ID} {} {carry}", keys()))
+        .expect("the stream completes");
+    let files = entries(&stage);
+    let left = left_of(&stage);
+    for (folder, regular) in folders {
+        let path = format!("{folder}/{regular}");
+        assert_eq!(
+            files[&path],
+            format!("{folder} code\n").as_bytes(),
+            "{path}"
+        );
+        for (name, why) in [
+            ("bin/tool", "not-a-file"),
+            ("bin/python3", "not-a-file"),
+            ("hard.js", "not-a-file"),
+            ("bad\u{fffd}name.js", "uncarried-name"),
+            ("new\nline.js", "uncarried-name"),
+        ] {
+            let path = format!("{folder}/{name}");
+            assert!(!files.contains_key(&path), "{path:?} is staged");
+            assert!(
+                left.contains(&(path.clone(), why.to_owned())),
+                "{path:?}: {left:?}"
+            );
+        }
+    }
+    assert!(!contains(&stage, format!("{MARKER}-hard").as_bytes()));
+    assert!(files.keys().all(|name| !name.contains('\n')));
+    // `sizes` walks the same rules and completes too.
+    let measured: Value =
+        serde_json::from_slice(&run_bytes(&fixture, &format!("sizes {ID} {carry}")).unwrap())
+            .unwrap();
+    let streamed: Value = serde_json::from_slice(&files[SUMMARY_ENTRY]).unwrap();
+    assert_eq!(
+        measured["classes"]["runtime"],
+        streamed["classes"]["runtime"]
+    );
 }
 
 /// FIN-499: a history text file holding a credential comes with it
@@ -890,7 +962,13 @@ fn the_raw_exporter_matches_the_classifier() {
         }
     }
     let raw_bytes = std::fs::read(&out).unwrap();
-    for needle in [MARKER, TELEGRAM_TOKEN, OPENROUTER_KEY, SECRET_HEX] {
+    for needle in [
+        MARKER,
+        TELEGRAM_TOKEN,
+        OPENROUTER_KEY,
+        SECRET_HEX,
+        KEY_PAYLOAD,
+    ] {
         assert!(
             !contains(&raw_bytes, needle.as_bytes()),
             "the raw zip holds {needle}"

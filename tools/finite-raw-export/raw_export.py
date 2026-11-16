@@ -327,6 +327,8 @@ ALWAYS_SECRET = [
 ]
 # Rust's is_ascii_whitespace, which leaves out \x0b.
 URL_PASSWORD = re.compile(rb"(?=(https?://[^ \t\n\x0c\r/:@]+:([^ \t\n\x0c\r/@]+)@))")
+# A private key's block ends at the first of these after its BEGIN.
+PRIVATE_KEY_END = re.compile(rb"-----END [A-Z ]*PRIVATE KEY-----")
 # What a redaction puts in each match's place (export.py's `redact_text`).
 REDACTED = b"[REDACTED]"
 PLACEHOLDER_WORDS = (b"xxxx", b"****", b"...", b"your", b"example", b"placeholder", b"redacted", b"changeme")
@@ -360,14 +362,23 @@ def holds_secret(text):
 def redact(text):
     """`text` with every credential-shaped string that is no placeholder
     replaced by `[REDACTED]`, matches that overlap or touch as one
-    (shapes.rs's `redact`)."""
+    (shapes.rs's `redact`). A private key's match is its whole block,
+    BEGIN through END, or to the end of `text` when it has no END."""
+    found = []
+    for m in ALWAYS_SECRET[0].finditer(text):
+        footer = PRIVATE_KEY_END.search(text, m.start() + len(m.group(1)))
+        found.append((m.start(), (footer.end() if footer else len(text)) - m.start()))
+    found += [(m.start(), len(m.group(1))) for m in ALWAYS_SECRET[1].finditer(text)]
+    found += [(m.start(), len(m.group(1))) for m in URL_PASSWORD.finditer(text) if secret_password(m.group(2))]
+    found += [
+        (m.start(), len(m.group(1)))
+        for shape in TOKEN_SHAPES
+        for m in shape.finditer(text)
+        if secret_token(m.group(1))
+    ]
     lengths = {}
-    found = [(m, True) for shape in ALWAYS_SECRET for m in shape.finditer(text)]
-    found += [(m, secret_password(m.group(2))) for m in URL_PASSWORD.finditer(text)]
-    found += [(m, secret_token(m.group(1))) for shape in TOKEN_SHAPES for m in shape.finditer(text)]
-    for match, secret in found:
-        if secret:
-            lengths[match.start()] = max(lengths.get(match.start(), 0), len(match.group(1)))
+    for start, length in found:
+        lengths[start] = max(lengths.get(start, 0), length)
     spans = []
     for start in sorted(lengths):
         end = start + lengths[start]

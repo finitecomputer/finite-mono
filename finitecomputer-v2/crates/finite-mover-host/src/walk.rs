@@ -203,9 +203,9 @@ impl Walk<'_> {
             };
             return visit.left(&parts, replaced, file_bytes(&stat));
         }
-        let verdict = self
-            .overrides
-            .apply(&parts, classify::classify(&parts, kind, build_output));
+        let verdict =
+            self.overrides
+                .apply(&parts, kind, classify::classify(&parts, kind, build_output));
         if verdict.class.staged() {
             if self.mode == Mode::Measure {
                 return visit.staged("", verdict.class, Source::Measured(file_bytes(&stat)));

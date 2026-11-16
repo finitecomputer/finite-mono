@@ -13,7 +13,9 @@
 //! `TOKEN_SHAPES`, `PLACEHOLDER` and `is_secret`, :132-141 and :254-263).
 //! It replaces every match this scan finds, overlapping ones as one, so
 //! what it leaves passes [`scan`]; the export's `sub` kept only the first
-//! match at each place.
+//! match at each place. A private key's match is its whole block, BEGIN
+//! through END, or to the end of the text when it has no END: its header
+//! alone would leave the key itself.
 //!
 //! [`TextScan`] is the scan fed in pieces: [`scan`] runs on it, and so does
 //! the mover's uploader on every entry of a stage, so the two never differ.
@@ -328,7 +330,7 @@ fn secret_at(text: &[u8], at: usize) -> Option<usize> {
     let word_start = at == 0 || !word(text[at - 1]);
     let starting_token = || word_start.then(|| token(rest)).flatten();
     match rest[0] {
-        b'-' => private_key_header(rest),
+        b'-' => private_key(rest),
         b'd' => discord_webhook(rest),
         b'h' => url_password(rest).max(starting_token()),
         b's' | b'r' | b'g' | b'x' | b'A' | b'n' | b'e' | b'0'..=b'9' => starting_token(),
@@ -457,12 +459,23 @@ fn placeholder(text: &[u8]) -> bool {
         .any(|word| contains(word))
 }
 
-/// `-----BEGIN [A-Z ]*PRIVATE KEY-----`.
-fn private_key_header(text: &[u8]) -> Option<usize> {
-    let rest = text.strip_prefix(b"-----BEGIN ")?;
+/// A private key's block: `-----BEGIN [A-Z ]*PRIVATE KEY-----` through the
+/// first `-----END [A-Z ]*PRIVATE KEY-----` after it, or through the end of
+/// `text` when none follows (a key cut short is a key all the same).
+fn private_key(text: &[u8]) -> Option<usize> {
+    let header = private_key_marker(text, b"-----BEGIN ")?;
+    let end = (header..text.len())
+        .find_map(|at| private_key_marker(&text[at..], b"-----END ").map(|footer| at + footer))
+        .unwrap_or(text.len());
+    Some(end)
+}
+
+/// `<prefix>[A-Z ]*PRIVATE KEY-----`, as its length.
+fn private_key_marker(text: &[u8], prefix: &[u8]) -> Option<usize> {
+    let rest = text.strip_prefix(prefix)?;
     let length = run(rest, |byte| byte.is_ascii_uppercase() || byte == b' ');
     (rest[..length].ends_with(b"PRIVATE KEY") && rest[length..].starts_with(b"-----"))
-        .then_some(b"-----BEGIN ".len() + length + b"-----".len())
+        .then_some(prefix.len() + length + b"-----".len())
 }
 
 /// `discord(?:app)?\.com/api/webhooks/\d+/[\w-]+`.
@@ -609,8 +622,9 @@ mod tests {
                 "bot [REDACTED]\n",
             ),
             (
+                // No END: the key, cut short, goes to the end.
                 "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n",
-                "[REDACTED]\nb3Bl\n",
+                "[REDACTED]",
             ),
             (
                 "hook https://discord.com/api/webhooks/123/abcDEF end",
@@ -638,6 +652,48 @@ mod tests {
             let out = redact(text.as_bytes());
             assert_eq!(String::from_utf8(out.clone()).unwrap(), redacted, "{text}");
             assert_eq!(scan(&out[..]).unwrap(), TextVerdict::Clean, "{text}");
+        }
+    }
+
+    /// A private key goes whole, BEGIN through END, whatever its body
+    /// holds; one with no END goes to the end. Nothing of its body is
+    /// left, without relying on the scan to notice a missing header.
+    #[test]
+    fn a_private_key_block_is_redacted_whole() {
+        let body = "Proc-Type: 4,ENCRYPTED\nDEK-Info: AES-128-CBC,00\n\nMIIEBODY1\nBODY2==\n";
+        for (text, redacted) in [
+            (
+                format!(
+                    "a\n-----BEGIN RSA PRIVATE KEY-----\n{body}-----END RSA PRIVATE KEY-----\nb\n"
+                ),
+                "a\n[REDACTED]\nb\n",
+            ),
+            (
+                format!(
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\n{body}-----END OPENSSH PRIVATE KEY-----"
+                ),
+                "[REDACTED]",
+            ),
+            (
+                format!(
+                    "x -----BEGIN PRIVATE KEY-----\n{body}-----END PRIVATE KEY----- y -----BEGIN EC PRIVATE KEY-----\n{body}-----END EC PRIVATE KEY-----\nz"
+                ),
+                "x [REDACTED] y [REDACTED]\nz",
+            ),
+            // Cut short: no END, so everything from BEGIN on.
+            (
+                format!("keep\n-----BEGIN PRIVATE KEY-----\n{body}"),
+                "keep\n[REDACTED]",
+            ),
+            // An END that is not a private key's ends nothing.
+            (
+                format!("-----BEGIN PRIVATE KEY-----\n{body}-----END CERTIFICATE-----\nmore\n"),
+                "[REDACTED]",
+            ),
+        ] {
+            let out = String::from_utf8(redact(text.as_bytes())).unwrap();
+            assert_eq!(out, redacted, "{text}");
+            assert!(!out.contains("BODY") && !out.contains("DEK-Info"), "{out}");
         }
     }
 
