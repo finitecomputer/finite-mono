@@ -17,8 +17,8 @@ use finite_mover_host::error::HostError;
 use finite_mover_host::stage::SUMMARY_ENTRY;
 use finite_mover_host::summary::Tally;
 use fixture::{
-    AGENT_KEY, BRAINS, Fixture, ID, MARKER, OPENROUTER_KEY, PERSON_KEY, SECRET_HEX, STAGED,
-    TELEGRAM_TOKEN, name_file,
+    AGENT_KEY, BRAINS, Fixture, ID, MARKER, OPENROUTER_KEY, PERSON_KEY, REDACTED_TEXT, SECRET_HEX,
+    STAGED, TELEGRAM_TOKEN, name_file,
 };
 use serde_json::Value;
 
@@ -113,10 +113,14 @@ fn the_stage_is_exactly_history_work_the_config_copy_and_name_files() {
     let mut expected: BTreeSet<&str> = STAGED.iter().map(|(path, _)| *path).collect();
     expected.extend([CONFIG_COPY, SUMMARY_ENTRY]);
     expected.extend(names.iter().map(String::as_str));
+    expected.extend(REDACTED_TEXT.iter().map(|(path, _, _)| *path));
     assert_eq!(
         entries.keys().map(String::as_str).collect::<BTreeSet<_>>(),
         expected
     );
+    for (path, _, redacted) in REDACTED_TEXT {
+        assert_eq!(entries[*path], redacted.as_bytes(), "{path} is redacted");
+    }
     for (path, _) in STAGED {
         let source = std::fs::read(fixture.tree.join(path)).unwrap();
         assert_eq!(entries[*path], source, "{path} is staged byte for byte");
@@ -141,6 +145,8 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
             "config"
         } else if name_files().contains(name) {
             "work"
+        } else if REDACTED_TEXT.iter().any(|(path, _, _)| path == name) {
+            "history"
         } else {
             STAGED.iter().find(|(path, _)| path == name).unwrap().1
         };
@@ -199,10 +205,10 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         );
     }
 
-    // `sizes` reads no file, so it differs from the stage in exactly three
-    // ways: a text file holding a credential counts in its path's class,
-    // and there is no config copy and no name file. Everything else is the
-    // same.
+    // `sizes` reads no file, so it differs from the stage in exactly four
+    // ways: a work text file holding a credential counts in its path's
+    // class, a history one counts its bytes before redaction, and there is
+    // no config copy and no name file. Everything else is the same.
     let estimate: BTreeMap<String, Tally> =
         serde_json::from_value(measured["classes"].clone()).unwrap();
     let in_text: Vec<u64> = fixture::SECRET_TEXT
@@ -236,11 +242,15 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         .iter()
         .map(|name| entries[name].len() as u64)
         .collect();
+    let redaction: u64 = REDACTED_TEXT
+        .iter()
+        .map(|(_, original, redacted)| (original.len() - redacted.len()) as u64)
+        .sum();
     assert_eq!(
         staged_by_path(&estimate),
         (
             files + text.files - named.len() as u64,
-            bytes + text.bytes - named.iter().sum::<u64>()
+            bytes + text.bytes - named.iter().sum::<u64>() + redaction
         )
     );
 }
@@ -474,6 +484,55 @@ fn the_operators_overrides_carry_and_leave_but_never_a_secret() {
             "{class}"
         );
     }
+}
+
+/// FIN-499: a history text file holding a credential comes with it
+/// redacted and every other byte as it was, as phase 0's export did; work
+/// text holding one stays behind, a binary file is not read for one, and a
+/// left path shaped like one is redacted in the summary.
+#[test]
+fn history_text_holding_a_credential_is_staged_redacted() {
+    let fixture = fixture::build();
+    let write = |path: &str, bytes: &[u8]| {
+        let path = fixture.tree.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    let soul =
+        "I am kind and brief.\nDeploy with ghp_abcdefghij0123456789 if asked.\nNever share it.\n";
+    let jobs = r#"{"jobs":[{"id":"daily","prompt":"post to https://bot:hunter22secret@example.org/hook with key sk-proj4abcdefghijklmnop","schedule":{"kind":"cron","expr":"0 9 * * *"}}]}"#;
+    write("agent/hermes-home/SOUL.md", soul.as_bytes());
+    write("agent/hermes-home/cron/jobs.json", jobs.as_bytes());
+    let binary = [&b"\0\x01blob"[..], b" ghp_abcdefghij0123456789"].concat();
+    write("agent/hermes-home/memories/blob.bin", &binary);
+    write(
+        "workspace/ghp_abcdefghij0123456789/key.txt",
+        b"ghp_zyxwvutsrq9876543210\n",
+    );
+    let stage = stream(&fixture);
+    let files = entries(&stage);
+    assert_eq!(
+        String::from_utf8(files["agent/hermes-home/SOUL.md"].clone()).unwrap(),
+        "I am kind and brief.\nDeploy with [REDACTED] if asked.\nNever share it.\n"
+    );
+    assert_eq!(
+        String::from_utf8(files["agent/hermes-home/cron/jobs.json"].clone()).unwrap(),
+        r#"{"jobs":[{"id":"daily","prompt":"post to [REDACTED]example.org/hook with key [REDACTED]","schedule":{"kind":"cron","expr":"0 9 * * *"}}]}"#
+    );
+    assert_eq!(
+        files["agent/hermes-home/memories/blob.bin"], binary,
+        "binary: as it is"
+    );
+    assert!(!files.contains_key("workspace/ghp_abcdefghij0123456789/key.txt"));
+    let left = left_of(&stage);
+    assert!(
+        left.contains(&(
+            "workspace/[REDACTED]/key.txt".to_owned(),
+            "token-in-text".to_owned()
+        )),
+        "{left:?}"
+    );
+    assert!(!contains(&files[SUMMARY_ENTRY], b"ghp_"));
 }
 
 /// A brain folder whose name file would be named like a credential gets

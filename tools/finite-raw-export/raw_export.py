@@ -322,11 +322,13 @@ TOKEN_SHAPES = [
     )
 ]
 ALWAYS_SECRET = [
-    re.compile(rb"(?=-----BEGIN [A-Z ]*PRIVATE KEY-----)"),
-    re.compile(rb"(?=discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_\x80-\xff-])"),
+    re.compile(rb"(?=(-----BEGIN [A-Z ]*PRIVATE KEY-----))"),
+    re.compile(rb"(?=(discord(?:app)?\.com/api/webhooks/[0-9]+/[A-Za-z0-9_\x80-\xff-]+))"),
 ]
 # Rust's is_ascii_whitespace, which leaves out \x0b.
-URL_PASSWORD = re.compile(rb"(?=https?://[^ \t\n\x0c\r/:@]+:([^ \t\n\x0c\r/@]+)@)")
+URL_PASSWORD = re.compile(rb"(?=(https?://[^ \t\n\x0c\r/:@]+:([^ \t\n\x0c\r/@]+)@))")
+# What a redaction puts in each match's place (export.py's `redact_text`).
+REDACTED = b"[REDACTED]"
 PLACEHOLDER_WORDS = (b"xxxx", b"****", b"...", b"your", b"example", b"placeholder", b"redacted", b"changeme")
 
 
@@ -350,9 +352,35 @@ def secret_password(password):
 def holds_secret(text):
     if any(shape.search(text) for shape in ALWAYS_SECRET):
         return True
-    if any(secret_password(m.group(1)) for m in URL_PASSWORD.finditer(text)):
+    if any(secret_password(m.group(2)) for m in URL_PASSWORD.finditer(text)):
         return True
     return any(secret_token(m.group(1)) for shape in TOKEN_SHAPES for m in shape.finditer(text))
+
+
+def redact(text):
+    """`text` with every credential-shaped string that is no placeholder
+    replaced by `[REDACTED]`, matches that overlap or touch as one
+    (shapes.rs's `redact`)."""
+    lengths = {}
+    found = [(m, True) for shape in ALWAYS_SECRET for m in shape.finditer(text)]
+    found += [(m, secret_password(m.group(2))) for m in URL_PASSWORD.finditer(text)]
+    found += [(m, secret_token(m.group(1))) for shape in TOKEN_SHAPES for m in shape.finditer(text)]
+    for match, secret in found:
+        if secret:
+            lengths[match.start()] = max(lengths.get(match.start(), 0), len(match.group(1)))
+    spans = []
+    for start in sorted(lengths):
+        end = start + lengths[start]
+        if spans and start <= spans[-1][1]:
+            spans[-1][1] = max(spans[-1][1], end)
+        else:
+            spans.append([start, end])
+    out, copied = [], 0
+    for start, end in spans:
+        out += [text[copied:start], REDACTED]
+        copied = end
+    out.append(text[copied:])
+    return b"".join(out)
 
 
 def carry_start(text):
@@ -389,21 +417,27 @@ def scan(data):
     return "clean"
 
 
-def snapshot(handle, size):
-    """Read a file once: ("binary", None), ("text", bytes), ("secret", None)
-    or ("uncheckable", None). A text file is staged from these bytes."""
+def snapshot(handle, size, redact_secrets=False):
+    """Read a file once: (kind, bytes, bytes read), its kind "binary",
+    "text", "redacted", "secret" or "uncheckable". A text file is staged
+    from these bytes; with `redact_secrets`, plain text holding a
+    credential comes "redacted" when that passes the scan."""
     first = handle.read(BINARY_PROBE)
     if not first.startswith((b"\xff\xfe", b"\xfe\xff")) and 0 in first:
-        return "binary", None
+        return "binary", None, None
     if size > TEXT_SNAPSHOT_MAX:
-        return "uncheckable", None
+        return "uncheckable", None, None
     text = first + handle.read(TEXT_SNAPSHOT_MAX + 1 - len(first))
     if len(text) > TEXT_SNAPSHOT_MAX:
-        return "uncheckable", None
+        return "uncheckable", None, None
     verdict = scan(text)
     if verdict in ("clean", "binary"):
-        return "text", text
-    return verdict, None
+        return "text", text, len(text)
+    if verdict == "secret" and redact_secrets and not text.startswith((b"\xff\xfe", b"\xfe\xff")):
+        redacted = redact(text)
+        if scan(redacted) == "clean":
+            return "redacted", redacted, len(text)
+    return verdict, None, None
 
 
 # --- The allow-listed config (config_copy.rs) -------------------------------
@@ -507,6 +541,7 @@ class Export:
         self.classes[verdict.cls][0] += 1
         self.classes[verdict.cls][1] += size
         prefix = "/".join(p.decode("utf-8", "replace") for p in parts[: max(1, min(verdict.depth, len(parts)))])
+        prefix = redact(prefix.encode("utf-8")).decode("utf-8")
         key = (prefix, CLASSES.index(verdict.cls), WHYS.index(verdict.why))
         line = self.left.setdefault(key, [0, 0])
         line[0] += 1
@@ -627,15 +662,15 @@ class Export:
             opened = os.fstat(handle.fileno())
             if not same_file(st, opened):
                 raise TreeChanged(path_text(path))
-            kind, text = snapshot(handle, opened.st_size)
-            if kind == "text" and self.extra_text_check and self.extra_text_check(text):
+            kind, text, read = snapshot(handle, opened.st_size, verdict.cls == "history")
+            if kind in ("text", "redacted") and self.extra_text_check and self.extra_text_check(text):
                 kind = "secret"
             if kind in ("secret", "uncheckable"):
                 why = "token-in-text" if kind == "secret" else "uncheckable-text"
                 return self.add_left(path, Verdict("secret", why, len(path)), opened.st_size)
             arcname = b"/".join(path).decode("utf-8")
-            if kind == "text":
-                if len(text) != opened.st_size:
+            if kind in ("text", "redacted"):
+                if read != opened.st_size:
                     raise TreeChanged(path_text(path))
                 self.write_bytes(arcname, text, opened.st_mode, opened.st_mtime)
             else:
@@ -643,7 +678,7 @@ class Export:
                 self.write_stream(arcname, handle, opened)
                 if not same_file(opened, os.fstat(handle.fileno())):
                     raise TreeChanged(path_text(path))
-            self.add_staged(verdict.cls, opened.st_size)
+            self.add_staged(verdict.cls, len(text) if text is not None else opened.st_size)
             self.staged_files.append((self.absolute(path), opened))
 
     def absolute(self, path):

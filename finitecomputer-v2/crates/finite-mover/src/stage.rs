@@ -9,7 +9,10 @@
 //!   path refuses the whole stage: none of that file's bytes, nor anything
 //!   after it, leaves the mover. Parts already sent hold only entries that
 //!   passed (and at most the start of the refused one's header), and the
-//!   stage is never completed.
+//!   stage is never completed. The same goes for an entry whose bytes
+//!   hold a credential-shaped string: none of the bytes it could be part
+//!   of leave before the host reader's own scan has passed them, and its
+//!   finding refuses the stage.
 //! - **Resume.** `GET …/parts` lists what finite.chat holds. Each part is
 //!   re-read from the new stream and skipped when its size and SHA-256
 //!   match; a part that differs is sent again in its place.
@@ -163,6 +166,8 @@ pub enum StageError {
     TooLarge,
     #[error("the stage was refused whole: {path} is a secret path")]
     Refused { path: String },
+    #[error("the stage was refused whole: {path} holds a credential-shaped string")]
+    RefusedText { path: String },
     #[error("the stage was refused whole: {path} is not a safe name")]
     UnsafeName { path: String },
     #[error("the stage is not a stage the mover can check: {0}")]
@@ -185,6 +190,7 @@ impl From<ScanError> for StageError {
     fn from(error: ScanError) -> Self {
         match error {
             ScanError::Secret(path) => StageError::Refused { path },
+            ScanError::SecretText(path) => StageError::RefusedText { path },
             ScanError::Unsafe(path) => StageError::UnsafeName { path },
             other => StageError::Malformed(other),
         }

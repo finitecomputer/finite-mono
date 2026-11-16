@@ -6,6 +6,17 @@
 //! It is at least as strict as the export: every alternative is tried at
 //! every position, where the export's `finditer` keeps only the first
 //! match at each.
+//!
+//! [`redact`] replaces each match with `[REDACTED]`, as phase 0's export
+//! did for the agent's SOUL and memories (`redact_text`,
+//! `~/dev/finite/audit/move-finite/export.py:283-284`, with its
+//! `TOKEN_SHAPES`, `PLACEHOLDER` and `is_secret`, :132-141 and :254-263).
+//! It replaces every match this scan finds, overlapping ones as one, so
+//! what it leaves passes [`scan`]; the export's `sub` kept only the first
+//! match at each place.
+//!
+//! [`TextScan`] is the scan fed in pieces: [`scan`] runs on it, and so does
+//! the mover's uploader on every entry of a stage, so the two never differ.
 
 use std::io::{self, Read};
 
@@ -42,6 +53,9 @@ enum Encoding {
 /// anyway.
 pub const TEXT_SNAPSHOT_MAX: u64 = 256 * 1024 * 1024;
 
+/// What a redaction puts in each match's place (export.py:284).
+pub const REDACTED: &[u8] = b"[REDACTED]";
+
 /// What reading a file once found, with the bytes a text file is staged
 /// from.
 #[derive(Debug, PartialEq, Eq)]
@@ -52,6 +66,10 @@ pub enum Snapshot {
     /// Clean text, every byte of it: the stage holds exactly what was
     /// checked, whatever the file holds a moment later.
     Text(Vec<u8>),
+    /// Text that held a credential-shaped string, with each replaced by
+    /// [`REDACTED`], and how many bytes were read: only when asked to
+    /// redact, for plain (not UTF-16) text whose redaction passes [`scan`].
+    Redacted { text: Vec<u8>, read: u64 },
     /// Text holding a credential-shaped string.
     Secret,
     /// Text too large to hold (`TEXT_SNAPSHOT_MAX`), or with a run too long
@@ -60,8 +78,9 @@ pub enum Snapshot {
 }
 
 /// Read a file once: decide whether it is binary from its first bytes, and
-/// hold a text file whole to check it and to stage it from.
-pub fn snapshot(mut reader: impl Read, size: u64) -> io::Result<Snapshot> {
+/// hold a text file whole to check it and to stage it from. With `redact`,
+/// a text file holding a credential-shaped string comes redacted.
+pub fn snapshot(mut reader: impl Read, size: u64, redact_secrets: bool) -> io::Result<Snapshot> {
     let mut first = vec![0; BINARY_PROBE];
     let probed = read_full(&mut reader, &mut first)?;
     first.truncate(probed);
@@ -82,6 +101,20 @@ pub fn snapshot(mut reader: impl Read, size: u64) -> io::Result<Snapshot> {
         TextVerdict::Clean => Snapshot::Text(text),
         // A NUL past the first 8 KiB: as text it was read, and it is clean.
         TextVerdict::Binary => Snapshot::Text(text),
+        TextVerdict::Secret
+            if redact_secrets
+                && !text.starts_with(b"\xff\xfe")
+                && !text.starts_with(b"\xfe\xff") =>
+        {
+            let redacted = redact(&text);
+            match scan(&redacted[..])? {
+                TextVerdict::Clean => Snapshot::Redacted {
+                    text: redacted,
+                    read: text.len() as u64,
+                },
+                _ => Snapshot::Secret,
+            }
+        }
         TextVerdict::Secret => Snapshot::Secret,
         TextVerdict::Uncheckable => Snapshot::Uncheckable,
     })
@@ -89,32 +122,116 @@ pub fn snapshot(mut reader: impl Read, size: u64) -> io::Result<Snapshot> {
 
 /// Read `reader` to its end, or until a credential is found.
 pub fn scan(mut reader: impl Read) -> io::Result<TextVerdict> {
+    let mut text = TextScan::default();
     let mut chunk = vec![0; CHUNK];
-    let mut filled = read_full(&mut reader, &mut chunk)?;
-    let encoding = if chunk[..filled].starts_with(b"\xff\xfe") {
-        Encoding::Utf16Le
-    } else if chunk[..filled].starts_with(b"\xfe\xff") {
-        Encoding::Utf16Be
-    } else if chunk[..filled.min(BINARY_PROBE)].contains(&0) {
-        return Ok(TextVerdict::Binary);
-    } else {
-        Encoding::Bytes
-    };
-    let mut text = Vec::new();
-    let mut odd: Option<u8> = None;
-    while filled > 0 {
-        decode(encoding, &chunk[..filled], &mut odd, &mut text);
-        if holds_secret(&text) {
-            return Ok(TextVerdict::Secret);
+    loop {
+        let filled = read_full(&mut reader, &mut chunk)?;
+        text.feed(&chunk[..filled]);
+        if let Some(verdict) = text.verdict() {
+            return Ok(verdict);
         }
-        let start = carry_start(&text);
-        text.drain(..start);
-        if text.len() > CARRY_MAX {
-            return Ok(TextVerdict::Uncheckable);
+        if filled < CHUNK {
+            return Ok(text.finish());
         }
-        filled = read_full(&mut reader, &mut chunk)?;
     }
-    Ok(TextVerdict::Clean)
+}
+
+/// The scan of one stream, fed as its bytes come: in the same 1 MiB chunks
+/// from its start, with the same carry, so its verdict is [`scan`]'s.
+#[derive(Default)]
+pub struct TextScan {
+    /// Bytes fed and not yet scanned: less than a chunk.
+    pending: Vec<u8>,
+    /// Decided from the first 8 KiB (or the whole stream, if shorter).
+    encoding: Option<Encoding>,
+    /// Binary, a credential, or a run too long: nothing more is scanned.
+    verdict: Option<TextVerdict>,
+    odd: Option<u8>,
+    /// The carry: scanned text a match may still run through.
+    text: Vec<u8>,
+    /// Text units scanned and dropped before the carry: final.
+    dropped: u64,
+    /// Every byte fed.
+    fed: u64,
+}
+
+impl TextScan {
+    pub fn feed(&mut self, mut bytes: &[u8]) {
+        self.fed += bytes.len() as u64;
+        while !bytes.is_empty() && self.verdict.is_none() {
+            let take = (CHUNK - self.pending.len()).min(bytes.len());
+            self.pending.extend_from_slice(&bytes[..take]);
+            bytes = &bytes[take..];
+            if self.encoding.is_none() && self.pending.len() >= BINARY_PROBE {
+                self.decide_encoding();
+            }
+            if self.pending.len() == CHUNK {
+                self.step();
+            }
+        }
+    }
+
+    /// Binary, Secret or Uncheckable once found; `None` while clean so far.
+    pub fn verdict(&self) -> Option<TextVerdict> {
+        self.verdict
+    }
+
+    /// How many of the bytes fed are final: no match can include them.
+    /// All of a binary stream; for text, those before the carry.
+    pub fn cleared(&self) -> u64 {
+        match (self.verdict, self.encoding) {
+            (Some(TextVerdict::Binary), _) => self.fed,
+            (Some(_), _) | (None, None) => 0,
+            (None, Some(Encoding::Bytes)) => self.dropped,
+            // Each UTF-16 unit, its byte order mark among them, is 2 bytes.
+            (None, Some(_)) => self.dropped * 2,
+        }
+    }
+
+    /// Scan what is left: the stream has ended.
+    pub fn finish(mut self) -> TextVerdict {
+        if self.verdict.is_none() {
+            if self.encoding.is_none() {
+                self.decide_encoding();
+            }
+            if !self.pending.is_empty() {
+                self.step();
+            }
+        }
+        self.verdict.unwrap_or(TextVerdict::Clean)
+    }
+
+    fn decide_encoding(&mut self) {
+        self.encoding = Some(if self.pending.starts_with(b"\xff\xfe") {
+            Encoding::Utf16Le
+        } else if self.pending.starts_with(b"\xfe\xff") {
+            Encoding::Utf16Be
+        } else if self.pending[..self.pending.len().min(BINARY_PROBE)].contains(&0) {
+            self.verdict = Some(TextVerdict::Binary);
+            Encoding::Bytes
+        } else {
+            Encoding::Bytes
+        });
+    }
+
+    /// Scan one chunk (the last may be short), as `scan` always has.
+    fn step(&mut self) {
+        let Some(encoding) = self.encoding.filter(|_| self.verdict.is_none()) else {
+            return;
+        };
+        let chunk = std::mem::take(&mut self.pending);
+        decode(encoding, &chunk, &mut self.odd, &mut self.text);
+        if holds_secret(&self.text) {
+            self.verdict = Some(TextVerdict::Secret);
+            return;
+        }
+        let start = carry_start(&self.text);
+        self.text.drain(..start);
+        self.dropped += start as u64;
+        if self.text.len() > CARRY_MAX {
+            self.verdict = Some(TextVerdict::Uncheckable);
+        }
+    }
 }
 
 fn read_full(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
@@ -175,21 +292,48 @@ fn carry_start(text: &[u8]) -> usize {
 
 /// Whether `text` holds a credential-shaped string that is no placeholder.
 pub fn holds_secret(text: &[u8]) -> bool {
-    (0..text.len()).any(|at| {
-        let rest = &text[at..];
-        // Only the first byte of a run of word bytes can start a token, so
-        // each byte is looked at a bounded number of times.
-        let word_start = at == 0 || !word(text[at - 1]);
-        match rest[0] {
-            b'-' => private_key_header(rest),
-            b'd' => discord_webhook(rest),
-            b'h' => url_password(rest) || (word_start && token(rest)),
-            b's' | b'r' | b'g' | b'x' | b'A' | b'n' | b'e' | b'0'..=b'9' => {
-                word_start && token(rest)
+    (0..text.len()).any(|at| secret_at(text, at).is_some())
+}
+
+/// `text` with every credential-shaped string that is no placeholder
+/// replaced by [`REDACTED`]; matches that overlap or touch become one.
+/// Every match starts and ends at an ASCII byte, so UTF-8 stays UTF-8.
+pub fn redact(text: &[u8]) -> Vec<u8> {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for at in 0..text.len() {
+        if let Some(length) = secret_at(text, at) {
+            match spans.last_mut() {
+                Some(last) if at <= last.1 => last.1 = last.1.max(at + length),
+                _ => spans.push((at, at + length)),
             }
-            _ => false,
         }
-    })
+    }
+    let mut out = Vec::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, end) in spans {
+        out.extend_from_slice(&text[copied..start]);
+        out.extend_from_slice(REDACTED);
+        copied = end;
+    }
+    out.extend_from_slice(&text[copied..]);
+    out
+}
+
+/// The length of the credential-shaped string that starts at `at`, if one
+/// does and it is no placeholder.
+fn secret_at(text: &[u8], at: usize) -> Option<usize> {
+    let rest = &text[at..];
+    // Only the first byte of a run of word bytes can start a token, so
+    // each byte is looked at a bounded number of times.
+    let word_start = at == 0 || !word(text[at - 1]);
+    let starting_token = || word_start.then(|| token(rest)).flatten();
+    match rest[0] {
+        b'-' => private_key_header(rest),
+        b'd' => discord_webhook(rest),
+        b'h' => url_password(rest).max(starting_token()),
+        b's' | b'r' | b'g' | b'x' | b'A' | b'n' | b'e' | b'0'..=b'9' => starting_token(),
+        _ => None,
+    }
 }
 
 /// `[A-Za-z0-9_-]`, the class the export's lookbehind refuses before a token.
@@ -234,8 +378,9 @@ fn prefixed<'a>(
     (length >= min).then(|| &text[..prefix.len() + length])
 }
 
-/// The `token` group of `TOKEN_SHAPES`, at a word start.
-fn token(text: &[u8]) -> bool {
+/// The `token` group of `TOKEN_SHAPES`, at a word start: the longest
+/// secret one's length.
+fn token(text: &[u8]) -> Option<usize> {
     let candidates = [
         prefixed(text, b"sk-", word, 16),
         prefixed(text, b"sk_live_", alnum, 16),
@@ -252,7 +397,12 @@ fn token(text: &[u8]) -> bool {
         prefixed(text, b"nsec1", lower_digit, 20),
         jwt(text),
     ];
-    candidates.into_iter().flatten().any(secret_token)
+    candidates
+        .into_iter()
+        .flatten()
+        .filter(|token| secret_token(token))
+        .map(<[u8]>::len)
+        .max()
 }
 
 /// `xox[abpr]-[A-Za-z0-9-]{10,}`.
@@ -308,56 +458,48 @@ fn placeholder(text: &[u8]) -> bool {
 }
 
 /// `-----BEGIN [A-Z ]*PRIVATE KEY-----`.
-fn private_key_header(text: &[u8]) -> bool {
-    let Some(rest) = text.strip_prefix(b"-----BEGIN ") else {
-        return false;
-    };
+fn private_key_header(text: &[u8]) -> Option<usize> {
+    let rest = text.strip_prefix(b"-----BEGIN ")?;
     let length = run(rest, |byte| byte.is_ascii_uppercase() || byte == b' ');
-    rest[..length].ends_with(b"PRIVATE KEY") && rest[length..].starts_with(b"-----")
+    (rest[..length].ends_with(b"PRIVATE KEY") && rest[length..].starts_with(b"-----"))
+        .then_some(b"-----BEGIN ".len() + length + b"-----".len())
 }
 
 /// `discord(?:app)?\.com/api/webhooks/\d+/[\w-]+`.
-fn discord_webhook(text: &[u8]) -> bool {
-    let Some(rest) = text
+fn discord_webhook(text: &[u8]) -> Option<usize> {
+    let rest = text
         .strip_prefix(b"discord.com/api/webhooks/")
-        .or_else(|| text.strip_prefix(b"discordapp.com/api/webhooks/"))
-    else {
-        return false;
-    };
+        .or_else(|| text.strip_prefix(b"discordapp.com/api/webhooks/"))?;
     let digits = run(rest, |byte| byte.is_ascii_digit());
-    digits > 0
-        && rest[digits..]
-            .strip_prefix(b"/")
-            .is_some_and(|id| run(id, |byte| word(byte) || byte >= 0x80) > 0)
+    let id = rest[digits..].strip_prefix(b"/").filter(|_| digits > 0)?;
+    let length = run(id, |byte| word(byte) || byte >= 0x80);
+    (length > 0).then_some(text.len() - rest.len() + digits + 1 + length)
 }
 
 /// `https?://[^\s/:@]+:(?P<password>[^\s/@]+)@`, with the export's rule for
 /// a password: six characters or more, no placeholder, not an
 /// environment-variable name.
-fn url_password(text: &[u8]) -> bool {
-    let Some(rest) = text
+fn url_password(text: &[u8]) -> Option<usize> {
+    let rest = text
         .strip_prefix(b"https://")
-        .or_else(|| text.strip_prefix(b"http://"))
-    else {
-        return false;
-    };
+        .or_else(|| text.strip_prefix(b"http://"))?;
     let user = run(rest, |byte| {
         !byte.is_ascii_whitespace() && !b"/:@".contains(&byte)
     });
-    let Some(after_colon) = rest[user..].strip_prefix(b":").filter(|_| user > 0) else {
-        return false;
-    };
+    let after_colon = rest[user..].strip_prefix(b":").filter(|_| user > 0)?;
     let length = run(after_colon, |byte| {
         !byte.is_ascii_whitespace() && !b"/@".contains(&byte)
     });
     let password = &after_colon[..length];
-    length > 0
+    let secret = length > 0
         && after_colon[length..].starts_with(b"@")
         && password.len() >= 6
         && !placeholder(password)
         && !password
             .iter()
-            .all(|byte| upper_digit(*byte) || *byte == b'_')
+            .all(|byte| upper_digit(*byte) || *byte == b'_');
+    // The whole `https://user:password@`, as the export's match.
+    secret.then_some(text.len() - after_colon.len() + length + 1)
 }
 
 #[cfg(test)]
@@ -437,18 +579,127 @@ mod tests {
     fn a_snapshot_holds_text_and_skips_binary() {
         let text = b"notes, and no credential\n".to_vec();
         assert_eq!(
-            snapshot(&text[..], text.len() as u64).unwrap(),
+            snapshot(&text[..], text.len() as u64, false).unwrap(),
             Snapshot::Text(text.clone())
         );
         let token = b"key ghp_abcdefghij0123456789\n";
-        assert_eq!(snapshot(&token[..], 29).unwrap(), Snapshot::Secret);
+        assert_eq!(snapshot(&token[..], 29, false).unwrap(), Snapshot::Secret);
         let binary = b"SQLite format 3\0ghp_abcdefghij0123456789";
-        assert_eq!(snapshot(&binary[..], 40).unwrap(), Snapshot::Binary);
+        assert_eq!(snapshot(&binary[..], 40, false).unwrap(), Snapshot::Binary);
+        assert_eq!(snapshot(&binary[..], 40, true).unwrap(), Snapshot::Binary);
         assert_eq!(
-            snapshot(&text[..], TEXT_SNAPSHOT_MAX + 1).unwrap(),
+            snapshot(&text[..], TEXT_SNAPSHOT_MAX + 1, false).unwrap(),
             Snapshot::Uncheckable,
             "a text file too large to hold is never read past its start"
         );
+    }
+
+    /// Each match becomes `[REDACTED]`; every other byte stays; what is
+    /// left passes the scan; a placeholder stays as it is.
+    #[test]
+    fn redaction_replaces_each_match_and_keeps_the_rest() {
+        for (text, redacted) in [
+            ("key ghp_abcdefghij0123456789 here", "key [REDACTED] here"),
+            (
+                "a sk-proj4abcdefghijklmnop, b sk_live_abcdefgh12345678.",
+                "a [REDACTED], b [REDACTED].",
+            ),
+            (
+                "bot 123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1\n",
+                "bot [REDACTED]\n",
+            ),
+            (
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n",
+                "[REDACTED]\nb3Bl\n",
+            ),
+            (
+                "hook https://discord.com/api/webhooks/123/abcDEF end",
+                "hook https://[REDACTED] end",
+            ),
+            (
+                "clone https://alice:hunter22secret@example.org/repo",
+                "clone [REDACTED]example.org/repo",
+            ),
+            // A token inside a URL's credentials: one match, overlapping.
+            (
+                "https://ghp_abcdefghij0123456789:hunter22secret@x",
+                "[REDACTED]x",
+            ),
+            ("été ghp_abcdefghij0123456789 ünï", "été [REDACTED] ünï"),
+            (
+                "sk-xxxxxxxxxxxxxxxxxxxxxxxx and AKIAIOSFODNN7EXAMPLE",
+                "sk-xxxxxxxxxxxxxxxxxxxxxxxx and AKIAIOSFODNN7EXAMPLE",
+            ),
+            (
+                "coindesk-dl0123456789abcdefghij",
+                "coindesk-dl0123456789abcdefghij",
+            ),
+        ] {
+            let out = redact(text.as_bytes());
+            assert_eq!(String::from_utf8(out.clone()).unwrap(), redacted, "{text}");
+            assert_eq!(scan(&out[..]).unwrap(), TextVerdict::Clean, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_redacts_only_when_asked_and_only_plain_text() {
+        let token = b"SOUL\nkey ghp_abcdefghij0123456789\nend\n";
+        let size = token.len() as u64;
+        assert_eq!(snapshot(&token[..], size, false).unwrap(), Snapshot::Secret);
+        assert_eq!(
+            snapshot(&token[..], size, true).unwrap(),
+            Snapshot::Redacted {
+                text: b"SOUL\nkey [REDACTED]\nend\n".to_vec(),
+                read: size
+            }
+        );
+        let mut utf16 = vec![0xff, 0xfe];
+        for unit in "key ghp_abcdefghij0123456789".encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        let size = utf16.len() as u64;
+        assert_eq!(snapshot(&utf16[..], size, true).unwrap(), Snapshot::Secret);
+    }
+
+    /// Fed in any pieces, the scan answers as `scan` does, and never clears
+    /// a byte a match it later finds includes.
+    #[test]
+    fn a_scan_fed_in_pieces_is_scan_and_clears_no_match() {
+        let mut text = b"line of notes\n".repeat(200_000);
+        let at = text.len();
+        text.extend_from_slice(b"key ghp_abcdefghij0123456789\n");
+        text.extend_from_slice(&b"more\n".repeat(1000));
+        let mut clean = b"plain prose\n".repeat(300_000);
+        clean.push(b'x');
+        let binary = [
+            &b"SQLite format 3\0"[..],
+            &[7; 9000],
+            b"ghp_abcdefghij0123456789",
+        ]
+        .concat();
+        for (bytes, expected) in [
+            (&text, TextVerdict::Secret),
+            (&clean, TextVerdict::Clean),
+            (&binary, TextVerdict::Binary),
+        ] {
+            assert_eq!(scan(&bytes[..]).unwrap(), expected);
+            for piece in [1, 4093, 1 << 20, bytes.len()] {
+                let mut fed = TextScan::default();
+                let mut verdict = None;
+                for part in bytes.chunks(piece) {
+                    fed.feed(part);
+                    if expected == TextVerdict::Secret {
+                        assert!(fed.cleared() <= at as u64, "cleared past the token");
+                    }
+                    if let Some(found) = fed.verdict() {
+                        verdict = Some(found);
+                        break;
+                    }
+                }
+                let verdict = verdict.unwrap_or_else(|| fed.finish());
+                assert_eq!(verdict, expected, "pieces of {piece}");
+            }
+        }
     }
 
     #[test]

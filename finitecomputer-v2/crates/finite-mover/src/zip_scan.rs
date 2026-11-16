@@ -5,6 +5,13 @@
 //! data descriptor, and hands the entries over to be matched against the
 //! central directory at the end ([`crate::zip_tail`]).
 //!
+//! Every entry's bytes go through the host reader's own credential scan
+//! ([`TextScan`]), the one it stages by, as the backstop of its redaction:
+//! a text entry holding a credential-shaped string refuses the stage, and
+//! no byte such a string could include is decided before the scan has
+//! passed it. A binary entry (a NUL in its first 8 KiB), such as a SQLite
+//! database, is not read past that, as the host reader does not read it.
+//!
 //! It accepts exactly `finite-mover-host`'s writer: stored entries, a local
 //! header with the writer's zip64 field holding the size, the data, and a
 //! zip64 data descriptor, one after another from byte 0 up to the central
@@ -13,6 +20,7 @@
 use std::collections::BTreeSet;
 
 use finite_mover_host::classify::{Class, EntryKind, classify};
+use finite_mover_host::shapes::{TextScan, TextVerdict};
 use finite_mover_host::stage::SUMMARY_ENTRY;
 
 const LOCAL: u32 = 0x0403_4b50;
@@ -38,6 +46,8 @@ pub struct Scanned {
 pub enum ScanError {
     #[error("the stage was refused whole: {0} is a secret path")]
     Secret(String),
+    #[error("the stage was refused whole: {0} holds a credential-shaped string")]
+    SecretText(String),
     #[error("the stage was refused whole: {0} is not a safe name")]
     Unsafe(String),
     #[error("the stage is malformed at byte {offset}: {why}")]
@@ -52,6 +62,9 @@ enum State {
     Data {
         remaining: u64,
         crc: crc32fast::Hasher,
+        /// Where the entry's data starts in the stream, and its scan.
+        start: u64,
+        text: Box<TextScan>,
     },
     Descriptor {
         crc: u32,
@@ -90,19 +103,38 @@ impl Scanner {
         while !bytes.is_empty() {
             match &mut self.state {
                 State::Directory => return Ok(()),
-                State::Data { remaining, crc } => {
+                State::Data {
+                    remaining,
+                    crc,
+                    text,
+                    ..
+                } => {
                     let take =
                         usize::try_from(*remaining).map_or(bytes.len(), |r| r.min(bytes.len()));
                     crc.update(&bytes[..take]);
+                    text.feed(&bytes[..take]);
                     *remaining -= take as u64;
                     self.offset += take as u64;
                     bytes = &bytes[take..];
-                    if *remaining == 0 {
-                        let State::Data { crc, .. } =
+                    let ended = *remaining == 0;
+                    if matches!(
+                        text.verdict(),
+                        Some(TextVerdict::Secret | TextVerdict::Uncheckable)
+                    ) {
+                        return Err(self.secret_text());
+                    }
+                    if ended {
+                        let State::Data { crc, text, .. } =
                             std::mem::replace(&mut self.state, State::Header)
                         else {
                             unreachable!()
                         };
+                        if matches!(
+                            text.finish(),
+                            TextVerdict::Secret | TextVerdict::Uncheckable
+                        ) {
+                            return Err(self.secret_text());
+                        }
                         self.state = State::Descriptor {
                             crc: crc.finalize(),
                         };
@@ -134,6 +166,12 @@ impl Scanner {
                 LOCAL_BYTES + name + extra
             }
         }
+    }
+
+    /// The entry being read holds a credential, or a run too long to check.
+    fn secret_text(&self) -> ScanError {
+        let name = self.entries.last().map_or("", |entry| entry.name.as_str());
+        ScanError::SecretText(name.to_string())
     }
 
     fn malformed(&self, why: &'static str) -> ScanError {
@@ -212,6 +250,8 @@ impl Scanner {
             State::Data {
                 remaining: size,
                 crc: crc32fast::Hasher::new(),
+                start: self.offset,
+                text: Box::default(),
             }
         };
         Ok(())
@@ -229,8 +269,10 @@ impl Scanner {
     }
 
     pub fn decided(&self) -> u64 {
-        match self.state {
+        match &self.state {
             State::Directory => self.directory_offset.unwrap_or(self.offset),
+            // Only what the credential scan has passed.
+            State::Data { start, text, .. } => start + text.cleared(),
             _ => self.offset,
         }
     }
@@ -340,6 +382,49 @@ mod tests {
             scanner.feed(&bytes[..data]),
             Err(ScanError::Secret("workspace/.env".into()))
         );
+    }
+
+    /// The backstop of the host reader's redaction: a text entry holding a
+    /// credential-shaped string refuses the stage, and no byte of it is ever
+    /// decided; a binary one, which the host reader does not read, passes,
+    /// and so does a redacted one.
+    #[test]
+    fn an_unredacted_token_in_text_is_refused_and_never_decided() {
+        const TOKEN: &[u8] = b"ghp_abcdefghij0123456789";
+        let mut soul = b"kind and brief\n".repeat(150_000);
+        soul.extend_from_slice(b"key ");
+        soul.extend_from_slice(TOKEN);
+        soul.extend_from_slice(b" end\n");
+        let bytes = stage(&[
+            ("workspace/a.md", b"alpha"),
+            ("agent/hermes-home/SOUL.md", &soul),
+            ("workspace/after.md", b"after"),
+        ]);
+        let token = bytes.windows(TOKEN.len()).position(|w| w == TOKEN).unwrap() as u64;
+        for chunk in [1usize << 10, 1 << 16, 1 << 20, bytes.len()] {
+            let mut scanner = Scanner::default();
+            let mut refused = None;
+            for piece in bytes.chunks(chunk) {
+                if let Err(error) = scanner.feed(piece) {
+                    refused = Some(error);
+                    break;
+                }
+                assert!(scanner.decided() <= token, "decided past the token");
+            }
+            assert_eq!(
+                refused,
+                Some(ScanError::SecretText("agent/hermes-home/SOUL.md".into())),
+                "{chunk}"
+            );
+        }
+        let binary = [&b"SQLite format 3\0"[..], TOKEN].concat();
+        let redacted = b"key [REDACTED] end\n";
+        let passes = stage(&[
+            ("agent/hermes-home/state.db", &binary),
+            ("agent/hermes-home/SOUL.md", redacted),
+            (SUMMARY_ENTRY, b"{}"),
+        ]);
+        assert_eq!(scan(&passes, 7).unwrap().0.len(), 3);
     }
 
     #[test]

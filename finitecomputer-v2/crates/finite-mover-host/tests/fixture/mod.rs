@@ -85,21 +85,29 @@ pub const SECRET_FILES: &[&str] = &[
     "workspace/bots/pairing/telegram-approved.json",
 ];
 
-/// Text whose contents hold a credential shape: secret by content.
+/// Work text whose contents hold a credential shape: secret by content,
+/// left behind.
 pub const SECRET_TEXT: &[(&str, &str)] = &[
     (
         "workspace/notes/keys.md",
         "my github token ghp_abcdefghij0123456789",
     ),
+    ("workspace/bot.txt", TELEGRAM_TOKEN),
+];
+
+/// History text holding a credential shape: staged with it redacted, as
+/// (path, what the file holds, what the stage holds).
+pub const REDACTED_TEXT: &[(&str, &str, &str)] = &[
     (
         "agent/hermes-home/memories/MEMORY.md",
-        "key sk-proj4abcdefghijklmnop",
+        "likes tea\nkey sk-proj4abcdefghijklmnop, keep it safe\n",
+        "likes tea\nkey [REDACTED], keep it safe\n",
     ),
     (
         "agent/hermes-home/skills/deploy/SKILL.md",
-        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "# Deploy\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n",
+        "# Deploy\n[REDACTED]\nb3BlbnNzaC1rZXktdjEAAAAA\n",
     ),
-    ("workspace/bot.txt", TELEGRAM_TOKEN),
 ];
 
 /// What is staged, with its class.
@@ -165,6 +173,9 @@ pub fn build() -> Fixture {
         )
         .as_bytes(),
     );
+    for (path, text, _) in REDACTED_TEXT {
+        write(path, text.as_bytes());
+    }
     for (index, (path, text)) in SECRET_TEXT.iter().enumerate() {
         write(path, format!("{text}\n{MARKER}-text-{index}\n").as_bytes());
     }

@@ -3,7 +3,9 @@
 //! stages by.
 //!
 //! For each entry it asks [`classify`]. Staging (`stream`), it then reads a
-//! file the path rules would stage for credentials ([`shapes::snapshot`]).
+//! file the path rules would stage for credentials ([`shapes::snapshot`]):
+//! a `history` text file that holds one is staged redacted (as phase 0's
+//! export did the SOUL and memories); any other is left.
 //! Measuring (`sizes`), it opens no regular file at all: its numbers come
 //! from `lstat` and the path rules alone, so they are an estimate of what
 //! `stream` stages. It never follows a link, never leaves the tree's
@@ -241,10 +243,11 @@ impl Walk<'_> {
             return Err(HostError::TreeChanged(display(&path())));
         }
         let size = file_bytes(&opened);
-        let read = shapes::snapshot(&mut file, size)
+        let redact = verdict.class == Class::History;
+        let read = shapes::snapshot(&mut file, size, redact)
             .map_err(|error| HostError::io(display(&path()), error))?;
         let why = match &read {
-            Snapshot::Binary | Snapshot::Text(_) => None,
+            Snapshot::Binary | Snapshot::Text(_) | Snapshot::Redacted { .. } => None,
             Snapshot::Secret => Some(Why::TokenInText),
             Snapshot::Uncheckable => Some(Why::UncheckableText),
         };
@@ -269,6 +272,12 @@ impl Walk<'_> {
                     return Err(HostError::TreeChanged(display(&path())));
                 }
                 Source::Text { bytes, stat }
+            }
+            Snapshot::Redacted { text, read } => {
+                if read != size && self.mode == Mode::Stage {
+                    return Err(HostError::TreeChanged(display(&path())));
+                }
+                Source::Text { bytes: text, stat }
             }
             _ => {
                 file.seek(SeekFrom::Start(0))
