@@ -187,17 +187,61 @@ settlement. Its provider agent is needed to prove the complete encrypted path.
    share the control or internal engine credentials. Activate the listing only
    after both parties have the passing evidence and agreed prices/capabilities.
 
-The initial inventory candidate is `glm-5-3-flash`, text input/output, a combined
+The initial inventory is `glm-5-3-flash`, text input/output, a combined
 393216-token context and 4096-token maximum output including reasoning. Confirm
 these against the deployed engine and limiter. The whole-request deadline is
 120 seconds with the configuration above; Numes's 11-minute source timeout does
 not extend it. Advertise `max_tokens`; reasoning controls and tools require
-separate qualification before advertising. `/v1/models` discovery is optional
-for this initial listing because Numes has a reviewed static inventory. Prices
-are a separate agreement, not facts supplied by this adapter.
+separate qualification before advertising. Numes's normal Tinfoil provider now
+requires live `/v1/models` discovery even with a custom base URL; its earlier
+static-inventory exception is no longer the integration contract. Prices remain
+a separate agreement.
+
+### Tinfoil model discovery
+
+`GET /v1/models` is a public, read-only catalogue compatible with the shape at
+`https://api.tinfoil.sh/v1/models`. It does not call Core or the engine, consume
+capacity, or emit usage, and works while marketplace admission is paused.
+It advertises only `FINITE_PRIVATE_MODEL`, not compatibility aliases, and only
+the marketplace-supported `/v1/chat/completions` endpoint.
+
+Set `FINITE_PRIVATE_MODEL_CATALOG_JSON` on the limiter to describe the actual
+deployment. For the initial text-chat listing:
+
+```yaml
+- FINITE_PRIVATE_MODEL_CATALOG_JSON: '{"name":"GLM-5.3 Flash","context_window":393216,"tool_calling":false,"reasoning":true,"pricing":{}}'
+```
+
+The response has `object: "list"` and a `data` array. Each model supplies `id`,
+`object: "model"`, `created`, `owned_by: "finite"`, `name`, `type: "chat"`,
+`endpoints`, `context_window`, `multimodal: false`, `tool_calling`, `reasoning`,
+`supported_efforts: []`, and a `pricing` object. `created` defaults to zero
+(unspecified); configure a Unix timestamp if known. No reasoning-effort values
+or tool support should be advertised until qualified for the deployed engine.
+
+Prices are optional USD-per-million-token reference rates using Tinfoil's
+`inputTokenPricePer1M` and `outputTokenPricePer1M` names. Supply both rates or
+neither. Unspecified pricing serializes as `{}`, with no inferred zero prices,
+cache discounts or request charges. This does not establish Numes's behavior
+for missing reference prices: agree rates and verify its listing before public
+activation. The catalogue does not implement billing or provider settlement.
+
+When the metadata variable is absent, discovery returns an empty `data` array
+rather than inventing model limits. Malformed metadata, nonpositive context,
+empty names, incomplete rates, and negative/nonfinite prices fail startup.
+
+Deploy a limiter image containing this endpoint **and** the metadata variable.
+The previously deployed `b4883cfe…` image returns 404 and cannot gain the route
+from an environment change alone. Pin the new CI-built image before publishing
+a measured release. The existing shim forwards `/*`; no extra edge route is
+needed. Replacing the current single eight-GPU enclave requires the usual
+maintenance/rollback procedure; runtime capacity changes alone cannot deploy
+this code. After replacement, restore the authorized runtime capacity (currently
+eight) deliberately, since the configured initial cap remains zero.
 
 | Live acceptance case | Required evidence |
 | --- | --- |
+| Model discovery | Public `/v1/models` returns the canonical model in Tinfoil format; Numes discovers it at the configured base URL; agreed pricing is represented correctly |
 | Buffered encrypted chat | HTTP 200, 64-lowercase-hex response nonce, decryptable body, exact final usage header |
 | Streamed encrypted chat | Incremental ciphertext/decryption, `[DONE]`, normal EOF and actual final HTTP usage trailer |
 | Minimal client request | Success without request ID or optional output/count headers; `user_cache_secret` accepted |
