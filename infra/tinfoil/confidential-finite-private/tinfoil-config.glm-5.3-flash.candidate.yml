@@ -77,7 +77,7 @@ containers:
       start_period: 45m
 
   - name: "finite-private-limiter"
-    image: "ghcr.io/finitecomputer/private-limiter@sha256:b4883cfef5f48cf667a6acd438ab0aa36ed5cd473c7aa480fc8ea35b52499db5"
+    image: "ghcr.io/finitecomputer/private-limiter@sha256:3b3cd7eae28fc7b39d3be0b9fbe1229af3c648555a23caaea216e1d63cc5d8b9"
     restart: always
     env:
       - LISTEN_ADDR: "0.0.0.0:8002"
@@ -85,6 +85,7 @@ containers:
       - UPSTREAM_BASE_URL: "http://glm-5-3-flash:8001"
       - FINITE_PRIVATE_MODEL: "glm-5-3-flash"
       - FINITE_PRIVATE_UPSTREAM_MODEL: "glm-5-3-flash"
+      - FINITE_PRIVATE_MODEL_CATALOG_JSON: '{"name":"GLM-5.3 Flash","context_window":393216,"tool_calling":false,"reasoning":true,"pricing":{}}'
       # Existing issued Runtimes may send either historical label. The dotted
       # Z.ai spelling is accepted as an alias; the served name stays hyphenated.
       # The limiter canonicalizes only these names; any other model fails
