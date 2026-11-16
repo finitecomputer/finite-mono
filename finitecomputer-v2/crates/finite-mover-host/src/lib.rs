@@ -32,6 +32,7 @@ pub mod command;
 pub mod config_copy;
 pub mod error;
 pub mod notice;
+pub mod overrides;
 pub mod pairing;
 pub mod secrets;
 pub mod shapes;

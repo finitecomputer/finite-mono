@@ -421,6 +421,61 @@ fn an_older_movers_brains_are_ignored() {
     assert_eq!(sized, sizes(&fixture));
 }
 
+/// The operator's overrides (`--carry`, `--leave`): a runtime folder
+/// comes, a work folder stays, the most specific path decides, and a
+/// credential never comes; `sizes` estimates the same.
+#[test]
+fn the_operators_overrides_carry_and_leave_but_never_a_secret() {
+    let fixture = fixture::build();
+    let words = [
+        ("--carry", "agent/hermes-home"),
+        ("--carry", "workspace/app/node_modules"),
+        ("--leave", "workspace/photos"),
+        ("--carry", "workspace/photos/cat.jpg"),
+        ("--leave", "workspace/notes"),
+        ("--carry", "workspace/.git-credentials"),
+    ]
+    .map(|(flag, path)| format!("{flag} {}", hex::encode(path)))
+    .join(" ");
+    let stage = run_bytes(&fixture, &format!("stream {ID} {} {words}", keys())).unwrap();
+    let files = entries(&stage);
+    for carried in [
+        "agent/hermes-home/logs/gateway.log",
+        "workspace/app/node_modules/pkg/index.js",
+        "workspace/photos/cat.jpg",
+    ] {
+        assert!(files.contains_key(carried), "{carried} is carried");
+    }
+    for left in [
+        "workspace/notes/today.md",
+        "agent/hermes-home/.env",
+        "agent/hermes-home/config.yaml",
+        "agent/hermes-home/SOUL-link.md",
+        "workspace/.git-credentials",
+    ] {
+        assert!(!files.contains_key(left), "{left} is left");
+    }
+    assert!(
+        left_of(&stage).contains(&("workspace/notes".to_owned(), "left-by-operator".to_owned()))
+    );
+    for needle in [MARKER, TELEGRAM_TOKEN, OPENROUTER_KEY, SECRET_HEX] {
+        assert!(
+            !contains(&stage, needle.as_bytes()),
+            "the stage holds {needle}"
+        );
+    }
+    let measured: Value =
+        serde_json::from_slice(&run_bytes(&fixture, &format!("sizes {ID} {words}")).unwrap())
+            .unwrap();
+    let streamed: Value = serde_json::from_slice(&files[SUMMARY_ENTRY]).unwrap();
+    for class in ["cache", "runtime"] {
+        assert_eq!(
+            measured["classes"][class], streamed["classes"][class],
+            "{class}"
+        );
+    }
+}
+
 /// A brain folder whose name file would be named like a credential gets
 /// no name file, and the stage still goes (the uploader would refuse it).
 #[test]

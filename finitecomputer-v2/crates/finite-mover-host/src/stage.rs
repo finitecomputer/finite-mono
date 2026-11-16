@@ -19,6 +19,7 @@ use rustix::fs::Stat;
 use crate::brains::{self, Manifest, OwnerKeys};
 use crate::classify::{self, Class, EntryKind, Verdict};
 use crate::error::HostError;
+use crate::overrides::Overrides;
 use crate::simplex::{self, Carried, Carry, Seal};
 use crate::summary::{Summary, Tallies};
 use crate::tree::Tree;
@@ -33,9 +34,9 @@ pub const SUMMARY_ENTRY: &str = ".finite-stage/summary.json";
 /// may be running. The exact bytes are `stream`'s.
 ///
 /// Name files aren't counted: their few bytes are written by `stream`.
-pub fn sizes(tree: &Tree) -> Result<Summary, HostError> {
+pub fn sizes(tree: &Tree, overrides: &Overrides) -> Result<Summary, HostError> {
     let mut count = Count(Tallies::default());
-    walk::walk(tree, Mode::Measure, &mut count)?;
+    walk::walk(tree, overrides, Mode::Measure, &mut count)?;
     Ok(count.0.summary(tree.id().as_str()))
 }
 
@@ -59,6 +60,7 @@ impl Visit for Count {
 /// Returns the summary it wrote.
 pub fn stream(
     tree: &Tree,
+    overrides: &Overrides,
     keys: &OwnerKeys,
     stage: Option<&str>,
     out: impl Write,
@@ -70,7 +72,7 @@ pub fn stream(
         tallies: Tallies::default(),
         copied: Vec::new(),
     };
-    for (folder, manifest) in walk::walk(tree, Mode::Stage, &mut stage)? {
+    for (folder, manifest) in walk::walk(tree, overrides, Mode::Stage, &mut stage)? {
         stage.name_file(&folder, manifest.as_ref(), keys)?;
     }
     let carried = match simplex::decide(tree, stage_id)? {

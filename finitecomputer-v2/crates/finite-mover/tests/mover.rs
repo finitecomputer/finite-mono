@@ -531,6 +531,7 @@ impl World {
                     ],
                 )]),
                 idle: Duration::from_secs(120),
+                overrides: Some(dir.join("overrides.json")),
             },
             stage,
             locks: dir.join("locks"),
@@ -910,6 +911,58 @@ fn a_hand_off_finite_chat_cannot_take_now_leaves_the_command() {
     world.fake.platform().refuse_handoff = None;
     assert_eq!(world.work()[0].outcome, "staged");
     assert_eq!(world.fake.platform().handoffs.len(), 1);
+}
+
+/// FIN-499: the operator's overrides file, read on each run: its `*`
+/// entry and the agent's own go to the host reader, in hex; another
+/// agent's don't. One that can't be read fails the command before the
+/// agent is stopped.
+#[test]
+fn the_operators_overrides_go_with_each_stream() {
+    let world = World::new();
+    let file = world.dir.join("overrides.json");
+    std::fs::write(
+        &file,
+        json!({
+            "*": { "leave": ["workspace/photos"] },
+            OLD: { "carry": ["agent/hermes-home/sessions", "workspace/My Notes"] },
+            "proj_other": { "carry": ["workspace/elsewhere"] },
+        })
+        .to_string(),
+    )
+    .unwrap();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    assert_eq!(world.work()[0].outcome, "staged");
+    let hex = |path: &str| hex::encode(path);
+    assert_eq!(
+        world.log("host.log"),
+        [format!(
+            "{} --leave {} --carry {} --carry {}",
+            stream_words(1),
+            hex("workspace/photos"),
+            hex("agent/hermes-home/sessions"),
+            hex("workspace/My Notes")
+        )]
+    );
+
+    for bad in [
+        json!({ OLD: { "carry": ["../etc"] } }).to_string(),
+        json!({ OLD: { "carry": "workspace" } }).to_string(),
+        json!({ OLD: { "take": ["workspace"] } }).to_string(),
+        "not json".to_owned(),
+    ] {
+        let world = World::new();
+        std::fs::write(world.dir.join("overrides.json"), &bad).unwrap();
+        world.fake.tell(OLD, "asked", 1, stage_command(1));
+        let worked = world.work();
+        assert_eq!(
+            (worked[0].outcome.as_str(), worked[0].step.as_deref()),
+            ("failed", Some("overrides")),
+            "{bad}"
+        );
+        assert!(world.log("core.log").is_empty(), "not stopped: {bad}");
+        assert!(world.log("host.log").is_empty(), "nothing read: {bad}");
+    }
 }
 
 #[test]

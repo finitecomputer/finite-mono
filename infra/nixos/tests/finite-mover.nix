@@ -179,6 +179,7 @@ pkgs.testers.runNixOSTest {
 
     with subtest("the config is root's, readable by the mover's group alone"):
         assert app.succeed(f"stat -L -c '%a %U %G' {config}").strip() == "640 root finite-mover"
+        assert json.loads(app.succeed(f"cat {config}"))["overrides"] == f"{state}/overrides.json"
         app.fail(f"runuser -u nobody -- cat {config}")
 
     with subtest("the timers are off by default"):
@@ -211,6 +212,15 @@ pkgs.testers.runNixOSTest {
         # Every brain counts in its move: "brainpage" and "not-theirs".
         moved = app.succeed(f"jq -e '.agents.proj_live.move' {state}/sizes.json").strip()
         assert moved == "19", moved
+
+    with subtest("root's overrides file tweaks the next run, with no release"):
+        app.succeed(
+            f"echo '{{\"*\": {{\"leave\": [\"workspace/finitebrain/brain-other\"]}}}}' > {state}/overrides.json"
+        )
+        app.succeed("systemctl start finite-mover-sizes.service")
+        moved = app.succeed(f"jq -e '.agents.proj_live.move' {state}/sizes.json").strip()
+        assert moved == "9", moved
+        app.succeed(f"rm {state}/overrides.json")
 
     program = json.loads(app.succeed(f"cat {config}"))["core"]["program"]
     core = " ".join(shlex.quote(word) for word in program)

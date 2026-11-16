@@ -3,14 +3,16 @@
 //! and is parsed here, word by word, with no shell:
 //!
 //! ```text
-//! sizes   <durable_state_id>
+//! sizes   <durable_state_id> [--carry|--leave <hex path>]...
 //! stream  <durable_state_id> [--stage <stage id>] [--agent-key <hex>] [--person-key <hex>]...
+//!         [--carry|--leave <hex path>]...
 //! secrets <durable_state_id> <kind>[,<kind>...]
 //! owner-telegram-notice <durable_state_id> --notice <notice id>   (text on stdin)
 //! ```
 //!
 //! A key is 64 hex digits: the old agent's own, and its person's, which
-//! place each brain's owner in its name file ([`crate::brains`]).
+//! place each brain's owner in its name file ([`crate::brains`]). A path
+//! is its UTF-8 in hex: the operator's overrides ([`crate::overrides`]).
 //! `--brain <word>`, which an older mover sends to `sizes` and `stream`,
 //! is read and ignored: every brain is staged.
 //!
@@ -26,21 +28,24 @@ use serde::Serialize;
 use crate::brains::{self, OwnerKeys, PERSON_KEYS_MAX};
 use crate::error::HostError;
 use crate::notice::{self, NoticeId};
+use crate::overrides::{Override, Overrides};
 use crate::secrets::{self, Kind};
 use crate::stage;
 use crate::tree::{DurableId, Tree};
 
-/// The longest operation accepted.
-const COMMAND_MAX_BYTES: usize = 8192;
+/// The longest operation accepted: room for every key and override.
+const COMMAND_MAX_BYTES: usize = 32 * 1024;
 const STAGE_ID_MAX: usize = 128;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Operation {
     Sizes {
         id: DurableId,
+        overrides: Overrides,
     },
     Stream {
         id: DurableId,
+        overrides: Overrides,
         /// The stage's id, which the SimpleX seal is named by.
         stage: Option<String>,
         /// The keys that place each brain's owner.
@@ -62,6 +67,7 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let usage = || {
         HostError::Usage(
             "sizes <id> | stream <id> [--stage <id>] [--agent-key <hex>] [--person-key <hex>]... \
+             [--carry|--leave <hex path>]... \
              | secrets <id> <kind>[,<kind>...] | owner-telegram-notice <id> --notice <notice id>"
                 .into(),
         )
@@ -75,6 +81,7 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
         "sizes" | "stream" => {
             let mut stage = None;
             let mut keys = OwnerKeys::default();
+            let mut overrides = Overrides::default();
             let stream = op == "stream";
             while let Some(flag) = words.next() {
                 let value = words.next().ok_or_else(usage)?;
@@ -95,13 +102,20 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
                     "--person-key" if stream && keys.people.len() < PERSON_KEYS_MAX => {
                         keys.people.push(brains::parse_key(value)?);
                     }
+                    "--carry" => overrides.push(Override::Carry, value)?,
+                    "--leave" => overrides.push(Override::Leave, value)?,
                     _ => return Err(usage()),
                 }
             }
             Ok(if stream {
-                Operation::Stream { id, stage, keys }
+                Operation::Stream {
+                    id,
+                    overrides,
+                    stage,
+                    keys,
+                }
             } else {
-                Operation::Sizes { id }
+                Operation::Sizes { id, overrides }
             })
         }
         "secrets" => {
@@ -165,13 +179,18 @@ pub fn run_with(
     // The seal's write capabilities stay lowered but around the seal.
     crate::simplex::lower_writes()?;
     match operation {
-        Operation::Sizes { id } => {
+        Operation::Sizes { id, overrides } => {
             let tree = Tree::open(work_root, id)?;
-            print_json(&mut out, &stage::sizes(&tree)?)
+            print_json(&mut out, &stage::sizes(&tree, &overrides)?)
         }
-        Operation::Stream { id, stage, keys } => {
+        Operation::Stream {
+            id,
+            overrides,
+            stage,
+            keys,
+        } => {
             let tree = Tree::open(work_root, id)?;
-            stage::stream(&tree, &keys, stage.as_deref(), out).map(drop)
+            stage::stream(&tree, &overrides, &keys, stage.as_deref(), out).map(drop)
         }
         Operation::Secrets { id, kinds } => {
             let tree = Tree::open(work_root, id)?;
@@ -214,6 +233,7 @@ mod tests {
             parse_ssh("stream runtime_1").unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
+                overrides: Overrides::default(),
                 stage: None,
                 keys: OwnerKeys::default(),
             }
@@ -228,7 +248,8 @@ mod tests {
         assert_eq!(
             parse_ssh("sizes runtime_1").unwrap(),
             Operation::Sizes {
-                id: id("runtime_1")
+                id: id("runtime_1"),
+                overrides: Overrides::default(),
             }
         );
     }
@@ -244,6 +265,7 @@ mod tests {
             .unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
+                overrides: Overrides::default(),
                 stage: Some("proj_a.p1.2".to_owned()),
                 keys: OwnerKeys {
                     agent: Some([10; 32]),
@@ -275,6 +297,7 @@ mod tests {
             .unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
+                overrides: Overrides::default(),
                 stage: Some("s1".to_owned()),
                 keys: OwnerKeys::default(),
             }
@@ -282,9 +305,38 @@ mod tests {
         assert_eq!(
             parse_ssh("sizes runtime_1 --brain b1").unwrap(),
             Operation::Sizes {
-                id: id("runtime_1")
+                id: id("runtime_1"),
+                overrides: Overrides::default(),
             }
         );
+    }
+
+    #[test]
+    fn sizes_and_stream_take_the_operators_overrides() {
+        let (carry, leave) = (
+            hex::encode("agent/hermes-home/sessions"),
+            hex::encode("workspace/big"),
+        );
+        let mut overrides = Overrides::default();
+        overrides.push(Override::Carry, &carry).unwrap();
+        overrides.push(Override::Leave, &leave).unwrap();
+        assert_eq!(
+            parse_ssh(&format!("sizes runtime_1 --carry {carry} --leave {leave}")).unwrap(),
+            Operation::Sizes {
+                id: id("runtime_1"),
+                overrides: overrides.clone(),
+            }
+        );
+        assert!(matches!(
+            parse_ssh(&format!("stream runtime_1 --stage s1 --carry {carry} --leave {leave}")).unwrap(),
+            Operation::Stream { overrides: parsed, .. } if parsed == overrides
+        ));
+        for bad in [hex::encode("../etc"), hex::encode("/etc"), "zz".to_owned()] {
+            assert!(
+                parse_ssh(&format!("stream runtime_1 --carry {bad}")).is_err(),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -149,6 +149,8 @@ pub enum Why {
     Site,
     /// The runtime: everything that is neither history, work nor cache.
     Runtime,
+    /// A path the operator's overrides leave ([`crate::overrides`]).
+    LeftByOperator,
 }
 
 /// The kind of directory entry being classified.

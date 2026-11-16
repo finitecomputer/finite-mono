@@ -110,6 +110,7 @@ mod tests {
             )]
             .into(),
             idle: std::time::Duration::from_secs(1),
+            overrides: None,
         };
         let binding = Binding {
             old: "proj_a".into(),
@@ -176,6 +177,7 @@ mod tests {
                 )]
                 .into(),
                 idle: std::time::Duration::from_secs(1),
+                overrides: None,
             };
             let binding = Binding {
                 old: "proj_a".into(),

@@ -9,6 +9,20 @@
 # Nostr key (`mover.key`, which finite.chat knows by its npub) and its ssh
 # key for the Runner hosts. Neither is in the store, the repo or a log.
 #
+# What a stage carries can be tweaked live, with no release: root writes
+# /var/lib/finite-mover/overrides.json, which the mover reads on each run
+# (no file changes nothing). Each key is an old agent's Core project id, or
+# "*" for every agent; each path is relative to the agent's durable tree,
+# and covers everything under it:
+#
+#   { "*": { "leave": ["workspace/videos"] },
+#     "proj_123": { "carry": ["agent/hermes-home/sessions"] } }
+#
+# `carry` stages what a rule would leave as runtime, hidden or cache;
+# `leave` leaves what it would stage. A credential or a link is never
+# carried. A file the mover can't read, or a path it refuses, fails that
+# agent's stage before the agent is stopped.
+#
 # The timers are off until `timers.enable`: deploy first, give finite.chat
 # the npub, then turn them on. Delete this module with the rest of the move
 # (FIN-463's removal plan), with the role and both keys.
@@ -105,6 +119,7 @@ let
       wait_seconds = cfg.core.waitSeconds;
     };
     hosts = lib.mapAttrs (_: host: ssh ++ [ "finite-mover@${host.address}" ]) cfg.hosts;
+    overrides = "${stateDir}/overrides.json";
   };
 
   roleSql = "${cfg.package}/share/finite-mover/core-role.sql";

@@ -12,9 +12,13 @@
 //!     "program": ["sudo", "-n", "/run/wrappers/bin/finite-mover-core"],
 //!     "admin_email": "…", "admin_workos_user_id": "…", "wait_seconds": 900
 //!   },
-//!   "hosts": { "<source_host_id>": ["ssh", "-i", "…", "finite-mover@<host>"] }
+//!   "hosts": { "<source_host_id>": ["ssh", "-i", "…", "finite-mover@<host>"] },
+//!   "overrides": "/var/lib/finite-mover/overrides.json"
 //! }
 //! ```
+//!
+//! `overrides` is the operator's file of paths to carry or leave, read on
+//! each run ([`HostCommands::overrides`]); it may be absent.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -38,6 +42,8 @@ pub struct Config {
     pub core: CoreConfig,
     #[serde(default)]
     pub hosts: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub overrides: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -139,6 +145,7 @@ impl Config {
         HostCommands {
             hosts: self.hosts.clone(),
             idle: HOST_IDLE,
+            overrides: self.overrides.clone(),
         }
     }
 }

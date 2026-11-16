@@ -23,6 +23,7 @@ use crate::brains::{self, BRAIN_ROOT, Manifest};
 use crate::classify::{self, BUILD_DIRS, CONFIG_COPY_PATH, Class, EntryKind, Verdict, Why};
 use crate::config_copy::{CONFIG_MAX_BYTES, public_config};
 use crate::error::HostError;
+use crate::overrides::Overrides;
 use crate::shapes::{self, Snapshot};
 use crate::tree::{Tree, open_directory, open_regular, stat_entry};
 
@@ -80,12 +81,18 @@ pub trait Visit {
     fn staged(&mut self, name: &str, class: Class, source: Source) -> Result<(), HostError>;
 }
 
-/// Walk `tree`, and return the brain working trees it found, whose name
-/// files the stage writes. A file where one goes is left behind, replaced
-/// by the stage's own.
-pub fn walk(tree: &Tree, mode: Mode, visit: &mut impl Visit) -> Result<Brains, HostError> {
+/// Walk `tree` by the rules and the operator's `overrides`, and return
+/// the brain working trees it found, whose name files the stage writes. A
+/// file where one goes is left behind, replaced by the stage's own.
+pub fn walk(
+    tree: &Tree,
+    overrides: &Overrides,
+    mode: Mode,
+    visit: &mut impl Visit,
+) -> Result<Brains, HostError> {
     let mut walk = Walk {
         tree,
+        overrides,
         mode,
         brains: Brains::new(),
     };
@@ -96,6 +103,7 @@ pub fn walk(tree: &Tree, mode: Mode, visit: &mut impl Visit) -> Result<Brains, H
 
 struct Walk<'a> {
     tree: &'a Tree,
+    overrides: &'a Overrides,
     mode: Mode,
     brains: Brains,
 }
@@ -193,7 +201,9 @@ impl Walk<'_> {
             };
             return visit.left(&parts, replaced, file_bytes(&stat));
         }
-        let verdict = classify::classify(&parts, kind, build_output);
+        let verdict = self
+            .overrides
+            .apply(&parts, classify::classify(&parts, kind, build_output));
         if verdict.class.staged() {
             if self.mode == Mode::Measure {
                 return visit.staged("", verdict.class, Source::Measured(file_bytes(&stat)));
