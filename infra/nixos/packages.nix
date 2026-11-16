@@ -435,11 +435,8 @@ rec {
   finite-mover = mkWorkspaceCrate {
     pname = "finite-mover";
     dir = "finitecomputer-v2/crates/finite-mover";
-    # Core and finite-brain's store only for Cargo's manifest walk: the
-    # tests' schema dev-dependencies.
+    # Core only for Cargo's manifest walk: the tests' schema dev-dependency.
     sourcePaths = finiteSaasCoreSourcePaths ++ [
-      "finite-brain/crates/finite-brain-core"
-      "finite-brain/crates/finite-brain-store"
       "finite-nostr"
       "finitecomputer-v2/crates/finite-mover"
       "finitecomputer-v2/crates/finite-mover-host"

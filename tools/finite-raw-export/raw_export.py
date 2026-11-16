@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export an old finite.computer agent's raw folder for the new Finite.
 
-    python3 raw_export.py --out /data/agent/exports/raw.zip [--brain ID]...
+    python3 raw_export.py --out /data/agent/exports/raw.zip
                           [--site SLUG=DIR]... [--fact PATH=FILE]... [--root /data]
 
 It writes one zip of the agent's own folder in the `finite-computer` layout
@@ -24,8 +24,11 @@ Differences from the host reader, because this runs inside the live agent:
   `-journal` are not needed. A database SQLite can't open is copied as it
   is, with its sidecars.
 - No writer lease is taken; the agent itself holds it.
-- Owned brains, sites and the small fact files come from the caller
-  (export.py knows them through `fbrain`, `fsite` and the agent's env).
+- Sites and the small fact files, brains' name files among them, come
+  from the caller (export.py knows them through `fbrain`, `fsite` and the
+  agent's env). Every brain working tree comes, whoever owns it, as the
+  host reader carries it; `--brain`, which an older caller sends, is
+  ignored.
 
 It needs the standard library and PyYAML, which Hermes's own Python has
 (Hermes reads `config.yaml` with it): run it with that Python, as the
@@ -56,7 +59,6 @@ HERMES_CONFIG = (b"agent", b"hermes-home", b"config.yaml")
 LEFT_MAX = 1000
 DEPTH_MAX = 128
 CONFIG_MAX_BYTES = 4 * 1024 * 1024
-BRAIN_DIRECTORY_MAX_BYTES = 1024 * 1024
 TEXT_SNAPSHOT_MAX = 256 * 1024 * 1024
 FACT_MAX_BYTES = 64 * 1024
 
@@ -85,7 +87,6 @@ WHYS = (
     "replaced-by-copy",
     "cache-dir",
     "build-output",
-    "not-owned-brain",
     "not-a-file",
     "uncarried-name",
     "history",
@@ -176,12 +177,11 @@ def is_control(character):
     return code < 0x20 or 0x7F <= code <= 0x9F
 
 
-def classify(parts, kind="file", brain=None, build_output=None):
+def classify(parts, kind="file", build_output=None):
     """One path's class. `parts` are the path's components as bytes; `kind`
     is "file" or "other" (a link, pipe, device, a file with a second name or
-    a folder on another filesystem); `brain` is (depth, owned) of the brain
-    working tree the path is in, if any; `build_output` the depth of the
-    build folder it is under, if any."""
+    a folder on another filesystem); `build_output` the depth of the build
+    folder it is under, if any."""
     length = len(parts)
     secret = secret_rule(parts)
     if secret:
@@ -189,8 +189,6 @@ def classify(parts, kind="file", brain=None, build_output=None):
     for index, part in enumerate(parts[:-1]):
         if part in CACHE_DIRS:
             return Verdict("cache", "cache-dir", index + 1)
-    if brain is not None and not brain[1]:
-        return Verdict("runtime", "not-owned-brain", brain[0])
     if build_output is not None:
         return Verdict("cache", "build-output", build_output)
     if kind != "file":
@@ -489,10 +487,9 @@ class TreeChanged(Exception):
 
 
 class Export:
-    def __init__(self, root, out, owned_brains, extra_name_check=None, extra_text_check=None):
+    def __init__(self, root, out, extra_name_check=None, extra_text_check=None):
         self.root = Path(root)
         self.out = Path(out)
-        self.owned = set(owned_brains)
         self.extra_name_check = extra_name_check
         self.extra_text_check = extra_text_check
         self.classes = {cls: [0, 0] for cls in CLASSES}
@@ -541,7 +538,7 @@ class Export:
         try:
             self.device = os.fstat(root_fd).st_dev
             self.zip = zip_file
-            self.directory(root_fd, [], None, None)
+            self.directory(root_fd, [], None)
         finally:
             os.close(root_fd)
         # The tree wins: a clone or fact the tree already holds is not added
@@ -554,7 +551,7 @@ class Export:
             try:
                 self.device = os.fstat(fd).st_dev
                 self.walked = (os.fsencode(folder), 2)
-                self.directory(fd, [b"sites", slug.encode()], None, None)
+                self.directory(fd, [b"sites", slug.encode()], None)
             finally:
                 os.close(fd)
         for name, data in sorted(facts.items()):
@@ -569,7 +566,7 @@ class Export:
         summary = json.dumps(self.summary(summary_id), indent=2, ensure_ascii=False).encode()
         self.write_bytes(SUMMARY_ENTRY, summary, 0o644, 0)
 
-    def directory(self, fd, path, brain, build):
+    def directory(self, fd, path, build):
         if len(path) >= DEPTH_MAX:
             raise ValueError("deeper than 128 folders: " + "/".join(p.decode("utf-8", "replace") for p in path))
         names = sorted(os.fsencode(name) for name in os.listdir(fd))
@@ -577,9 +574,9 @@ class Export:
             project_file(name) and stat_module.S_ISREG(lstat(fd, name).st_mode) for name in names
         )
         for name in names:
-            self.entry(fd, name, path + [name], brain, build, project_here)
+            self.entry(fd, name, path + [name], build, project_here)
 
-    def entry(self, fd, name, path, brain, build, project_here):
+    def entry(self, fd, name, path, build, project_here):
         try:
             st = lstat(fd, name)
         except FileNotFoundError:
@@ -594,11 +591,11 @@ class Export:
             try:
                 if build is None and path[0] == b"workspace" and project_here and name in BUILD_DIRS:
                     build = len(path)
-                self.directory(child, path, self.brain_scope(child, path, brain), build)
+                self.directory(child, path, build)
             finally:
                 os.close(child)
             return
-        verdict = classify(path, "file" if regular else "other", brain, build)
+        verdict = classify(path, "file" if regular else "other", build)
         size = st.st_size if stat_module.S_ISREG(st.st_mode) else 0
         if verdict.cls in STAGED:
             if self.extra_name_check and self.extra_name_check(name.decode("utf-8", "replace")):
@@ -728,16 +725,6 @@ class Export:
             self.write_bytes(b"/".join(CONFIG_COPY).decode(), copy, 0o644, 0)
             self.add_staged("config", len(copy))
 
-    def brain_scope(self, fd, path, outer):
-        if outer is not None and not outer[1]:
-            return outer
-        try:
-            if not stat_module.S_ISDIR(lstat(fd, b".finitebrain").st_mode):
-                return outer
-        except OSError:
-            return outer
-        return (len(path), brain_id(fd) in self.owned)
-
     def write_bytes(self, name, data, mode, mtime):
         info = zip_info(name, mode, mtime)
         with self.zip.open(info, "w", force_zip64=True) as entry:
@@ -785,29 +772,6 @@ def still_the_same(absolute, before):
     except OSError:
         return False
     return now.st_nlink == 1 and same_file(before, now)
-
-
-def brain_id(fd):
-    try:
-        control = os.open(b".finitebrain", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-    except OSError:
-        return None
-    try:
-        handle = open_regular(control, b"brain-directory.json")
-        if handle is None:
-            return None
-        with handle:
-            data = handle.read(BRAIN_DIRECTORY_MAX_BYTES + 1)
-    finally:
-        os.close(control)
-    if len(data) > BRAIN_DIRECTORY_MAX_BYTES:
-        return None
-    try:
-        manifest = json.loads(data)
-        identifier = manifest["brain"]["id"]
-    except (ValueError, KeyError, TypeError):
-        return None
-    return identifier if isinstance(identifier, str) else None
 
 
 def main_history_database(path):
@@ -858,7 +822,8 @@ def export_raw(root, out, owned_brains=(), sites=None, facts=None, summary_id="r
                extra_name_check=None, extra_text_check=None):  # fmt: skip
     """Write the raw-folder zip to `out` and return its summary. `sites`
     maps a slug to a cloned site folder; `facts` maps an allowed fact path
-    to its JSON bytes. On any failure the partial zip is removed."""
+    to its JSON bytes. `owned_brains` is ignored: every brain comes. On any
+    failure the partial zip is removed."""
     require_yaml()
     out = Path(out)
     sites = dict(sites or {})
@@ -870,7 +835,7 @@ def export_raw(root, out, owned_brains=(), sites=None, facts=None, summary_id="r
         if not FACT_PATHS.match(name) or len(data) > FACT_MAX_BYTES or holds_secret(data):
             raise ValueError(f"{name} is not a fact file the import reads, or is not clean")
         json.loads(data)
-    export = Export(root, out, owned_brains, extra_name_check, extra_text_check)
+    export = Export(root, out, extra_name_check, extra_text_check)
     out.parent.mkdir(parents=True, exist_ok=True)
     try:
         with zipfile.ZipFile(out, "w", zipfile.ZIP_STORED, allowZip64=True) as zip_file:
@@ -898,7 +863,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Export this agent's raw folder (FIN-463).")
     parser.add_argument("--root", default="/data", help="the agent's /data")
     parser.add_argument("--out", required=True, help="the zip to write, outside the workspace")
-    parser.add_argument("--brain", action="append", default=[], help="an owned brain's id (repeat)")
+    parser.add_argument("--brain", action="append", default=[], help=argparse.SUPPRESS)
     parser.add_argument("--site", action="append", default=[], help="SLUG=DIR, a cloned owned site (repeat)")
     parser.add_argument("--fact", action="append", default=[], help="ZIP_PATH=FILE, a fact file (repeat)")
     parser.add_argument("--id", default="raw", help="the summary's id")

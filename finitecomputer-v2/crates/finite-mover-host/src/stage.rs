@@ -5,10 +5,10 @@
 //! data descriptors, so it can be written to a pipe and any file in it
 //! read later by one range request. Each staged file keeps its path in
 //! the tree (`agent/hermes-home/state.db`, `workspace/...`), plus the
-//! allow-listed config copy, each named owned brain's name file
-//! (`workspace/finitebrain/<id>.json`, `{"name": …}`) and, when it can be
-//! carried safely, the SimpleX conversation ([`crate::simplex`]). The last
-//! entry is
+//! allow-listed config copy, each brain's name file
+//! (`workspace/finitebrain/<folder>.json`, [`crate::brains`]) and, when it
+//! can be carried safely, the SimpleX conversation ([`crate::simplex`]).
+//! The last entry is
 //! [`SUMMARY_ENTRY`]: what `stream` staged and left, exactly, in the shape
 //! `sizes` estimates.
 
@@ -16,12 +16,13 @@ use std::io::{self, Write};
 
 use rustix::fs::Stat;
 
+use crate::brains::{self, Manifest, OwnerKeys};
 use crate::classify::{self, Class, EntryKind, Verdict};
 use crate::error::HostError;
 use crate::simplex::{self, Carried, Carry, Seal};
 use crate::summary::{Summary, Tallies};
 use crate::tree::Tree;
-use crate::walk::{self, Mode, OwnedBrains, Source, Visit, brain_name_path, same_file};
+use crate::walk::{self, Mode, Source, Visit, same_file};
 use crate::zip64::ZipStream;
 
 /// The summary's name inside the stage. No source path can take it: a
@@ -32,9 +33,9 @@ pub const SUMMARY_ENTRY: &str = ".finite-stage/summary.json";
 /// may be running. The exact bytes are `stream`'s.
 ///
 /// Name files aren't counted: their few bytes are written by `stream`.
-pub fn sizes(tree: &Tree, owned_brains: &OwnedBrains) -> Result<Summary, HostError> {
+pub fn sizes(tree: &Tree) -> Result<Summary, HostError> {
     let mut count = Count(Tallies::default());
-    walk::walk(tree, owned_brains, Mode::Measure, &mut count)?;
+    walk::walk(tree, Mode::Measure, &mut count)?;
     Ok(count.0.summary(tree.id().as_str()))
 }
 
@@ -54,10 +55,11 @@ impl Visit for Count {
 
 /// Write the stage to `out`, holding the chat store's writer lease for
 /// the whole walk. Refuses a running agent. `stage` names the stage, for
-/// the SimpleX seal ([`simplex`]). Returns the summary it wrote.
+/// the SimpleX seal ([`simplex`]); `keys` place each brain's owner.
+/// Returns the summary it wrote.
 pub fn stream(
     tree: &Tree,
-    owned_brains: &OwnedBrains,
+    keys: &OwnerKeys,
     stage: Option<&str>,
     out: impl Write,
 ) -> Result<Summary, HostError> {
@@ -68,11 +70,8 @@ pub fn stream(
         tallies: Tallies::default(),
         copied: Vec::new(),
     };
-    walk::walk(tree, owned_brains, Mode::Stage, &mut stage)?;
-    for (id, name) in owned_brains {
-        if let Some(name) = name {
-            stage.name_file(id, name)?;
-        }
+    for (folder, manifest) in walk::walk(tree, Mode::Stage, &mut stage)? {
+        stage.name_file(&folder, manifest.as_ref(), keys)?;
     }
     let carried = match simplex::decide(tree, stage_id)? {
         Ok(carried) => Ok(stage.carry(carried)?),
@@ -121,16 +120,21 @@ struct Stage<W: Write> {
 }
 
 impl<W: Write> Stage<W> {
-    /// Stage brain `id`'s name file, as phase 0's export wrote it. Its
-    /// path must be one the uploader's second check takes (an id such as
-    /// `identity` would make a credential's name), and its text no
+    /// Stage the name file of the brain in `workspace/finitebrain/<folder>/`.
+    /// Its path must be one the uploader's second check takes (a folder
+    /// such as `identity` would make a credential's name), and its text no
     /// credential's shape; otherwise there is none, and the importer
     /// names the brain from its pages.
-    fn name_file(&mut self, id: &str, name: &str) -> Result<(), HostError> {
-        let path = brain_name_path(id);
+    fn name_file(
+        &mut self,
+        folder: &str,
+        manifest: Option<&Manifest>,
+        keys: &OwnerKeys,
+    ) -> Result<(), HostError> {
+        let path = brains::name_path(folder);
         let parts: Vec<&[u8]> = path.split('/').map(str::as_bytes).collect();
-        let body = serde_json::to_vec(&serde_json::json!({ "name": name })).map_err(write_error)?;
-        let verdict = classify::classify(&parts, EntryKind::File, classify::BrainScope::None);
+        let body = brains::name_file(manifest, keys);
+        let verdict = classify::classify(&parts, EntryKind::File, None);
         if !verdict.class.staged() || crate::shapes::holds_secret(&body) {
             return Ok(());
         }

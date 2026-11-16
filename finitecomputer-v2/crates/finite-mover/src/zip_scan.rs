@@ -12,7 +12,7 @@
 
 use std::collections::BTreeSet;
 
-use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
+use finite_mover_host::classify::{Class, EntryKind, classify};
 use finite_mover_host::stage::SUMMARY_ENTRY;
 
 const LOCAL: u32 = 0x0403_4b50;
@@ -259,7 +259,7 @@ fn check_name(name: &str) -> Result<(), ScanError> {
         return Err(ScanError::Unsafe(name.to_string()));
     }
     let bytes: Vec<&[u8]> = parts.iter().map(|part| part.as_bytes()).collect();
-    if classify(&bytes, EntryKind::File, BrainScope::None).class == Class::Secret {
+    if classify(&bytes, EntryKind::File, None).class == Class::Secret {
         return Err(ScanError::Secret(name.to_string()));
     }
     Ok(())

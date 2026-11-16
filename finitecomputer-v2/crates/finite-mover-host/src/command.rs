@@ -3,15 +3,16 @@
 //! and is parsed here, word by word, with no shell:
 //!
 //! ```text
-//! sizes   <durable_state_id> [--brain <brain id>[:<name>]]...
-//! stream  <durable_state_id> [--brain <brain id>[:<name>]]... [--stage <stage id>]
+//! sizes   <durable_state_id>
+//! stream  <durable_state_id> [--stage <stage id>] [--agent-key <hex>] [--person-key <hex>]...
 //! secrets <durable_state_id> <kind>[,<kind>...]
 //! owner-telegram-notice <durable_state_id> --notice <notice id>   (text on stdin)
 //! ```
 //!
-//! A brain's `<name>` is its display name's UTF-8 in hex, so a name of any
-//! words is one word here; `stream` writes it as the brain's name file
-//! ([`stage`]).
+//! A key is 64 hex digits: the old agent's own, and its person's, which
+//! place each brain's owner in its name file ([`crate::brains`]).
+//! `--brain <word>`, which an older mover sends to `sizes` and `stream`,
+//! is read and ignored: every brain is staged.
 //!
 //! The work root is never part of it: it comes from the forced command's
 //! own arguments, which only the host's configuration sets.
@@ -22,33 +23,28 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::brains::{self, OwnerKeys, PERSON_KEYS_MAX};
 use crate::error::HostError;
 use crate::notice::{self, NoticeId};
 use crate::secrets::{self, Kind};
 use crate::stage;
 use crate::tree::{DurableId, Tree};
-use crate::walk::OwnedBrains;
 
 /// The longest operation accepted.
 const COMMAND_MAX_BYTES: usize = 8192;
-/// The most brains one operation may name.
-const BRAINS_MAX: usize = 256;
-const BRAIN_ID_MAX: usize = 128;
-/// The longest brain name, in bytes (finite-brain's display names are at
-/// most 128).
-const BRAIN_NAME_MAX: usize = 256;
+const STAGE_ID_MAX: usize = 128;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Operation {
     Sizes {
         id: DurableId,
-        owned_brains: OwnedBrains,
     },
     Stream {
         id: DurableId,
-        owned_brains: OwnedBrains,
         /// The stage's id, which the SimpleX seal is named by.
         stage: Option<String>,
+        /// The keys that place each brain's owner.
+        keys: OwnerKeys,
     },
     Secrets {
         id: DurableId,
@@ -65,8 +61,8 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let mut words = words.into_iter();
     let usage = || {
         HostError::Usage(
-            "sizes|stream <id> [--brain <id>[:<hex name>]]... [--stage <id>] | secrets <id> <kind>[,<kind>...] \
-             | owner-telegram-notice <id> --notice <notice id>"
+            "sizes <id> | stream <id> [--stage <id>] [--agent-key <hex>] [--person-key <hex>]... \
+             | secrets <id> <kind>[,<kind>...] | owner-telegram-notice <id> --notice <notice id>"
                 .into(),
         )
     };
@@ -77,42 +73,35 @@ pub fn parse<'a>(words: impl IntoIterator<Item = &'a str>) -> Result<Operation, 
     let id = DurableId::parse(words.next().ok_or_else(usage)?)?;
     match op {
         "sizes" | "stream" => {
-            let mut owned_brains = OwnedBrains::new();
             let mut stage = None;
+            let mut keys = OwnerKeys::default();
+            let stream = op == "stream";
             while let Some(flag) = words.next() {
-                if flag == "--stage" && op == "stream" && stage.is_none() {
-                    let id = words.next().ok_or_else(usage)?;
-                    if !brain_id(id) {
-                        return Err(HostError::Usage(
-                            "a stage id is 1 to 128 of [A-Za-z0-9_.-]".into(),
-                        ));
+                let value = words.next().ok_or_else(usage)?;
+                match flag {
+                    // An older mover's owned brains: every brain comes now.
+                    "--brain" => {}
+                    "--stage" if stream && stage.is_none() => {
+                        if !stage_id(value) {
+                            return Err(HostError::Usage(
+                                "a stage id is 1 to 128 of [A-Za-z0-9_.-]".into(),
+                            ));
+                        }
+                        stage = Some(value.to_owned());
                     }
-                    stage = Some(id.to_owned());
-                    continue;
+                    "--agent-key" if stream && keys.agent.is_none() => {
+                        keys.agent = Some(brains::parse_key(value)?);
+                    }
+                    "--person-key" if stream && keys.people.len() < PERSON_KEYS_MAX => {
+                        keys.people.push(brains::parse_key(value)?);
+                    }
+                    _ => return Err(usage()),
                 }
-                if flag != "--brain" {
-                    return Err(usage());
-                }
-                let word = words.next().ok_or_else(usage)?;
-                let (brain, name) = match word.split_once(':') {
-                    Some((brain, name)) => (brain, Some(brain_name(name)?)),
-                    None => (word, None),
-                };
-                if !brain_id(brain) || owned_brains.len() >= BRAINS_MAX {
-                    return Err(HostError::Usage(
-                        "a brain id is 1 to 128 of [A-Za-z0-9_.-]".into(),
-                    ));
-                }
-                owned_brains.insert(brain.to_owned(), name);
             }
-            Ok(if op == "sizes" {
-                Operation::Sizes { id, owned_brains }
+            Ok(if stream {
+                Operation::Stream { id, stage, keys }
             } else {
-                Operation::Stream {
-                    id,
-                    owned_brains,
-                    stage,
-                }
+                Operation::Sizes { id }
             })
         }
         "secrets" => {
@@ -150,28 +139,9 @@ pub fn parse_ssh(original: &str) -> Result<Operation, HostError> {
     parse(original.split_ascii_whitespace())
 }
 
-/// A brain's display name from its hex: UTF-8, at most `BRAIN_NAME_MAX`
-/// bytes, with no control character.
-fn brain_name(hex_name: &str) -> Result<String, HostError> {
-    let refused = || {
-        HostError::Usage(format!(
-            "a brain's name is the hex of 1 to {BRAIN_NAME_MAX} bytes of UTF-8 text"
-        ))
-    };
-    if hex_name.is_empty() || hex_name.len() > 2 * BRAIN_NAME_MAX {
-        return Err(refused());
-    }
-    let bytes = hex::decode(hex_name).map_err(|_| refused())?;
-    let name = String::from_utf8(bytes).map_err(|_| refused())?;
-    if name.chars().any(char::is_control) {
-        return Err(refused());
-    }
-    Ok(name)
-}
-
-fn brain_id(value: &str) -> bool {
+fn stage_id(value: &str) -> bool {
     !value.is_empty()
-        && value.len() <= BRAIN_ID_MAX
+        && value.len() <= STAGE_ID_MAX
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
@@ -195,17 +165,13 @@ pub fn run_with(
     // The seal's write capabilities stay lowered but around the seal.
     crate::simplex::lower_writes()?;
     match operation {
-        Operation::Sizes { id, owned_brains } => {
+        Operation::Sizes { id } => {
             let tree = Tree::open(work_root, id)?;
-            print_json(&mut out, &stage::sizes(&tree, &owned_brains)?)
+            print_json(&mut out, &stage::sizes(&tree)?)
         }
-        Operation::Stream {
-            id,
-            owned_brains,
-            stage,
-        } => {
+        Operation::Stream { id, stage, keys } => {
             let tree = Tree::open(work_root, id)?;
-            stage::stream(&tree, &owned_brains, stage.as_deref(), out).map(drop)
+            stage::stream(&tree, &keys, stage.as_deref(), out).map(drop)
         }
         Operation::Secrets { id, kinds } => {
             let tree = Tree::open(work_root, id)?;
@@ -245,11 +211,11 @@ mod tests {
     #[test]
     fn operations_parse_word_by_word() {
         assert_eq!(
-            parse_ssh("stream runtime_1 --brain b1 --brain b-2").unwrap(),
+            parse_ssh("stream runtime_1").unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
-                owned_brains: [("b1".to_owned(), None), ("b-2".to_owned(), None)].into(),
                 stage: None,
+                keys: OwnerKeys::default(),
             }
         );
         assert_eq!(
@@ -262,57 +228,63 @@ mod tests {
         assert_eq!(
             parse_ssh("sizes runtime_1").unwrap(),
             Operation::Sizes {
-                id: id("runtime_1"),
-                owned_brains: OwnedBrains::new()
+                id: id("runtime_1")
             }
         );
     }
 
     #[test]
-    fn a_stream_may_name_its_stage() {
-        assert_eq!(
-            parse_ssh("stream runtime_1 --stage proj_a.p1.2 --brain b1").unwrap(),
-            Operation::Stream {
-                id: id("runtime_1"),
-                owned_brains: [("b1".to_owned(), None)].into(),
-                stage: Some("proj_a.p1.2".to_owned()),
-            }
-        );
-    }
-
-    #[test]
-    fn a_brain_may_carry_its_name_in_hex() {
-        let name = "Notes & plans: été";
+    fn a_stream_may_name_its_stage_and_the_keys_that_place_brains() {
+        let (agent, person) = ("0a".repeat(32), "0b".repeat(32));
         assert_eq!(
             parse_ssh(&format!(
-                "stream runtime_1 --brain b1:{} --brain b2",
-                hex::encode(name)
+                "stream runtime_1 --stage proj_a.p1.2 --agent-key {agent} \
+                 --person-key {person} --person-key {agent}"
             ))
             .unwrap(),
             Operation::Stream {
                 id: id("runtime_1"),
-                owned_brains: [
-                    ("b1".to_owned(), Some(name.to_owned())),
-                    ("b2".to_owned(), None)
-                ]
-                .into(),
-                stage: None,
+                stage: Some("proj_a.p1.2".to_owned()),
+                keys: OwnerKeys {
+                    agent: Some([10; 32]),
+                    people: vec![[11; 32], [10; 32]],
+                },
             }
         );
+        let too_many = format!("--person-key {person} ").repeat(PERSON_KEYS_MAX + 1);
         for bad in [
-            "b1:".to_owned(),
-            "b1:zz".to_owned(),
-            "b1:abc".to_owned(),
-            format!("b1:{}", hex::encode([0xff, 0xfe])),
-            format!("b1:{}", hex::encode("a\nb")),
-            format!("b1:{}", hex::encode("x".repeat(BRAIN_NAME_MAX + 1))),
-            format!("a/b:{}", hex::encode("n")),
+            format!("stream runtime_1 --agent-key {agent} --agent-key {agent}"),
+            format!("stream runtime_1 --agent-key {}", &agent[2..]),
+            "stream runtime_1 --person-key npub1xyz".to_owned(),
+            format!("stream runtime_1 {too_many}"),
+            format!("sizes runtime_1 --agent-key {agent}"),
         ] {
-            assert!(
-                parse_ssh(&format!("stream runtime_1 --brain {bad}")).is_err(),
-                "{bad}"
-            );
+            assert!(parse_ssh(&bad).is_err(), "{bad}");
         }
+    }
+
+    /// An older mover names each owned brain, with its name in hex: read
+    /// and ignored, so a host updated first still serves it.
+    #[test]
+    fn an_older_movers_brains_are_read_and_ignored() {
+        let name = hex::encode("Notes & plans: été");
+        assert_eq!(
+            parse_ssh(&format!(
+                "stream runtime_1 --stage s1 --brain b1:{name} --brain b-2"
+            ))
+            .unwrap(),
+            Operation::Stream {
+                id: id("runtime_1"),
+                stage: Some("s1".to_owned()),
+                keys: OwnerKeys::default(),
+            }
+        );
+        assert_eq!(
+            parse_ssh("sizes runtime_1 --brain b1").unwrap(),
+            Operation::Sizes {
+                id: id("runtime_1")
+            }
+        );
     }
 
     #[test]
@@ -323,7 +295,6 @@ mod tests {
             "sizes ../etc",
             "sizes runtime_1 extra",
             "sizes runtime_1 --brain",
-            "sizes runtime_1 --brain a/b",
             "stream runtime_1;rm -rf /",
             "stream runtime_1 --stage",
             "stream runtime_1 --stage a/b",

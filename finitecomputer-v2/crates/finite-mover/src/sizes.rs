@@ -118,7 +118,7 @@ mod tests {
             source_machine_id: "machine_a".into(),
             durable_state_id: "rt_a".into(),
             agent_npub: None,
-            owned_brains: Vec::new(),
+            person_keys: Vec::new(),
             retired_receipt: None,
         };
         let yesterday = Sizes {
@@ -184,7 +184,7 @@ mod tests {
                 source_machine_id: "machine_a".into(),
                 durable_state_id: "rt_a".into(),
                 agent_npub: None,
-                owned_brains: Vec::new(),
+                person_keys: Vec::new(),
                 retired_receipt: None,
             };
             let (_, failed) = measure(&[binding], &hosts, &SizesCache::default(), 2);

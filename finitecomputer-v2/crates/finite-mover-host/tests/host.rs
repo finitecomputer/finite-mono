@@ -11,13 +11,14 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 use std::process::Command;
 
-use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
+use finite_mover_host::classify::{Class, EntryKind, classify};
 use finite_mover_host::command::{Operation, parse, run};
 use finite_mover_host::error::HostError;
 use finite_mover_host::stage::SUMMARY_ENTRY;
 use finite_mover_host::summary::Tally;
 use fixture::{
-    Fixture, ID, MARKER, OPENROUTER_KEY, OWNED_BRAIN, SECRET_HEX, STAGED, TELEGRAM_TOKEN,
+    AGENT_KEY, BRAINS, Fixture, ID, MARKER, OPENROUTER_KEY, PERSON_KEY, SECRET_HEX, STAGED,
+    TELEGRAM_TOKEN, name_file,
 };
 use serde_json::Value;
 
@@ -33,13 +34,30 @@ fn run_bytes(fixture: &Fixture, words: &str) -> Result<Vec<u8>, HostError> {
     Ok(out)
 }
 
+/// The keys as the mover names them on `stream`.
+fn keys() -> String {
+    format!(
+        "--agent-key {} --person-key {}",
+        hex::encode(AGENT_KEY),
+        hex::encode(PERSON_KEY)
+    )
+}
+
 fn stream(fixture: &Fixture) -> Vec<u8> {
-    run_bytes(fixture, &format!("stream {ID} --brain {OWNED_BRAIN}")).unwrap()
+    run_bytes(fixture, &format!("stream {ID} {}", keys())).unwrap()
 }
 
 fn sizes(fixture: &Fixture) -> Value {
-    let out = run_bytes(fixture, &format!("sizes {ID} --brain {OWNED_BRAIN}")).unwrap();
+    let out = run_bytes(fixture, &format!("sizes {ID}")).unwrap();
     serde_json::from_slice(&out).unwrap()
+}
+
+/// Every brain's name file, in the stage.
+fn name_files() -> BTreeSet<String> {
+    BRAINS
+        .iter()
+        .map(|(folder, _, _)| name_file(folder))
+        .collect()
 }
 
 /// Every entry of the stage, by name.
@@ -82,17 +100,19 @@ fn the_stage_holds_no_secret() {
     }
     for name in entries(&stage).keys() {
         let parts: Vec<&[u8]> = name.split('/').map(str::as_bytes).collect();
-        let verdict = classify(&parts, EntryKind::File, BrainScope::None);
+        let verdict = classify(&parts, EntryKind::File, None);
         assert_ne!(verdict.class, Class::Secret, "{name} is a secret path");
     }
 }
 
 #[test]
-fn the_stage_is_exactly_history_work_and_the_config_copy() {
+fn the_stage_is_exactly_history_work_the_config_copy_and_name_files() {
     let fixture = fixture::build();
     let entries = entries(&stream(&fixture));
+    let names = name_files();
     let mut expected: BTreeSet<&str> = STAGED.iter().map(|(path, _)| *path).collect();
     expected.extend([CONFIG_COPY, SUMMARY_ENTRY]);
+    expected.extend(names.iter().map(String::as_str));
     assert_eq!(
         entries.keys().map(String::as_str).collect::<BTreeSet<_>>(),
         expected
@@ -119,6 +139,8 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         }
         let class = if name == CONFIG_COPY {
             "config"
+        } else if name_files().contains(name) {
+            "work"
         } else {
             STAGED.iter().find(|(path, _)| path == name).unwrap().1
         };
@@ -161,8 +183,8 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         ("workspace/.config", "hidden-folder"),
         ("workspace/finite-export", "earlier-export"),
         ("agent/agentd", "agentd"),
-        ("workspace/finitebrain/brain-org", "not-owned-brain"),
-        ("workspace/finitebrain/broken", "not-owned-brain"),
+        ("workspace/finitebrain/brain-org/.finitebrain", "cache-dir"),
+        ("workspace/finitebrain/broken/.finitebrain", "cache-dir"),
         ("workspace/passwd", "not-a-file"),
         ("workspace/other", "not-a-file"),
         ("workspace/pipe", "not-a-file"),
@@ -177,9 +199,10 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         );
     }
 
-    // `sizes` reads no file, so it differs from the stage in exactly two
+    // `sizes` reads no file, so it differs from the stage in exactly three
     // ways: a text file holding a credential counts in its path's class,
-    // and there is no config copy. Everything else is the same.
+    // and there is no config copy and no name file. Everything else is the
+    // same.
     let estimate: BTreeMap<String, Tally> =
         serde_json::from_value(measured["classes"].clone()).unwrap();
     let in_text: Vec<u64> = fixture::SECRET_TEXT
@@ -209,9 +232,16 @@ fn stream_stages_exactly_its_summary_and_sizes_estimates_it() {
         )
     };
     let (files, bytes) = staged_by_path(&summary);
+    let named: Vec<u64> = name_files()
+        .iter()
+        .map(|name| entries[name].len() as u64)
+        .collect();
     assert_eq!(
         staged_by_path(&estimate),
-        (files + text.files, bytes + text.bytes)
+        (
+            files + text.files - named.len() as u64,
+            bytes + text.bytes - named.iter().sum::<u64>()
+        )
     );
 }
 
@@ -246,7 +276,7 @@ fn sizes_opens_no_regular_file() {
         return;
     }
     // Not one file can be opened, and the estimate is unchanged.
-    let after = run_bytes(&fixture, &format!("sizes {ID} --brain {OWNED_BRAIN}"));
+    let after = run_bytes(&fixture, &format!("sizes {ID}"));
     set_readable(&fixture.tree, true);
     let after: Value =
         serde_json::from_slice(&after.expect("sizes answers without opening a file")).unwrap();
@@ -270,16 +300,30 @@ fn the_config_copy_holds_the_allow_list_and_no_token() {
     assert_eq!(copy, expected);
 }
 
+/// FIN-499: every brain working tree comes, whoever owns it, even one
+/// whose manifest can't be read; its `.finitebrain/` never does.
 #[test]
-fn only_brains_named_as_owned_are_staged() {
+fn every_brain_is_staged_but_its_control_folder() {
     let fixture = fixture::build();
-    let out = run_bytes(&fixture, &format!("stream {ID}")).unwrap();
+    let stage = run_bytes(&fixture, &format!("stream {ID}")).unwrap();
+    let files = entries(&stage);
+    for (folder, _, _) in BRAINS {
+        let page = format!("workspace/finitebrain/{folder}/page.md");
+        assert_eq!(
+            files.get(&page).map(Vec::as_slice),
+            Some(std::fs::read(fixture.tree.join(&page)).unwrap().as_slice()),
+            "{page}"
+        );
+    }
     assert!(
-        entries(&out)
-            .keys()
-            .all(|name| !name.starts_with("workspace/finitebrain/")),
-        "no brain without --brain"
+        files.keys().all(|name| !name.contains(".finitebrain")),
+        "no control folder: {:?}",
+        files.keys().collect::<Vec<_>>()
     );
+    assert!(left_of(&stage).contains(&(
+        "workspace/finitebrain/brain-org/.finitebrain".to_owned(),
+        "cache-dir".to_owned()
+    )));
 }
 
 /// The `left` lines of a stage's summary, as (path, why).
@@ -298,81 +342,87 @@ fn left_of(stage: &[u8]) -> BTreeSet<(String, String)> {
         .collect()
 }
 
-/// FIN-499: an owned brain comes whole, but for its `.finitebrain/`
-/// control folder, with the name file fragment's import reads; a brain
-/// the person doesn't own stays, and so does an old file where the name
-/// file goes.
-#[test]
-fn an_owned_brain_comes_whole_with_its_name_file_and_no_control_folder() {
-    let fixture = fixture::build();
-    let brains = fixture.tree.join("workspace/finitebrain");
-    std::fs::create_dir_all(brains.join("brain-owned/wiki")).unwrap();
-    std::fs::write(brains.join("brain-owned/wiki/topic.md"), "# Topic\n").unwrap();
-    std::fs::write(brains.join("brain-owned/.finitebrain/state.json"), "{}").unwrap();
-    std::fs::write(brains.join("brain-owned.json"), r#"{"name":"stale"}"#).unwrap();
-    let name = "Owned notes: ünïcode & spaces";
-    let stage = run_bytes(
-        &fixture,
-        &format!(
-            "stream {ID} --brain {OWNED_BRAIN}:{}",
-            hex::encode(name.as_bytes())
-        ),
-    )
-    .unwrap();
-    let files = entries(&stage);
-    let brain_entries: Vec<&str> = files
-        .keys()
-        .filter(|name| name.starts_with("workspace/finitebrain/"))
-        .map(String::as_str)
-        .collect();
-    assert_eq!(
-        brain_entries,
-        [
-            "workspace/finitebrain/brain-owned.json",
-            "workspace/finitebrain/brain-owned/page.md",
-            "workspace/finitebrain/brain-owned/wiki/topic.md",
-        ],
-        "the owned brain without .finitebrain/, its name file, and no other brain"
-    );
-    let named: Value =
-        serde_json::from_slice(&files["workspace/finitebrain/brain-owned.json"]).unwrap();
-    assert_eq!(named, serde_json::json!({ "name": name }));
-    let left = left_of(&stage);
-    for (path, why) in [
-        (
-            "workspace/finitebrain/brain-owned/.finitebrain",
-            "cache-dir",
-        ),
-        ("workspace/finitebrain/brain-org", "not-owned-brain"),
-        ("workspace/finitebrain/broken", "not-owned-brain"),
-        ("workspace/finitebrain/brain-owned.json", "replaced-by-copy"),
-    ] {
-        assert!(
-            left.contains(&(path.to_owned(), why.to_owned())),
-            "left lists {path} ({why}): {left:?}"
-        );
-    }
-    // The summary counts the name file with the work it came with.
-    let embedded: Value = serde_json::from_slice(&files[SUMMARY_ENTRY]).unwrap();
-    let staged: u64 = files
-        .iter()
-        .filter(|(name, _)| name.as_str() != SUMMARY_ENTRY)
-        .map(|(_, bytes)| bytes.len() as u64)
-        .sum();
-    assert_eq!(embedded["staged"]["bytes"].as_u64(), Some(staged));
-
-    // Named but not sent a name: the brain comes, and the old file at
-    // its name file's path is the brain's work as before.
-    let unnamed =
-        entries(&run_bytes(&fixture, &format!("stream {ID} --brain {OWNED_BRAIN}")).unwrap());
-    assert_eq!(
-        unnamed["workspace/finitebrain/brain-owned.json"],
-        br#"{"name":"stale"}"#
-    );
+/// A brain's name file, as staged.
+fn named(files: &BTreeMap<String, Vec<u8>>, folder: &str) -> Value {
+    serde_json::from_slice(&files[&name_file(folder)]).unwrap()
 }
 
-/// A brain id whose name file would be named like a credential gets no
-/// name file, and the stage still goes (the uploader would refuse it).
+/// Each brain's name file holds its manifest's name, kind and owner, and
+/// whose it is to the old agent: `agent`, `person`, `other` or `unknown`
+/// (FIN-499). An old file where it goes stays behind.
+#[test]
+fn each_name_file_says_whose_its_brain_is() {
+    let fixture = fixture::build();
+    let brains = fixture.tree.join("workspace/finitebrain");
+    std::fs::write(brains.join("brain-agent.json"), r#"{"name":"stale"}"#).unwrap();
+    std::fs::create_dir_all(brains.join("brain-agent/wiki")).unwrap();
+    std::fs::write(brains.join("brain-agent/wiki/topic.md"), "# Topic\n").unwrap();
+    let stage = stream(&fixture);
+    let files = entries(&stage);
+    for (folder, manifest, owner) in BRAINS {
+        let expected = match manifest {
+            Some((kind, key)) => serde_json::json!({
+                "name": format!("{folder} notes"),
+                "kind": kind,
+                "owner_npub": key.map(fixture::npub),
+                "owner": owner,
+            }),
+            None => serde_json::json!({
+                "name": null, "kind": null, "owner_npub": null, "owner": "unknown",
+            }),
+        };
+        assert_eq!(named(&files, folder), expected, "{folder}");
+    }
+    assert_eq!(
+        files["workspace/finitebrain/brain-agent/wiki/topic.md"],
+        b"# Topic\n"
+    );
+    assert!(left_of(&stage).contains(&(
+        "workspace/finitebrain/brain-agent.json".to_owned(),
+        "replaced-by-copy".to_owned()
+    )));
+
+    // Without its person's keys, a brain neither key owns can't be placed:
+    // `unknown`, never a guess. A team's brain is still a team's.
+    let agent_only = run_bytes(
+        &fixture,
+        &format!("stream {ID} --agent-key {}", hex::encode(AGENT_KEY)),
+    )
+    .unwrap();
+    let files = entries(&agent_only);
+    for (folder, owner) in [
+        ("brain-agent", "agent"),
+        ("brain-person", "unknown"),
+        ("brain-else", "unknown"),
+        ("brain-org", "other"),
+        ("broken", "unknown"),
+    ] {
+        assert_eq!(named(&files, folder)["owner"], owner, "{folder}");
+    }
+}
+
+/// An older mover names its person's owned brains, with their names in
+/// hex, on `sizes` and `stream`. A host updated first serves it the same
+/// stage, with every brain, as a mover that names none.
+#[test]
+fn an_older_movers_brains_are_ignored() {
+    let fixture = fixture::build();
+    let older = format!(
+        "--brain brain-agent:{} --brain brain-org",
+        hex::encode("Old notes: été")
+    );
+    assert_eq!(
+        entries(&run_bytes(&fixture, &format!("stream {ID} {older}")).unwrap()),
+        entries(&run_bytes(&fixture, &format!("stream {ID}")).unwrap())
+    );
+    let sized: Value =
+        serde_json::from_slice(&run_bytes(&fixture, &format!("sizes {ID} {older}")).unwrap())
+            .unwrap();
+    assert_eq!(sized, sizes(&fixture));
+}
+
+/// A brain folder whose name file would be named like a credential gets
+/// no name file, and the stage still goes (the uploader would refuse it).
 #[test]
 fn a_name_file_never_takes_a_credentials_name() {
     let fixture = fixture::build();
@@ -384,11 +434,7 @@ fn a_name_file_never_takes_a_credentials_name() {
     )
     .unwrap();
     std::fs::write(brain.join("page.md"), "a page\n").unwrap();
-    let stage = run_bytes(
-        &fixture,
-        &format!("stream {ID} --brain identity:{}", hex::encode("Mine")),
-    )
-    .unwrap();
+    let stage = stream(&fixture);
     let entries = entries(&stage);
     assert!(entries.contains_key("workspace/finitebrain/identity/page.md"));
     assert!(!entries.contains_key("workspace/finitebrain/identity.json"));
@@ -601,24 +647,28 @@ fn ssh(work_root: &Path, original: &str) -> std::process::Output {
 #[test]
 fn the_forced_command_runs_only_its_operations() {
     let fixture = fixture::build();
-    let sized = ssh(
-        &fixture.work_root,
-        &format!("sizes {ID} --brain {OWNED_BRAIN}"),
-    );
+    let sized = ssh(&fixture.work_root, &format!("sizes {ID}"));
     assert!(sized.status.success());
     let summary: Value = serde_json::from_slice(&sized.stdout).unwrap();
     assert_eq!(summary["id"], ID);
-    let streamed = ssh(
-        &fixture.work_root,
-        &format!("stream {ID} --brain {OWNED_BRAIN}"),
-    );
+    let streamed = ssh(&fixture.work_root, &format!("stream {ID} {}", keys()));
     assert!(streamed.status.success());
     assert!(entries(&streamed.stdout).contains_key(SUMMARY_ENTRY));
+    // An older mover's command, as it comes over ssh.
+    let older = ssh(
+        &fixture.work_root,
+        &format!(
+            "stream {ID} --stage proj_a.p1.1 --brain brain-agent:{}",
+            hex::encode("Old notes")
+        ),
+    );
+    assert!(older.status.success());
+    assert!(entries(&older.stdout).contains_key(&name_file("brain-org")));
     for (original, code) in [
         ("cat /etc/passwd", 64),
         (&format!("stream ../{ID}") as &str, 65),
         ("sizes x;id", 65),
-        (&format!("sizes {ID} --brain a/b") as &str, 64),
+        (&format!("stream {ID} --agent-key npub1x") as &str, 64),
         ("sizes no_such_agent", 65),
     ] {
         let output = ssh(&fixture.work_root, original);
@@ -678,7 +728,8 @@ fn the_raw_exporter_matches_the_classifier() {
         .arg(raw_exporter().join("raw_export.py"))
         .args(["--root".as_ref(), fixture.tree.as_os_str()])
         .args(["--out".as_ref(), out.as_os_str()])
-        .args(["--brain", OWNED_BRAIN, "--id", ID])
+        // An older caller's owned brain: ignored, as the host ignores it.
+        .args(["--brain", "brain-agent", "--id", ID])
         .output()
         .expect("python3 runs the raw-folder exporter");
     assert!(
@@ -689,6 +740,15 @@ fn the_raw_exporter_matches_the_classifier() {
     );
     let raw = entries(&std::fs::read(&out).unwrap());
     // The same names, the same bytes: the config copy and the summary too.
+    // Brains' name files are the host's alone: the raw export's caller
+    // writes its own (`--fact`), as phase 0's export did.
+    let names = name_files();
+    let named = names.iter().map(|name| staged[name].len() as u64);
+    let (named_files, named_bytes) = (names.len() as u64, named.sum::<u64>());
+    let staged: BTreeMap<String, Vec<u8>> = staged
+        .into_iter()
+        .filter(|(name, _)| !names.contains(name))
+        .collect();
     assert_eq!(
         raw.keys().collect::<Vec<_>>(),
         staged.keys().collect::<Vec<_>>()
@@ -696,6 +756,11 @@ fn the_raw_exporter_matches_the_classifier() {
     for (name, bytes) in &staged {
         if name == SUMMARY_ENTRY {
             let mut ours: Value = serde_json::from_slice(bytes).unwrap();
+            for tally in ["/classes/work", "/staged"] {
+                let tally = ours.pointer_mut(tally).unwrap();
+                tally["files"] = (tally["files"].as_u64().unwrap() - named_files).into();
+                tally["bytes"] = (tally["bytes"].as_u64().unwrap() - named_bytes).into();
+            }
             let theirs: Value = serde_json::from_slice(&raw[name]).unwrap();
             // The raw export runs in the live agent, beside its running
             // SimpleX core: it never carries SimpleX, so it has no record of

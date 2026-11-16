@@ -7,8 +7,7 @@
 //!   "key_file": "/var/lib/finite-mover/mover.key",
 //!   "locks": "/var/lib/finite-mover/locks",
 //!   "fleet": { "postgres": { "conninfo": "host=/run/postgresql user=finite_mover dbname=…",
-//!                            "sizes_file": "/var/lib/finite-mover/sizes.json",
-//!                            "brains": ["sudo", "-n", "/run/wrappers/bin/finite-mover-brains"] } },
+//!                            "sizes_file": "/var/lib/finite-mover/sizes.json" } },
 //!   "core": {
 //!     "program": ["sudo", "-n", "/run/wrappers/bin/finite-mover-core"],
 //!     "admin_email": "…", "admin_workos_user_id": "…", "wait_seconds": 900
@@ -47,12 +46,10 @@ pub enum FleetConfig {
     /// A fleet written to a file (tests, a hand-run roster).
     File(PathBuf),
     /// Core's database, through the mover's read-only role (M1), with
-    /// the daily `sizes` run's cache, and the command that lists
-    /// finite-brain's owned brains (`brains`).
+    /// the daily `sizes` run's cache.
     Postgres {
         conninfo: String,
         sizes_file: PathBuf,
-        brains: Vec<String>,
     },
 }
 

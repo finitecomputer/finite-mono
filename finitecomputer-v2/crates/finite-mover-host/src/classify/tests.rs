@@ -2,13 +2,13 @@ use super::*;
 
 fn of(path: &str) -> (Class, Why) {
     let parts: Vec<&[u8]> = path.split('/').map(str::as_bytes).collect();
-    let verdict = classify(&parts, EntryKind::File, BrainScope::None);
+    let verdict = classify(&parts, EntryKind::File, None);
     (verdict.class, verdict.why)
 }
 
 fn depth(path: &str) -> usize {
     let parts: Vec<&[u8]> = path.split('/').map(str::as_bytes).collect();
-    classify(&parts, EntryKind::File, BrainScope::None).depth
+    classify(&parts, EntryKind::File, None).depth
 }
 
 /// Every secret path the design lists (FIN-463 §4), and each rule's
@@ -210,37 +210,24 @@ fn work_is_the_workspace_less_caches() {
 }
 
 #[test]
-fn links_brains_and_odd_names_stay_behind() {
+fn links_and_odd_names_stay_behind_and_every_brain_is_work() {
     let parts: Vec<&[u8]> = vec![b"workspace", b"link"];
-    let link = classify(&parts, EntryKind::Other, BrainScope::None);
+    let link = classify(&parts, EntryKind::Other, None);
     assert_eq!((link.class, link.why), (Class::Runtime, Why::NotAFile));
 
-    let parts: Vec<&[u8]> = vec![b"workspace", b"finitebrain", b"b1", b"page.md"];
-    let unowned = classify(
-        &parts,
-        EntryKind::File,
-        BrainScope::Brain {
-            depth: 3,
-            owned: false,
-        },
+    // Whoever owns it: a brain's pages are the workspace's.
+    assert_eq!(
+        of("workspace/finitebrain/b1/page.md"),
+        (Class::Work, Why::Workspace)
     );
     assert_eq!(
-        (unowned.class, unowned.why, unowned.depth),
-        (Class::Runtime, Why::NotOwnedBrain, 3)
+        of("workspace/finitebrain/b1/.finitebrain/brain-directory.json"),
+        (Class::Cache, Why::CacheDir)
     );
-    let owned = classify(
-        &parts,
-        EntryKind::File,
-        BrainScope::Brain {
-            depth: 3,
-            owned: true,
-        },
-    );
-    assert_eq!((owned.class, owned.why), (Class::Work, Why::Workspace));
 
     for name in [&b"bad\xffname"[..], b"new\nline", b"back\\slash"] {
         let parts: Vec<&[u8]> = vec![b"workspace", name, b"x.md"];
-        let verdict = classify(&parts, EntryKind::File, BrainScope::None);
+        let verdict = classify(&parts, EntryKind::File, None);
         assert_eq!(
             (verdict.class, verdict.why, verdict.depth),
             (Class::Runtime, Why::UncarriedName, 2)
@@ -251,10 +238,7 @@ fn links_brains_and_odd_names_stay_behind() {
 #[test]
 fn build_output_is_cache_where_the_walk_found_it() {
     let parts: Vec<&[u8]> = vec![b"workspace", b"app", b"dist", b"bundle.js"];
-    let scope = Scope {
-        brain: BrainScope::None,
-        build_output: Some(3),
-    };
+    let scope = Some(3);
     let verdict = classify(&parts, EntryKind::File, scope);
     assert_eq!(
         (verdict.class, verdict.why, verdict.depth),

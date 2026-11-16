@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use finite_mover_host::brains::PERSON_KEYS_MAX;
 use zeroize::Zeroizing;
 
 use crate::child::{Watched, run_within};
@@ -57,14 +58,11 @@ impl HostCommands {
         Ok(command)
     }
 
-    /// `sizes <durable_state_id> [--brain <id>]...`: the host reader's
-    /// summary from metadata alone (it opens no file), as the roster counts.
-    /// It answers only at its end, so it has `idle` to do so.
+    /// `sizes <durable_state_id>`: the host reader's summary from metadata
+    /// alone (it opens no file), as the roster counts. It answers only at
+    /// its end, so it has `idle` to do so.
     pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
-        let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
-        for brain in &binding.owned_brains {
-            words.extend(["--brain".to_string(), brain.id.clone()]);
-        }
+        let words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
         let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
         if !ended.status.success() {
@@ -109,12 +107,12 @@ impl HostCommands {
             .map_err(|_| HostError::NotRun("the host reader's secrets could not be read".into()))
     }
 
-    /// `stream <durable_state_id> --stage <stage id> [--brain <id>:<hex
-    /// name>]...`: the stage, as the host reader writes it, with each owned
-    /// brain's name file. The reader names its SimpleX
-    /// seal by the stage's id, and carries SimpleX only with one. Its
-    /// failure, or its exit before the end, is a read error at the stream's
-    /// end.
+    /// `stream <durable_state_id> --stage <stage id> [--agent-key <hex>]
+    /// [--person-key <hex>]...`: the stage, as the host reader writes it,
+    /// with every brain and each one's name file, whose owner the keys
+    /// place. The reader names its SimpleX seal by the stage's id, and
+    /// carries SimpleX only with one. Its failure, or its exit before the
+    /// end, is a read error at the stream's end.
     pub fn stream(&self, binding: &Binding, stage: &str) -> Result<HostStream, HostError> {
         let mut words = vec![
             "stream".to_string(),
@@ -122,12 +120,7 @@ impl HostCommands {
             "--stage".to_string(),
             stage.to_string(),
         ];
-        for brain in &binding.owned_brains {
-            words.extend([
-                "--brain".to_string(),
-                format!("{}:{}", brain.id, hex::encode(&brain.name)),
-            ]);
-        }
+        words.extend(owner_keys(binding));
         let mut watched = Watched::spawn(
             self.command(binding, &words)?
                 .stdin(Stdio::null())
@@ -153,6 +146,30 @@ impl HostCommands {
 
 /// A host reader that exited unsuccessfully: its status and the last line
 /// it wrote to stderr (the reader puts no secret in an error).
+/// The keys that place each brain's owner, as the host reader takes them:
+/// 64 hex digits each, the agent's own and at most `PERSON_KEYS_MAX` of
+/// its person's. A key that isn't one is left out, and a brain it would
+/// have placed is `unknown`.
+fn owner_keys(binding: &Binding) -> Vec<String> {
+    let hex = |key: &str| nostr::PublicKey::parse(key).ok().map(|key| key.to_hex());
+    let mut words = Vec::new();
+    if let Some(agent) = binding.agent_npub.as_deref().and_then(hex) {
+        words.extend(["--agent-key".to_string(), agent]);
+    }
+    let mut people: Vec<String> = binding
+        .person_keys
+        .iter()
+        .filter_map(|key| hex(key))
+        .collect();
+    people.sort();
+    people.dedup();
+    people.truncate(PERSON_KEYS_MAX);
+    for person in people {
+        words.extend(["--person-key".to_string(), person]);
+    }
+    words
+}
+
 fn failed(status: &std::process::ExitStatus, stderr: &[u8]) -> HostError {
     let stderr = String::from_utf8_lossy(stderr);
     let last = stderr

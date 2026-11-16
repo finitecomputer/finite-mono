@@ -26,6 +26,7 @@
 //! Delete it with the rest of the move (FIN-463's removal plan): once every
 //! roster agent is moved, withdrawn or expired.
 
+pub mod brains;
 pub mod classify;
 pub mod command;
 pub mod config_copy;

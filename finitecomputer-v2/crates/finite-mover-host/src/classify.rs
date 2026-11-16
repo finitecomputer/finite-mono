@@ -12,12 +12,13 @@
 //! 1. `secret`: never staged. Each rule names the code that writes the file.
 //! 2. `cache`: anything under a dependency or cache directory, or under a
 //!    build folder beside the project file that builds it.
-//! 3. A brain working tree the mover did not name as owned: `runtime`.
-//! 4. Links, sockets and devices, and names a zip can't carry: `runtime`.
-//! 5. `history`: the allow-listed parts of the Hermes home.
-//! 6. `work`: the workspace, but its hidden folders and earlier exports;
+//! 3. Links, sockets and devices, and names a zip can't carry: `runtime`.
+//! 4. `history`: the allow-listed parts of the Hermes home.
+//! 5. `work`: the workspace, but its hidden folders and earlier exports;
 //!    and `sites/<slug>/`, the agent's own sites, cloned beside the tree.
-//! 7. Everything else: `runtime`.
+//!    Every brain working tree in it comes, whoever owns the brain, less
+//!    its `.finitebrain/` (a cache directory).
+//! 6. Everything else: `runtime`.
 //!
 //! `config` is never a source path: it is the allow-listed copy that
 //! [`crate::config_copy`] makes of `config.yaml`, which itself is secret.
@@ -117,8 +118,8 @@ pub enum Why {
     UncheckableText,
     /// The allow-listed copy of `config.yaml`.
     ConfigCopy,
-    /// A source file at the path the allow-listed copy, or an owned
-    /// brain's name file, takes.
+    /// A source file at the path the allow-listed copy, or a brain's name
+    /// file, takes.
     ReplacedByCopy,
     /// Dependencies, caches and version control (`SKIP_DIRS`,
     /// export.py:66-84). They stay in the Borg backup.
@@ -126,10 +127,6 @@ pub enum Why {
     /// A build folder beside the project file that builds it, in the
     /// workspace (`BUILD_DIRS`, `PROJECT_FILES`, export.py:85-115, 2003-2020).
     BuildOutput,
-    /// A brain working tree the mover did not name as owned by this
-    /// person, or one whose `.finitebrain/brain-directory.json` can't be
-    /// read.
-    NotOwnedBrain,
     /// A link (symbolic, or a file with more than one name), socket, pipe
     /// or device: never followed, never read, never staged.
     NotAFile,
@@ -160,37 +157,6 @@ pub enum EntryKind {
     File,
     /// A link, socket, pipe, device, or a directory on another filesystem.
     Other,
-}
-
-/// Whether the entry sits inside a brain working tree, and whether the
-/// mover named that brain as owned. Only the walk can know this (it reads
-/// `.finitebrain/brain-directory.json`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BrainScope {
-    None,
-    /// `depth` is the number of components of the working tree's root.
-    Brain {
-        depth: usize,
-        owned: bool,
-    },
-}
-
-/// Where an entry sits, as only the walk can know: in which brain working
-/// tree, and under which build folder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Scope {
-    pub brain: BrainScope,
-    /// The number of components of the build folder the entry is under.
-    pub build_output: Option<usize>,
-}
-
-impl From<BrainScope> for Scope {
-    fn from(brain: BrainScope) -> Self {
-        Scope {
-            brain,
-            build_output: None,
-        }
-    }
 }
 
 /// A path's class, why, and how many leading components decided it. The
@@ -315,11 +281,12 @@ const HISTORY_DIRS: [&str; 4] = ["memories", "skills", "cron", "scripts"];
 const SQLITE_SIDECARS: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 /// Classify one path, relative to the durable tree, by its components.
+/// `build_output` is the number of components of the build folder the
+/// entry is under, which only the walk can know.
 ///
 /// This is the rule the mover's uploader repeats on every name it
 /// receives: a `secret` class there refuses the whole stage.
-pub fn classify(parts: &[&[u8]], kind: EntryKind, scope: impl Into<Scope>) -> Verdict {
-    let scope = scope.into();
+pub fn classify(parts: &[&[u8]], kind: EntryKind, build_output: Option<usize>) -> Verdict {
     let len = parts.len();
     if let Some(secret) = secret_rule(parts) {
         return secret;
@@ -330,14 +297,7 @@ pub fn classify(parts: &[&[u8]], kind: EntryKind, scope: impl Into<Scope>) -> Ve
     {
         return verdict(Class::Cache, Why::CacheDir, index + 1);
     }
-    if let BrainScope::Brain {
-        depth,
-        owned: false,
-    } = scope.brain
-    {
-        return verdict(Class::Runtime, Why::NotOwnedBrain, depth);
-    }
-    if let Some(depth) = scope.build_output {
+    if let Some(depth) = build_output {
         return verdict(Class::Cache, Why::BuildOutput, depth);
     }
     if kind == EntryKind::Other {

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use finite_mover_host::classify::{BrainScope, Class, EntryKind, classify};
+use finite_mover_host::classify::{Class, EntryKind, classify};
 use finite_mover_host::command::{parse, run};
 use finite_mover_host::stage::SUMMARY_ENTRY;
 use serde_json::{Value, json};
@@ -460,7 +460,7 @@ fn the_uploaders_second_check_lets_the_carried_entries_through() {
     // finite-mover's uploader refuses any entry the classifier calls secret.
     for name in [CHAT, AGENT, OWNER] {
         let parts: Vec<&[u8]> = name.split('/').map(str::as_bytes).collect();
-        let class = classify(&parts, EntryKind::File, BrainScope::None).class;
+        let class = classify(&parts, EntryKind::File, None).class;
         assert_ne!(class, Class::Secret, "{name}");
     }
 }

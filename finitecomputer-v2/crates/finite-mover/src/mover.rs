@@ -292,12 +292,7 @@ impl<'a> Mover<'a> {
                 format!("stage {stage} is not this command's"),
             ));
         }
-        // Before the stop: brains finite-brain can't list now never go
-        // missing from a stage; the command waits for the next run.
-        let binding = self
-            .fleet
-            .with_owned_brains(self.binding(command)?)
-            .map_err(|error| Stop::Platform(error.into()))?;
+        let binding = self.binding(command)?;
         self.core
             .stop(&binding)
             .map_err(|error| Stop::Failed("stop", error.to_string()))?;

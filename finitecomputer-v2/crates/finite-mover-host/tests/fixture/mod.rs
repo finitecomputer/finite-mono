@@ -7,7 +7,27 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 
 pub const ID: &str = "runtime_fixture";
-pub const OWNED_BRAIN: &str = "brain-owned";
+/// The old agent's own key and its person's, as the mover sends them, and
+/// a key that is neither.
+pub const AGENT_KEY: [u8; 32] = [0x0a; 32];
+pub const PERSON_KEY: [u8; 32] = [0x0b; 32];
+pub const ELSE_KEY: [u8; 32] = [0x0c; 32];
+/// A manifest's kind and owner; `None` is a manifest that isn't JSON.
+pub type Manifest = Option<(&'static str, Option<[u8; 32]>)>;
+/// The brains, each in `workspace/finitebrain/<folder>/`: its folder, its
+/// manifest, and the `owner` its name file says when the mover sends both
+/// keys.
+pub const BRAINS: &[(&str, Manifest, &str)] = &[
+    ("brain-agent", Some(("personal", Some(AGENT_KEY))), "agent"),
+    (
+        "brain-person",
+        Some(("personal", Some(PERSON_KEY))),
+        "person",
+    ),
+    ("brain-org", Some(("organization", None)), "other"),
+    ("brain-else", Some(("personal", Some(ELSE_KEY))), "other"),
+    ("broken", None, "unknown"),
+];
 /// Every secret file's contents hold this, and nothing staged does.
 pub const MARKER: &str = "SECRET-MARKER";
 pub const TELEGRAM_TOKEN: &str = "123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw1";
@@ -99,7 +119,11 @@ pub const STAGED: &[(&str, &str)] = &[
     ("workspace/notes/today.md", "work"),
     ("workspace/notes/placeholder.md", "work"),
     ("workspace/photos/cat.jpg", "work"),
-    ("workspace/finitebrain/brain-owned/page.md", "work"),
+    ("workspace/finitebrain/brain-agent/page.md", "work"),
+    ("workspace/finitebrain/brain-person/page.md", "work"),
+    ("workspace/finitebrain/brain-org/page.md", "work"),
+    ("workspace/finitebrain/brain-else/page.md", "work"),
+    ("workspace/finitebrain/broken/page.md", "work"),
     ("workspace/app/package.json", "work"),
     ("workspace/notes/build/outline.md", "work"),
 ];
@@ -154,26 +178,13 @@ pub fn build() -> Fixture {
         };
         write(path, &contents);
     }
-    // Brains: owned, someone else's, and one whose manifest can't be read.
-    for (brain, id) in [
-        ("brain-owned", Some(OWNED_BRAIN)),
-        ("brain-org", Some("brain-org")),
-        ("broken", None),
-    ] {
-        let manifest = id.map_or_else(
-            || "not json".to_owned(),
-            |id| format!(r#"{{"version":"1","brain":{{"id":"{id}","kind":"personal","name":"n","owner_npub":null}}}}"#),
-        );
+    // Brains: the agent's, its person's, a team's, someone else's, and
+    // one whose manifest can't be read. Each one's page is in STAGED.
+    for (folder, manifest, _) in BRAINS {
         write(
-            &format!("workspace/finitebrain/{brain}/.finitebrain/brain-directory.json"),
-            manifest.as_bytes(),
+            &format!("workspace/finitebrain/{folder}/.finitebrain/brain-directory.json"),
+            manifest_json(folder, *manifest).as_bytes(),
         );
-        if brain != "brain-owned" {
-            write(
-                &format!("workspace/finitebrain/{brain}/page.md"),
-                b"not this person's brain\n",
-            );
-        }
     }
     // Cache and runtime.
     write(
@@ -238,6 +249,35 @@ pub fn build() -> Fixture {
         work_root,
         tree,
     }
+}
+
+/// The name file of the brain in `workspace/finitebrain/<folder>/`.
+pub fn name_file(folder: &str) -> String {
+    format!("workspace/finitebrain/{folder}.json")
+}
+
+/// A key's `npub1…`.
+pub fn npub(key: [u8; 32]) -> String {
+    let hrp = bech32::Hrp::parse("npub").unwrap();
+    bech32::encode::<bech32::Bech32>(hrp, &key).unwrap()
+}
+
+/// `.finitebrain/brain-directory.json` as `fbrain open` writes it
+/// (finite-brain-core's `BrainDirectoryManifest`), named after its folder.
+pub fn manifest_json(folder: &str, manifest: Manifest) -> String {
+    let Some((kind, owner)) = manifest else {
+        return "not json".to_owned();
+    };
+    serde_json::json!({
+        "version": "1",
+        "brain": { "id": folder, "kind": kind, "name": format!("{folder} notes"), "ownerNpub": owner.map(npub) },
+        "workingTree": { "path": "." },
+        "encryptedSync": { "path": ".finitebrain/encrypted-sync" },
+        "portability": { "ownedByAgentRuntime": true },
+        "createdAt": "2026-11-01T00:00:00Z",
+        "updatedAt": "2026-11-01T00:00:00Z"
+    })
+    .to_string()
 }
 
 fn write_raw_name(directory: &Path, name: &[u8]) {
