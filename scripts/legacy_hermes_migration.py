@@ -4,7 +4,9 @@
 The target installer is deliberately offline. It imports conversation history
 through the target Hermes version, preserves the complete source home in an
 inert sealed archive, activates only compatible state, and hash-fences the
-newly-created Finite identity and Chat client store.
+newly-created Finite identity and Chat client store. The opt-in
+``--mode full-fidelity`` also activates the bot's persona, Telegram connection,
+skills, scheduled jobs and home files (see legacy_hermes_fidelity.py).
 """
 
 from __future__ import annotations
@@ -97,6 +99,12 @@ def _parser() -> argparse.ArgumentParser:
     manifest.add_argument("--source-image-manifest-digest", required=True)
     manifest.add_argument("--source-container-image-id", required=True)
     manifest.add_argument("--source-volume-inventory-sha256", required=True)
+    manifest.add_argument(
+        "--mode",
+        choices=("default", "full-fidelity"),
+        default="default",
+        help="full-fidelity also activates persona, Telegram, skills, cron and home files",
+    )
 
     verify = subparsers.add_parser(
         "verify", help="verify a sealed bundle without mutation"
@@ -112,7 +120,55 @@ def _parser() -> argparse.ArgumentParser:
     install.add_argument("--expected-manifest-sha256", required=True)
     install.add_argument("--expected-target-identity-sha256", required=True)
     install.add_argument("--expected-target-chat-client-sha256", required=True)
+    install.add_argument(
+        "--mode",
+        choices=("default", "full-fidelity"),
+        default="default",
+        help="must match the mode the approved manifest was sealed with",
+    )
+    install.add_argument(
+        "--telegram",
+        choices=("rehearsal", "live"),
+        default="rehearsal",
+        help="full-fidelity only: rehearsal (default) writes no token; live "
+        "writes the real token and needs the Runtime fingerprint",
+    )
+    install.add_argument(
+        "--expected-telegram-runtime-fingerprint",
+        help="fingerprint from telegram-qualify run inside the Runtime image "
+        "Core will boot; required with --telegram live",
+    )
+
+    subparsers.add_parser(
+        "telegram-qualify",
+        help="prove this image's Telegram adapter keeps queued updates; print "
+        "its fingerprint",
+    )
+    poller = subparsers.add_parser(
+        "telegram-poller-check",
+        help="before restart: prove nothing else polls the target's Telegram token",
+    )
+    poller.add_argument("--target-root", type=Path, required=True)
     return parser
+
+
+def _telegram_poller_check(target_root: Path) -> tuple[dict, bool]:
+    from legacy_hermes_fidelity import _get, _load_yaml_mapping
+    from legacy_hermes_telegram_gate import check_no_other_poller
+
+    config_path = target_root / "agent/hermes-home/config.yaml"
+    config = _load_yaml_mapping(
+        config_path.read_text(encoding="utf-8"), "target Hermes config.yaml"
+    )
+    telegram = _get(config, "gateway", "platforms", "telegram") or {}
+    token = telegram.get("token") if isinstance(telegram, dict) else None
+    if not isinstance(token, str) or not token:
+        raise MigrationError("the target has no Telegram token to check")
+    base_url = (telegram.get("extra") or {}).get("base_url") or (
+        "https://api.telegram.org/bot"
+    )
+    result = check_no_other_poller(token, base_url)
+    return result, bool(result["safe_to_start"])
 
 
 def main(argv: Iterable[str] | None = None) -> int:
@@ -169,9 +225,20 @@ def main(argv: Iterable[str] | None = None) -> int:
                     container_image_id=args.source_container_image_id,
                     source_inventory_sha256=args.source_volume_inventory_sha256,
                 ),
+                mode=args.mode,
             )
         elif args.command == "verify":
             result = verify_bundle(args.bundle)
+        elif args.command == "telegram-qualify":
+            from legacy_hermes_telegram_gate import qualify_target_telegram
+
+            result = qualify_target_telegram()
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result.get("qualified") else 3
+        elif args.command == "telegram-poller-check":
+            result, safe = _telegram_poller_check(args.target_root)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if safe else 3
         else:
             result = install_bundle(
                 args.bundle,
@@ -180,9 +247,15 @@ def main(argv: Iterable[str] | None = None) -> int:
                 expected_manifest_sha256=args.expected_manifest_sha256,
                 expected_identity_sha256=args.expected_target_identity_sha256,
                 expected_chat_client_sha256=args.expected_target_chat_client_sha256,
+                mode=args.mode,
+                telegram_mode=args.telegram,
+                expected_telegram_fingerprint=args.expected_telegram_runtime_fingerprint,
             )
     except MigrationError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        # Notes are value-free; an incomplete rollback is reported in one.
+        for note in getattr(exc, "__notes__", ()):
+            print(f"note: {note}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

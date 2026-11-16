@@ -1,0 +1,2140 @@
+"""Unit and contract tests for the opt-in full-fidelity importer mode.
+
+The default-mode suite (test_legacy_hermes_migration.py) is unchanged; these
+tests build a census-shaped box1 home (legacy_box1_fixture.py) and install it
+with fake Hermes databases. Real-library proof against the pinned target
+Hermes, including a live gateway, is finitechat/tests/hermes/
+test_legacy_hermes_full_fidelity.py.
+"""
+
+from __future__ import annotations
+
+import functools
+import hashlib
+import importlib.util
+import io
+import json
+import os
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parents[2]
+MODULE = ROOT / "scripts" / "legacy_hermes_migration.py"
+sys.path.insert(0, str(MODULE.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+SPEC = importlib.util.spec_from_file_location("legacy_hermes_migration_ff", MODULE)
+assert SPEC is not None and SPEC.loader is not None
+migration = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = migration
+SPEC.loader.exec_module(migration)
+
+import legacy_box1_fixture as fx  # noqa: E402
+import legacy_hermes_fidelity as fidelity  # noqa: E402
+import yaml  # noqa: E402
+
+
+class FakeSessionDB:
+    imported: list[dict] = []
+    routes: list[dict] = []
+    activity: list[tuple[str, float]] = []
+
+    def __init__(self, db_path: Path):
+        self.db_path = db_path
+
+    def import_sessions(self, sessions: list[dict]) -> dict:
+        FakeSessionDB.imported.extend(sessions)
+        return {"ok": True, "imported": len(sessions), "skipped": 0, "detached": 0}
+
+    def record_gateway_session_peer(self, session_id: str, **fields) -> None:
+        FakeSessionDB.routes.append({"session_id": session_id, **fields})
+
+    def touch_session_activity(self, session_id: str, ts: float) -> None:
+        FakeSessionDB.activity.append((session_id, ts))
+
+    def clear_session_activity_labels(self, session_id: str) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class FakeMemoryStore:
+    def __init__(self, db_path: Path):
+        self.connection = sqlite3.connect(db_path)
+
+    def list_facts(self, limit: int = 50) -> list[dict]:
+        rows = self.connection.execute(
+            "SELECT fact_id, content FROM facts LIMIT ?", (limit,)
+        ).fetchall()
+        return [{"fact_id": row[0], "content": row[1]} for row in rows]
+
+    def update_fact(self, fact_id: int, content: str) -> bool:
+        self.connection.execute(
+            "UPDATE facts SET content = ? WHERE fact_id = ?", (content, fact_id)
+        )
+        self.connection.commit()
+        return True
+
+    def rebuild_all_vectors(self) -> int:
+        return 0
+
+    def close(self) -> None:
+        self.connection.close()
+
+
+QUALIFIED = {
+    "qualified": True,
+    "reasons": [],
+    "fingerprint": "f" * 64,
+    "capability": "finite.telegram.preserve-pending/2",
+    "hermes_version": "0.21.0",
+    "adapter_path": "/nix/store/x-hermes-agent/share/hermes-agent/plugins/platforms/telegram/adapter.py",
+    "adapter_sha256": "a" * 64,
+}
+
+
+def run_hermes(hermes_home: Path, scratch: Path, code: str) -> str:
+    """Run target Hermes code in a child with scratch HOME and HERMES_HOME."""
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        env={
+            "HOME": str(scratch),
+            "HERMES_HOME": str(hermes_home),
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TZ": "UTC",
+        },
+        cwd=scratch,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    if completed.returncode != 0:
+        raise AssertionError(completed.stderr[-3000:])
+    return completed.stdout
+
+
+def sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class FullFidelityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        version = mock.patch("importlib.metadata.version", return_value="0.21.0")
+        version.start()
+        self.addCleanup(version.stop)
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        self.now = datetime(2026, 11, 13, 18, 0, tzinfo=timezone.utc)
+        evidence = fx.build_bundle(self.root, migration, now=self.now)
+        self.bundle = evidence["bundle"]
+        self.metadata = fx.source_metadata(migration, evidence["inventory_sha256"])
+        FakeSessionDB.imported = []
+        FakeSessionDB.routes = []
+        FakeSessionDB.activity = []
+        self.scratch_home = self.root / "scratch-home"
+        self.scratch_home.mkdir()
+        self.hooks = self.make_hooks()
+
+    def make_hooks(self, **overrides) -> fidelity.FidelityHooks:
+        values = dict(
+            is_default_soul=lambda text: text == fx.DEFAULT_SOUL,
+            bundled_skill_names=lambda: {
+                "apple-notes": PurePosixPath("apple/apple-notes")
+            },
+            telegram_qualification=lambda: dict(QUALIFIED),
+            now=lambda: self.now,
+        )
+        values.update(overrides)
+        return fidelity.FidelityHooks(**values)
+
+    def rebuild(self, now: datetime, **bundle_options) -> None:
+        """Rebuild the source and bundle at another time (real-clock checks)."""
+        self.now = now
+        root = Path(tempfile.mkdtemp(dir=self.root))
+        evidence = fx.build_bundle(root, migration, now=now, **bundle_options)
+        self.bundle = evidence["bundle"]
+        self.metadata = fx.source_metadata(migration, evidence["inventory_sha256"])
+        self.root = root
+
+    def manifest(self, mode: str = "full-fidelity") -> dict:
+        return migration.create_manifest(self.bundle, self.metadata, mode=mode)
+
+    def install(
+        self,
+        target: Path,
+        *,
+        mode: str = "full-fidelity",
+        hooks=None,
+        telegram: str = "live",
+        fingerprint: str | None = QUALIFIED["fingerprint"],
+    ) -> dict:
+        return migration.install_bundle(
+            self.bundle,
+            target,
+            expected_machine_id="frankie",
+            expected_manifest_sha256=sha256(self.bundle / "manifest.json"),
+            expected_identity_sha256=sha256(target / "agent/identity/identity.json"),
+            expected_chat_client_sha256=sha256(target / "agent/client.sqlite3"),
+            session_db_factory=FakeSessionDB,
+            memory_store_factory=FakeMemoryStore,
+            mode=mode,
+            fidelity_hooks=hooks or self.hooks,
+            telegram_mode=telegram,
+            expected_telegram_fingerprint=fingerprint,
+        )
+
+    def installed(self) -> tuple[Path, dict]:
+        self.manifest()
+        target = fx.build_target(self.root)
+        return target, self.install(target)
+
+    def tree(self, root: Path) -> dict[str, str]:
+        return {
+            path.relative_to(root).as_posix(): (
+                "link:" + str(path.readlink())
+                if path.is_symlink()
+                else ("dir" if path.is_dir() else sha256(path))
+            )
+            for path in sorted(root.rglob("*"))
+        }
+
+    # -- manifest contract ---------------------------------------------------
+
+    def test_default_manifest_carries_no_fidelity_plan(self) -> None:
+        manifest = self.manifest(mode="default")
+        self.assertNotIn("mode", manifest)
+        self.assertNotIn("fidelity", manifest)
+
+    def test_plan_is_bound_into_the_manifest_without_secret_values(self) -> None:
+        manifest = self.manifest()
+        plan = manifest["fidelity"]
+        self.assertEqual(manifest["mode"], "full-fidelity")
+        text = (self.bundle / "manifest.json").read_text()
+        for secret in fx.SECRET_VALUES:
+            self.assertNotIn(secret, text)
+        self.assertTrue(plan["telegram"]["activate"])
+        self.assertEqual(plan["telegram"]["token_sources"], ["env:TELEGRAM_BOT_TOKEN"])
+        self.assertEqual(plan["telegram"]["pairing"]["approved_count"], 2)
+        self.assertEqual(plan["telegram"]["pairing"]["pending_count"], 1)
+        self.assertEqual(
+            [skill["path"] for skill in plan["skills"]["user"]],
+            [fx.USER_SKILL, fx.CLASH_SKILL],
+        )
+        self.assertEqual(
+            {
+                item["path"]: item["reason"]
+                for item in plan["skills"]["managed_not_activated"]
+            },
+            {
+                fx.BUNDLED_SKILL: "hermes-bundled-unmodified",
+                "devops/overlay-helper": "box1-image-managed-overlay",
+            },
+        )
+        self.assertEqual(plan["skills"]["layout"]["status"], "confirmed")
+        self.assertEqual(
+            [(item["path"], item["reason"]) for item in plan["skills"]["review_only"]],
+            [("devops/edited-helper", "box1-managed-skill-modified-in-source")],
+        )
+        agents = plan["persona"]["agents_md"]
+        self.assertTrue(agents["seed"]["staged"])
+        self.assertEqual(
+            {item["path"]: item["status"] for item in agents["files"]},
+            {
+                "AGENTS.md": "owner-additions-activated",
+                ".hermes/AGENTS.md": "box1-seed-excluded",
+            },
+        )
+        self.assertEqual(agents["target"], "/data/workspace/AGENTS.md")
+        self.assertEqual(
+            plan["routing"]["entries_by_platform"], {"matrix": 1, "telegram": 1}
+        )
+        hermes_home = {
+            item["name"]: item["disposition"] for item in plan["omitted"]["hermes_home"]
+        }
+        for left_out in ("plugins", "hooks", "bin", "venv", "logs", "audio_cache"):
+            self.assertEqual(hermes_home[left_out], "sealed-not-activated", left_out)
+        self.assertEqual(hermes_home["SOUL.md"], "activated")
+        self.assertEqual(
+            {item["name"] for item in plan["omitted"]["hidden_home_entries"]},
+            {".cache", ".codex", ".finite", ".npm"},
+        )
+        for name in ("telegram", "platforms", "gateway"):
+            self.assertNotIn(name, plan["config"]["adopted_keys"])
+        self.assertEqual(
+            plan["home"]["placed"],
+            ["Downloads", "lessons", "make_post.py", "poster_final.jpg", "recipes"],
+        )
+        self.assertEqual(
+            {item["name"]: item["reason"] for item in plan["home"]["withheld"]},
+            {
+                "AGENTS.md": "box1-platform-seed-handled-by-persona-plan",
+                "__pycache__": "generated-bytecode",
+                "finitebrain": "brain-working-tree-reauthorize-and-sync",
+                "node_modules": "generated-dependency-tree",
+            },
+        )
+        self.assertIn(
+            "tts.elevenlabs.api_key", plan["config"]["dropped_secret_shaped_keys"]
+        )
+        self.assertIn("timezone", plan["config"]["adopted_keys"])
+        self.assertIn("display.personality", plan["config"]["adopted_keys"])
+        self.assertNotIn("display.platforms", plan["config"]["adopted_keys"])
+        for withheld in (
+            "model",
+            "terminal",
+            "delegation",
+            "toolsets",
+            "memory.provider",
+        ):
+            self.assertIn(withheld, plan["config"]["withheld_top_level_keys"])
+        keys = {
+            item["name"]: item["target_state"] for item in plan["omitted"]["tool_keys"]
+        }
+        self.assertEqual(
+            keys["FIRECRAWL_API_KEY"], "target-provides-own-key-not-copied"
+        )
+        self.assertEqual(keys["FC_GITEA_TOKEN"], "not-provided-by-target-not-copied")
+        self.assertEqual(
+            keys["OPENROUTER_API_KEY"], "not-provided-by-target-not-copied"
+        )
+        self.assertEqual(keys["FINITE_PRIVATE_API_KEY"], "target-managed-not-copied")
+        self.assertEqual(
+            [channel["name"] for channel in plan["omitted"]["channels"]], ["signal"]
+        )
+        self.assertEqual(
+            plan["omitted"]["google"]["target_state"],
+            "out-of-scope-fresh-authorization-required",
+        )
+
+    def test_verify_rejects_a_rewritten_plan_or_a_dropped_mode(self) -> None:
+        self.manifest()
+        manifest_path = self.bundle / "manifest.json"
+        original = json.loads(manifest_path.read_text())
+        tampered = json.loads(json.dumps(original))
+        tampered["fidelity"]["skills"]["user"].append({"path": "x", "name": "x"})
+        manifest_path.write_text(json.dumps(tampered))
+        with self.assertRaisesRegex(
+            migration.MigrationError, "full-fidelity plan mismatch"
+        ):
+            migration.verify_bundle(self.bundle)
+        dropped = dict(original)
+        del dropped["mode"]
+        manifest_path.write_text(json.dumps(dropped))
+        with self.assertRaisesRegex(
+            migration.MigrationError, "plan present without its mode"
+        ):
+            migration.verify_bundle(self.bundle)
+        renamed = dict(original, mode="everything")
+        manifest_path.write_text(json.dumps(renamed))
+        with self.assertRaisesRegex(
+            migration.MigrationError, "unsupported migration mode"
+        ):
+            migration.verify_bundle(self.bundle)
+
+    def test_install_mode_must_match_the_approved_manifest(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "does not match the approved"
+        ):
+            self.install(target, mode="default")
+        self.manifest(mode="default")
+        with self.assertRaisesRegex(
+            migration.MigrationError, "does not match the approved"
+        ):
+            self.install(target, mode="full-fidelity")
+        self.assertFalse((target / "migration").exists())
+
+    def manifest_cli_args(self) -> list[str]:
+        return [
+            "manifest",
+            "--bundle",
+            str(self.bundle),
+            "--source-host-id",
+            "box1",
+            "--source-machine-id",
+            "frankie",
+            "--source-owner-email",
+            "owner@example.invalid",
+            "--source-hermes-version",
+            "0.14.0",
+            "--source-image-reference",
+            self.metadata.image_reference,
+            "--source-image-manifest-digest",
+            self.metadata.image_manifest_digest,
+            "--source-container-image-id",
+            self.metadata.container_image_id,
+            "--source-volume-inventory-sha256",
+            self.metadata.source_inventory_sha256,
+            "--mode",
+            "full-fidelity",
+        ]
+
+    def install_cli_args(self, target: Path) -> list[str]:
+        return [
+            "install",
+            "--bundle",
+            str(self.bundle),
+            "--target-root",
+            str(target),
+            "--expected-source-machine-id",
+            "frankie",
+            "--expected-manifest-sha256",
+            sha256(self.bundle / "manifest.json"),
+            "--expected-target-identity-sha256",
+            sha256(target / "agent/identity/identity.json"),
+            "--expected-target-chat-client-sha256",
+            sha256(target / "agent/client.sqlite3"),
+            "--mode",
+            "full-fidelity",
+            "--telegram",
+            "live",
+            "--expected-telegram-runtime-fingerprint",
+            QUALIFIED["fingerprint"],
+        ]
+
+    def run_cli(self, args: list[str]) -> tuple[int, str, str]:
+        """Run the importer CLI and keep both of its output streams."""
+        install = functools.partial(
+            migration.install_bundle,
+            session_db_factory=FakeSessionDB,
+            memory_store_factory=FakeMemoryStore,
+        )
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(fidelity, "default_hooks", return_value=self.hooks),
+            mock.patch.object(migration, "install_bundle", install),
+            redirect_stdout(out),
+            redirect_stderr(err),
+        ):
+            code = migration.main(args)
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_no_fixture_secret(self, *streams: str) -> None:
+        for stream in streams:
+            for secret in fx.SECRET_VALUES:
+                self.assertNotIn(secret, stream)
+
+    def test_cli_seals_and_installs_full_fidelity(self) -> None:
+        code, manifest_out, manifest_err = self.run_cli(self.manifest_cli_args())
+        self.assertEqual(code, 0, manifest_err)
+        self.assertEqual(json.loads(manifest_out)["mode"], "full-fidelity")
+        target = fx.build_target(self.root)
+        code, out, err = self.run_cli(self.install_cli_args(target))
+        self.assertEqual(code, 0, err)
+        receipt = json.loads(out)
+        self.assertEqual(receipt["fidelity"]["installed"]["telegram"]["mode"], "live")
+        self.assert_no_fixture_secret(manifest_out, manifest_err, out, err)
+
+    def test_cli_rejected_setting_never_prints_its_value(self) -> None:
+        # Target Hermes quotes a rejected voice.submit_mode with repr(). A
+        # credential put there by mistake must not reach either CLI stream.
+        source_config = self.root / "source-home/.hermes/config.yaml"
+        original = yaml.safe_load(source_config.read_text())
+        for rejected in (
+            fx.SECRET_VALUES[0],
+            {"nested": {"credential": fx.SECRET_VALUES[2]}},
+        ):
+            with self.subTest(rejected=type(rejected).__name__):
+                config = dict(original)
+                config["voice"] = {"submit_mode": rejected}
+                self.rewrite_source_file(".hermes/config.yaml", yaml.safe_dump(config))
+                code, manifest_out, manifest_err = self.run_cli(
+                    self.manifest_cli_args()
+                )
+                self.assertEqual(code, 0, manifest_err)
+                target = fx.build_target(Path(tempfile.mkdtemp(dir=self.root)))
+                before = self.tree(target)
+                code, out, err = self.run_cli(self.install_cli_args(target))
+                self.assertEqual(code, 1, err)
+                self.assertIn("1 new error(s) in voice", err)
+                self.assertIn("values are not shown", err)
+                self.assert_no_fixture_secret(manifest_out, manifest_err, out, err)
+                self.assertEqual(self.tree(target), before)
+
+    # -- activations -----------------------------------------------------------
+
+    def test_persona_settings_and_telegram_are_activated_like_agentd(self) -> None:
+        target, receipt = self.installed()
+        hermes = target / "agent/hermes-home"
+        soul = (hermes / "SOUL.md").read_text()
+        self.assertIn(fx.SOUL_MARKER, soul)
+        self.assertIn("/data/workspace/legacy-box1/workspace", soul)
+        self.assertIn("/data/workspace/legacy-box1/Downloads", soul)
+        self.assertNotIn("/home/node", soul)
+        config = yaml.safe_load((hermes / "config.yaml").read_text())
+        self.assertEqual(oct((hermes / "config.yaml").stat().st_mode & 0o777), "0o600")
+        telegram = config["gateway"]["platforms"]["telegram"]
+        self.assertEqual(
+            telegram,
+            {
+                "enabled": True,
+                "token": fx.TOKEN,
+                "reply_to_mode": "first",
+                "gateway_restart_notification": False,
+                "typing_indicator": True,
+                "extra": {"dm_policy": "pairing", "preserve_pending_updates": True},
+                "home_channel": {
+                    "platform": "telegram",
+                    "chat_id": str(fx.OWNER_ID),
+                    "name": "Telegram",
+                },
+            },
+        )
+        # Target-owned settings stay the target's.
+        self.assertEqual(config["model"]["api_key"], "${FINITE_PRIVATE_API_KEY}")
+        self.assertEqual(config["terminal"]["cwd"], "/data/workspace")
+        self.assertEqual(config["skills"]["external_dirs"], [fx.MANAGED_SKILLS])
+        self.assertTrue(config["gateway"]["platforms"]["finitechat"]["enabled"])
+        self.assertEqual(
+            config["display"]["platforms"], {"finitechat": {"streaming": False}}
+        )
+        self.assertNotIn("finite_managed_skill_sources", config)
+        self.assertNotIn("delegation", config)
+        # User-facing settings come from the source.
+        self.assertEqual(config["timezone"], fx.TIMEZONE)
+        self.assertEqual(config["display"]["personality"], "kawaii")
+        self.assertTrue(config["display"]["streaming"])
+        self.assertEqual(config["agent"]["personality"], "kawaii")
+        self.assertIn("kawaii", config["personalities"])
+        self.assertEqual(config["session_reset"]["idle_minutes"], 1440)
+        self.assertEqual(config["tts"]["provider"], "edge")
+        self.assertNotIn("api_key", config["tts"]["elevenlabs"])
+        self.assertEqual(config["tts"]["elevenlabs"]["voice_id"], "synthetic-voice")
+        self.assertEqual(config["human_delay"]["max_ms"], 2500)
+        self.assertTrue(config["onboarding"]["seen"])
+        self.assertTrue(config["cron"]["wrap_response"])
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["config"]["model"], "source-model-kept"
+        )
+        # The pre-import config and SOUL stay beside the receipt.
+        backups = target / "migration/legacy-hermes-v2/preimport-state/full-fidelity"
+        self.assertEqual(
+            (backups / "agent__hermes-home__SOUL.md").read_text(), fx.DEFAULT_SOUL
+        )
+        self.assertTrue((backups / "agent__hermes-home__config.yaml").is_file())
+        text = (target / "migration/legacy-hermes-v2/receipt.json").read_text()
+        for secret in fx.SECRET_VALUES:
+            self.assertNotIn(secret, text)
+
+    def test_both_pairing_stores_merge_into_the_active_target_dir(self) -> None:
+        target, receipt = self.installed()
+        active = target / "agent/hermes-home/platforms/pairing"
+        approved = json.loads((active / "telegram-approved.json").read_text())
+        pending = json.loads((active / "telegram-pending.json").read_text())
+        self.assertEqual(sorted(approved), [str(fx.OWNER_ID), str(fx.SECOND_ID)])
+        self.assertEqual(approved[str(fx.OWNER_ID)]["user_name"], "Owner")
+        self.assertEqual(
+            [entry["user_id"] for entry in pending.values()], [str(fx.PENDING_ID)]
+        )
+        self.assertFalse((active / "_rate_limits.json").exists())
+        self.assertFalse((active / "signal-approved.json").exists())
+        self.assertEqual(
+            oct((active / "telegram-approved.json").stat().st_mode & 0o777), "0o600"
+        )
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["pairing"],
+            {
+                "approved_count": 2,
+                "pending_count": 1,
+                "allowlisted_users_added": 0,
+                "target_dir": "agent/hermes-home/platforms/pairing",
+            },
+        )
+
+    def test_pairing_uses_the_legacy_dir_when_the_target_reads_it(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        legacy = target / "agent/hermes-home/pairing"
+        legacy.mkdir()
+        (legacy / "_rate_limits.json").write_text("{}")
+        self.install(target)
+        self.assertTrue((legacy / "telegram-approved.json").is_file())
+        self.assertFalse((target / "agent/hermes-home/platforms/pairing").exists())
+
+    # -- round 4: Telegram access outside the pairing store, relative links ----
+
+    def authorized(self, hermes_home: Path, users: list[str], env=None) -> list:
+        """Ask the target gateway's own authorization method about DM senders."""
+        code = (
+            "import json, sys; from gateway.config import Platform, "
+            "load_gateway_config; from gateway.pairing import PairingStore; "
+            "from gateway.run import GatewayRunner; "
+            "from gateway.session import SessionSource; "
+            "r = object.__new__(GatewayRunner); r.config = load_gateway_config(); "
+            "r.pairing_store = PairingStore(); r.adapters = {}; "
+            "print(json.dumps([r._is_user_authorized(SessionSource("
+            "platform=Platform.TELEGRAM, chat_id=u, chat_type='dm', user_id=u)) "
+            f"for u in {users!r}]))"
+        )
+        scratch = Path(tempfile.mkdtemp(dir=self.root))
+        if env:
+            code = f"import os; os.environ.update({env!r}); " + code
+        output = run_hermes(hermes_home, scratch, code)
+        return json.loads(output.strip().splitlines()[-1])
+
+    def test_allowlisted_but_unpaired_owner_keeps_telegram_access(self) -> None:
+        allowlisted = "707"
+
+        def env_form(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(env.read_text() + f"TELEGRAM_ALLOWED_USERS={allowlisted}\n")
+
+        def yaml_form(*path: str, value) -> Callable[[Path], None]:
+            def edit(home: Path) -> None:
+                config_path = home / ".hermes/config.yaml"
+                config = yaml.safe_load(config_path.read_text())
+                holder = config
+                for part in path[:-1]:
+                    holder = holder.setdefault(part, {})
+                holder[path[-1]] = value
+                config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+            return edit
+
+        forms = (
+            ("env:TELEGRAM_ALLOWED_USERS", env_form),
+            (
+                "config:telegram.allow_from",
+                yaml_form("telegram", "allow_from", value=[int(allowlisted)]),
+            ),
+            (
+                "config:platforms.telegram.extra.allow_from",
+                yaml_form(
+                    "platforms", "telegram", "extra", "allow_from", value=allowlisted
+                ),
+            ),
+        )
+        # Control: the source allowlist alone admits the owner in target Hermes.
+        empty_home = Path(tempfile.mkdtemp(dir=self.root))
+        self.assertEqual(
+            self.authorized(
+                empty_home,
+                [allowlisted],
+                env={"TELEGRAM_ALLOWED_USERS": allowlisted},
+            ),
+            [True],
+        )
+        for label, edit in forms:
+            with self.subTest(source=label):
+                self.rebuild(self.now, customize_home=edit)
+                manifest = self.manifest()
+                telegram = manifest["fidelity"]["telegram"]
+                self.assertEqual(
+                    telegram["allowlist"],
+                    {
+                        "sources": [label],
+                        "unpaired_user_count": 1,
+                        "target": "approved-pairing-entries",
+                    },
+                )
+                self.assertNotIn(allowlisted, json.dumps(telegram))
+                target = fx.build_target(self.root)
+                receipt = self.install(target)
+                hermes = target / "agent/hermes-home"
+                approved = json.loads(
+                    (hermes / "platforms/pairing/telegram-approved.json").read_text()
+                )
+                self.assertEqual(
+                    sorted(approved),
+                    sorted([str(fx.OWNER_ID), str(fx.SECOND_ID), allowlisted]),
+                )
+                self.assertEqual(
+                    approved[allowlisted]["approved_via"], "legacy-telegram-allowlist"
+                )
+                self.assertEqual(approved[str(fx.OWNER_ID)]["user_name"], "Owner")
+                pairing = receipt["fidelity"]["installed"]["pairing"]
+                self.assertEqual(
+                    (pairing["approved_count"], pairing["allowlisted_users_added"]),
+                    (3, 1),
+                )
+                config = yaml.safe_load((hermes / "config.yaml").read_text())
+                self.assertEqual(
+                    config["gateway"]["platforms"]["telegram"]["extra"]["dm_policy"],
+                    "pairing",
+                )
+                # The target's own authorization: the owner and both paired
+                # users get in without a new pairing step; a stranger does not.
+                self.assertEqual(
+                    self.authorized(
+                        hermes,
+                        [allowlisted, str(fx.OWNER_ID), str(fx.SECOND_ID), "999"],
+                    ),
+                    [True, True, True, False],
+                )
+
+    def test_allowlisted_user_already_paired_is_not_duplicated(self) -> None:
+        def edit(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(
+                env.read_text() + f"TELEGRAM_ALLOWED_USERS={fx.OWNER_ID}, \n"
+            )
+
+        self.rebuild(self.now, customize_home=edit)
+        manifest = self.manifest()
+        self.assertEqual(
+            manifest["fidelity"]["telegram"]["allowlist"]["unpaired_user_count"], 0
+        )
+        target = fx.build_target(self.root)
+        receipt = self.install(target)
+        approved = json.loads(
+            (
+                target / "agent/hermes-home/platforms/pairing/telegram-approved.json"
+            ).read_text()
+        )
+        self.assertEqual(approved[str(fx.OWNER_ID)]["user_name"], "Owner")
+        self.assertNotIn("approved_via", approved[str(fx.OWNER_ID)])
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["pairing"]["allowlisted_users_added"], 0
+        )
+
+    def test_telegram_grants_without_a_target_equivalent_fail_closed(self) -> None:
+        token = {"TELEGRAM_BOT_TOKEN": fx.TOKEN}
+        failing = (
+            (
+                {"TELEGRAM_ALLOWED_USERS": "*"},
+                {},
+                "env:TELEGRAM_ALLOWED_USERS (allows everyone)",
+            ),
+            (
+                {"TELEGRAM_ALLOWED_USERS": "707,@owner_handle"},
+                {},
+                "env:TELEGRAM_ALLOWED_USERS (entry is not a numeric Telegram user id)",
+            ),
+            ({"TELEGRAM_ALLOW_ALL_USERS": "true"}, {}, "env:TELEGRAM_ALLOW_ALL_USERS"),
+            ({"GATEWAY_ALLOW_ALL_USERS": "1"}, {}, "env:GATEWAY_ALLOW_ALL_USERS"),
+            ({"GATEWAY_ALLOWED_USERS": "707"}, {}, "env:GATEWAY_ALLOWED_USERS"),
+            (
+                {"TELEGRAM_GROUP_ALLOWED_CHATS": "-100123"},
+                {},
+                "env:TELEGRAM_GROUP_ALLOWED_CHATS",
+            ),
+            ({"TELEGRAM_ALLOW_BOTS": "all"}, {}, "env:TELEGRAM_ALLOW_BOTS"),
+            (
+                {},
+                {"telegram": {"allow_from": ["*"]}},
+                "config:telegram.allow_from (allows everyone)",
+            ),
+            (
+                {},
+                {"gateway": {"telegram": {"allow_from": "${MISSING}"}}},
+                "config:gateway.telegram.allow_from (unresolved reference)",
+            ),
+            (
+                {},
+                {"platforms": {"telegram": {"extra": {"dm_policy": "open"}}}},
+                "config:platforms.telegram.extra.dm_policy",
+            ),
+            (
+                {},
+                {"gateway": {"platforms": {"telegram": {"group_allow_from": [5]}}}},
+                "config:gateway.platforms.telegram.group_allow_from",
+            ),
+            (
+                {},
+                {"telegram": {"extra": {"group_allowed_chats": "-100123"}}},
+                "config:telegram.extra.group_allowed_chats",
+            ),
+        )
+        for env, config, message in failing:
+            with self.subTest(message=message):
+                with self.assertRaises(migration.MigrationError) as raised:
+                    fidelity.telegram_access(config, {**token, **env})
+                text = str(raised.exception)
+                self.assertIn("no target equivalent", text)
+                self.assertIn(message, text)
+                for value in ("707", "@owner_handle", "-100123", fx.TOKEN):
+                    self.assertNotIn(value, text)
+        # Off values and the target's own policies are not grants.
+        users, sources = fidelity.telegram_access(
+            {
+                "telegram": {"allow_bots": "none", "dm_policy": "pairing"},
+                "platforms": {"telegram": {"extra": {"dm_policy": "allowlist"}}},
+                "gateway": {"telegram": {"allow_from": "${OWNERS}"}},
+            },
+            {
+                **token,
+                "TELEGRAM_ALLOW_ALL_USERS": "false",
+                "GATEWAY_ALLOW_ALL_USERS": "",
+                "TELEGRAM_ALLOW_BOTS": "none",
+                "OWNERS": "12, 7",
+            },
+        )
+        self.assertEqual(users, ["7", "12"])
+        self.assertEqual(sources, ["config:gateway.telegram.allow_from"])
+
+        # End to end: the manifest is refused before cutover, nothing is planned.
+        def allow_all(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(env.read_text() + "TELEGRAM_ALLOW_ALL_USERS=true\n")
+
+        self.rebuild(self.now, customize_home=allow_all)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "no target equivalent.*TELEGRAM_ALLOW_ALL_USERS"
+        ):
+            self.manifest()
+        self.assertFalse((self.bundle / "manifest.json").exists())
+
+    def test_telegram_grants_are_ignored_when_telegram_does_not_move(self) -> None:
+        def disabled(home: Path) -> None:
+            env = home / ".hermes/.env"
+            env.write_text(
+                env.read_text()
+                .replace(f"TELEGRAM_BOT_TOKEN={fx.TOKEN}\n", "")
+                .replace(f"TELEGRAM_HOME_CHANNEL={fx.OWNER_ID}\n", "")
+                + "TELEGRAM_ALLOW_ALL_USERS=true\n"
+            )
+
+        self.rebuild(self.now, customize_home=disabled)
+        telegram = self.manifest()["fidelity"]["telegram"]
+        self.assertFalse(telegram["activate"])
+        self.assertEqual(telegram["allowlist"]["sources"], [])
+
+    def test_relative_links_map_to_every_activated_root(self) -> None:
+        links = {
+            "lessons/relative-workspace": "../workspace/notes.md",
+            "lessons/relative-script": "../.hermes/scripts/check_inbox.py",
+            "lessons/relative-uploads": "./../uploads/photo.txt",
+            "lessons/relative-dev": "../dev/project/README.md",
+            "lessons/relative-loose": "../recipes/report.csv",
+            "lessons/relative-inactive": "../.hermes/audio_cache/voice.ogg",
+            "lessons/relative-withheld": "../finitebrain/notes.md",
+            "lessons/relative-hidden": "../.codex/config.toml",
+            "lessons/absolute-script": "/home/node/.hermes/scripts/check_inbox.py",
+            # An intermediate symlink followed by `..` leaves the directory the
+            # symlink points at: both read the home-root report.txt.
+            "lessons/alias": "../recipes",
+            "lessons/report-link": "alias/../report.txt",
+            "lessons/report-abs": "/home/node/lessons/alias/../report.txt",
+            "lessons/chain": "latest",
+        }
+
+        def edit(home: Path) -> None:
+            (home / "report.txt").write_text("home root report\n")
+            (home / "lessons/report.txt").write_text("lessons report\n")
+            for name, link in links.items():
+                (home / name).symlink_to(link)
+
+        self.rebuild(self.now, customize_home=edit)
+        source = self.root / "source-home"
+        # The source filesystem's own answer, which the import must keep. An
+        # absolute link names /home/node, which this machine does not have,
+        # so the identity check below follows it from the source home instead.
+        self.assertEqual(
+            (source / "lessons/report-link").read_text(), "home root report\n"
+        )
+        target, receipt = self.installed()
+        legacy = target / "workspace/legacy-box1"
+        expected = {
+            "lessons/relative-workspace": "../workspace/notes.md",
+            "lessons/relative-script": "/data/agent/hermes-home/scripts/check_inbox.py",
+            "lessons/relative-uploads": "../uploads/photo.txt",
+            "lessons/relative-dev": "../dev/project/README.md",
+            "lessons/relative-loose": "../recipes/report.csv",
+            "lessons/absolute-script": "/data/agent/hermes-home/scripts/check_inbox.py",
+            "lessons/alias": "../recipes",
+            "lessons/report-link": "../report.txt",
+            "lessons/report-abs": "/data/workspace/legacy-box1/report.txt",
+            "lessons/chain": "week1.md",
+        }
+        for name, link in expected.items():
+            with self.subTest(link=name):
+                # os.readlink: pathlib would drop a leading "./" from the text.
+                self.assertEqual(os.readlink(legacy / name), link)
+                # Identity: the target link reads the target copy of the very
+                # file the source link reads.
+                text = os.readlink(source / name)
+                followed = (
+                    source / text.removeprefix("/home/node/")
+                    if text.startswith("/home/node/")
+                    else source / name
+                )
+                real = Path(os.path.realpath(followed)).relative_to(source.resolve())
+                if real.parts[0] == ".hermes":
+                    copy = target / "agent/hermes-home" / real.relative_to(".hermes")
+                else:
+                    copy = legacy / real
+                self.assertTrue(copy.exists(), copy)
+                self.assertTrue(
+                    self._target_link_path(target, legacy / name).samefile(copy)
+                )
+        for name in ("lessons/report-link", "lessons/report-abs"):
+            with self.subTest(content=name):
+                self.assertEqual(
+                    self._target_link_path(target, legacy / name).read_text(),
+                    "home root report\n",
+                )
+        self.assertEqual(
+            (legacy / "lessons/relative-workspace").read_text(), "workspace notes\n"
+        )
+        for name in links.keys() - expected.keys():
+            with self.subTest(skipped=name):
+                self.assertFalse((legacy / name).is_symlink())
+                self.assertFalse((legacy / name).exists())
+        home = receipt["fidelity"]["installed"]["home"]
+        # The fixture's own inactive link plus the three rejected above. Loops
+        # never reach a bundle (the source inventory stops on them); the
+        # snapshot test below covers them.
+        self.assertEqual(home["skipped_symlink_count"], 1 + 3)
+        # Existing relative links inside one placed entry keep their text.
+        self.assertEqual(os.readlink(legacy / "lessons/latest"), "week1.md")
+
+    @staticmethod
+    def _target_link_path(target: Path, link: Path) -> Path:
+        """The path a placed link names, with the target's /data at `target`."""
+        text = os.readlink(link)
+        if text.startswith("/data/"):
+            return target / text.removeprefix("/data/")
+        return link.parent / text
+
+    def test_link_resolution_follows_the_source_snapshot(self) -> None:
+        home = Path(tempfile.mkdtemp(dir=self.root)) / "home"
+        for name, text in {
+            "report.txt": "home root report\n",
+            "lessons/report.txt": "lessons report\n",
+            "lessons/week1.md": "lesson one\n",
+            "recipes/report.csv": "a,b\n",
+            "workspace/notes.md": "workspace notes\n",
+            "workspace/sub/keep": "",
+            ".hermes/scripts/check_inbox.py": "print(1)\n",
+            ".hermes/logs/gateway.log": "log\n",
+        }.items():
+            (home / name).parent.mkdir(parents=True, exist_ok=True)
+            (home / name).write_text(text)
+        for name, link in {
+            "lessons/alias": "../recipes",
+            "lessons/up": "../..",
+            "lessons/out": "/etc",
+            "lessons/loop-a": "loop-b",
+            "lessons/loop-b": "loop-a",
+            "lessons/self": "self",
+            "lessons/hs": "../.hermes/scripts",
+            "lessons/latest": "week1.md",
+        }.items():
+            (home / name).symlink_to(link)
+        archive = home.parent / "source-home.tar"
+        with tarfile.open(archive, "w") as handle:
+            handle.add(home, arcname=".", recursive=True)
+        snapshot = fidelity.SourceSnapshot(archive, {"entries": []})
+        self.addCleanup(snapshot.close)
+        install = mock.Mock(
+            path_map=fidelity.PathMap(
+                ["lessons", "recipes", "report.txt", "workspace", "dev", "uploads"]
+            ),
+            snapshot=snapshot,
+        )
+        cases = {
+            # The review's case, relative and absolute: home-root report.txt.
+            ("lessons/report-link", "alias/../report.txt"): "../report.txt",
+            ("lessons/report-abs", "/home/node/lessons/alias/../report.txt"): (
+                "/data/workspace/legacy-box1/report.txt"
+            ),
+            ("lessons/local", "report.txt"): "report.txt",
+            ("lessons/chain", "latest"): "week1.md",
+            ("lessons/hs-link", "hs/check_inbox.py"): (
+                "/data/agent/hermes-home/scripts/check_inbox.py"
+            ),
+            ("lessons/normalized", "../workspace/./sub/../notes.md"): (
+                "../workspace/notes.md"
+            ),
+            ("lessons/dangling", "../workspace/missing.md"): "../workspace/missing.md",
+            ("top-link", "workspace/notes.md"): "workspace/notes.md",
+            # Escapes, cycles and broken walks are never placed.
+            ("lessons/relative-escape", "../../etc/passwd"): None,
+            ("lessons/escape-via", "up/etc/passwd"): None,
+            ("lessons/out-via", "out/passwd"): None,
+            ("lessons/loop-link", "loop-a"): None,
+            ("lessons/self-link", "self/x"): None,
+            ("lessons/thru-file", "week1.md/x"): None,
+            ("lessons/missing-dir", "../workspace/nope/../notes.md"): None,
+            ("lessons/home-root", ".."): None,
+            ("lessons/home-abs", "/home/node"): None,
+            ("lessons/other-home", "/home/nodereport.txt"): None,
+            # Leaving the home and coming back by name is still an escape.
+            ("lessons/escape-to-placed", "../../report.txt"): None,
+            ("lessons/escape-via-up", "up/node/report.txt"): None,
+            ("lessons/absolute-escape", "/home/node/workspace/../../../etc/passwd"): (
+                None
+            ),
+            ("lessons/outside", "/etc/passwd"): None,
+            # The kernel reads `~` as a literal directory name.
+            ("lessons/tilde", "~/workspace/notes.md"): None,
+            ("lessons/punctuated", "../workspace."): None,
+            ("lessons/inactive-hermes", "../.hermes/logs/gateway.log"): None,
+            ("lessons/hermes-root", "../.hermes"): None,
+        }
+        for (path, link), expected in cases.items():
+            with self.subTest(path=path, link=link):
+                self.assertEqual(
+                    fidelity.FidelityInstall._placed_link(install, path, link),
+                    expected,
+                )
+
+    def test_user_skills_activate_and_baseline_clashes_stay_review_only(self) -> None:
+        target, receipt = self.installed()
+        skills = target / "agent/hermes-home/skills"
+        skill = (skills / fx.USER_SKILL / "SKILL.md").read_text()
+        self.assertIn("/data/workspace/legacy-box1/workspace/cellar.md", skill)
+        self.assertTrue((skills / fx.USER_SKILL / "references/regions.md").is_file())
+        self.assertFalse((skills / fx.CLASH_SKILL).exists())
+        self.assertFalse((skills / fx.BUNDLED_SKILL).exists())
+        self.assertFalse((skills / "devops/overlay-helper").exists())
+        self.assertFalse((skills / ".archive").exists())
+        review = target / "migration/legacy-hermes-v2/review-only/skills"
+        self.assertTrue((review / fx.CLASH_SKILL / "SKILL.md").is_file())
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["skills"]["review_only_clashes"],
+            [
+                {
+                    "path": fx.CLASH_SKILL,
+                    "name": "google-workspace-finite",
+                    "reason": "target-managed-skills-baseline",
+                }
+            ],
+        )
+
+    def test_scripts_and_cron_activate_without_a_post_downtime_burst(self) -> None:
+        target, receipt = self.installed()
+        hermes = target / "agent/hermes-home"
+        script = hermes / "scripts/check_inbox.py"
+        self.assertIn(
+            "/data/workspace/legacy-box1/workspace/notes.md", script.read_text()
+        )
+        self.assertEqual(oct(script.stat().st_mode & 0o777), "0o755")
+        document = json.loads((hermes / "cron/jobs.json").read_text())
+        jobs = {job["id"]: job for job in document["jobs"]}
+        self.assertEqual(
+            list(jobs),
+            [job["id"] for job in receipt["fidelity"]["plan"]["cron"]["jobs"]],
+        )
+        for job_id in ("daily-briefing", "inbox-check", "openrouter-job"):
+            next_run = datetime.fromisoformat(jobs[job_id]["next_run_at"])
+            self.assertGreater(next_run, self.now, job_id)
+            self.assertTrue(jobs[job_id]["enabled"], job_id)
+        # The daily slot is eight hours after `now` in the bot's timezone.
+        self.assertEqual(
+            datetime.fromisoformat(jobs["daily-briefing"]["next_run_at"]),
+            self.now + timedelta(hours=8),
+        )
+        self.assertEqual(
+            datetime.fromisoformat(jobs["inbox-check"]["next_run_at"]),
+            self.now + timedelta(minutes=fx.INTERVAL_MINUTES),
+        )
+        self.assertNotIn("run_claim", jobs["daily-briefing"])
+        self.assertEqual(
+            jobs["inbox-check"]["script"],
+            "/data/agent/hermes-home/scripts/check_inbox.py",
+        )
+        self.assertEqual(
+            jobs["inbox-check"]["workdir"], "/data/workspace/legacy-box1/dev/project"
+        )
+        self.assertIn(
+            "/data/workspace/legacy-box1/workspace/notes.md",
+            jobs["daily-briefing"]["prompt"],
+        )
+        self.assertEqual(jobs["daily-briefing"]["origin"]["chat_id"], str(fx.OWNER_ID))
+        self.assertEqual(
+            jobs["future-reminder"]["next_run_at"],
+            jobs["future-reminder"]["schedule"]["run_at"],
+        )
+        self.assertTrue(jobs["future-reminder"]["enabled"])
+        self.assertFalse(jobs["missed-reminder"]["enabled"])
+        self.assertEqual(
+            jobs["missed-reminder"]["paused_reason"], fidelity.ONESHOT_MISSED_REASON
+        )
+        self.assertFalse(jobs["matrix-relay"]["enabled"])
+        self.assertEqual(
+            jobs["matrix-relay"]["paused_reason"], "delivery-platform-inactive: matrix"
+        )
+        self.assertFalse(jobs["paused-digest"]["enabled"])
+        self.assertEqual(jobs["paused-digest"]["paused_reason"], "owner paused")
+        self.assertIsNone(jobs["openrouter-job"]["provider"])
+        self.assertIsNone(jobs["openrouter-job"]["base_url"])
+        self.assertIsNone(jobs["openrouter-job"]["model"])
+        outcomes = receipt["fidelity"]["installed"]["cron"]["outcomes"]
+        self.assertEqual(
+            outcomes["paused:oneshot-missed-during-cutover"], ["missed-reminder"]
+        )
+        self.assertEqual(
+            outcomes["paused:delivery-platform-inactive"], ["matrix-relay"]
+        )
+        self.assertEqual(outcomes["kept-disabled"], ["paused-digest"])
+        self.assertEqual(
+            outcomes["kept-completed:repeat-exhausted"], ["exhausted-interval"]
+        )
+        self.assertEqual(outcomes["kept-completed"], ["completed-oneshot"])
+        self.assertEqual(
+            outcomes["recurring-error-state-rescheduled"], ["error-state-daily"]
+        )
+        self.assertEqual(
+            outcomes["oneshot-scheduled"], ["claimed-oneshot", "future-reminder"]
+        )
+        self.assertEqual(
+            outcomes["recurring-next-run-recomputed+inference-route-normalized"],
+            ["openrouter-job"],
+        )
+
+    def test_home_files_land_where_rewritten_paths_point(self) -> None:
+        target, receipt = self.installed()
+        legacy = target / "workspace/legacy-box1"
+        self.assertEqual(
+            (legacy / "poster_final.jpg").read_bytes()[:4], b"\xff\xd8\xff\xe0"
+        )
+        # Activated user files point at the new home; the sealed snapshot keeps
+        # the original bytes.
+        self.assertEqual(
+            (legacy / "make_post.py").read_text(),
+            "OUT = '/data/workspace/legacy-box1/workspace/post.png'\nprint(OUT)\n",
+        )
+        self.assertEqual(
+            (target / "workspace/legacy-box1/workspace/plan.md").read_text(),
+            "Final memo: /data/workspace/legacy-box1/Downloads/memo.txt\n",
+        )
+        self.assertEqual(
+            (legacy / "Downloads/cache.bin").read_bytes(),
+            (self.root / "source-home/Downloads/cache.bin").read_bytes(),
+        )
+        installed = receipt["fidelity"]["installed"]
+        self.assertIn(
+            {"path": "workspace/legacy-box1/Downloads/cache.bin", "reason": "binary"},
+            installed["unrewritable_references"],
+        )
+        self.assertGreaterEqual(
+            installed["workspace_path_rewrites"]["files_rewritten"], 1
+        )
+        with sqlite3.connect(
+            target / "agent/hermes-home/memory_store.db"
+        ) as connection:
+            fact = connection.execute("SELECT content FROM facts").fetchone()[0]
+        self.assertIn("/data/workspace/legacy-box1/workspace/notes.md", fact)
+        self.assertNotIn("/home/node", fact)
+        self.assertEqual(oct((legacy / "make_post.py").stat().st_mode & 0o777), "0o755")
+        self.assertEqual(
+            (legacy / "Downloads/memo.txt").read_text(), "memo from Downloads\n"
+        )
+        self.assertEqual((legacy / "recipes/report.csv").read_text(), "a,b\n1,2\n")
+        self.assertEqual(str((legacy / "lessons/latest").readlink()), "week1.md")
+        self.assertEqual(
+            str((legacy / "lessons/workspace-link").readlink()),
+            "/data/workspace/legacy-box1/workspace/notes.md",
+        )
+        self.assertFalse((legacy / "lessons/hermes-cache-link").is_symlink())
+        for withheld in (
+            "AGENTS.md",
+            "node_modules",
+            "__pycache__",
+            "finitebrain",
+            ".finite",
+            ".hermes",
+        ):
+            self.assertFalse((legacy / withheld).exists(), withheld)
+        review = target / "migration/legacy-hermes-v2/review-only/agents"
+        self.assertTrue((review / "home-AGENTS.md").is_file())
+        self.assertTrue((review / "hermes-AGENTS.md").is_file())
+        # Only the owner's addition is activated, as project context.
+        agents = (target / "workspace/AGENTS.md").read_text()
+        self.assertIn(fx.AGENTS_OWNER_ADDITION, agents)
+        self.assertNotIn("finitec publish", agents)
+        home = receipt["fidelity"]["installed"]["home"]
+        self.assertEqual(home["skipped_symlink_count"], 1)
+        memory = (target / "agent/hermes-home/memories/MEMORY.md").read_text()
+        self.assertIn("/data/workspace/legacy-box1/workspace/trips.md", memory)
+        self.assertIn(fx.MEMORY_MARKER, memory)
+        session = next(
+            item
+            for item in FakeSessionDB.imported
+            if item["id"] == "legacy-telegram-session"
+        )
+        self.assertEqual(session["cwd"], "/data/workspace/legacy-box1")
+        rendered = json.dumps(session["messages"])
+        for expected in (
+            "/data/workspace/legacy-box1/poster_final.jpg",
+            "/data/workspace/legacy-box1/Downloads/memo.txt",
+            "MEDIA: /data/workspace/legacy-box1/uploads/photo.txt",
+            "/data/workspace/legacy-box1/uploads/photo.txt",
+            "/home/node/.hermes/audio_cache/voice.ogg",
+        ):
+            self.assertIn(expected, rendered)
+        counts = receipt["fidelity"]["installed"]["session_path_rewrites"]
+        self.assertEqual(
+            {key: counts[key] for key in ("rewritten", "unmapped_left")},
+            {"rewritten": 6, "unmapped_left": 1},
+        )
+
+    def test_default_mode_bundle_installs_exactly_as_before(self) -> None:
+        self.manifest(mode="default")
+        target = fx.build_target(self.root)
+        before = self.tree(target / "agent/hermes-home")
+        receipt = self.install(target, mode="default")
+        self.assertNotIn("fidelity", receipt)
+        after = self.tree(target / "agent/hermes-home")
+        self.assertEqual(
+            {
+                key: value
+                for key, value in after.items()
+                if not key.startswith(("memories", "state.db", "memory_store.db"))
+            },
+            {
+                key: value
+                for key, value in before.items()
+                if not key.startswith(("state.db", "memory_store.db"))
+            },
+        )
+        self.assertFalse((target / "workspace/legacy-box1/Downloads").exists())
+
+    # -- fail closed -----------------------------------------------------------
+
+    def assert_fails_without_mutation(
+        self, target: Path, message: str, hooks=None
+    ) -> None:
+        before = self.tree(target)
+        with self.assertRaisesRegex(migration.MigrationError, message):
+            self.install(target, hooks=hooks)
+        self.assertEqual(self.tree(target), before)
+
+    def test_customized_target_soul_fails_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        (target / "agent/hermes-home/SOUL.md").write_text(
+            "A persona someone wrote on the target\n"
+        )
+        self.assert_fails_without_mutation(target, "target SOUL.md was customized")
+
+    def test_existing_target_telegram_connection_fails_closed(self) -> None:
+        self.manifest()
+        config = fx.build_target(self.root) / "agent/hermes-home/config.yaml"
+        data = yaml.safe_load(config.read_text())
+        data["gateway"]["platforms"]["telegram"] = {
+            "enabled": True,
+            "token": "1:" + "x" * 30,
+        }
+        config.write_text(yaml.safe_dump(data))
+        self.assert_fails_without_mutation(
+            config.parents[2], "already has a Telegram connection"
+        )
+
+    def test_non_empty_target_pairing_store_fails_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        store = target / "agent/hermes-home/platforms/pairing/telegram-approved.json"
+        store.parent.mkdir(parents=True)
+        store.write_text(json.dumps({"999": {"user_name": "x"}}))
+        self.assert_fails_without_mutation(target, "pairing store is not empty")
+
+    def test_target_with_scheduled_jobs_fails_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        jobs = target / "agent/hermes-home/cron/jobs.json"
+        jobs.parent.mkdir(parents=True)
+        jobs.write_text(json.dumps({"jobs": [{"id": "target-job"}]}))
+        self.assert_fails_without_mutation(target, "already has scheduled jobs")
+
+    def test_home_skill_and_script_collisions_fail_closed(self) -> None:
+        self.manifest()
+        for collision, message in (
+            ("workspace/legacy-box1/Downloads", "legacy-box1/Downloads"),
+            ("agent/hermes-home/skills/" + fx.USER_SKILL, "skills/" + fx.USER_SKILL),
+            ("agent/hermes-home/scripts/check_inbox.py", "scripts/check_inbox.py"),
+        ):
+            with self.subTest(collision=collision):
+                target = fx.build_target(Path(tempfile.mkdtemp(dir=self.root)))
+                (target / collision).mkdir(parents=True)
+                self.assert_fails_without_mutation(
+                    target, "destination collision: .*" + message
+                )
+
+    def test_missing_target_config_or_pending_update_patch_fails_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        (target / "agent/hermes-home/config.yaml").unlink()
+        self.assert_fails_without_mutation(target, "config.yaml is missing")
+        target = fx.build_target(Path(tempfile.mkdtemp(dir=self.root)))
+        hooks = self.make_hooks(
+            telegram_qualification=lambda: {
+                "qualified": False,
+                "reasons": ["conflict-retry-drops-queue"],
+            }
+        )
+        self.assert_fails_without_mutation(
+            target, "drops queued Telegram updates.*conflict-retry", hooks=hooks
+        )
+
+    def test_late_failure_restores_config_soul_and_removes_placed_files(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        before = self.tree(target)
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json", side_effect=OSError("disk")
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.install(target)
+        after = self.tree(target)
+        # Like the default mode, only the empty parent of the receipt dir remains.
+        self.assertEqual(after.pop("migration"), "dir")
+        self.assertEqual(after, before)
+
+    def test_source_telegram_shapes_that_agentd_cannot_represent_fail_closed(
+        self,
+    ) -> None:
+        cases = (
+            ({"TELEGRAM_BOT_TOKEN": "not-a-token"}, {}, "Bot API shape"),
+            (
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                {"telegram": {"token": "1:" + "y" * 35}},
+                "token sources disagree",
+            ),
+            (
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN, "TELEGRAM_HOME_CHANNEL": "-1001234"},
+                {},
+                "not a numeric private chat id",
+            ),
+        )
+        for env, config, message in cases:
+            with (
+                self.subTest(message=message),
+                self.assertRaisesRegex(migration.MigrationError, message),
+            ):
+                fidelity.telegram_source(config, env)
+        message = str(self._token_error())
+        self.assertNotIn("not-a-token", message)
+
+    def _token_error(self) -> Exception:
+        try:
+            fidelity.telegram_source({}, {"TELEGRAM_BOT_TOKEN": "not-a-token"})
+        except migration.MigrationError as exc:
+            return exc
+        raise AssertionError("expected a token error")
+
+    def test_config_yaml_token_and_reference_are_accepted(self) -> None:
+        token, home, enabled, evidence = fidelity.telegram_source(
+            {
+                "telegram": {"token": "${LAZ_TOKEN}", "enabled": True},
+                "platforms": {"telegram": {"enabled": True}},
+            },
+            {"LAZ_TOKEN": fx.TOKEN},
+        )
+        self.assertEqual((token, home, enabled), (fx.TOKEN, None, True))
+        self.assertEqual(evidence["token_sources"], ["config:telegram.token"])
+        _, _, enabled, _ = fidelity.telegram_source(
+            {"platforms": {"telegram": {"enabled": False}}},
+            {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+        )
+        self.assertFalse(enabled)
+
+    def test_path_map_rewrites_only_placed_and_active_roots(self) -> None:
+        path_map = fidelity.PathMap(["workspace", "Downloads", "poster.jpg"])
+        cases = {
+            "/home/node": "/data/workspace/legacy-box1",
+            "/home/node/workspace/a b.md": "/data/workspace/legacy-box1/workspace/a b.md",
+            "see ~/Downloads/x.pdf.": "see /data/workspace/legacy-box1/Downloads/x.pdf.",
+            "/home/node/poster.jpg,": "/data/workspace/legacy-box1/poster.jpg,",
+            "/home/node/.hermes/skills/x/SKILL.md": "/data/agent/hermes-home/skills/x/SKILL.md",
+            "/home/node/.hermes/SOUL.md": "/data/agent/hermes-home/SOUL.md",
+            "/home/node/.hermes/venv/bin/python": "/home/node/.hermes/venv/bin/python",
+            "/home/node/.ssh/id_ed25519": "/home/node/.ssh/id_ed25519",
+            "/home/nodejs/x": "/home/nodejs/x",
+            "x/home/node/workspace": "x/home/node/workspace",
+            "approx~/workspace": "approx~/workspace",
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(path_map.rewrite_text(source), expected)
+
+    # -- round 2: rehearsal, gate, routing, cron state, paths, persona -------
+
+    def test_rehearsal_is_the_default_and_never_writes_the_token(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        receipt = migration.install_bundle(
+            self.bundle,
+            target,
+            expected_machine_id="frankie",
+            expected_manifest_sha256=sha256(self.bundle / "manifest.json"),
+            expected_identity_sha256=sha256(target / "agent/identity/identity.json"),
+            expected_chat_client_sha256=sha256(target / "agent/client.sqlite3"),
+            session_db_factory=FakeSessionDB,
+            memory_store_factory=FakeMemoryStore,
+            mode="full-fidelity",
+            fidelity_hooks=self.hooks,
+        )
+        config_text = (target / "agent/hermes-home/config.yaml").read_text()
+        self.assertNotIn(fx.TOKEN, config_text)
+        telegram = yaml.safe_load(config_text)["gateway"]["platforms"]["telegram"]
+        self.assertIs(telegram["enabled"], False)
+        self.assertNotIn("token", telegram)
+        self.assertIs(telegram["extra"]["finite_legacy_rehearsal"], True)
+        self.assertEqual(telegram["extra"]["dm_policy"], "pairing")
+        installed = receipt["fidelity"]["installed"]
+        self.assertEqual(installed["telegram"]["mode"], "rehearsal")
+        self.assertEqual(
+            installed["config"]["telegram"],
+            "rehearsal-disabled-no-token-with-home-channel",
+        )
+        # Everything else is the same as a live install: pairing and jobs.
+        self.assertEqual(installed["pairing"]["approved_count"], 2)
+        self.assertTrue((target / "agent/hermes-home/cron/jobs.json").is_file())
+        for argv_default in (
+            migration._parser()
+            .parse_args(
+                [
+                    "install",
+                    "--bundle",
+                    "b",
+                    "--target-root",
+                    "t",
+                    "--expected-source-machine-id",
+                    "m",
+                    "--expected-manifest-sha256",
+                    "0" * 64,
+                    "--expected-target-identity-sha256",
+                    "0" * 64,
+                    "--expected-target-chat-client-sha256",
+                    "0" * 64,
+                ]
+            )
+            .telegram,
+        ):
+            self.assertEqual(argv_default, "rehearsal")
+
+    def test_live_telegram_needs_the_qualified_runtime_fingerprint(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        before = self.tree(target)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "needs --expected-telegram"
+        ):
+            self.install(target, telegram="live", fingerprint=None)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "not the qualified Runtime"
+        ):
+            self.install(target, telegram="live", fingerprint="0" * 64)
+        with self.assertRaisesRegex(
+            migration.MigrationError, "not the qualified Runtime"
+        ):
+            self.install(target, telegram="rehearsal", fingerprint="0" * 64)
+        self.assertEqual(self.tree(target), before)
+        receipt = self.install(target)
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["telegram"]["qualification"][
+                "fingerprint"
+            ],
+            QUALIFIED["fingerprint"],
+        )
+
+    def test_active_telegram_chat_is_rebound_to_its_session(self) -> None:
+        _, receipt = self.installed()
+        self.assertEqual(len(FakeSessionDB.routes), 1)
+        route = FakeSessionDB.routes[0]
+        self.assertEqual(route["session_id"], fx.ACTIVE_SESSION_ID)
+        self.assertEqual(route["session_key"], f"agent:main:telegram:dm:{fx.OWNER_ID}")
+        self.assertEqual(
+            (route["source"], route["chat_id"], route["chat_type"], route["user_id"]),
+            ("telegram", str(fx.OWNER_ID), "dm", str(fx.OWNER_ID)),
+        )
+        origin = json.loads(route["origin_json"])
+        self.assertEqual(origin["platform"], "telegram")
+        for claim in (
+            "active_turn_token",
+            "resume_pending",
+            "suspended",
+            "model_override",
+        ):
+            self.assertNotIn(claim, json.dumps(route))
+        # Activity is the source conversation's real last message, not install time.
+        session = next(
+            s for s in fx.sessions(self.now) if s["id"] == fx.ACTIVE_SESSION_ID
+        )
+        self.assertEqual(
+            FakeSessionDB.activity,
+            [(fx.ACTIVE_SESSION_ID, max(m["timestamp"] for m in session["messages"]))],
+        )
+        routing = receipt["fidelity"]["installed"]["routing"]
+        self.assertEqual(routing["mapped_session_ids"], [fx.ACTIVE_SESSION_ID])
+        self.assertEqual(routing["not_mapped"], {"platform-not-active:matrix": 1})
+
+    def test_ambiguous_telegram_routing_fails_closed(self) -> None:
+        home = self.root / "source-home/.hermes/sessions/sessions.json"
+        index = json.loads(home.read_text())
+        owner = dict(index[f"agent:main:telegram:dm:{fx.OWNER_ID}"])
+        # An older key for the same chat that points at another session.
+        index["agent:main:telegram:dm"] = {
+            **owner,
+            "session_key": "agent:main:telegram:dm",
+            "session_id": "legacy-telegram-session",
+        }
+        self.rewrite_source_file(".hermes/sessions/sessions.json", json.dumps(index))
+        self.manifest()
+        target = fx.build_target(self.root)
+        self.assert_fails_without_mutation(target, "ambiguous legacy Telegram routing")
+
+    def rewrite_source_file(self, relative: str, text: str) -> None:
+        """Change one source file and rebuild the sealed snapshot and inventory."""
+        import tarfile
+
+        home = self.root / "source-home"
+        (home / relative).write_text(text)
+        for name in ("source-volume-inventory.json", "integrations.json", "sites.json"):
+            (self.bundle / name).unlink()
+        inventory = self.bundle / "source-volume-inventory.json"
+        migration.inventory_source_volume(inventory, home)
+        migration.inventory_source_integrations(
+            self.bundle / "integrations.json", home, inventory
+        )
+        endpoints = self.root / "published-endpoints.json"
+        migration.inventory_source_sites(
+            self.bundle / "sites.json",
+            endpoints,
+            inventory,
+            expected_machine_id="frankie",
+        )
+        snapshot = self.bundle / "payload/source-home.tar"
+        snapshot.unlink()
+        with tarfile.open(snapshot, "w") as archive:
+            archive.add(home, arcname=".", recursive=True)
+        snapshot.chmod(0o600)
+        self.metadata = fx.source_metadata(
+            migration, hashlib.sha256(inventory.read_bytes()).hexdigest()
+        )
+
+    def test_box1_scheduler_state_cannot_cause_a_burst_in_target_hermes(self) -> None:
+        # Real clock: the target's own get_due_jobs() decides what is due now.
+        self.rebuild(datetime.now(timezone.utc).replace(microsecond=0))
+        self.hooks = self.make_hooks(now=lambda: datetime.now(timezone.utc))
+        target, receipt = self.installed()
+        hermes = target / "agent/hermes-home"
+        jobs = {
+            job["id"]: job
+            for job in json.loads((hermes / "cron/jobs.json").read_text())["jobs"]
+        }
+        for job in jobs.values():
+            for key in fidelity.CRON_EXECUTION_FIELDS_REMOVED:
+                self.assertNotIn(key, job, (job["id"], key))
+            self.assertIsNone(job.get("last_status"), job["id"])
+        self.assertFalse(jobs["exhausted-interval"]["enabled"])
+        self.assertEqual(jobs["exhausted-interval"]["state"], "completed")
+        self.assertEqual(jobs["completed-oneshot"]["state"], "completed")
+        self.assertEqual(jobs["error-state-daily"]["state"], "scheduled")
+        self.assertTrue(jobs["claimed-oneshot"]["enabled"])
+        legacy = receipt["fidelity"]["installed"]["cron"]["legacy_execution"]
+        self.assertEqual(legacy["errored-poll"]["last_status"], "error")
+        self.assertTrue(legacy["errored-poll"]["had_last_error"])
+        self.assertEqual(legacy["errored-poll"]["failure_streak"], 3)
+        self.assertEqual(
+            legacy["claimed-oneshot"]["cleared"],
+            ["fire_claim", "manual_run_at", "run_claim"],
+        )
+        self.assertEqual(
+            legacy["exhausted-interval"]["repeat"], {"times": 3, "completed": 3}
+        )
+        self.assertNotIn("synthetic old failure", json.dumps(receipt))
+        due = run_hermes(
+            hermes,
+            self.scratch_home,
+            "import json; from cron.jobs import get_due_jobs; "
+            "print(json.dumps([j['id'] for j in get_due_jobs()]))",
+        )
+        self.assertEqual(json.loads(due.strip().splitlines()[-1]), [])
+        self.assertFalse((hermes / "cron/persisted_error_recoveries.jsonl").exists())
+
+    def test_next_runs_are_computed_after_the_import_not_at_start(self) -> None:
+        # A long session import must not leave recurring jobs scheduled from
+        # a stale boundary: the second clock reading (at apply) wins.
+        readings = iter([self.now, self.now + timedelta(hours=2)])
+        self.hooks = self.make_hooks(now=lambda: next(readings))
+        target, receipt = self.installed()
+        later = self.now + timedelta(hours=2)
+        cron = receipt["fidelity"]["installed"]["cron"]
+        self.assertEqual(cron["scheduled_from"], later.isoformat())
+        jobs = {
+            job["id"]: job
+            for job in json.loads(
+                (target / "agent/hermes-home/cron/jobs.json").read_text()
+            )["jobs"]
+        }
+        self.assertEqual(
+            datetime.fromisoformat(jobs["inbox-check"]["next_run_at"]),
+            later + timedelta(minutes=fx.INTERVAL_MINUTES),
+        )
+
+    def test_empty_target_cron_store_is_replaced_and_restored_on_failure(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        jobs = target / "agent/hermes-home/cron/jobs.json"
+        jobs.parent.mkdir()
+        empty = b'{"jobs": [], "updated_at": null}\n'
+        jobs.write_bytes(empty)
+        before = self.tree(target)
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json", side_effect=OSError("disk")
+            ),
+            self.assertRaises(OSError),
+        ):
+            self.install(target)
+        after = self.tree(target)
+        self.assertEqual(after.pop("migration"), "dir")
+        self.assertEqual(after, before)
+        self.assertEqual(jobs.read_bytes(), empty)
+        receipt = self.install(target)
+        self.assertTrue(
+            receipt["fidelity"]["installed"]["cron"]["replaced_empty_target_store"]
+        )
+        self.assertTrue(json.loads(jobs.read_text())["jobs"])
+        backup = (
+            target
+            / "migration/legacy-hermes-v2/preimport-state/full-fidelity"
+            / "agent__hermes-home__cron__jobs.json"
+        )
+        self.assertEqual(backup.read_bytes(), empty)
+
+    def test_agents_md_activates_owner_additions_only(self) -> None:
+        cases = (
+            # (home AGENTS.md text, stage seed, expected home status)
+            (fx.AGENTS_SEED, True, "box1-seed-excluded"),
+            (
+                "My intro\n" + fx.AGENTS_SEED + "\n" + fx.AGENTS_OWNER_ADDITION,
+                True,
+                "owner-additions-activated",
+            ),
+            (
+                fx.AGENTS_SEED.replace("Traefik", "Caddy") + fx.AGENTS_OWNER_ADDITION,
+                True,
+                "unknown-variant-review-only",
+            ),
+            (
+                fx.AGENTS_SEED + fx.AGENTS_OWNER_ADDITION,
+                False,
+                "seed-not-staged-review-only",
+            ),
+        )
+        for text, staged, status in cases:
+            with self.subTest(status=status, staged=staged):
+                if not staged:
+                    (self.bundle / "box1-seed/AGENTS.md").unlink()
+                self.rewrite_source_file("AGENTS.md", text)
+                plan = self.manifest()["fidelity"]["persona"]["agents_md"]
+                files = {item["path"]: item["status"] for item in plan["files"]}
+                self.assertEqual(files["AGENTS.md"], status)
+                target = fx.build_target(Path(tempfile.mkdtemp(dir=self.root)))
+                receipt = self.install(target)
+                activated = target / "workspace/AGENTS.md"
+                self.assertEqual(
+                    activated.exists(), status == "owner-additions-activated"
+                )
+                if activated.exists():
+                    body = activated.read_text()
+                    self.assertIn("My intro", body)
+                    self.assertIn(fx.AGENTS_OWNER_ADDITION, body)
+                    self.assertNotIn("finitec publish", body)
+                self.assertEqual(
+                    receipt["fidelity"]["installed"]["agents_md"]["files"]["AGENTS.md"],
+                    status,
+                )
+
+    def test_existing_target_agents_md_fails_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        (target / "workspace/AGENTS.md").write_text("target context\n")
+        self.assert_fails_without_mutation(target, "workspace/AGENTS.md already exists")
+
+    def test_every_box1_telegram_config_location_is_read(self) -> None:
+        token, home, enabled, evidence = fidelity.telegram_source(
+            {
+                "gateway": {
+                    "telegram": {"token": "${LAZ}", "home_channel": {"chat_id": 55}}
+                },
+                "platforms": {"telegram": True, "signal": {"enabled": True}},
+                "telegram": {"enabled": True},
+                "unauthorized_dm_behavior": "pair",
+            },
+            {"LAZ": fx.TOKEN},
+        )
+        self.assertEqual((token, home, enabled), (fx.TOKEN, "55", True))
+        self.assertEqual(evidence["token_sources"], ["config:gateway.telegram.token"])
+        self.assertEqual(
+            evidence["home_channel_sources"], ["config:gateway.telegram.home_channel"]
+        )
+        failing = (
+            (
+                {"gateway": {"telegram": {"token": "${MISSING}"}}},
+                {},
+                "no token resolves",
+            ),
+            ({"telegram": {"enabled": True}}, {}, "no token resolves"),
+            ({"platforms": {"telegram": "true"}}, {}, "no token resolves"),
+            (
+                {"gateway": {"telegram": {"token": "2:" + "z" * 35}}},
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "token sources disagree",
+            ),
+            (
+                {
+                    "telegram": {"home_channel": 9},
+                    "gateway": {"telegram": {"home_channel": 8}},
+                },
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "home channel sources disagree",
+            ),
+            (
+                {
+                    "gateway": {
+                        "platforms": {"telegram": {"enabled": True, "token": fx.TOKEN}},
+                        "telegram": {"enabled": False, "token": fx.TOKEN},
+                    }
+                },
+                {},
+                "enablement sources disagree: gateway.platforms.telegram.enabled=on, "
+                "gateway.telegram.enabled=off",
+            ),
+            (
+                {"platforms": {"telegram": "FALSE"}, "telegram": {"enabled": "TRUE"}},
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "enablement sources disagree",
+            ),
+            (
+                {"gateway": {"telegram": {"enabled": "sometimes"}}},
+                {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                "enablement gateway.telegram.enabled is not a boolean",
+            ),
+        )
+        for config, env, message in failing:
+            with self.subTest(message=message, config=config):
+                with self.assertRaisesRegex(migration.MigrationError, message):
+                    fidelity.telegram_source(config, env)
+        # Quoted booleans normalize once, in any case.
+        for word, expected in (("TRUE", True), (" True ", True), ("False", False)):
+            with self.subTest(word=word):
+                _, _, enabled, evidence = fidelity.telegram_source(
+                    {"gateway": {"platforms": {"telegram": {"enabled": word}}}},
+                    {"TELEGRAM_BOT_TOKEN": fx.TOKEN},
+                )
+                self.assertIs(enabled, expected)
+                self.assertEqual(
+                    evidence["enablement_sources"],
+                    ["gateway.platforms.telegram.enabled"],
+                )
+        # The same value in two blocks is not a disagreement.
+        _, _, enabled, _ = fidelity.telegram_source(
+            {
+                "gateway": {"telegram": {"enabled": "true", "token": fx.TOKEN}},
+                "platforms": {"telegram": True},
+            },
+            {},
+        )
+        self.assertTrue(enabled)
+        plan = fidelity._plan_config(
+            {
+                "telegram": {"enabled": True},
+                "platforms": {},
+                "unauthorized_dm_behavior": "x",
+            }
+        )
+        for key in ("telegram", "platforms", "unauthorized_dm_behavior"):
+            self.assertIn(key, plan["withheld_top_level_keys"])
+
+    def test_files_added_to_a_managed_skill_make_it_review_only(self) -> None:
+        # SKILL.md still matches its .runtime-managed record, but the bot added
+        # a support file beside it; a bundled skill with no recorded hash
+        # cannot be shown unmodified either.
+        for base in (self.root / "source-home/.hermes", self.bundle / "payload/hermes"):
+            (base / "skills/devops/overlay-helper/owner-added.py").write_text(
+                'print("owner implementation")\n'
+            )
+            (base / "skills/.bundled_manifest").write_text("apple-notes:\n")
+        self.rewrite_source_file(".hermes/skills/.bundled_manifest", "apple-notes:\n")
+        plan = self.manifest()["fidelity"]["skills"]
+        managed = {item["path"] for item in plan["managed_not_activated"]}
+        self.assertNotIn("devops/overlay-helper", managed)
+        self.assertNotIn(fx.BUNDLED_SKILL, managed)
+        review = {item["path"]: item for item in plan["review_only"]}
+        self.assertEqual(
+            review["devops/overlay-helper"]["reason"],
+            "box1-managed-skill-modified-in-source",
+        )
+        self.assertEqual(review["devops/overlay-helper"]["added_file_count"], "1")
+        self.assertEqual(review["devops/overlay-helper"]["modified_file_count"], "0")
+        self.assertEqual(
+            review[fx.BUNDLED_SKILL]["reason"], "hermes-bundled-unverified"
+        )
+        target, receipt = self.installed()
+        skills = target / "agent/hermes-home/skills"
+        self.assertFalse((skills / "devops/overlay-helper").exists())
+
+    def test_missing_skill_layout_is_visible_and_activates_nothing(self) -> None:
+        import shutil
+
+        skills = self.bundle / "payload/hermes/skills"
+        (skills / ".bundled_manifest").unlink()
+        shutil.rmtree(self.root / "source-home/.hermes/.runtime-managed")
+        (self.root / "source-home/.hermes/skills/.bundled_manifest").unlink()
+        self.rewrite_source_file("make_post.py", "print('x')\n")
+        plan = self.manifest()["fidelity"]["skills"]
+        self.assertEqual(
+            plan["layout"]["status"], "unconfirmed-every-skill-review-only"
+        )
+        self.assertEqual(plan["user"], [])
+        self.assertIn(
+            (fx.USER_SKILL, "skill-layout-unconfirmed"),
+            [(item["path"], item["reason"]) for item in plan["review_only"]],
+        )
+        target = fx.build_target(self.root)
+        receipt = self.install(target)
+        skills_receipt = receipt["fidelity"]["installed"]["skills"]
+        self.assertEqual(skills_receipt["activated"], [])
+        self.assertEqual(
+            skills_receipt["layout"]["status"], "unconfirmed-every-skill-review-only"
+        )
+
+    def test_adopted_settings_that_target_validation_rejects_fail_closed(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+
+        def validate(config: dict) -> list[dict]:
+            if config.get("timezone") == fx.TIMEZONE:
+                return [{"severity": "error", "message": "synthetic rejection"}]
+            return [{"severity": "warning", "message": "pre-existing"}]
+
+        self.assert_fails_without_mutation(
+            target,
+            r"fail target Hermes config validation: 1 new error\(s\) in timezone;",
+            hooks=self.make_hooks(validate_config=validate),
+        )
+        # The real target validator accepts the adopted census settings.
+        receipt = self.install(target)
+        self.assertEqual(
+            receipt["fidelity"]["installed"]["config"]["validation"]["validated"],
+            "target-validate_config_structure",
+        )
+
+    def test_validator_exception_text_is_not_reported(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+
+        def validate(config: dict) -> list[dict]:
+            if config.get("timezone") == fx.TIMEZONE:
+                raise ValueError(f"cannot parse {fx.SECRET_VALUES[1]!r}")
+            return []
+
+        with self.assertRaises(migration.MigrationError) as raised:
+            self.install(target, hooks=self.make_hooks(validate_config=validate))
+        message = str(raised.exception)
+        self.assertIn("validation raised ValueError", message)
+        for secret in fx.SECRET_VALUES:
+            self.assertNotIn(secret, message)
+        self.assertIsNone(raised.exception.__cause__)
+
+    def test_recent_pending_pairing_code_survives_and_is_approvable(self) -> None:
+        self.rebuild(datetime.now(timezone.utc).replace(microsecond=0))
+        self.hooks = self.make_hooks()
+        target, _ = self.installed()
+        output = run_hermes(
+            target / "agent/hermes-home",
+            self.scratch_home,
+            "import json; from gateway.pairing import PairingStore; s = PairingStore(); "
+            "pending = s.list_pending('telegram'); "
+            f"approved = s.approve_code('telegram', '{fx.PENDING_CODE}'); "
+            f"print(json.dumps([len(pending), approved, s.is_approved('telegram', '{fx.PENDING_ID}')]))",
+        )
+        pending, approved, is_approved = json.loads(output.strip().splitlines()[-1])
+        self.assertEqual(pending, 1)
+        self.assertEqual(approved["user_id"], str(fx.PENDING_ID))
+        self.assertTrue(is_approved)
+
+    def test_rollback_keeps_going_when_one_step_fails(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        before = self.tree(target)
+        original_config = (target / "agent/hermes-home/config.yaml").read_bytes()
+        real_replace = os.replace
+        failed: list[tuple[Path, Path]] = []
+
+        def flaky_replace(source, destination, *args, **kwargs):
+            # Fail the first restore of a backed-up file during rollback.
+            if "preimport-state/full-fidelity" in str(source) and not failed:
+                failed.append((Path(source), Path(destination)))
+                raise OSError("synthetic restore failure")
+            return real_replace(source, destination, *args, **kwargs)
+
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json", side_effect=OSError("disk")
+            ),
+            mock.patch("legacy_hermes_fidelity.os.replace", flaky_replace),
+            self.assertRaises(OSError) as raised,
+        ):
+            self.install(target)
+        self.assertEqual(len(failed), 1)
+        backup, original = failed[0]
+        self.assertEqual(original.name, "config.yaml")
+        note = next(n for n in raised.exception.__notes__ if "rollback incomplete" in n)
+        self.assertIn("kept in migration/legacy-hermes-v2/", note)
+        # The backup that failed to restore survives with the original bytes.
+        self.assertEqual(backup.read_bytes(), original_config)
+        after = self.tree(target)
+        # Placed files and the other restores still happened.
+        self.assertFalse((target / "workspace/legacy-box1/Downloads").exists())
+        self.assertFalse((target / "agent/hermes-home/cron/jobs.json").exists())
+        changed = {
+            key for key in set(before) | set(after) if before.get(key) != after.get(key)
+        }
+        self.assertTrue(
+            {key for key in changed if not key.startswith("migration")}
+            <= {"agent/hermes-home/config.yaml"},
+            changed,
+        )
+        self.assertEqual(
+            after["agent/hermes-home/SOUL.md"], before["agent/hermes-home/SOUL.md"]
+        )
+        # A retry is refused until the operator restores the archive.
+        with self.assertRaisesRegex(
+            migration.MigrationError, "restore the pre-import archive before retrying"
+        ):
+            self.install(target)
+
+    def test_cli_reports_an_incomplete_rollback_on_stderr(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        real_replace = os.replace
+        failed: list[str] = []
+
+        def flaky_replace(source, destination, *args, **kwargs):
+            if "preimport-state/full-fidelity" in str(source) and not failed:
+                failed.append(str(source))
+                raise OSError("synthetic restore failure")
+            return real_replace(source, destination, *args, **kwargs)
+
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json",
+                side_effect=migration.MigrationError("synthetic receipt failure"),
+            ),
+            mock.patch("legacy_hermes_fidelity.os.replace", flaky_replace),
+        ):
+            code, out, err = self.run_cli(self.install_cli_args(target))
+        self.assertEqual(code, 1, err)
+        self.assertIn("error: synthetic receipt failure", err)
+        self.assertIn("note: rollback incomplete", err)
+        self.assertIn("kept in migration/legacy-hermes-v2/", err)
+        self.assert_no_fixture_secret(out, err)
+
+    def test_failed_database_restore_keeps_the_original_database(self) -> None:
+        self.manifest()
+        target = fx.build_target(self.root)
+        state_db = target / "agent/hermes-home/state.db"
+        with sqlite3.connect(state_db) as db:
+            db.execute("CREATE TABLE preimport_history(value TEXT)")
+            db.execute("INSERT INTO preimport_history VALUES ('target chat before')")
+        db.close()
+        original_bytes = state_db.read_bytes()
+        real_replace = os.replace
+        failed: list[Path] = []
+
+        def fail_database_restore(source, destination, *args, **kwargs):
+            if str(source).endswith("preimport-state/state.db"):
+                failed.append(Path(source))
+                raise OSError("synthetic database restore failure")
+            return real_replace(source, destination, *args, **kwargs)
+
+        with (
+            mock.patch(
+                "legacy_hermes_target._write_private_json", side_effect=OSError("disk")
+            ),
+            mock.patch("legacy_hermes_target.os.replace", fail_database_restore),
+            self.assertRaises(OSError) as raised,
+        ):
+            self.install(target)
+        self.assertEqual(len(failed), 1)
+        self.assertTrue(
+            any("restore state.db" in note for note in raised.exception.__notes__)
+        )
+        # The original database is kept byte for byte where the note points,
+        # and no half-imported database is left active.
+        self.assertEqual(failed[0].read_bytes(), original_bytes)
+        self.assertFalse(state_db.exists())
+
+    def test_poller_check_reports_codes_and_never_the_token(self) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        status = {"getUpdates": 409}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args) -> None:
+                return None
+
+            def do_GET(self) -> None:
+                method = self.path.split("?")[0].rsplit("/", 1)[-1]
+                code = status.get(method, 200)
+                body = {
+                    "ok": code == 200,
+                    "result": []
+                    if method == "getUpdates"
+                    else {"url": "", "pending_update_count": 2},
+                }
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.manifest()
+        target = fx.build_target(self.root)
+        self.install(target)
+        config_path = target / "agent/hermes-home/config.yaml"
+        config = yaml.safe_load(config_path.read_text())
+        config["gateway"]["platforms"]["telegram"]["extra"]["base_url"] = (
+            f"http://127.0.0.1:{server.server_address[1]}/bot"
+        )
+        config_path.write_text(yaml.safe_dump(config))
+        for code, safe in ((409, False), (200, True)):
+            status["getUpdates"] = code
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                exit_code = migration.main(
+                    ["telegram-poller-check", "--target-root", str(target)]
+                )
+            result = json.loads(out.getvalue())
+            self.assertEqual(result["other_poller_detected"], code == 409)
+            self.assertEqual(result["safe_to_start"], safe)
+            self.assertEqual(result["pending_update_count"], 2)
+            self.assertEqual(exit_code, 0 if safe else 3)
+            self.assertNotIn(fx.TOKEN, out.getvalue())
+            self.assertNotIn(fx.TOKEN.split(":")[1], out.getvalue())
+
+
+class RunbookOutageTests(unittest.TestCase):
+    """The cutover runbook measures the outage from box1's stop request."""
+
+    RUNBOOK = ROOT / "infra/runbooks/legacy-hermes-box1-to-v2.md"
+
+    def test_outage_starts_before_the_source_stop_request(self) -> None:
+        text = self.RUNBOOK.read_text()
+        step5 = text[text.index("### 5. Freeze the bot on box1") :]
+        step5 = step5[: step5.index("### 6.")]
+        stop_request = step5.index("STOP_REQUESTED_AT=$(date -u")
+        scale = step5.index("kubectl scale")
+        deleted = step5.index("--for=delete")
+        stopped = step5.index("SOURCE_STOPPED_AT=$(date -u")
+        self.assertLess(stop_request, scale)
+        self.assertLess(deleted, stopped)
+        self.assertIn(
+            "outage is `FIRST_REPLY_AT` minus `STOP_REQUESTED_AT`",
+            " ".join(text.split()),
+        )
+        for mark in ("TARGET_READY_AT", "RESTART_AT", "FIRST_REPLY_AT"):
+            self.assertIn(mark, text)
+        self.assertNotIn("FREEZE_AT", text)
+        self.assertIn("source shutdown bound", " ".join(text.split()))
+
+
+class TelegramGateTests(unittest.TestCase):
+    """The behavioral qualification against this interpreter's real adapter."""
+
+    def copy_adapter(self, edit=None) -> Path:
+        import shutil
+
+        from hermes_cli.plugins import get_bundled_plugins_dir
+
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, True)
+        source = get_bundled_plugins_dir() / "platforms/telegram"
+        shutil.copytree(
+            source,
+            root / "platforms/telegram",
+            ignore=shutil.ignore_patterns("__pycache__"),
+        )
+        adapter = root / "platforms/telegram/adapter.py"
+        adapter.chmod(0o644)
+        if edit is not None:
+            text = adapter.read_text()
+            edited = edit(text)
+            self.assertNotEqual(edited, text, "the edit did not apply")
+            adapter.write_text(edited)
+        return root
+
+    def test_patched_adapter_qualifies_with_a_stable_fingerprint(self) -> None:
+        import legacy_hermes_telegram_gate as gate
+
+        root = self.copy_adapter()
+        first = gate.qualify_target_telegram(plugins_dir=root)
+        self.assertTrue(first["qualified"], first)
+        self.assertEqual(first["capability"], gate.REQUIRED_CAPABILITY)
+        second = gate.qualify_target_telegram(plugins_dir=root)
+        self.assertEqual(first["fingerprint"], second["fingerprint"])
+        self.assertEqual(first["probes"]["control"]["conflict_drop_requests"], 1)
+
+    def test_helper_kept_but_a_call_site_reverted_is_rejected(self) -> None:
+        import legacy_hermes_telegram_gate as gate
+
+        cases = {
+            "conflict-retry-drops-queue": lambda text: text.replace(
+                "drop_pending_updates=self._finite_drop_pending_updates(\n"
+                '                        "conflict-retry", True\n'
+                "                    ),",
+                "drop_pending_updates=True,",
+            ),
+            "cold-start-drops-queue": lambda text: text.replace(
+                "drop_pending_updates=self._finite_drop_pending_updates(\n"
+                '                        "cold-start", not is_reconnect\n'
+                "                    ),",
+                "drop_pending_updates=not is_reconnect,",
+            ),
+        }
+        for reason, edit in cases.items():
+            with self.subTest(reason=reason):
+                root = self.copy_adapter(edit)
+                text = (root / "platforms/telegram/adapter.py").read_text()
+                self.assertIn("def _preserve_pending_updates_on_start", text)
+                self.assertIn(gate.REQUIRED_CAPABILITY, text)
+                verdict = gate.qualify_target_telegram(plugins_dir=root)
+                self.assertFalse(verdict["qualified"])
+                self.assertIn(reason, verdict["reasons"])
+                self.assertIn("patched-call-sites-not-exercised", verdict["reasons"])
+
+    def test_a_missing_or_old_capability_marker_is_rejected(self) -> None:
+        import legacy_hermes_telegram_gate as gate
+
+        root = self.copy_adapter(
+            lambda text: text.replace(
+                '"finite.telegram.preserve-pending/2"',
+                '"finite.telegram.preserve-pending/1"',
+            )
+        )
+        verdict = gate.qualify_target_telegram(plugins_dir=root)
+        self.assertFalse(verdict["qualified"])
+        self.assertEqual(
+            verdict["reasons"], ["capability-marker-missing-or-wrong-version"]
+        )
+
+    def test_a_marker_in_a_comment_is_not_a_capability(self) -> None:
+        import legacy_hermes_telegram_gate as gate
+
+        root = self.copy_adapter(
+            lambda text: (
+                "# "
+                + gate.REQUIRED_CAPABILITY
+                + " _preserve_pending_updates_on_start\n"
+            )
+        )
+        verdict = gate.qualify_target_telegram(plugins_dir=root)
+        self.assertFalse(verdict["qualified"])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -455,7 +455,7 @@ jobs:
         env:
           HERMES_AGENT_PYTHON: ${{ steps.hermes_agent_runtime.outputs.python }}
         run: |
-          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/scripts/tests" -p 'test_legacy_hermes_migration.py'
+          "$HERMES_AGENT_PYTHON" -m unittest discover -s "$GITHUB_WORKSPACE/scripts/tests" -p 'test_legacy_hermes_*.py'
 
       - name: Chat reliability fast gate (Hermes adapter)
         env:
