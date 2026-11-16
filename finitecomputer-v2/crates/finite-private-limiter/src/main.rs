@@ -69,6 +69,10 @@ fn config_from_env() -> Result<LimiterConfig> {
         config.upstream_stream_idle_timeout,
     )?;
     config.numes = NumesConfig::from_env()?;
+    config.model_catalog = optional_nonempty_env("FINITE_PRIVATE_MODEL_CATALOG_JSON")?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .context("FINITE_PRIVATE_MODEL_CATALOG_JSON must be valid model catalogue metadata")?;
     config.watchdog = WatchdogConfig {
         enabled: bool_env("FINITE_PRIVATE_WATCHDOG_ENABLED")?,
         interval: duration_env(

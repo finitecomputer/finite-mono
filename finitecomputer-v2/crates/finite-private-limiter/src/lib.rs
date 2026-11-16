@@ -16,8 +16,10 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::{sleep, timeout};
 
 mod metrics;
+mod models;
 mod numes;
 use metrics::{LimiterMetrics, RequestTimer, TerminalOutcome};
+pub use models::{ModelCatalogConfig, ModelPricing};
 pub use numes::NumesConfig;
 
 const USAGE_FORMULA_VERSION: &str = "2026-05-26.v1";
@@ -71,6 +73,8 @@ pub struct LimiterConfig {
     pub default_enable_thinking: Option<bool>,
     /// Independent marketplace admission. Absent by default; never uses Core grants.
     pub numes: Option<NumesConfig>,
+    /// Public discovery metadata for the canonical chat model. No aliases or secrets.
+    pub model_catalog: Option<ModelCatalogConfig>,
 }
 
 /// Admission operating mode. See [`LimiterConfig`](struct.LimiterConfig.html)
@@ -121,6 +125,7 @@ impl LimiterConfig {
             default_reasoning_effort: None,
             default_enable_thinking: None,
             numes: None,
+            model_catalog: None,
         }
     }
 }
@@ -171,6 +176,8 @@ pub enum LimiterConfigError {
     InvalidModelRouting(String),
     #[error("invalid Numes configuration: {0}")]
     InvalidNumesConfig(String),
+    #[error("invalid model catalogue: {0}")]
+    InvalidModelCatalog(String),
 }
 
 impl LimiterConfig {
@@ -220,6 +227,9 @@ impl LimiterConfig {
 
 pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
     validate_config(&config)?;
+    if let Some(catalog) = &config.model_catalog {
+        catalog.validate()?;
+    }
     if let Some(numes) = &config.numes {
         numes.validate()?;
         if !config
@@ -274,6 +284,7 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
         .route("/health", get(health))
         .route("/ready", get(health))
         .route("/metrics", get(metrics))
+        .route("/v1/models", get(models::list))
         .route("/v1/chat/completions", post(proxy_openai))
         .route("/v1/responses", post(proxy_openai))
         .route(
