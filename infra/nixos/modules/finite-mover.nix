@@ -200,7 +200,7 @@ in
       type = lib.types.package;
       default = finitePackages.finite-mover;
       defaultText = lib.literalExpression "finitePackages.finite-mover";
-      description = "The mover, from the same release as Core.";
+      description = "The mover. lat-2 builds it from its host revision, with Core on the app pin (hosts/finite-lat-2/mover.nix).";
     };
     corePackage = lib.mkOption {
       type = lib.types.package;
