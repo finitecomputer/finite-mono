@@ -23,8 +23,8 @@ Gmail, Calendar, Drive, Contacts, Sheets, and Docs through the pinned `gws`
 contain `gws`; do not download or replace it at task time.
 
 On finitecomputer, prefer the dashboard Google Workspace connect flow first.
-If the machine page already shows Google Workspace as connected, do not tell the
-user to create their own Google Cloud project. Only fall back to manual OAuth
+If the machine page already shows Google Workspace as connected, use that
+connection; the user never needs their own Google Cloud project. Only fall back to manual OAuth
 client setup when the dashboard flow is unavailable or explicitly broken.
 
 ## References
