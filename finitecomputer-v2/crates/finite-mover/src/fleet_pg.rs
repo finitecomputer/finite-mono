@@ -16,12 +16,14 @@
 //!   never acted on. A Recovery Snapshot already taken is the retirement's
 //!   receipt.
 //!
-//! - **Its brains:** those finite-brain says its person owns, by the
-//!   agent's npub, the key Core pinned from its health reports
-//!   ([`crate::brains`]).
+//! - **Its keys:** the agent's own, the npub Core pinned from its health
+//!   reports, and its person's: each hosted key Core observed for the
+//!   project's owner, and the hosted chat account its creation named
+//!   (`FINITECHAT_OWNER_NPUBS`), the same key. The host reader places each
+//!   brain's owner by them; every brain comes, whoever owns it.
 //!
-//! Sites and which secrets an agent holds are not Core's: the roster lists
-//! none of them yet (the ops notes say where they come from).
+//! Brains, sites and which secrets an agent holds are not Core's: the
+//! roster lists none of them yet (the ops notes say where they come from).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -29,17 +31,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio_postgres::NoTls;
 
-use crate::brains::{BrainOwners, BrainsReader};
-use crate::contract::{
-    Has, OldBrain, ROSTER_AGENTS_MAX, Roster, RosterAgent, RosterPerson, valid_old,
-};
+use crate::contract::{Has, ROSTER_AGENTS_MAX, Roster, RosterAgent, RosterPerson, valid_old};
 use crate::fleet::{Binding, Fleet, FleetError};
 use crate::sizes::SizesCache;
 
 pub struct PgFleet {
     conninfo: String,
     sizes_file: PathBuf,
-    brains: BrainsReader,
 }
 
 /// Each runtime's spec, as Core picks it for a control.
@@ -57,7 +55,17 @@ const RUNTIME_COLUMNS: &str = "
        spec.id IS NOT NULL AS has_creation_row, spec.runtime_spec IS NOT NULL AS has_spec,
        spec.runtime_spec->>'schema' AS spec_schema,
        spec.runtime_spec->'spec'->>'agentRuntimeId' AS spec_runtime_id,
-       spec.runtime_spec->'spec'->>'durableStateId' AS spec_durable_state_id";
+       spec.runtime_spec->'spec'->>'durableStateId' AS spec_durable_state_id,
+       ARRAY(
+         SELECT principal.public_key_hex FROM projects AS owned
+         JOIN account_brain_principals AS principal
+           ON principal.user_id = owned.owner_user_id AND principal.status = 'active'
+         WHERE owned.id = runtime.project_id
+         UNION
+         SELECT request.owner_chat_account_id FROM agent_creation_requests AS request
+         WHERE request.project_id = runtime.project_id AND request.owner_chat_account_id IS NOT NULL
+         ORDER BY 1 LIMIT 64
+       ) AS person_keys";
 
 /// The live old agents, with their owner and binding.
 fn live_query() -> String {
@@ -96,11 +104,10 @@ LIMIT 1"
 }
 
 impl PgFleet {
-    pub fn new(conninfo: &str, sizes_file: &Path, brains: BrainsReader) -> Self {
+    pub fn new(conninfo: &str, sizes_file: &Path) -> Self {
         Self {
             conninfo: conninfo.to_string(),
             sizes_file: sizes_file.to_path_buf(),
-            brains,
         }
     }
 
@@ -130,22 +137,14 @@ impl PgFleet {
         })
     }
 
-    /// Every live old agent's binding, with its brains, for the daily
-    /// `sizes` run.
+    /// Every live old agent's binding, for the daily `sizes` run.
     pub fn live(&self) -> Result<Vec<Binding>, FleetError> {
-        let owners = self.brains.read()?;
         Ok(self
             .query(&live_query(), &[])?
             .iter()
             .filter_map(binding_of)
-            .map(|binding| with_brains(binding, &owners))
             .collect())
     }
-}
-
-fn with_brains(mut binding: Binding, owners: &BrainOwners) -> Binding {
-    binding.owned_brains = owners.of(binding.agent_npub.as_deref());
-    binding
 }
 
 /// A row's binding, or `None` when Core's rule gives this mover nothing
@@ -186,7 +185,7 @@ fn binding_of(row: &tokio_postgres::Row) -> Option<Binding> {
         source_machine_id,
         durable_state_id,
         agent_npub: row.get("agent_npub"),
-        owned_brains: Vec::new(),
+        person_keys: row.get("person_keys"),
         retired_receipt: row.try_get("retired_receipt").ok().flatten(),
     })
 }
@@ -194,15 +193,14 @@ fn binding_of(row: &tokio_postgres::Row) -> Option<Binding> {
 impl Fleet for PgFleet {
     fn roster(&self) -> Result<Roster, FleetError> {
         let sizes = SizesCache::read(&self.sizes_file);
-        let owners = self.brains.read()?;
         let mut people: BTreeMap<String, RosterPerson> = BTreeMap::new();
         for row in self.query(&live_query(), &[])? {
             let old: String = row.get("old");
             // An id the wire can't carry, or a runtime whose spec isn't its
             // own, is left off the roster: never offered, never moved.
-            let Some(binding) = binding_of(&row).filter(|_| valid_old(&old)) else {
+            if !valid_old(&old) || binding_of(&row).is_none() {
                 continue;
-            };
+            }
             let workos_id: String = row.get("workos_user_id");
             let person = people
                 .entry(workos_id.clone())
@@ -220,16 +218,7 @@ impl Fleet for PgFleet {
                 name: row.get("display_name"),
                 picture_url: row.get("profile_picture_url"),
                 last_active_ms: None,
-                // Not measured apart: its bytes are in the agent's `move`.
-                brains: owners
-                    .of(binding.agent_npub.as_deref())
-                    .into_iter()
-                    .map(|brain| OldBrain {
-                        id: brain.id,
-                        title: brain.name,
-                        bytes: 0,
-                    })
-                    .collect(),
+                brains: Vec::new(),
                 sites: Vec::new(),
                 has: Has::default(),
             });
@@ -251,9 +240,5 @@ impl Fleet for PgFleet {
             binding.old = old.to_string();
             Some(binding)
         }))
-    }
-
-    fn with_owned_brains(&self, binding: Binding) -> Result<Binding, FleetError> {
-        Ok(with_brains(binding, &self.brains.read()?))
     }
 }

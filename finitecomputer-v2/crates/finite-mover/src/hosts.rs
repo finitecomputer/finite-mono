@@ -5,11 +5,15 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::process::{ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use finite_mover_host::brains::PERSON_KEYS_MAX;
+use finite_mover_host::overrides::{OVERRIDES_MAX, parse_path};
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::child::{Watched, run_within};
@@ -33,6 +37,21 @@ pub struct HostCommands {
     /// How long a reader may send nothing while the mover waits on it
     /// (`HOST_IDLE`).
     pub idle: Duration,
+    /// The operator's overrides file ([`HostCommands::overrides`]).
+    pub overrides: Option<PathBuf>,
+}
+
+/// The largest overrides file read.
+const OVERRIDES_FILE_MAX: u64 = 64 * 1024;
+
+/// One entry of the overrides file.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Overrides {
+    #[serde(default)]
+    carry: Vec<String>,
+    #[serde(default)]
+    leave: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +60,8 @@ pub enum HostError {
     Unknown(String),
     #[error("the host reader could not be started: {0}")]
     NotRun(String),
+    #[error("the operator's overrides: {0}")]
+    Overrides(String),
 }
 
 impl HostCommands {
@@ -57,14 +78,53 @@ impl HostCommands {
         Ok(command)
     }
 
-    /// `sizes <durable_state_id> [--brain <id>]...`: the host reader's
-    /// summary from metadata alone (it opens no file), as the roster counts.
-    /// It answers only at its end, so it has `idle` to do so.
+    /// The operator's overrides for old agent `old`, as the host reader's
+    /// words (`--carry`, `--leave`, each path's UTF-8 in hex), read now
+    /// from the overrides file: `{"<old>" or "*": {"carry": [<path>, ...],
+    /// "leave": [<path>, ...]}}`, each path relative to the durable tree.
+    /// No file changes nothing; one that can't be read, or a path the
+    /// reader would refuse, is an error.
+    pub fn overrides(&self, old: &str) -> Result<Vec<String>, HostError> {
+        let Some(path) = &self.overrides else {
+            return Ok(Vec::new());
+        };
+        let refused = |why: String| HostError::Overrides(format!("{}: {why}", path.display()));
+        let file = match std::fs::File::open(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            other => other.map_err(|error| refused(error.to_string()))?,
+        };
+        let mut bytes = Vec::new();
+        file.take(OVERRIDES_FILE_MAX + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| refused(error.to_string()))?;
+        if bytes.len() as u64 > OVERRIDES_FILE_MAX {
+            return Err(refused(format!("over {OVERRIDES_FILE_MAX} bytes")));
+        }
+        let entries: BTreeMap<String, Overrides> =
+            serde_json::from_slice(&bytes).map_err(|error| refused(error.to_string()))?;
+        let mut words = Vec::new();
+        for entry in ["*", old].iter().filter_map(|key| entries.get(*key)) {
+            for (flag, paths) in [("--carry", &entry.carry), ("--leave", &entry.leave)] {
+                for path in paths {
+                    parse_path(path).map_err(|error| refused(format!("{path:?}: {error}")))?;
+                    words.extend([flag.to_string(), hex::encode(path)]);
+                }
+            }
+        }
+        if words.len() / 2 > OVERRIDES_MAX {
+            return Err(refused(format!(
+                "more than {OVERRIDES_MAX} paths for {old}"
+            )));
+        }
+        Ok(words)
+    }
+
+    /// `sizes <durable_state_id> [--carry|--leave <hex path>]...`: the host
+    /// reader's summary from metadata alone (it opens no file), as the
+    /// roster counts. It answers only at its end, so it has `idle` to do so.
     pub fn sizes(&self, binding: &Binding) -> Result<crate::contract::Sizes, HostError> {
         let mut words = vec!["sizes".to_string(), binding.durable_state_id.clone()];
-        for brain in &binding.owned_brains {
-            words.extend(["--brain".to_string(), brain.id.clone()]);
-        }
+        words.extend(self.overrides(&binding.old)?);
         let (ended, stdout, stderr) = run_within(&mut self.command(binding, &words)?, self.idle)
             .map_err(|error| HostError::NotRun(error.to_string()))?;
         if !ended.status.success() {
@@ -109,25 +169,28 @@ impl HostCommands {
             .map_err(|_| HostError::NotRun("the host reader's secrets could not be read".into()))
     }
 
-    /// `stream <durable_state_id> --stage <stage id> [--brain <id>:<hex
-    /// name>]...`: the stage, as the host reader writes it, with each owned
-    /// brain's name file. The reader names its SimpleX
+    /// `stream <durable_state_id> --stage <stage id> [--agent-key <hex>]
+    /// [--person-key <hex>]... [--carry|--leave <hex path>]...`: the stage,
+    /// as the host reader writes it, with every brain and each one's name
+    /// file, whose owner the keys place, and the operator's `overrides`
+    /// (read before the agent was stopped). The reader names its SimpleX
     /// seal by the stage's id, and carries SimpleX only with one. Its
     /// failure, or its exit before the end, is a read error at the stream's
     /// end.
-    pub fn stream(&self, binding: &Binding, stage: &str) -> Result<HostStream, HostError> {
+    pub fn stream(
+        &self,
+        binding: &Binding,
+        stage: &str,
+        overrides: &[String],
+    ) -> Result<HostStream, HostError> {
         let mut words = vec![
             "stream".to_string(),
             binding.durable_state_id.clone(),
             "--stage".to_string(),
             stage.to_string(),
         ];
-        for brain in &binding.owned_brains {
-            words.extend([
-                "--brain".to_string(),
-                format!("{}:{}", brain.id, hex::encode(&brain.name)),
-            ]);
-        }
+        words.extend(owner_keys(binding));
+        words.extend(overrides.iter().cloned());
         let mut watched = Watched::spawn(
             self.command(binding, &words)?
                 .stdin(Stdio::null())
@@ -153,6 +216,30 @@ impl HostCommands {
 
 /// A host reader that exited unsuccessfully: its status and the last line
 /// it wrote to stderr (the reader puts no secret in an error).
+/// The keys that place each brain's owner, as the host reader takes them:
+/// 64 hex digits each, the agent's own and at most `PERSON_KEYS_MAX` of
+/// its person's. A key that isn't one is left out, and a brain it would
+/// have placed is `unknown`.
+fn owner_keys(binding: &Binding) -> Vec<String> {
+    let hex = |key: &str| nostr::PublicKey::parse(key).ok().map(|key| key.to_hex());
+    let mut words = Vec::new();
+    if let Some(agent) = binding.agent_npub.as_deref().and_then(hex) {
+        words.extend(["--agent-key".to_string(), agent]);
+    }
+    let mut people: Vec<String> = binding
+        .person_keys
+        .iter()
+        .filter_map(|key| hex(key))
+        .collect();
+    people.sort();
+    people.dedup();
+    people.truncate(PERSON_KEYS_MAX);
+    for person in people {
+        words.extend(["--person-key".to_string(), person]);
+    }
+    words
+}
+
 fn failed(status: &std::process::ExitStatus, stderr: &[u8]) -> HostError {
     let stderr = String::from_utf8_lossy(stderr);
     let last = stderr

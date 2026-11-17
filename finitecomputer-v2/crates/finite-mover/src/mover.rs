@@ -292,12 +292,13 @@ impl<'a> Mover<'a> {
                 format!("stage {stage} is not this command's"),
             ));
         }
-        // Before the stop: brains finite-brain can't list now never go
-        // missing from a stage; the command waits for the next run.
-        let binding = self
-            .fleet
-            .with_owned_brains(self.binding(command)?)
-            .map_err(|error| Stop::Platform(error.into()))?;
+        let binding = self.binding(command)?;
+        // Before the stop: overrides that can't be read never leave a stage
+        // without them; the command fails as it is, the agent still running.
+        let overrides = self
+            .hosts
+            .overrides(&binding.old)
+            .map_err(|error| Stop::Failed("overrides", error.to_string()))?;
         self.core
             .stop(&binding)
             .map_err(|error| Stop::Failed("stop", error.to_string()))?;
@@ -305,7 +306,7 @@ impl<'a> Mover<'a> {
         self.hand_off(command, &binding)?;
         let stream = self
             .hosts
-            .stream(&binding, &target.stage_id())
+            .stream(&binding, &target.stage_id(), &overrides)
             .map_err(|error| Stop::Failed("stream", error.to_string()))?;
         let mut last = Instant::now();
         let mut progress = |bytes: u64, files: u64| {

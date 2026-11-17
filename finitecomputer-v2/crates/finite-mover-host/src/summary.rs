@@ -74,6 +74,10 @@ impl Tallies {
             .map(|part| String::from_utf8_lossy(part))
             .collect::<Vec<_>>()
             .join("/");
+        // A name shaped like a credential leaves no credential in the
+        // stage: the uploader scans the summary too.
+        let prefix = String::from_utf8(crate::shapes::redact(prefix.as_bytes()))
+            .expect("redaction keeps UTF-8");
         self.left
             .entry((prefix, verdict.class, verdict.why))
             .or_default()

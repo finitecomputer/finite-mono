@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::brains::OwnedBrain;
 use crate::contract::Roster;
 
 /// One old agent's exact binding, as Core's `*-exact` commands check it.
@@ -23,13 +22,14 @@ pub struct Binding {
     pub source_machine_id: String,
     /// `<work root>/kata/<durable_state_id>` on its runner host.
     pub durable_state_id: String,
-    /// The npub its runtime signs with, as Core pinned it: the key
-    /// finite-brain knows the agent by.
+    /// The npub its runtime signs with, as Core pinned it: the key a
+    /// brain it owns names as its owner.
     #[serde(default)]
     pub agent_npub: Option<String>,
-    /// Brains its person owns, staged with it ([`Fleet::with_owned_brains`]).
+    /// Its person's keys Core knows, as hex: those a brain its person owns
+    /// names. With `agent_npub`, the host reader places each brain's owner.
     #[serde(default)]
-    pub owned_brains: Vec<OwnedBrain>,
+    pub person_keys: Vec<String>,
     /// Its retirement's receipt, once Core retired it: a retire command
     /// asked again marks it without retiring it twice.
     #[serde(default)]
@@ -47,11 +47,6 @@ pub trait Fleet {
     fn roster(&self) -> Result<Roster, FleetError>;
     /// `old`'s binding, or `None` if Core has no runtime for it.
     fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError>;
-    /// `binding` with the brains its person owns, read now. Only a stage
-    /// needs them; a file's bindings name them already.
-    fn with_owned_brains(&self, binding: Binding) -> Result<Binding, FleetError> {
-        Ok(binding)
-    }
 }
 
 /// A fleet written out by hand or by a test: `{roster, bindings: {old: …}}`.
@@ -89,5 +84,37 @@ impl Fleet for FileFleet {
 
     fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError> {
         Ok(self.read()?.bindings.remove(old))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file written for an older mover may name each binding's owned
+    /// brains (`"owned_brains": []` on the canary's): read and ignored.
+    #[test]
+    fn an_older_files_owned_brains_are_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet.json");
+        for owned in [
+            serde_json::json!([]),
+            serde_json::json!([{ "id": "b1", "name": "Notes" }]),
+        ] {
+            let file = serde_json::json!({
+                "roster": { "snapshot": "s", "observed_ms": 1, "people": [] },
+                "bindings": { "proj_a": {
+                    "old": "proj_a", "agent_runtime_id": "rt_a", "source_host_id": "lat-3",
+                    "source_machine_id": "m_a", "durable_state_id": "rt_a",
+                    "owned_brains": owned,
+                } },
+            });
+            std::fs::write(&path, file.to_string()).unwrap();
+            let binding = FileFleet::new(&path).binding("proj_a").unwrap().unwrap();
+            assert_eq!(
+                (binding.durable_state_id.as_str(), binding.person_keys.len()),
+                ("rt_a", 0)
+            );
+        }
     }
 }

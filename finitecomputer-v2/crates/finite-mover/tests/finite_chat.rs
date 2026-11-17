@@ -578,7 +578,8 @@ fn a_secret_path_refuses_the_whole_stage_before_its_bytes_leave() {
         "agent/hermes-home/config.yaml",
     ] {
         let fake = Fake::new();
-        let photo = vec![1; 6 * MIB];
+        // Binary, as a photo is: its bytes go as they stream.
+        let photo = [&[0u8; 16][..], &vec![1; 6 * MIB]].concat();
         let bytes = hand_stage(&[
             ("workspace/photos/cat.jpg", &photo),
             (secret, SECRET_MARKER),
@@ -621,6 +622,58 @@ fn a_secret_path_refuses_the_whole_stage_before_its_bytes_leave() {
     assert!(matches!(error, StageError::Refused { .. }), "{error}");
     assert_eq!(fake.calls(), ["GET parts"]);
     assert!(fake.chat().received.is_empty());
+}
+
+/// FIN-499: the backstop of the host reader's redaction. A stage whose
+/// text still holds a credential-shaped string is refused whole, and the
+/// part that holds it never leaves; a binary entry is not read for one.
+#[test]
+fn an_unredacted_token_refuses_the_whole_stage_before_it_leaves() {
+    const TOKEN: &[u8] = b"ghp_abcdefghij0123456789";
+    let fake = Fake::new();
+    let photo = [&[0u8; 16][..], &vec![1; 6 * MIB]].concat();
+    let mut jobs = b"{\"prompt\": \"post daily\"}\n".repeat(200_000);
+    jobs.extend_from_slice(b"{\"prompt\": \"use ");
+    jobs.extend_from_slice(TOKEN);
+    jobs.extend_from_slice(b"\"}\n");
+    let bytes = hand_stage(&[
+        ("workspace/photos/cat.jpg", &photo),
+        ("agent/hermes-home/cron/jobs.json", &jobs),
+        ("workspace/after.md", b"after"),
+    ]);
+    let error = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, StageError::RefusedText { path } if path == "agent/hermes-home/cron/jobs.json"),
+        "{error}"
+    );
+    let chat = fake.chat();
+    assert!(
+        !contains(&chat.received, TOKEN),
+        "no byte of the token arrived"
+    );
+    assert!(chat.completed.is_empty(), "no stage, no manifest");
+    drop(chat);
+
+    // A database holding one goes, as the host reader stages it.
+    let fake = Fake::new();
+    let database = [&b"SQLite format 3\0"[..], TOKEN].concat();
+    let bytes = hand_stage(&[("agent/hermes-home/state.db", &database)]);
+    upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(fake.chat().completed.len(), 1);
 }
 
 /// A central-directory signature where a local header belongs: the

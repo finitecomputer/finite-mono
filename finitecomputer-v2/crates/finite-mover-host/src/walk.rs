@@ -3,7 +3,9 @@
 //! stages by.
 //!
 //! For each entry it asks [`classify`]. Staging (`stream`), it then reads a
-//! file the path rules would stage for credentials ([`shapes::snapshot`]).
+//! file the path rules would stage for credentials ([`shapes::snapshot`]):
+//! a `history` text file that holds one is staged redacted (as phase 0's
+//! export did the SOUL and memories); any other is left.
 //! Measuring (`sizes`), it opens no regular file at all: its numbers come
 //! from `lstat` and the path rules alone, so they are an estimate of what
 //! `stream` stages. It never follows a link, never leaves the tree's
@@ -13,50 +15,36 @@ use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 
 use rustix::fs::{Dir, FileType, Stat};
 use rustix::io::Errno;
 
-use crate::classify::{
-    self, BUILD_DIRS, BrainScope, CONFIG_COPY_PATH, Class, EntryKind, Scope, Verdict, Why,
-};
+use crate::brains::{self, BRAIN_ROOT, Manifest};
+use crate::classify::{self, BUILD_DIRS, CONFIG_COPY_PATH, Class, EntryKind, Verdict, Why};
 use crate::config_copy::{CONFIG_MAX_BYTES, public_config};
 use crate::error::HostError;
+use crate::overrides::Overrides;
 use crate::shapes::{self, Snapshot};
 use crate::tree::{Tree, open_directory, open_regular, stat_entry};
 
 /// The deepest directory the walk enters; deeper is refused.
 pub const DEPTH_MAX: usize = 128;
-/// The largest `brain-directory.json` read.
-const BRAIN_DIRECTORY_MAX_BYTES: u64 = 1024 * 1024;
 /// `config.yaml`, whose allow-listed copy the walk makes.
 const HERMES_CONFIG: [&str; 3] = ["agent", "hermes-home", "config.yaml"];
 
-/// The brains the mover named as owned by this agent's person: each id,
-/// with its display name when the mover sent one.
-pub type OwnedBrains = BTreeMap<String, Option<String>>;
-
-/// Where `fbrain open` puts a brain's working tree (`FBRAIN_WORKING_TREE_ROOT`,
-/// `/data/workspace/finitebrain`), and beside it each owned brain's name
-/// file, `<id>.json`, which the stage writes (phase 0's export.py did the
-/// same; fragment's `finite-computer` import profile reads it).
-pub const BRAIN_ROOT: [&str; 2] = ["workspace", "finitebrain"];
-
-/// The name file of brain `id`, as its path in the tree and the stage.
-pub fn brain_name_path(id: &str) -> String {
-    format!("{}/{id}.json", BRAIN_ROOT.join("/"))
-}
+/// Each brain working tree in `workspace/finitebrain/`, by its folder's
+/// name, with its manifest when it was read ([`crate::brains`]).
+pub type Brains = BTreeMap<String, Option<Manifest>>;
 
 /// How the walk treats a tree that changes under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
     /// `sizes`: an estimate from metadata, while the agent may be running.
     /// No regular file is opened: an entry that vanishes is skipped, a text
-    /// file holding a credential counts in its path's class, there is no
-    /// config copy, and a brain tree counts as owned when its folder is
-    /// named by an owned brain's id (where `fbrain open` puts it).
+    /// file holding a credential counts in its path's class, and there is
+    /// no config copy and no brain's manifest.
     Measure,
     /// `stream`: the agent is stopped and its lease held, so any change is
     /// an error and the stage is abandoned.
@@ -95,36 +83,41 @@ pub trait Visit {
     fn staged(&mut self, name: &str, class: Class, source: Source) -> Result<(), HostError>;
 }
 
-/// Walk `tree`, staging only the brain working trees whose ids are in
-/// `owned_brains`. A file where a named owned brain's name file goes is
-/// left behind, replaced by the stage's own.
+/// Walk `tree` by the rules and the operator's `overrides`, and return
+/// the brain working trees it found, whose name files the stage writes. A
+/// file where one goes is left behind, replaced by the stage's own.
 pub fn walk(
     tree: &Tree,
-    owned_brains: &OwnedBrains,
+    overrides: &Overrides,
     mode: Mode,
     visit: &mut impl Visit,
-) -> Result<(), HostError> {
-    let walk = Walk {
+) -> Result<Brains, HostError> {
+    let mut walk = Walk {
         tree,
-        owned_brains,
+        overrides,
         mode,
+        brains: Brains::new(),
     };
     let root = rustix::io::dup(tree.root()).map_err(|error| walk.io(&[], error))?;
-    walk.directory(&root, &mut Vec::new(), BrainScope::None.into(), visit)
+    walk.directory(&root, &mut Vec::new(), None, visit)?;
+    Ok(walk.brains)
 }
 
 struct Walk<'a> {
     tree: &'a Tree,
-    owned_brains: &'a OwnedBrains,
+    overrides: &'a Overrides,
     mode: Mode,
+    brains: Brains,
 }
 
 impl Walk<'_> {
+    /// `build_output`: the number of components of the build folder the
+    /// directory is in, if any.
     fn directory(
-        &self,
+        &mut self,
         directory: &OwnedFd,
         path: &mut Vec<Vec<u8>>,
-        scope: Scope,
+        build_output: Option<usize>,
         visit: &mut impl Visit,
     ) -> Result<(), HostError> {
         if path.len() >= DEPTH_MAX {
@@ -141,7 +134,7 @@ impl Walk<'_> {
         });
         for name in names {
             path.push(name.to_bytes().to_vec());
-            self.entry(directory, &name, path, scope, project_here, visit)?;
+            self.entry(directory, &name, path, build_output, project_here, visit)?;
             path.pop();
         }
         Ok(())
@@ -164,11 +157,11 @@ impl Walk<'_> {
     }
 
     fn entry(
-        &self,
+        &mut self,
         directory: &OwnedFd,
         name: &CStr,
         path: &mut Vec<Vec<u8>>,
-        scope: Scope,
+        build_output: Option<usize>,
         project_here: bool,
         visit: &mut impl Visit,
     ) -> Result<(), HostError> {
@@ -184,18 +177,15 @@ impl Walk<'_> {
                 Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return self.vanished(path),
                 Err(error) => return Err(self.io(path, error)),
             };
-            let build_output = scope.build_output.or_else(|| {
+            let build_output = build_output.or_else(|| {
                 let in_workspace = path.first().map(Vec::as_slice) == Some(b"workspace");
                 let build_folder = BUILD_DIRS
                     .iter()
                     .any(|dir| path[path.len() - 1] == dir.as_bytes());
                 (in_workspace && project_here && build_folder).then_some(path.len())
             });
-            let scope = Scope {
-                brain: self.brain_scope(&child, path, scope.brain),
-                build_output,
-            };
-            return self.directory(&child, path, scope, visit);
+            self.find_brain(&child, path);
+            return self.directory(&child, path, build_output, visit);
         }
         // A file with another name may be outside the tree: it is never
         // read, like a symbolic link.
@@ -213,7 +203,9 @@ impl Walk<'_> {
             };
             return visit.left(&parts, replaced, file_bytes(&stat));
         }
-        let verdict = classify::classify(&parts, kind, scope);
+        let verdict =
+            self.overrides
+                .apply(&parts, kind, classify::classify(&parts, kind, build_output));
         if verdict.class.staged() {
             if self.mode == Mode::Measure {
                 return visit.staged("", verdict.class, Source::Measured(file_bytes(&stat)));
@@ -251,10 +243,11 @@ impl Walk<'_> {
             return Err(HostError::TreeChanged(display(&path())));
         }
         let size = file_bytes(&opened);
-        let read = shapes::snapshot(&mut file, size)
+        let redact = verdict.class == Class::History;
+        let read = shapes::snapshot(&mut file, size, redact)
             .map_err(|error| HostError::io(display(&path()), error))?;
         let why = match &read {
-            Snapshot::Binary | Snapshot::Text(_) => None,
+            Snapshot::Binary | Snapshot::Text(_) | Snapshot::Redacted { .. } => None,
             Snapshot::Secret => Some(Why::TokenInText),
             Snapshot::Uncheckable => Some(Why::UncheckableText),
         };
@@ -279,6 +272,12 @@ impl Walk<'_> {
                     return Err(HostError::TreeChanged(display(&path())));
                 }
                 Source::Text { bytes, stat }
+            }
+            Snapshot::Redacted { text, read } => {
+                if read != size && self.mode == Mode::Stage {
+                    return Err(HostError::TreeChanged(display(&path())));
+                }
+                Source::Text { bytes: text, stat }
             }
             _ => {
                 file.seek(SeekFrom::Start(0))
@@ -319,8 +318,9 @@ impl Walk<'_> {
         }
     }
 
-    /// A file at the path of a named owned brain's name file, which the
-    /// stage writes in its place.
+    /// A file at the path of a brain's name file, which the stage writes
+    /// in its place. Names are walked in order, so `<folder>/` has been
+    /// found before `<folder>.json` comes.
     fn replaced_by_name_file(&self, parts: &[&[u8]]) -> bool {
         let [workspace, root, file] = parts else {
             return false;
@@ -328,35 +328,27 @@ impl Walk<'_> {
         [*workspace, *root] == BRAIN_ROOT.map(str::as_bytes)
             && file
                 .strip_suffix(b".json")
-                .and_then(|id| std::str::from_utf8(id).ok())
-                .and_then(|id| self.owned_brains.get(id))
-                .is_some_and(Option::is_some)
+                .and_then(|folder| std::str::from_utf8(folder).ok())
+                .is_some_and(|folder| self.brains.contains_key(folder))
     }
 
-    /// Entering a directory that holds `.finitebrain/`: a brain working
-    /// tree, wherever `fbrain open` put it, owned only if the mover named
-    /// its id. An unowned tree's whole subtree stays unowned.
-    fn brain_scope(&self, directory: &OwnedFd, path: &[Vec<u8>], outer: BrainScope) -> BrainScope {
-        if matches!(outer, BrainScope::Brain { owned: false, .. }) {
-            return outer;
-        }
-        let is_brain = stat_entry(directory, c".finitebrain")
-            .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory);
-        if !is_brain {
-            return outer;
-        }
-        let owned = match self.mode {
-            // Measuring reads no file, not even the manifest.
-            Mode::Measure => std::str::from_utf8(&path[path.len() - 1])
-                .is_ok_and(|name| self.owned_brains.contains_key(name)),
-            Mode::Stage => {
-                brain_id(directory).is_some_and(|id| self.owned_brains.contains_key(&id))
-            }
+    /// Entering `workspace/finitebrain/<folder>/`: a brain working tree if
+    /// it holds `.finitebrain/`, whose manifest is read when staging.
+    fn find_brain(&mut self, directory: &OwnedFd, path: &[Vec<u8>]) {
+        let [workspace, root, folder] = path else {
+            return;
         };
-        BrainScope::Brain {
-            depth: path.len(),
-            owned,
-        }
+        let is_brain = [workspace.as_slice(), root.as_slice()] == BRAIN_ROOT.map(str::as_bytes)
+            && stat_entry(directory, c".finitebrain")
+                .is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::Directory);
+        let Some(folder) = std::str::from_utf8(folder).ok().filter(|_| is_brain) else {
+            return;
+        };
+        let manifest = match self.mode {
+            Mode::Measure => None,
+            Mode::Stage => brains::read_manifest(self.tree, directory),
+        };
+        self.brains.insert(folder.to_owned(), manifest);
     }
 
     fn vanished(&self, path: &[Vec<u8>]) -> Result<(), HostError> {
@@ -369,26 +361,6 @@ impl Walk<'_> {
     fn io(&self, path: &[Vec<u8>], error: Errno) -> HostError {
         HostError::io(display(path), error.into())
     }
-}
-
-/// The brain id in `.finitebrain/brain-directory.json`
-/// (finite-brain-core/src/portability.rs:355-386), if it can be read.
-fn brain_id(directory: impl AsFd) -> Option<String> {
-    let control = open_directory(directory, c".finitebrain").ok()?;
-    let file = open_regular(&control, c"brain-directory.json").ok()??;
-    let mut bytes = Vec::new();
-    file.take(BRAIN_DIRECTORY_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > BRAIN_DIRECTORY_MAX_BYTES {
-        return None;
-    }
-    let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    manifest
-        .get("brain")?
-        .get("id")?
-        .as_str()
-        .map(str::to_owned)
 }
 
 /// A regular file's size; nothing else holds bytes the move counts.

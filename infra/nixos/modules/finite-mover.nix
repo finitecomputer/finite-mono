@@ -3,13 +3,25 @@
 # finitecomputer-v2/crates). It reads Core's database through a read-only
 # role, changes Core only through four exact subcommands of Core's own CLI,
 # and reads each agent's tree on its Runner host over ssh, where
-# finite-mover-host.nix forces the reader. Which brains each agent's
-# person owns it reads from finite-brain's database, only through one
-# fixed command run as finite-brain's own user (FIN-499).
+# finite-mover-host.nix forces the reader.
 #
 # Two keys are made once, here on the host, and never leave it: the mover's
 # Nostr key (`mover.key`, which finite.chat knows by its npub) and its ssh
 # key for the Runner hosts. Neither is in the store, the repo or a log.
+#
+# What a stage carries can be tweaked live, with no release: root writes
+# /var/lib/finite-mover/overrides.json, which the mover reads on each run
+# (no file changes nothing). Each key is an old agent's Core project id, or
+# "*" for every agent; each path is relative to the agent's durable tree,
+# and covers everything under it:
+#
+#   { "*": { "leave": ["workspace/videos"] },
+#     "proj_123": { "carry": ["agent/hermes-home/sessions"] } }
+#
+# `carry` stages what a rule would leave as runtime, hidden or cache;
+# `leave` leaves what it would stage. A credential or a link is never
+# carried. A file the mover can't read, or a path it refuses, fails that
+# agent's stage before the agent is stopped.
 #
 # The timers are off until `timers.enable`: deploy first, give finite.chat
 # the npub, then turn them on. Delete this module with the rest of the move
@@ -76,44 +88,6 @@ let
       -- ${cfg.corePackage}/bin/finite-saas-core "$@"
   '';
 
-  # finite-brain's database, read for the mover by `finite-mover-brains`
-  # as the database's own owner (finite-brain's dynamic user), never as the
-  # mover: a file of the database another user makes (its `-shm`) is one
-  # finite-brain can't open (finite-litestream.nix). The owner is read off
-  # the database each time (a dynamic uid isn't fixed, and a transient
-  # DynamicUser unit doesn't share it); a root-owned database is refused.
-  # Its folder is bound in by systemd, which alone passes
-  # /var/lib/private; the reader opens it read-only, refuses one another
-  # user owns, and has no network.
-  brainMount = "/run/finite-mover-brain";
-  brainsWrapper = pkgs.writeShellScript "finite-mover-brains" ''
-    set -eu
-    if [ "$#" -ne 0 ]; then
-      echo "finite-mover-brains: takes no arguments" >&2
-      exit 64
-    fi
-    database=${lib.escapeShellArg cfg.brain.database}
-    owner=$(${pkgs.coreutils}/bin/stat -c %u "$database")
-    group=$(${pkgs.coreutils}/bin/stat -c %g "$database")
-    if [ "$owner" = 0 ] || [ "$group" = 0 ]; then
-      echo "finite-mover-brains: $database is root's; refusing" >&2
-      exit 1
-    fi
-    exec ${config.systemd.package}/bin/systemd-run \
-      --quiet --wait --pipe --collect \
-      --service-type=exec \
-      --description="finite-brain's owned brains, read for the finite.chat mover" \
-      --uid="$owner" --gid="$group" \
-      --property=BindPaths=${dirOf cfg.brain.database}:${brainMount} \
-      --property=PrivateNetwork=yes \
-      --property=PrivateTmp=yes \
-      --property=ProtectSystem=strict \
-      --property=ProtectHome=yes \
-      --property=NoNewPrivileges=yes \
-      --property=RuntimeMaxSec=120 \
-      -- ${cfg.package}/bin/finite-mover-brains ${brainMount}/${baseNameOf cfg.brain.database}
-  '';
-
   ssh = [
     "${pkgs.openssh}/bin/ssh"
     "-i"
@@ -137,11 +111,6 @@ let
     fleet.postgres = {
       conninfo = "host=/run/postgresql user=finite_mover dbname=${cfg.postgres.database}";
       sizes_file = "${stateDir}/sizes.json";
-      brains = [
-        "${config.security.wrapperDir}/sudo"
-        "-n"
-        "${brainsWrapper}"
-      ];
     };
     core = {
       inherit (cfg.core) program;
@@ -150,6 +119,7 @@ let
       wait_seconds = cfg.core.waitSeconds;
     };
     hosts = lib.mapAttrs (_: host: ssh ++ [ "finite-mover@${host.address}" ]) cfg.hosts;
+    overrides = "${stateDir}/overrides.json";
   };
 
   roleSql = "${cfg.package}/share/finite-mover/core-role.sql";
@@ -271,13 +241,6 @@ in
         ];
         defaultText = lib.literalExpression ''[ "/run/wrappers/bin/sudo" "-n" "<finite-mover-core>" ]'';
         description = "The command that runs Core's CLI; the subcommand follows.";
-      };
-    };
-    brain = {
-      database = lib.mkOption {
-        type = lib.types.str;
-        default = "/var/lib/private/finitebrain/finite-brain.sqlite3";
-        description = "finite-brain's database, at its real path under /var/lib/private (finite-brain.nix's FINITE_BRAIN_DB). Its owner reads it for the mover.";
       };
     };
     hosts = lib.mkOption {
@@ -405,18 +368,10 @@ in
       {
         users = [ "finite-mover" ];
         runAs = "root";
-        commands =
-          map (subcommand: {
-            command = "${coreWrapper} ${subcommand} *";
-            options = [ "NOPASSWD" ];
-          }) subcommands
-          # `""`: no arguments at all.
-          ++ [
-            {
-              command = ''${brainsWrapper} ""'';
-              options = [ "NOPASSWD" ];
-            }
-          ];
+        commands = map (subcommand: {
+          command = "${coreWrapper} ${subcommand} *";
+          options = [ "NOPASSWD" ];
+        }) subcommands;
       }
     ];
 
