@@ -232,6 +232,11 @@ pub fn app(config: LimiterConfig) -> Result<Router, LimiterConfigError> {
     }
     if let Some(numes) = &config.numes {
         numes.validate()?;
+        if numes.max_output_tokens.is_none() && config.model_catalog.is_none() {
+            return Err(LimiterConfigError::InvalidNumesConfig(
+                "NUMES_MAX_OUTPUT_TOKENS=context requires a model catalogue".into(),
+            ));
+        }
         if !config
             .default_model
             .bytes()

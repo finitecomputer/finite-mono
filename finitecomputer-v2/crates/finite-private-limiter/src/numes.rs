@@ -20,7 +20,9 @@ pub struct NumesConfig {
     pub control_api_key: String,
     /// Initial cap after process start. Zero pauses marketplace admission.
     pub max_concurrent: usize,
-    pub max_output_tokens: u64,
+    /// None delegates the completion budget to the engine and requires a model catalogue.
+    pub max_output_tokens: Option<u64>,
+    /// Zero uses the upstream stage timeouts without a whole-request deadline.
     pub request_timeout: Duration,
 }
 
@@ -59,7 +61,13 @@ impl NumesConfig {
             api_key: std::env::var("NUMES_API_KEY").unwrap_or_default(),
             control_api_key: std::env::var("NUMES_CONTROL_API_KEY").unwrap_or_default(),
             max_concurrent: usize::try_from(number("NUMES_MAX_CONCURRENT", 0)?)?,
-            max_output_tokens: number("NUMES_MAX_OUTPUT_TOKENS", 4096)?,
+            max_output_tokens: if std::env::var("NUMES_MAX_OUTPUT_TOKENS").as_deref()
+                == Ok("context")
+            {
+                None
+            } else {
+                Some(number("NUMES_MAX_OUTPUT_TOKENS", 4096)?)
+            },
             request_timeout: Duration::from_secs(number("NUMES_REQUEST_TIMEOUT_SECS", 120)?),
         }))
     }
@@ -77,9 +85,9 @@ impl NumesConfig {
         }
         if self.api_key == self.control_api_key
             || self.max_concurrent > MAX_CONCURRENT
-            || self.max_output_tokens == 0
-            || self.max_output_tokens > 1_000_000
-            || self.request_timeout.is_zero()
+            || self
+                .max_output_tokens
+                .is_some_and(|n| n == 0 || n > 1_000_000)
             || self.request_timeout > Duration::from_secs(3600)
         {
             return Err(LimiterConfigError::InvalidNumesConfig(
@@ -280,25 +288,36 @@ pub(super) async fn serve(
             "Messages, boolean stream and at most one completion are required.",
         );
     }
-    // Bound every accepted request even when the encrypted body omits a limit.
-    // A relay may impose a smaller limit in the visible Tinfoil header.
-    let mut output_limit = admission.config.max_output_tokens;
+    // The engine tokenizes the input and enforces its remaining context.
+    // Only a fixed policy or an explicit client limit is sent as max_tokens.
+    let ceiling = admission.config.max_output_tokens.unwrap_or_else(|| {
+        state
+            .config
+            .model_catalog
+            .as_ref()
+            .expect("validated Numes context")
+            .context_window
+    });
+    let mut requested = None;
     for name in ["max_tokens", "max_completion_tokens"] {
         if let Some(v) = object.get(name) {
-            let Some(n) = v.as_u64().filter(|n| *n > 0 && *n <= output_limit) else {
+            let Some(n) = v
+                .as_u64()
+                .filter(|n| *n > 0 && *n <= requested.unwrap_or(ceiling))
+            else {
                 return error(
                     StatusCode::BAD_REQUEST,
                     "numes_invalid_output_limit",
                     "Output exceeds Finite's marketplace limit.",
                 );
             };
-            output_limit = n;
+            requested = Some(n);
         }
     }
     if headers.contains_key("x-tinfoil-max-output-tokens") {
         let Some(n) = header(&headers, "x-tinfoil-max-output-tokens")
             .and_then(|v| v.parse::<u64>().ok())
-            .filter(|n| *n > 0 && *n <= admission.config.max_output_tokens)
+            .filter(|n| *n > 0 && *n <= ceiling)
         else {
             return error(
                 StatusCode::BAD_REQUEST,
@@ -306,7 +325,7 @@ pub(super) async fn serve(
                 "Invalid X-Tinfoil-Max-Output-Tokens.",
             );
         };
-        output_limit = output_limit.min(n);
+        requested = Some(requested.map_or(n, |limit| limit.min(n)));
     }
     if headers.contains_key("x-tinfoil-completion-count")
         && header(&headers, "x-tinfoil-completion-count") != Some("1")
@@ -318,7 +337,10 @@ pub(super) async fn serve(
         );
     }
     object.remove("max_completion_tokens");
-    object.insert("max_tokens".into(), json!(output_limit));
+    let output_limit = requested.or(admission.config.max_output_tokens);
+    if let Some(limit) = output_limit {
+        object.insert("max_tokens".into(), json!(limit));
+    }
     object.insert("n".into(), json!(1));
     let streaming = object
         .get("stream")
@@ -356,10 +378,12 @@ pub(super) async fn serve(
             body,
             streaming,
             request_id,
-            output_limit,
+            output_limit.unwrap_or(ceiling),
             reply_tx,
         );
-        if timeout(deadline, work).await.is_err() {
+        if deadline.is_zero() {
+            work.await;
+        } else if timeout(deadline, work).await.is_err() {
             // Dropping the upstream cancels the request. Never fabricate usage.
             eprintln!("finite-private Numes request deadline exceeded");
         }
@@ -395,7 +419,8 @@ async fn generate(
     };
     let model = &state.config.default_model;
     if !streaming {
-        let Ok(body) = upstream.bytes().await else {
+        let Ok(Ok(body)) = timeout(state.config.upstream_body_timeout, upstream.bytes()).await
+        else {
             return;
         };
         let Ok(value) = serde_json::from_slice::<Value>(&body) else {
@@ -418,20 +443,17 @@ async fn generate(
         let _ = reply.send(response);
         return;
     }
-    let (tx, mut rx) = mpsc::channel::<Result<Frame<Bytes>, std::io::Error>>(8);
+    let (tx, mut rx) = mpsc::channel::<Frame<Bytes>>(8);
     let frames = async_stream::stream! {
         while let Some(frame) = rx.recv().await {
-            let terminal = match &frame {
-                Ok(frame) => frame.is_trailers(),
-                Err(_) => true,
-            };
-            yield frame;
+            let terminal = frame.is_trailers();
+            yield Ok(frame);
             if terminal {
                 return;
             }
         }
-        // A deadline drops the worker and sender. Expose that as an incomplete
-        // HTTP body, not a normal EOF that an encrypting proxy could finalize.
+        // A drop without trailers is incomplete, including when the worker
+        // times out or upstream usage cannot be verified.
         yield Err(std::io::Error::other("Numes stream ended without final usage"));
     };
     let response = Response::builder()
@@ -443,17 +465,25 @@ async fn generate(
     let _ = reply.send(response);
     let mut stream = upstream.bytes_stream();
     let mut usage = StreamUsage::new(model, output_limit);
-    while let Some(item) = stream.next().await {
+    let idle_timeout = state.config.upstream_stream_idle_timeout;
+    loop {
+        let item = match timeout(idle_timeout, stream.next()).await {
+            Ok(Some(item)) => item,
+            Ok(None) => break,
+            Err(_) => return,
+        };
         let Ok(chunk) = item else {
-            let _ = tx
-                .send(Err(std::io::Error::other("Numes upstream stream failed")))
-                .await;
             return;
         };
         usage.push(&chunk);
         // Closed receiver means customer delivery ended. Keep draining upstream
-        // to obtain final counts, holding the slot until completion/deadline.
-        let _ = tx.send(Ok(Frame::data(chunk))).await;
+        // to obtain final counts, holding the slot until completion or timeout.
+        if timeout(idle_timeout, tx.send(Frame::data(chunk)))
+            .await
+            .is_err()
+        {
+            return;
+        }
         // Drain through HTTP EOF, even after [DONE]. A later transport failure
         // or contradictory event must prevent issuing a successful receipt.
     }
@@ -463,13 +493,7 @@ async fn generate(
             USAGE_HEADER,
             HeaderValue::from_str(&usage.format(model)).unwrap(),
         );
-        let _ = tx.send(Ok(Frame::trailers(trailers))).await;
-    } else {
-        let _ = tx
-            .send(Err(std::io::Error::other(
-                "Numes stream ended without valid final usage",
-            )))
-            .await;
+        let _ = timeout(idle_timeout, tx.send(Frame::trailers(trailers))).await;
     }
 }
 

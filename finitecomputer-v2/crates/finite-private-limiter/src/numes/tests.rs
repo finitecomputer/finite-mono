@@ -59,7 +59,6 @@ async fn engine(
         .into_response();
     }
     assert_eq!(body["stream_options"]["include_usage"], true);
-    assert_eq!(body["max_tokens"], 64);
     let stream = async_stream::stream! {
         yield Ok::<_, std::io::Error>(Bytes::from(format!("data: {{\"model\":\"{MODEL}\",\"choices\":[{{\"delta\":{{\"content\":\"ok\"}}}}]}}\n\n")));
         engine.release.acquire().await.unwrap().forget();
@@ -119,13 +118,20 @@ fn config(core: String, upstream: String) -> LimiterConfig {
         api_key: KEY.into(),
         control_api_key: ADMIN.into(),
         max_concurrent: 1,
-        max_output_tokens: 64,
+        max_output_tokens: Some(64),
         request_timeout: Duration::from_secs(5),
     });
     config
 }
 
 async fn harness(engine_state: Engine, deadline: Duration) -> Harness {
+    harness_with(engine_state, |cfg| {
+        cfg.numes.as_mut().unwrap().request_timeout = deadline;
+    })
+    .await
+}
+
+async fn harness_with(engine_state: Engine, configure: impl FnOnce(&mut LimiterConfig)) -> Harness {
     let core_calls = Arc::new(AtomicUsize::new(0));
     let counter = core_calls.clone();
     let core = Router::new().fallback(move |headers: HeaderMap| {
@@ -150,7 +156,7 @@ async fn harness(engine_state: Engine, deadline: Duration) -> Harness {
     )
     .await;
     let mut cfg = config(core, upstream);
-    cfg.numes.as_mut().unwrap().request_timeout = deadline;
+    configure(&mut cfg);
     Harness {
         app: app(cfg).unwrap(),
         engine: engine_state,
@@ -206,6 +212,82 @@ async fn wait_for(mut predicate: impl AsyncFnMut() -> bool) {
     })
     .await
     .expect("synthetic condition timed out");
+}
+
+fn context_policy(config: &mut LimiterConfig) {
+    let numes = config.numes.as_mut().unwrap();
+    numes.max_output_tokens = None;
+    numes.request_timeout = Duration::ZERO;
+    config.model_catalog = Some(
+        serde_json::from_value(json!({
+            "name": "GLM-5.3 Flash", "context_window": 393216, "tool_calling": false,
+            "reasoning": true
+        }))
+        .unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn context_mode_accepts_offer_probe_and_defers_omitted_limits_to_engine() {
+    let h = harness_with(Engine::new(), context_policy).await;
+    for (field, body_limit, header_limit, expected) in [
+        ("max_tokens", Some(32768), None, Some(32768)),
+        ("max_completion_tokens", Some(32768), Some(8192), Some(8192)),
+        ("max_tokens", None, Some(8192), Some(8192)),
+        ("max_tokens", None, None, None),
+    ] {
+        let mut input = json!({"model": MODEL, "messages": [], "stream": true});
+        if let Some(limit) = body_limit {
+            input[field] = json!(limit);
+        }
+        let mut req = request(KEY, true);
+        *req.body_mut() = Body::from(input.to_string());
+        if let Some(limit) = header_limit {
+            req.headers_mut()
+                .insert("x-tinfoil-max-output-tokens", HeaderValue::from(limit));
+        }
+        h.engine.release.add_permits(1);
+        let response = h.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap();
+        assert_eq!(
+            body.trailers().unwrap()[USAGE_HEADER],
+            "prompt=10,completion=2,total=12,model=glm-5-3-flash"
+        );
+        let forwarded = h.engine.last_request.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            forwarded.get("max_tokens").and_then(Value::as_u64),
+            expected
+        );
+        assert!(forwarded.get("max_completion_tokens").is_none());
+        wait_for(async || inflight(&h.app).await == 0).await;
+    }
+    let mut req = request(KEY, false);
+    *req.body_mut() =
+        Body::from(json!({"model": MODEL, "messages": [], "max_tokens": 393217}).to_string());
+    assert_eq!(
+        h.app.clone().oneshot(req).await.unwrap().status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(h.engine.calls.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn staged_timeouts_release_stalled_stream_without_a_usage_trailer() {
+    let h = harness_with(Engine::new(), |cfg| {
+        context_policy(cfg);
+        cfg.upstream_stream_idle_timeout = Duration::from_millis(100);
+    })
+    .await;
+    let response = h.app.clone().oneshot(request(KEY, true)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        timeout(Duration::from_secs(2), response.into_body().collect())
+            .await
+            .unwrap()
+            .is_err()
+    );
+    wait_for(async || inflight(&h.app).await == 0).await;
 }
 
 #[tokio::test]

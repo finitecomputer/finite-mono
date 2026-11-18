@@ -21,8 +21,8 @@ Numes an existing Finite subscriber key or the model server's internal key.
 | `NUMES_API_KEY` | Dedicated relay credential; at least 32 non-space ASCII characters |
 | `NUMES_CONTROL_API_KEY` | Separate Finite-only control credential; never give this to Numes |
 | `NUMES_MAX_CONCURRENT` | Initial per-process cap; defaults to **0**, paused |
-| `NUMES_MAX_OUTPUT_TOKENS` | Per-request completion limit; defaults to 4096, includes reasoning |
-| `NUMES_REQUEST_TIMEOUT_SECS` | Whole-request deadline including prefill and delivery; defaults to 120 seconds, at most 3600 |
+| `NUMES_MAX_OUTPUT_TOKENS` | Completion limit including reasoning. Defaults to 4096. Set to `context` to use the catalogue context as the outer limit and delegate the remaining budget to the engine |
+| `NUMES_REQUEST_TIMEOUT_SECS` | Whole-request deadline including prefill and delivery. Defaults to 120 seconds, at most 3600. Set to 0 to use the upstream stage timeouts only |
 
 Keep the initial cap at zero so process replacement always returns to a safe
 paused state. Runtime changes are in memory and do not change the measured
@@ -30,9 +30,7 @@ configuration or survive a restart. Resume deliberately after checking capacity.
 The two credentials must be distinct and must not reuse configured Finite service,
 model, metrics or degraded-allowlist credentials.
 
-**Finite's in-enclave cap is authoritative.** Numes can publish its own lower
-endpoint/per-model limit, but cannot override ours through request parameters or
-headers. Admission atomically checks the total number of Numes requests across
+**Finite's in-enclave concurrency cap is authoritative.** Admission atomically checks the total number of Numes requests across
 connections, including queueing/prefill, streaming and disconnected-client drains.
 There is no waiting queue: a full or paused endpoint immediately returns HTTP 429
 with `numes_at_capacity` and `Retry-After: 1`, before contacting the model.
@@ -88,10 +86,13 @@ letters, digits, `-`, `_`, `.`, or `:`. Either ID is returned on the response.
 
 Aliases are reserved for existing Finite clients. Numes lists the canonical
 model only. The model server must enforce its published context window. The
-adapter enforces one completion and a bounded output limit even when the body
-omits it; `X-Tinfoil-Max-Output-Tokens` can further reduce that limit and
-`X-Tinfoil-Completion-Count`, if present, must be `1`. Streaming requests always
-request engine usage. Reasoning/tool behavior otherwise follows the configured
+limiter enforces one completion. A fixed output policy also sets the default
+for requests that omit a limit. In context mode, omitted limits stay omitted
+so the engine can account for input tokens and available capacity. Explicit
+limits must fit within the catalogue context, and the engine applies its own
+input and generation limits. `X-Tinfoil-Max-Output-Tokens` can specify or reduce
+the requested limit. `X-Tinfoil-Completion-Count`, if present, must be `1`.
+Streaming requests always request engine usage. Reasoning/tool behavior otherwise follows the configured
 model and existing thinking defaults.
 
 The client may omit `stream`, `n`, and both optional output/count headers.
@@ -123,9 +124,11 @@ request and response content do not.
 
 The generation worker owns its capacity slot before upstream dispatch. If the
 HTTP handler or downstream stream is dropped, the worker continues consuming
-upstream output to final usage, within the whole-request deadline. It never
-releases a slot merely because a customer stopped reading. Slow readers are
-bounded by the same deadline. On timeout the adapter closes the upstream request
+upstream output to final usage or a timeout. Streams have an upstream idle
+timeout and a downstream write timeout using the same interval. Buffered
+requests use the upstream body timeout. Both use the upstream first-byte
+timeout and respect a whole-request deadline when configured. On timeout the
+adapter closes the upstream request
 and emits no fabricated usage; engine-side cancellation latency must be qualified.
 For Numes to receive usage after a customer disconnects, its relay must keep its
 own upstream response open and drain it. A disconnected relay cannot receive a
@@ -169,8 +172,8 @@ settlement. Its provider agent is needed to prove the complete encrypted path.
 
    ```yaml
    - NUMES_MAX_CONCURRENT: "0"
-   - NUMES_MAX_OUTPUT_TOKENS: "4096"
-   - NUMES_REQUEST_TIMEOUT_SECS: "120"
+   - NUMES_MAX_OUTPUT_TOKENS: "context"
+   - NUMES_REQUEST_TIMEOUT_SECS: "0"
    ```
 
 4. Publish the measured release and complete both release workflow phases.
@@ -188,10 +191,11 @@ settlement. Its provider agent is needed to prove the complete encrypted path.
    after both parties have the passing evidence and agreed prices/capabilities.
 
 The initial inventory is `glm-5-3-flash`, text input/output, a combined
-393216-token context and 4096-token maximum output including reasoning. Confirm
-these against the deployed engine and limiter. The whole-request deadline is
-120 seconds with the configuration above; Numes's 11-minute source timeout does
-not extend it. Advertise `max_tokens`; reasoning controls and tools require
+393216-token combined context. Input length and the engine's available token
+budget determine the maximum completion, including reasoning. With the settings
+above, the first-byte timeout is 120 seconds and the buffered body or stream idle
+timeout is 600 seconds in the serving candidate. The Numes relay may impose a
+shorter deadline. Advertise `max_tokens`; reasoning controls and tools require
 separate qualification before advertising. Numes's normal Tinfoil provider now
 requires live `/v1/models` discovery even with a custom base URL; its earlier
 static-inventory exception is no longer the integration contract. Prices remain
