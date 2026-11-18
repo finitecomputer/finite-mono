@@ -20,7 +20,7 @@ fn config() -> LimiterConfig {
         api_key: "synthetic-numes-source-key-000000000000".into(),
         control_api_key: "synthetic-finite-control-key-0000000000".into(),
         max_concurrent: 0,
-        max_output_tokens: 4096,
+        max_output_tokens: Some(4096),
         request_timeout: Duration::from_secs(120),
     });
     config.model_catalog = Some(serde_json::from_value(metadata()).unwrap());
