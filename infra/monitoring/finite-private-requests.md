@@ -21,7 +21,9 @@ traffic, tokens, timings, and seven-day diagnostic metadata.
 - First-output delay ends at meaningful reasoning, answer, or tool-argument
   output; first-answer delay ends at answer text. Ignore headers, keepalives,
   role events, and tool names without arguments. Nonstreaming requests have
-  duration only. Detect boundaries without storing content.
+  duration only. Detect boundaries without storing content. The dashboard
+  labels these "Time to first token (TTFT)" and "Time to reply text, including
+  thinking", because reply text follows reasoning and is not TTFT.
 - Timings start at limiter request acceptance and stop before settlement
   retries. They measure limiter observations, not client delivery or exact
   engine token timestamps. Output tokens per wall-clock second is aggregate
