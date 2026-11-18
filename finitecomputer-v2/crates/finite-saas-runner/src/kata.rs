@@ -4101,15 +4101,17 @@ fn first_manifest_change(
 fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata, RunnerError> {
     let missing = || {
         RunnerError::RuntimeLaunch(
-            "durable state has no agent/identity/identity.json reached through real directories"
-                .to_string(),
+            "cold relocation state is missing agent/identity/identity.json".to_string(),
         )
     };
     let mut path = state_root.to_path_buf();
     for directory in ["agent", "identity"] {
         path.push(directory);
         if !path.symlink_metadata().map_err(|_| missing())?.is_dir() {
-            return Err(missing());
+            return Err(RunnerError::RuntimeLaunch(format!(
+                "agent/identity/identity.json must be reached through real directories, not through {}",
+                path.strip_prefix(state_root).unwrap_or(&path).display()
+            )));
         }
     }
     path.push("identity.json");
