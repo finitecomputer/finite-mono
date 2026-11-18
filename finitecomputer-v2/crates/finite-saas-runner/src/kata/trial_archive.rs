@@ -69,6 +69,12 @@ impl KataLauncher {
         if durable_state_manifest_sha256(&plan.state_root)? != before {
             return Err(invalid("Archived source changed"));
         }
+        // Restore accepts only an identity reached through real directories.
+        // Refuse such a tree here, so reclaim never removes a local copy that
+        // could not be restored.
+        if !staged_agent_identity_metadata(&plan.state_root)?.is_file() {
+            return Err(invalid("Archived identity is not a regular file"));
+        }
         self.cleanup_retirement_staging(&lease.request.id)?;
         Ok(TrialArchiveSnapshot {
             receipt,

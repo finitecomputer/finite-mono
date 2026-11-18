@@ -44,6 +44,41 @@ fn reclaim_lease(
 }
 
 #[test]
+fn trial_archive_refuses_an_identity_reached_through_a_link() {
+    // In the guest, /data/identity-store is this tree's own directory. On
+    // the host it is a host path, so restore would never find the identity
+    // there. Archiving the tree is refused, so reclaim cannot remove the
+    // only local copy of a tree that cannot be restored.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, _fake, archive) = archive_fixture(&temp);
+    std::fs::create_dir_all(plan.state_root.join("identity-store")).unwrap();
+    std::fs::rename(
+        plan.state_root.join("agent/identity/identity.json"),
+        plan.state_root.join("identity-store/identity.json"),
+    )
+    .unwrap();
+    std::fs::remove_dir(plan.state_root.join("agent/identity")).unwrap();
+    std::os::unix::fs::symlink(
+        "/data/identity-store",
+        plan.state_root.join("agent/identity"),
+    )
+    .unwrap();
+
+    let error = launcher
+        .archive_trial_state(&archive, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("identity"), "{error}");
+    assert!(
+        plan.state_root
+            .join("identity-store/identity.json")
+            .is_file()
+    );
+    assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+}
+
+#[test]
 fn trial_archive_reclaim_restore_preserves_identity_history_and_boot_changes() {
     let temp = tempfile::tempdir().unwrap();
     let (mut launcher, plan, fake, archive) = archive_fixture(&temp);

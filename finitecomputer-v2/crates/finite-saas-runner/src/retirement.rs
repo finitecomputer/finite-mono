@@ -600,10 +600,11 @@ fn validate_archive_name(name: &str) -> RecoveryZipResult<()> {
 /// The archive is untrusted input, since the guest wrote the tree. Two
 /// properties keep it safe, and neither depends on what a target names:
 /// - A restore never writes outside its root (see [`restore_recovery_zip`]).
-/// - No host reader follows a link in a durable tree. This module, the
-///   state manifest and the quiescence probe walk it with lstat and
-///   readlink. A live tree already holds whatever links its guest made, so
-///   a restore that recreates them gives no new reach.
+/// - No host reader follows a link in a durable tree. This module and the
+///   state manifest walk it with lstat and readlink. Trial restore and
+///   relocation reach the identity file only through real directories, and
+///   refuse the tree otherwise. A live tree already holds whatever links its
+///   guest made, so a restore that recreates them gives no new reach.
 ///
 /// Targets:
 /// - Relative: must stay inside the data root, counted from the link's
