@@ -14,9 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use finite_mover::contract::{Has, Roster, RosterAgent, RosterPerson, Sizes};
+use finite_mover::contract::{CommandKind, Has, Roster, RosterAgent, RosterPerson, Sizes};
 use finite_mover::core_cli::CoreCli;
-use finite_mover::fleet::{Binding, FileFleet, FleetFile};
+use finite_mover::fleet::{Binding, FileFleet, Fleet, FleetError, FleetFile};
 use finite_mover::hosts::HostCommands;
 use finite_mover::migrations::MigrationsClient;
 use finite_mover::mover::{Mover, SeqClock, Worked};
@@ -1154,6 +1154,65 @@ fn another_keys_signature_is_refused_everywhere() {
 }
 
 /// The fleet file, changed by `edit`.
+/// The fleet as a cohort that leaves every agent out answers it, for
+/// each command a binding is asked for but a restart (`PgFleet`, whose
+/// own rule `core_fleet.rs` proves).
+struct LeftOut<'a>(&'a FileFleet);
+
+impl Fleet for LeftOut<'_> {
+    fn roster(&self) -> Result<Roster, FleetError> {
+        self.0.roster()
+    }
+
+    fn binding(&self, old: &str, kind: CommandKind) -> Result<Option<Binding>, FleetError> {
+        match kind {
+            CommandKind::Restart => self.0.binding(old, kind),
+            _ => Err(FleetError::Unlisted(old.to_string())),
+        }
+    }
+}
+
+#[test]
+fn an_old_agent_outside_the_cohort_is_never_stopped_or_retired_and_the_mailbox_goes_on() {
+    for command in [
+        stage_command(1),
+        json!({"id": "proj_a:1:retire_migrated", "old": OLD, "attempt": 1, "kind": "retire", "as": "migrated"}),
+    ] {
+        let world = World::new();
+        world.fake.tell(OLD, "asked", 1, command.clone());
+        // Another agent's command behind it is still done.
+        world
+            .fake
+            .tell("proj_b", "held", 1, restart_command("proj_b"));
+        let fleet = LeftOut(&world.fleet);
+        let mut mover = Mover::new(
+            &world.platform,
+            &fleet,
+            &world.core,
+            &world.hosts,
+            &world.locks,
+        );
+        mover.part_bytes = PART_BYTES_MIN;
+        let worked = mover.work_mailbox().expect("a refusal never fails the run");
+        let outcomes: Vec<(&str, Option<&str>)> = worked
+            .iter()
+            .map(|one| (one.outcome.as_str(), one.step.as_deref()))
+            .collect();
+        assert_eq!(
+            outcomes,
+            [("failed", Some("cohort")), ("failed", Some("binding"))],
+            "{command}"
+        );
+        assert_eq!(
+            worked[0].why.as_deref(),
+            Some("this old agent is not in the operator's cohort")
+        );
+        assert!(world.log("core.log").is_empty(), "Core is never asked");
+        assert!(world.log("host.log").is_empty(), "nor its host");
+        assert_eq!(world.fake.kinds(), ["failed", "failed"]);
+    }
+}
+
 fn edit_fleet(world: &World, edit: impl FnOnce(&mut Value)) {
     let path = world.dir.join("fleet.json");
     let mut fleet: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();

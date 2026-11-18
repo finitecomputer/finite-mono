@@ -7,7 +7,8 @@
 //!   "key_file": "/var/lib/finite-mover/mover.key",
 //!   "locks": "/var/lib/finite-mover/locks",
 //!   "fleet": { "postgres": { "conninfo": "host=/run/postgresql user=finite_mover dbname=…",
-//!                            "sizes_file": "/var/lib/finite-mover/sizes.json" } },
+//!                            "sizes_file": "/var/lib/finite-mover/sizes.json",
+//!                            "cohort": "/var/lib/finite-mover/cohort.json" } },
 //!   "core": {
 //!     "program": ["sudo", "-n", "/run/wrappers/bin/finite-mover-core"],
 //!     "admin_email": "…", "admin_workos_user_id": "…", "wait_seconds": 900
@@ -19,6 +20,10 @@
 //!
 //! `overrides` is the operator's file of paths to carry or leave, read on
 //! each run ([`HostCommands::overrides`]); it may be absent.
+//!
+//! `cohort`, when named, is the operator's file of the old agents the move
+//! is offered to, read on each run (`crate::cohort`): absent, it lists no
+//! one. With no `cohort` named, everyone is offered.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
@@ -52,10 +57,13 @@ pub enum FleetConfig {
     /// A fleet written to a file (tests, a hand-run roster).
     File(PathBuf),
     /// Core's database, through the mover's read-only role (M1), with
-    /// the daily `sizes` run's cache.
+    /// the daily `sizes` run's cache, within the operator's cohort if one
+    /// is named.
     Postgres {
         conninfo: String,
         sizes_file: PathBuf,
+        #[serde(default)]
+        cohort: Option<PathBuf>,
     },
 }
 
@@ -155,4 +163,47 @@ pub fn npub(key: &[u8; 32]) -> Option<String> {
     use nostr::nips::nip19::ToBech32;
     let secret = nostr::SecretKey::from_slice(key).ok()?;
     nostr::Keys::new(secret).public_key().to_bech32().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fleet(postgres: serde_json::Value) -> Result<FleetConfig, ConfigError> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let config = serde_json::json!({
+            "finite_chat": "https://finite.test",
+            "key_file": "/k",
+            "locks": "/l",
+            "fleet": { "postgres": postgres },
+            "core": { "program": ["core"], "admin_email": "a@finite.test", "admin_workos_user_id": "user_a" },
+        });
+        std::fs::write(&path, config.to_string()).unwrap();
+        Config::read(&path).map(|config| config.fleet)
+    }
+
+    #[test]
+    fn a_postgres_fleet_names_a_cohort_or_none() {
+        let cohort = |fleet| match fleet {
+            Ok(FleetConfig::Postgres { cohort, .. }) => cohort,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            cohort(fleet(
+                serde_json::json!({ "conninfo": "c", "sizes_file": "/s", "cohort": "/var/c.json" })
+            )),
+            Some(PathBuf::from("/var/c.json"))
+        );
+        assert_eq!(
+            cohort(fleet(
+                serde_json::json!({ "conninfo": "c", "sizes_file": "/s" })
+            )),
+            None
+        );
+        assert!(matches!(
+            fleet(serde_json::json!({ "conninfo": "c", "sizes_file": "/s", "cohorts": "/c" })),
+            Err(ConfigError::Unreadable { .. })
+        ));
+    }
 }

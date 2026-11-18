@@ -12,14 +12,16 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use finite_mover::contract::{Has, Sizes};
-use finite_mover::fleet::Fleet;
+use finite_mover::contract::{CommandKind, Has, Sizes};
+use finite_mover::fleet::{Fleet, FleetError};
 use finite_mover::fleet_pg::PgFleet;
 use finite_mover::sizes::SizesCache;
 use serde_json::{Value, json};
 use tokio_postgres::NoTls;
 
 static DATABASES: AtomicU32 = AtomicU32::new(0);
+
+const STOP: CommandKind = CommandKind::StopAndStage;
 
 fn public_key(byte: u8) -> nostr::PublicKey {
     nostr::Keys::new(nostr::SecretKey::from_slice(&[byte; 32]).unwrap()).public_key()
@@ -431,7 +433,7 @@ fn the_roster_lists_each_live_agent_of_a_signed_in_owner_once_with_its_daily_siz
         .into()
     );
 
-    let fleet = PgFleet::new(&db.as_role, &sizes_file);
+    let fleet = PgFleet::new(&db.as_role, &sizes_file, None);
     let roster = fleet.roster().unwrap();
     let listed: Vec<(String, String, Vec<Listed>)> = roster
         .people
@@ -503,9 +505,9 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
     let db = CoreDb::new();
     block_on(execute(&db.url, &fleet_fixture()));
     let dir = tempfile::tempdir().unwrap();
-    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"));
+    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"), None);
 
-    let live = fleet.binding("proj_live").unwrap().unwrap();
+    let live = fleet.binding("proj_live", STOP).unwrap().unwrap();
     assert_eq!(
         (
             live.old.as_str(),
@@ -532,12 +534,12 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
     assert_eq!(live.person_keys, person);
     // The same person's other agent, created without a chat account: the
     // person's observed key alone. Another person's: none, never a guess.
-    let legacy = fleet.binding("proj_legacy").unwrap().unwrap();
+    let legacy = fleet.binding("proj_legacy", STOP).unwrap().unwrap();
     assert_eq!(
         (legacy.agent_npub, legacy.person_keys),
         (None, vec![key_hex(3)])
     );
-    let two = fleet.binding("proj_two").unwrap().unwrap();
+    let two = fleet.binding("proj_two", STOP).unwrap().unwrap();
     assert_eq!(
         (two.agent_npub, two.person_keys),
         (Some(npub(2)), Vec::<String>::new())
@@ -545,7 +547,7 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
 
     // Retired: its link is gone, its runtime and receipt remain, so a
     // retry of the retire step marks it moved without retiring it again.
-    let retired = fleet.binding("proj_retired").unwrap().unwrap();
+    let retired = fleet.binding("proj_retired", STOP).unwrap().unwrap();
     assert_eq!(
         (
             retired.agent_runtime_id.as_str(),
@@ -557,7 +559,7 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
     // Each tree as Core names it for a control.
     let tree = |old: &str| {
         fleet
-            .binding(old)
+            .binding(old, STOP)
             .unwrap()
             .map(|binding| (binding.agent_runtime_id, binding.durable_state_id))
     };
@@ -579,7 +581,7 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
 
     // Nothing Core's rule gives this mover to act on.
     for old in ["proj_respun", "proj_foreign", "proj_phala", "proj_unknown"] {
-        assert_eq!(fleet.binding(old).unwrap(), None, "{old}");
+        assert_eq!(fleet.binding(old, STOP).unwrap(), None, "{old}");
     }
 
     // The live list the sizes run measures is the roster's agents.
@@ -600,6 +602,140 @@ fn a_binding_is_the_runtime_its_own_spec_names_with_any_receipt_already_taken() 
             "proj_two"
         ]
     );
+}
+
+/// The roster's agents by person: (WorkOS id, [old]).
+fn roster_of(fleet: &PgFleet) -> Vec<(String, Vec<String>)> {
+    fleet
+        .roster()
+        .unwrap()
+        .people
+        .into_iter()
+        .map(|person| {
+            let agents = person.agents.into_iter().map(|agent| agent.old).collect();
+            (person.workos_id, agents)
+        })
+        .collect()
+}
+
+fn people(listed: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    listed
+        .iter()
+        .map(|(person, agents)| {
+            (
+                person.to_string(),
+                agents.iter().map(|old| old.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_cohort_lists_and_binds_its_agents_alone_read_again_on_each_call() {
+    let db = CoreDb::new();
+    block_on(execute(&db.url, &fleet_fixture()));
+    let dir = tempfile::tempdir().unwrap();
+    let sizes = dir.path().join("sizes.json");
+    let cohort = dir.path().join("cohort.json");
+    let fleet = PgFleet::new(&db.as_role, &sizes, Some(&cohort));
+    // One agent of each person, one moved already, and one Core lacks:
+    // those two are left out, and said by id alone.
+    std::fs::write(
+        &cohort,
+        r#"{"old": ["proj_relocated", "proj_two", "proj_moved", "proj_unknown"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        roster_of(&fleet),
+        people(&[("user_w1", &["proj_relocated"]), ("user_w2", &["proj_two"])])
+    );
+    // Stopped, staged or retired only if listed; restarted whatever it lists.
+    for kind in [STOP, CommandKind::Retire] {
+        assert!(fleet.binding("proj_two", kind).unwrap().is_some());
+        assert!(matches!(
+            fleet.binding("proj_live", kind),
+            Err(FleetError::Unlisted(old)) if old == "proj_live"
+        ));
+    }
+    assert!(
+        fleet
+            .binding("proj_live", CommandKind::Restart)
+            .unwrap()
+            .is_some()
+    );
+
+    // Root adds someone: the next call has them, with no release.
+    std::fs::write(
+        &cohort,
+        r#"{"old": ["proj_relocated", "proj_two", "proj_live"]}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        roster_of(&fleet),
+        people(&[
+            ("user_w1", &["proj_live", "proj_relocated"]),
+            ("user_w2", &["proj_two"])
+        ])
+    );
+    assert!(fleet.binding("proj_live", STOP).unwrap().is_some());
+}
+
+#[test]
+fn a_cohort_file_not_there_lists_no_one_and_one_unreadable_is_an_error() {
+    let db = CoreDb::new();
+    block_on(execute(&db.url, &fleet_fixture()));
+    let dir = tempfile::tempdir().unwrap();
+    let sizes = dir.path().join("sizes.json");
+    let cohort = dir.path().join("cohort.json");
+    let fleet = PgFleet::new(&db.as_role, &sizes, Some(&cohort));
+
+    // Named but not there: no one, never everyone.
+    assert_eq!(roster_of(&fleet), people(&[]));
+    assert!(matches!(
+        fleet.binding("proj_live", STOP),
+        Err(FleetError::Unlisted(_))
+    ));
+
+    // Not its shape, or not readable: the call fails, and the next one
+    // reads it again. A restart never reads it, so it still starts.
+    for broken in [
+        r#"{"old": ["proj_live"], "all": true}"#,
+        r#"{"old": ["#,
+        "{}",
+    ] {
+        std::fs::write(&cohort, broken).unwrap();
+        assert!(
+            matches!(fleet.roster(), Err(FleetError::Cohort(_))),
+            "{broken}"
+        );
+        assert!(
+            matches!(fleet.binding("proj_live", STOP), Err(FleetError::Cohort(_))),
+            "{broken}"
+        );
+        assert!(
+            fleet
+                .binding("proj_live", CommandKind::Restart)
+                .unwrap()
+                .is_some()
+        );
+    }
+    std::fs::remove_file(&cohort).unwrap();
+    std::fs::create_dir(&cohort).unwrap();
+    assert!(matches!(fleet.roster(), Err(FleetError::Cohort(_))));
+
+    // No cohort named: everyone, as before there were cohorts.
+    let everyone = PgFleet::new(&db.as_role, &sizes, None);
+    assert_eq!(
+        roster_of(&everyone),
+        people(&[
+            (
+                "user_w1",
+                &["proj_legacy", "proj_live", "proj_machine", "proj_relocated"]
+            ),
+            ("user_w2", &["proj_two"])
+        ])
+    );
+    assert!(everyone.binding("proj_live", STOP).unwrap().is_some());
 }
 
 #[test]
@@ -770,7 +906,7 @@ fn an_operator_created_agent_is_listed_under_its_owner_once_they_sign_in() {
         created.project.id
     });
     let dir = tempfile::tempdir().unwrap();
-    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"));
+    let fleet = PgFleet::new(&db.as_role, &dir.path().join("sizes.json"), None);
     let roster = fleet.roster().unwrap();
     assert!(
         roster.people.is_empty(),

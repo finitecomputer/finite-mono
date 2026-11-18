@@ -16,6 +16,10 @@
 //! The mover acts only on the agent a command names, and only while the
 //! mailbox holds that command: it reads the mailbox again before each one,
 //! so a command withdrawn or replaced while another ran is never done.
+//!
+//! With the operator's cohort (`cohort`), a stop or a retirement of an old
+//! agent outside it fails at its `cohort` step, and nothing is asked of
+//! Core or its host; a restart is done whatever the cohort lists.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -261,7 +265,7 @@ impl<'a> Mover<'a> {
     }
 
     fn binding(&self, command: &Command) -> Result<Binding, Stop> {
-        match self.fleet.binding(&command.old) {
+        match self.fleet.binding(&command.old, command.kind) {
             // Every call to Core and the host names this agent alone.
             Ok(Some(binding)) if binding.old == command.old => Ok(binding),
             Ok(Some(_)) => Err(Stop::Failed(
@@ -271,6 +275,12 @@ impl<'a> Mover<'a> {
             Ok(None) => Err(Stop::Failed(
                 "binding",
                 "Core has no runtime for this old agent".into(),
+            )),
+            // Reported, so the rest of the mailbox goes on; Core and the
+            // host are never asked about it.
+            Err(FleetError::Unlisted(_)) => Err(Stop::Failed(
+                "cohort",
+                "this old agent is not in the operator's cohort".into(),
             )),
             Err(error) => Err(Stop::Platform(error.into())),
         }

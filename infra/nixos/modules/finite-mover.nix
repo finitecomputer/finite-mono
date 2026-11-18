@@ -23,6 +23,28 @@
 # carried. A file the mover can't read, or a path it refuses, fails that
 # agent's stage before the agent is stopped.
 #
+# Who is offered the move can be narrowed live too. With `cohort` set (to
+# /var/lib/finite-mover/cohort.json, say), the roster lists only the old
+# agents root writes there, by Core project id, and the mover stops or
+# retires no other; a restart, which only brings back an agent it
+# stopped, goes ahead regardless:
+#
+#   { "old": ["proj_123", "proj_456"] }
+#
+# The file is read on each run, so it needs no release; the mover user
+# must be able to read it. Missing, it offers no one; one that can't be
+# read or isn't this shape fails the run, and never offers everyone. With
+# `cohort` unset, everyone is offered.
+#
+# A cohort grows: root adds ids, and the next roster run (within 10
+# minutes) offers them. It only grows in practice. Taking an id out
+# withdraws its offer only while its person hasn't said Yes (putting it
+# back offers it again). A move already under way goes on at finite.chat,
+# but the mover refuses its stop and retirement, so it fails or waits for
+# staff until the id is back: never take out someone who said Yes. Unset
+# `cohort` before finite.chat's phase 2 cutoff, which archives only the
+# agents a roster lists.
+#
 # The timers are off until `timers.enable`: deploy first, give finite.chat
 # the npub, then turn them on. Delete this module with the rest of the move
 # (FIN-463's removal plan), with the role and both keys.
@@ -111,7 +133,8 @@ let
     fleet.postgres = {
       conninfo = "host=/run/postgresql user=finite_mover dbname=${cfg.postgres.database}";
       sizes_file = "${stateDir}/sizes.json";
-    };
+    }
+    // lib.optionalAttrs (cfg.cohort != null) { inherit (cfg) cohort; };
     core = {
       inherit (cfg.core) program;
       admin_email = cfg.core.adminEmail;
@@ -212,6 +235,16 @@ in
       type = lib.types.str;
       default = "https://finite.chat";
       description = "finite.chat's origin, whose mailbox the mover works.";
+    };
+    cohort = lib.mkOption {
+      type = lib.types.nullOr (lib.types.strMatching "/.+");
+      default = null;
+      example = "/var/lib/finite-mover/cohort.json";
+      description = ''
+        The operator's cohort file, which root edits live: the move is
+        offered only to the old agents it lists (see this module's header).
+        A missing file offers no one; null offers everyone.
+      '';
     };
     postgres.database = lib.mkOption {
       type = lib.types.str;

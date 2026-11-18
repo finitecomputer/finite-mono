@@ -5,8 +5,8 @@
 //! - `mailbox`: read the mailbox and do what it says (every 10 seconds).
 //!   One run at a time: a second, meanwhile, does nothing.
 //! - `sizes`: measure every live agent through its host's reader, from
-//!   metadata alone, into the cache the roster reads (once a day). Only
-//!   with Core's database as the fleet.
+//!   metadata alone, into the cache the roster reads (once a day), in the
+//!   operator's cohort or not. Only with Core's database as the fleet.
 //!
 //! It prints one JSON line per result, never a secret or a person's data.
 
@@ -60,7 +60,8 @@ fn run() -> Result<(), String> {
         FleetConfig::Postgres {
             conninfo,
             sizes_file,
-        } => Box::new(PgFleet::new(conninfo, sizes_file)),
+            cohort,
+        } => Box::new(PgFleet::new(conninfo, sizes_file, cohort.as_deref())),
     };
     let core = config.core();
     let hosts = config.hosts();
@@ -95,6 +96,7 @@ fn sizes(config: &Config) -> Result<(), String> {
     let FleetConfig::Postgres {
         conninfo,
         sizes_file,
+        cohort,
     } = &config.fleet
     else {
         return Err("sizes reads Core's database: the fleet must be postgres".into());
@@ -102,7 +104,7 @@ fn sizes(config: &Config) -> Result<(), String> {
     let Some(_held) = lock(config, "sizes.lock")? else {
         return Ok(());
     };
-    let live = PgFleet::new(conninfo, sizes_file)
+    let live = PgFleet::new(conninfo, sizes_file, cohort.as_deref())
         .live()
         .map_err(|error| error.to_string())?;
     let now_ms = SystemTime::now()

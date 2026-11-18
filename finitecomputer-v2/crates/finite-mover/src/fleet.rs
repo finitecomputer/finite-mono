@@ -2,15 +2,17 @@
 //! old agent's exact binding, which every command needs: Core's runtime,
 //! the runner host and machine it runs on, and its durable tree there.
 //!
-//! M1 reads both from Core's database (a read-only role). A file holds
-//! them too, for tests and for a hand-run roster.
+//! M1 reads both from Core's database (a read-only role), within the
+//! operator's cohort when there is one (`cohort`). A file holds them too,
+//! for tests and for a hand-run roster.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::contract::Roster;
+use crate::cohort::CohortError;
+use crate::contract::{CommandKind, Roster};
 
 /// One old agent's exact binding, as Core's `*-exact` commands check it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,13 +42,22 @@ pub struct Binding {
 pub enum FleetError {
     #[error("the fleet could not be read: {0}")]
     Unreadable(String),
+    #[error("the operator's cohort: {0}")]
+    Cohort(#[from] CohortError),
+    #[error("{0} is not in the operator's cohort")]
+    Unlisted(String),
 }
 
 pub trait Fleet {
-    /// Every live old agent and its owner, now.
+    /// Every live old agent and its owner, now: within the operator's
+    /// cohort, when there is one.
     fn roster(&self) -> Result<Roster, FleetError>;
-    /// `old`'s binding, or `None` if Core has no runtime for it.
-    fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError>;
+    /// `old`'s binding for a command of `kind`, or `None` if Core has no
+    /// runtime for it. An old agent the operator's cohort leaves out is
+    /// refused (`FleetError::Unlisted`) for any command but a restart: a
+    /// restart starts again only an agent the mover stopped, and a refused
+    /// one is final on finite.chat's side, which would leave it stopped.
+    fn binding(&self, old: &str, kind: CommandKind) -> Result<Option<Binding>, FleetError>;
 }
 
 /// A fleet written out by hand or by a test: `{roster, bindings: {old: …}}`.
@@ -82,7 +93,8 @@ impl Fleet for FileFleet {
         Ok(self.read()?.roster)
     }
 
-    fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError> {
+    /// The file is its own cohort: it binds only the agents written in it.
+    fn binding(&self, old: &str, _kind: CommandKind) -> Result<Option<Binding>, FleetError> {
         Ok(self.read()?.bindings.remove(old))
     }
 }
@@ -110,7 +122,10 @@ mod tests {
                 } },
             });
             std::fs::write(&path, file.to_string()).unwrap();
-            let binding = FileFleet::new(&path).binding("proj_a").unwrap().unwrap();
+            let binding = FileFleet::new(&path)
+                .binding("proj_a", CommandKind::StopAndStage)
+                .unwrap()
+                .unwrap();
             assert_eq!(
                 (binding.durable_state_id.as_str(), binding.person_keys.len()),
                 ("rt_a", 0)

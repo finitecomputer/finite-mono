@@ -95,7 +95,11 @@ pkgs.testers.runNixOSTest {
         hostKey = sshKeys.snakeOilPublicKey;
       };
     };
-    specialisation.timers.configuration.finite.mover.timers.enable = true;
+    # The timers as they first go on: with a cohort.
+    specialisation.timers.configuration.finite.mover = {
+      timers.enable = true;
+      cohort = "/var/lib/finite-mover/cohort.json";
+    };
 
     # The Runner knows this ssh key, so it's placed before the mover's keys
     # are made, which must keep it.
@@ -180,6 +184,8 @@ pkgs.testers.runNixOSTest {
     with subtest("the config is root's, readable by the mover's group alone"):
         assert app.succeed(f"stat -L -c '%a %U %G' {config}").strip() == "640 root finite-mover"
         assert json.loads(app.succeed(f"cat {config}"))["overrides"] == f"{state}/overrides.json"
+        # No cohort named: everyone.
+        assert "cohort" not in json.loads(app.succeed(f"cat {config}"))["fleet"]["postgres"]
         app.fail(f"runuser -u nobody -- cat {config}")
 
     with subtest("the timers are off by default"):
@@ -270,5 +276,30 @@ pkgs.testers.runNixOSTest {
         for name in ["finite-mover-mailbox", "finite-mover-roster", "finite-mover-sizes"]:
             assert f"{name}.timer" in timers, timers
         app.wait_until_succeeds("journalctl -u finite-mover-mailbox -o cat | grep -q finite-mover", timeout=60)
+
+    def roster_run():
+        # No finite.chat here, so every push fails: what came before it is
+        # the roster, read as the mover's own unit reads it.
+        app.fail("systemctl start finite-mover-roster.service")
+        run = app.succeed("systemctl show -p InvocationID --value finite-mover-roster.service").strip()
+        lines = f"journalctl -o cat _SYSTEMD_INVOCATION_ID={run}"
+        # Its last line is the run's error, after any the roster said.
+        app.wait_until_succeeds(f"{lines} | grep -v \"the cohort's\" | grep -q '^finite-mover: '", timeout=30)
+        return app.succeed(lines)
+
+    with subtest("with a cohort, the roster reads root's file on each run"):
+        cohort = f"{state}/cohort.json"
+        assert json.loads(app.succeed(f"cat {config}"))["fleet"]["postgres"]["cohort"] == cohort
+        assert app.succeed(npub_cmd).strip() == npub, "the mover reads the config it names"
+        out = roster_run()
+        assert "cohort" not in out, out
+        app.succeed(f"echo '{{\"old\": [\"proj_live\", \"proj_gone\"]}}' > {cohort}")
+        out = roster_run()
+        assert "the cohort's proj_gone is not on the roster" in out, out
+        assert "proj_live" not in out, out
+        app.succeed(f"echo '{{\"old\": \"proj_live\"}}' > {cohort}")
+        out = roster_run()
+        assert "the operator's cohort:" in out and "not on the roster" not in out, out
+        app.succeed(f"rm {cohort}")
   '';
 }

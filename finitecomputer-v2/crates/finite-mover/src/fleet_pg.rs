@@ -24,20 +24,32 @@
 //!
 //! Brains, sites and which secrets an agent holds are not Core's: the
 //! roster lists none of them yet (the ops notes say where they come from).
+//!
+//! - **The operator's cohort** (`cohort`), when the config names one: read
+//!   again on each roster and binding. The roster lists only the agents it
+//!   lists, and a binding for anything but a restart is refused for one it
+//!   doesn't. An id it lists that isn't on the roster is said on stderr, by
+//!   id alone. The daily `sizes` run measures everyone, cohort or not, so
+//!   an agent added to it is offered with its sizes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio_postgres::NoTls;
 
-use crate::contract::{Has, ROSTER_AGENTS_MAX, Roster, RosterAgent, RosterPerson, valid_old};
+use crate::cohort::Cohort;
+use crate::contract::{
+    CommandKind, Has, ROSTER_AGENTS_MAX, Roster, RosterAgent, RosterPerson, valid_old,
+};
 use crate::fleet::{Binding, Fleet, FleetError};
 use crate::sizes::SizesCache;
 
 pub struct PgFleet {
     conninfo: String,
     sizes_file: PathBuf,
+    /// The operator's cohort file, if the config names one; else everyone.
+    cohort: Option<PathBuf>,
 }
 
 /// Each runtime's spec, as Core picks it for a control.
@@ -104,11 +116,17 @@ LIMIT 1"
 }
 
 impl PgFleet {
-    pub fn new(conninfo: &str, sizes_file: &Path) -> Self {
+    pub fn new(conninfo: &str, sizes_file: &Path, cohort: Option<&Path>) -> Self {
         Self {
             conninfo: conninfo.to_string(),
             sizes_file: sizes_file.to_path_buf(),
+            cohort: cohort.map(Path::to_path_buf),
         }
+    }
+
+    /// The operator's cohort now, or `None` for everyone.
+    fn cohort(&self) -> Result<Option<Cohort>, FleetError> {
+        Ok(self.cohort.as_deref().map(Cohort::read).transpose()?)
     }
 
     fn query(
@@ -137,7 +155,8 @@ impl PgFleet {
         })
     }
 
-    /// Every live old agent's binding, for the daily `sizes` run.
+    /// Every live old agent's binding, for the daily `sizes` run: in the
+    /// cohort or not.
     pub fn live(&self) -> Result<Vec<Binding>, FleetError> {
         Ok(self
             .query(&live_query(), &[])?
@@ -192,13 +211,19 @@ fn binding_of(row: &tokio_postgres::Row) -> Option<Binding> {
 
 impl Fleet for PgFleet {
     fn roster(&self) -> Result<Roster, FleetError> {
+        let cohort = self.cohort()?;
         let sizes = SizesCache::read(&self.sizes_file);
         let mut people: BTreeMap<String, RosterPerson> = BTreeMap::new();
+        let mut listed = BTreeSet::new();
         for row in self.query(&live_query(), &[])? {
             let old: String = row.get("old");
             // An id the wire can't carry, or a runtime whose spec isn't its
-            // own, is left off the roster: never offered, never moved.
-            if !valid_old(&old) || binding_of(&row).is_none() {
+            // own, is left off the roster: never offered, never moved. So is
+            // one outside the operator's cohort, while there is one.
+            if !valid_old(&old)
+                || binding_of(&row).is_none()
+                || cohort.as_ref().is_some_and(|cohort| !cohort.lists(&old))
+            {
                 continue;
             }
             let workos_id: String = row.get("workos_user_id");
@@ -212,6 +237,7 @@ impl Fleet for PgFleet {
             if person.agents.len() >= ROSTER_AGENTS_MAX {
                 continue;
             }
+            listed.insert(old.clone());
             person.agents.push(RosterAgent {
                 sizes: sizes.agents.get(&old).copied().unwrap_or_default(),
                 old,
@@ -223,6 +249,15 @@ impl Fleet for PgFleet {
                 has: Has::default(),
             });
         }
+        // An id the cohort lists that Core has no listable agent for (a
+        // slip, or one moved already) is ignored, and said by id alone.
+        for old in cohort.iter().flat_map(Cohort::old) {
+            if !listed.contains(old) {
+                eprintln!(
+                    "finite-mover: the cohort's {old} is not on the roster: Core has no live old agent by that id that the mover can move"
+                );
+            }
+        }
         let observed_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_millis() as i64);
@@ -233,7 +268,15 @@ impl Fleet for PgFleet {
         })
     }
 
-    fn binding(&self, old: &str) -> Result<Option<Binding>, FleetError> {
+    fn binding(&self, old: &str, kind: CommandKind) -> Result<Option<Binding>, FleetError> {
+        // Checked before Core is asked; a restart never reads the cohort,
+        // so not even a broken file keeps an old agent stopped.
+        if kind != CommandKind::Restart
+            && let Some(cohort) = self.cohort()?
+            && !cohort.lists(old)
+        {
+            return Err(FleetError::Unlisted(old.to_string()));
+        }
         let rows = self.query(&binding_query(), &[&old])?;
         Ok(rows.first().and_then(|row| {
             let mut binding = binding_of(row)?;
