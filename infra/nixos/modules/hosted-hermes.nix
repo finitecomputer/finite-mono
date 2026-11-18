@@ -84,8 +84,23 @@ in
         KillMode = lib.mkForce "control-group";
         SendSIGKILL = true;
         Delegate = false;
-        TimeoutStopSec = "5s";
-        RuntimeMaxSec = "1h";
+        # A retirement uploads a whole home (up to about 120 GB) to
+        # rsync.net and reads it back, all in one run: about 4 hours at a
+        # clean day's ~20 MB/s. 12 hours still fits it at about 6 MB/s, and
+        # an upload cut short resumes from borg's last checkpoint.
+        # The cost, accepted: while one long retirement runs, this host's
+        # other Runner work waits for it. Staff retire big homes one at a
+        # time, at quiet hours.
+        RuntimeMaxSec = "12h";
+        # Borg commits a checkpoint on SIGINT, never on SIGTERM, and starts
+        # its ssh ignoring SIGINT so the checkpoint can still reach the
+        # repository. The runner, nerdctl and ctr exit on SIGINT just as on
+        # SIGTERM. After its checkpoint borg goes on uploading, so a stop
+        # mid-upload runs to this timeout and ends in SIGKILL; 60 s lets the
+        # checkpoint commit even on a slow link. If it doesn't, the last
+        # periodic checkpoint (every 5 minutes) still stands.
+        KillSignal = "SIGINT";
+        TimeoutStopSec = "60s";
       };
     };
     systemd.services.finite-hosted-hermes = {

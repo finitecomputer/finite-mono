@@ -2292,6 +2292,36 @@ impl KataLauncher {
         })
     }
 
+    /// The upload of a retirement ZIP. A home of up to about 120 GB can take
+    /// hours, and the run can be stopped part way (a deploy, the unit's
+    /// runtime cap, a lost lease). Borg commits a checkpoint every
+    /// `--checkpoint-interval` seconds (its default is 1800), and on SIGINT
+    /// (the runner unit's stop signal); a later `create` of the same ZIP
+    /// skips every chunk a checkpoint kept. So a stop loses at most about
+    /// five minutes of upload.
+    fn borg_create_command(
+        &self,
+        root: &Path,
+        archive: &str,
+        file_name: &std::ffi::OsStr,
+    ) -> Result<PlannedCommand, RunnerError> {
+        let retirement = self.retirement_config()?;
+        self.borg_command(
+            root,
+            vec![
+                OsString::from("create"),
+                OsString::from("--remote-path"),
+                retirement.remote_path.as_os_str().to_os_string(),
+                OsString::from("--compression"),
+                OsString::from("auto,zstd"),
+                OsString::from("--checkpoint-interval"),
+                OsString::from("300"),
+                OsString::from(archive),
+                file_name.to_os_string(),
+            ],
+        )
+    }
+
     fn run_borg_with_lease(
         &self,
         command: PlannedCommand,
@@ -2374,18 +2404,7 @@ impl KataLauncher {
             let file_name = zip.file_name().ok_or_else(|| {
                 RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
             })?;
-            let command = self.borg_command(
-                root,
-                vec![
-                    OsString::from("create"),
-                    OsString::from("--remote-path"),
-                    retirement.remote_path.as_os_str().to_os_string(),
-                    OsString::from("--compression"),
-                    OsString::from("auto,zstd"),
-                    OsString::from(&archive),
-                    file_name.to_os_string(),
-                ],
-            )?;
+            let command = self.borg_create_command(root, &archive, file_name)?;
             self.run_borg_with_lease(command, renew_lease)?;
         }
         if !self.borg_archive_exists(root, &locator)? {
@@ -6381,6 +6400,31 @@ esac
             poll_interval: Duration::from_millis(1),
             convergence_timeout: Duration::from_secs(2),
         });
+    }
+
+    #[test]
+    fn retirement_upload_checkpoints_every_five_minutes() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, _plan, _fake_state) = test_launcher(&temp, 41233);
+        configure_test_retirement(&mut launcher, temp.path());
+
+        let command = launcher
+            .borg_create_command(
+                temp.path(),
+                "test-repository::retired",
+                std::ffi::OsStr::new("retirement-request.zip"),
+            )
+            .unwrap();
+
+        assert_eq!(command.args.first(), Some(&OsString::from("create")));
+        assert!(
+            command
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--checkpoint-interval", "300"]),
+            "borg create must checkpoint every 300 seconds: {:?}",
+            command.args
+        );
     }
 
     #[test]

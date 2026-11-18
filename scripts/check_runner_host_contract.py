@@ -363,8 +363,9 @@ def check_hosted_ingress_host(host: str, origins: dict[str, str]) -> None:
         "KillMode": "control-group",
         "SendSIGKILL": True,
         "Delegate": False,
-        "TimeoutStopSec": "5s",
-        "RuntimeMaxSec": "1h",
+        "KillSignal": "SIGINT",
+        "TimeoutStopSec": "60s",
+        "RuntimeMaxSec": "12h",
     }
     for key, value in expected.items():
         if service.get(key) != value:
