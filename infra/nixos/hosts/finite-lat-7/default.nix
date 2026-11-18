@@ -38,6 +38,7 @@ in
     ../../modules/metrics.nix
     ../../modules/ssh-flood-limits.nix
     ../../modules/tcp-ip-options-guard.nix
+    ../../modules/block-sctp-autoload.nix
   ];
 
   networking.hostName = "finite-lat-7";
