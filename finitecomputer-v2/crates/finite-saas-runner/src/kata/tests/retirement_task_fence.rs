@@ -446,3 +446,153 @@ fn retirement_clears_an_interrupted_attempts_staging_before_the_space_check() {
         "the leftover goes before the check, so a retry has its space"
     );
 }
+
+fn retirement_phase(
+    launcher: &KataLauncher,
+    plan: &KataLaunchPlan,
+    lease: &RuntimeControlLease,
+) -> KataRetirementPhase {
+    launcher
+        .load_retirement_progress(plan, lease)
+        .unwrap()
+        .expect("retirement progress")
+        .phase
+}
+
+#[test]
+fn retirement_reproves_its_snapshot_before_a_retried_compute_removal() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41317);
+    set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+    // The snapshot is proven and uploaded, then compute removal fails.
+    let wedged = temp
+        .path()
+        .join(format!("fake-state/{}.wedged", plan.container_name));
+    std::fs::write(&wedged, "1").unwrap();
+    assert!(launcher.retire_runtime(&lease, &mut || Ok(())).is_err());
+    assert_eq!(
+        retirement_phase(&launcher, &plan, &lease),
+        KataRetirementPhase::RemoteVerified
+    );
+    assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+
+    // A restart containerd had already queued then runs the guest, which
+    // writes `/data`, and the monitor deletes its task again. The task is
+    // absent and the remote receipt is unchanged, but the archive is stale.
+    std::fs::remove_file(&wedged).unwrap();
+    std::fs::write(
+        plan.state_root.join("workspace/after-snapshot"),
+        "written by the restarted guest",
+    )
+    .unwrap();
+    assert!(tasks(&temp).trim().is_empty());
+
+    for attempt in ["retry", "second retry"] {
+        let error = launcher
+            .retire_runtime(&lease, &mut || Ok(()))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("changed after the retirement snapshot"),
+            "{attempt}: {error}"
+        );
+        assert!(
+            launcher.inspect(&plan.container_name).unwrap().is_some(),
+            "{attempt}: compute is kept"
+        );
+        assert_eq!(
+            retirement_phase(&launcher, &plan, &lease),
+            KataRetirementPhase::RemoteVerified,
+            "{attempt}"
+        );
+    }
+    assert!(plan.state_root.join("workspace/after-snapshot").is_file());
+}
+
+/// The fake nerdctl, except that a start containerd had already queued
+/// lands right before `rm`, after the Runner's last look: the guest writes
+/// `/data`, and `rm --force` then kills its task with the container.
+fn nerdctl_where_a_queued_start_lands_before_rm(root: &Path, state_root: &Path) -> PathBuf {
+    let bin = root.join("nerdctl-start-lands");
+    write_executable(
+        &bin,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+dir="$(dirname "$0")"
+command="${{1:-}}"
+if [ "$command" = "--namespace" ]; then command="${{3:-}}"; fi
+if [ "$command" = rm ] && [ -f "$dir/start-lands" ]; then
+  echo "written by the restarted guest" > "{state}/workspace/after-snapshot"
+  rm -f "$dir/start-lands"
+fi
+exec "$dir/nerdctl-fake" "$@"
+"#,
+            state = state_root.display()
+        ),
+    );
+    bin
+}
+
+#[test]
+fn retirement_refuses_its_receipt_when_a_queued_start_lands_after_the_last_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41318);
+    set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+    launcher.config.nerdctl_bin =
+        nerdctl_where_a_queued_start_lands_before_rm(temp.path(), &plan.state_root);
+    std::fs::write(temp.path().join("start-lands"), "1").unwrap();
+
+    for attempt in ["first", "retry"] {
+        let error = launcher
+            .retire_runtime(&lease, &mut || Ok(()))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("changed after the retirement snapshot"),
+            "{attempt}: {error}"
+        );
+        // Compute was removed, but no receipt names the stale archive.
+        assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
+        assert_eq!(
+            retirement_phase(&launcher, &plan, &lease),
+            KataRetirementPhase::ComputeRemoved,
+            "{attempt}"
+        );
+    }
+    assert!(!temp.path().join("start-lands").exists());
+    assert!(plan.state_root.join("workspace/after-snapshot").is_file());
+}
+
+#[test]
+fn retirement_resumed_after_compute_removal_still_proves_its_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41319);
+    set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+    launcher.retire_runtime(&lease, &mut || Ok(())).unwrap();
+    assert_eq!(
+        retirement_phase(&launcher, &plan, &lease),
+        KataRetirementPhase::ComputeRemoved
+    );
+
+    // Progress an older Runner left: it saved ComputeRemoved after a start
+    // released during the removal had written `/data`, and stopped before
+    // Core heard of the receipt. Its tree no longer matches the archive.
+    std::fs::write(
+        plan.state_root.join("workspace/after-snapshot"),
+        "written by the restarted guest",
+    )
+    .unwrap();
+
+    let error = launcher
+        .retire_runtime(&lease, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("changed after the retirement snapshot"),
+        "{error}"
+    );
+}
