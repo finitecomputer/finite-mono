@@ -1,0 +1,96 @@
+name: Finite mover checks
+
+# The FIN-463 mover's checks that the Rust workspace job cannot run: the
+# two-VM NixOS test (lat-2 mover beside a Runner with finite-mover-host) and
+# the reader's fault-injection tests, which need strace and unprivileged user
+# namespaces. Advisory: CI gate does not require them, and they run only when
+# the mover, its reader, their modules or this file change, or on dispatch.
+
+on:
+  pull_request:
+    paths:
+      - 'finitecomputer-v2/crates/finite-mover/**'
+      - 'finitecomputer-v2/crates/finite-mover-host/**'
+      - 'infra/nixos/modules/finite-mover.nix'
+      - 'infra/nixos/modules/finite-mover-host.nix'
+      - 'infra/nixos/tests/finite-mover.nix'
+      - '.github/workflows/finite-mover-checks.yml'
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: "Exact finite-mono commit to check"
+        required: true
+        type: string
+
+concurrency:
+  group: finite-mover-checks-${{ inputs.rev || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Skip nix-installer-action's check-in, which fails on a 1s timeout; see ci.yml.
+  IDS_LOOKUP: _detsys_ids._tcp.invalid.
+  CACHIX_CACHE_NAME: finite
+  NIX_CONFIG: |
+    access-tokens = github.com=${{ github.token }}
+
+jobs:
+  vm-test:
+    name: finite-mover VM test
+    # GitHub's ubuntu-24.04 runner exposes /dev/kvm (as lat5's storage check uses).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev || github.sha }}
+      - name: Require hardware virtualization
+        run: |
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: checks.x86_64-linux.finite-mover
+        run: nix build --option builders '' --print-build-logs .#checks.x86_64-linux.finite-mover
+
+  reader-fault-injection:
+    name: finite-mover-host ignored tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.rev || github.sha }}
+      - uses: DeterminateSystems/nix-installer-action@v16
+        with:
+          extra-conf: |
+            http2 = false
+      - uses: cachix/cachix-action@v17
+        with:
+          name: ${{ env.CACHIX_CACHE_NAME }}
+          skipPush: true
+      - name: Allow strace and unprivileged user namespaces
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq strace
+          # Ubuntu 24.04's AppArmor blocks unprivileged user namespaces, which
+          # nothing_on_another_filesystem_is_carried needs (unshare --user --mount).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          unshare --user --map-root-user --mount true
+      # The two 4.5 GB stage tests stay ignored; these are the ones a person
+      # would otherwise run by hand.
+      - name: An interrupted seal is never taken for a completed one
+        run: |
+          STRACE="$(command -v strace)" nix develop .#rust-ci --command \
+            cargo test --locked -p finite-mover-host --test simplex -- \
+            --ignored --exact an_interrupted_seal_is_never_taken_for_a_completed_one
+      - name: Nothing on another filesystem is carried
+        run: |
+          nix develop .#rust-ci --command \
+            cargo test --locked -p finite-mover-host --test simplex -- \
+            --ignored --exact nothing_on_another_filesystem_is_carried
