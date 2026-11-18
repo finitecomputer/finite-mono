@@ -418,13 +418,32 @@ in
       PasswordAuthentication = false;
       KbdInteractiveAuthentication = false;
     };
+    extraConfig = ''
+      Match User finite-lnurl-tunnel
+        AuthenticationMethods publickey
+        AuthorizedKeysFile /etc/finite/lnurl-tunnel.authorized_keys
+        AllowTcpForwarding remote
+        AllowStreamLocalForwarding no
+        GatewayPorts no
+        PermitListen 127.0.0.1:11001
+        MaxSessions 0
+        PermitTTY no
+        AllowAgentForwarding no
+        X11Forwarding no
+      Match all
+    '';
   };
+  users.groups.finite-lnurl-tunnel = { };
   users.users = {
     root.openssh.authorizedKeys.keys = operatorKeys;
     ubuntu = {
       isNormalUser = true;
       extraGroups = [ "wheel" ];
       openssh.authorizedKeys.keys = operatorKeys;
+    };
+    finite-lnurl-tunnel = {
+      isSystemUser = true;
+      group = "finite-lnurl-tunnel";
     };
   };
   security.sudo.wheelNeedsPassword = false;
