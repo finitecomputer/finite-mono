@@ -29,7 +29,7 @@
 //!   again on each roster and binding. The roster lists only the agents it
 //!   lists, and a binding for anything but a restart is refused for one it
 //!   doesn't. An id it lists that isn't on the roster is said on stderr, by
-//!   id alone. The daily `sizes` run measures everyone, cohort or not, so
+//!   id alone (`cohort::not_on_the_roster`). The daily `sizes` run measures everyone, cohort or not, so
 //!   an agent added to it is offered with its sizes.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,7 +38,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio_postgres::NoTls;
 
-use crate::cohort::Cohort;
+use crate::cohort::{Cohort, not_on_the_roster};
 use crate::contract::{
     CommandKind, Has, ROSTER_AGENTS_MAX, Roster, RosterAgent, RosterPerson, valid_old,
 };
@@ -250,12 +250,11 @@ impl Fleet for PgFleet {
             });
         }
         // An id the cohort lists that Core has no listable agent for (a
-        // slip, or one moved already) is ignored, and said by id alone.
-        for old in cohort.iter().flat_map(Cohort::old) {
+        // slip, or one moved already) is ignored, and said by id alone, or
+        // by its place when it isn't shaped as Core's.
+        for (place, old) in cohort.iter().flat_map(Cohort::entries) {
             if !listed.contains(old) {
-                eprintln!(
-                    "finite-mover: the cohort's {old} is not on the roster: Core has no live old agent by that id that the mover can move"
-                );
+                eprintln!("{}", not_on_the_roster(place, old));
             }
         }
         let observed_ms = SystemTime::now()

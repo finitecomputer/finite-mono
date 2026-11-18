@@ -3,7 +3,8 @@
 //! - `npub`: the mover key's npub, for the deployment's `migrations.mover`.
 //! - `roster`: push the roster once (a timer runs it every 10 minutes).
 //! - `mailbox`: read the mailbox and do what it says (every 10 seconds).
-//!   One run at a time: a second, meanwhile, does nothing.
+//!   One run at a time: a second, meanwhile, does nothing. A run that left
+//!   a command `waiting` (the operator's cohort couldn't be read) fails.
 //! - `sizes`: measure every live agent through its host's reader, from
 //!   metadata alone, into the cache the roster reads (once a day), in the
 //!   operator's cohort or not. Only with Core's database as the fleet.
@@ -79,11 +80,16 @@ fn run() -> Result<(), String> {
                 return Ok(());
             };
             let worked = mover.work_mailbox().map_err(|error| error.to_string())?;
-            for one in worked {
+            for one in &worked {
                 println!(
                     "{}",
-                    serde_json::to_string(&one).expect("a result serializes")
+                    serde_json::to_string(one).expect("a result serializes")
                 );
+            }
+            // The rest was done; the run still fails, so it is seen, and
+            // the next one tries the waiting commands again.
+            if let Some(waiting) = worked.iter().find(|one| one.outcome == "waiting") {
+                return Err(waiting.why.clone().unwrap_or_default());
             }
         }
         _ => return Err(USAGE.into()),

@@ -19,7 +19,10 @@
 //!
 //! With the operator's cohort (`cohort`), a stop or a retirement of an old
 //! agent outside it fails at its `cohort` step, and nothing is asked of
-//! Core or its host; a restart is done whatever the cohort lists.
+//! Core or its host; a restart is done whatever the cohort lists. While the
+//! cohort can't be read, a stop or retirement is left `waiting` in the
+//! mailbox and the run goes on to the rest, so a restart behind it is
+//! still done; the run then fails (`main`), and the next one tries again.
 
 use std::cell::Cell;
 use std::collections::BTreeSet;
@@ -112,7 +115,9 @@ pub enum MoverError {
 pub struct Worked {
     pub command: String,
     /// `staged`, `retired`, `restarted`, `failed`, `stale` (not this old
-    /// agent's command any more), or `left` (a kind the mover doesn't know).
+    /// agent's command any more), `left` (a kind the mover doesn't know), or
+    /// `waiting` (the operator's cohort couldn't be read: not done, left in
+    /// the mailbox for the next run).
     pub outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub step: Option<String>,
@@ -140,6 +145,9 @@ enum Stop {
     /// finite.chat or the fleet couldn't be asked: the command stays in
     /// the mailbox and is read again.
     Platform(MoverError),
+    /// The operator's cohort couldn't be read: the command stays in the
+    /// mailbox, and the run goes on to the others (a restart never reads it).
+    Cohort(FleetError),
 }
 
 impl From<SinkError> for Stop {
@@ -224,6 +232,11 @@ impl<'a> Mover<'a> {
             Ok(outcome) => Ok(Worked::of(command, outcome)),
             Err(Stop::Stale) => Ok(Worked::of(command, "stale")),
             Err(Stop::Platform(error)) => Err(error),
+            Err(Stop::Cohort(error)) => Ok(Worked {
+                step: Some("cohort".into()),
+                why: Some(short(&error.to_string())),
+                ..Worked::of(command, "waiting")
+            }),
             Err(Stop::Failed(step, why)) => {
                 let why = short(&why);
                 let report = Report {
@@ -234,7 +247,9 @@ impl<'a> Mover<'a> {
                 match self.report(command, report) {
                     Ok(_) | Err(Stop::Stale) => {}
                     Err(Stop::Platform(error)) => return Err(error),
-                    Err(Stop::Failed(..)) => unreachable!("a report fails as the platform's"),
+                    Err(Stop::Failed(..) | Stop::Cohort(_)) => {
+                        unreachable!("a report fails as the platform's")
+                    }
                 }
                 Ok(Worked {
                     step: Some(step.to_string()),
@@ -282,6 +297,7 @@ impl<'a> Mover<'a> {
                 "cohort",
                 "this old agent is not in the operator's cohort".into(),
             )),
+            Err(error @ FleetError::Cohort(_)) => Err(Stop::Cohort(error)),
             Err(error) => Err(Stop::Platform(error.into())),
         }
     }

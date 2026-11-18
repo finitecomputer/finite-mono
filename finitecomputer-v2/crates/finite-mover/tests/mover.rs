@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use finite_mover::cohort::Cohort;
 use finite_mover::contract::{CommandKind, Has, Roster, RosterAgent, RosterPerson, Sizes};
 use finite_mover::core_cli::CoreCli;
 use finite_mover::fleet::{Binding, FileFleet, Fleet, FleetError, FleetFile};
@@ -1211,6 +1212,68 @@ fn an_old_agent_outside_the_cohort_is_never_stopped_or_retired_and_the_mailbox_g
         assert!(world.log("host.log").is_empty(), "nor its host");
         assert_eq!(world.fake.kinds(), ["failed", "failed"]);
     }
+}
+
+/// The fleet while the operator's cohort file is broken: every binding
+/// but a restart's is that error (`PgFleet`).
+struct Broken<'a>(&'a FileFleet, PathBuf);
+
+impl Fleet for Broken<'_> {
+    fn roster(&self) -> Result<Roster, FleetError> {
+        self.0.roster()
+    }
+
+    fn binding(&self, old: &str, kind: CommandKind) -> Result<Option<Binding>, FleetError> {
+        match kind {
+            CommandKind::Restart => self.0.binding(old, kind),
+            _ => Err(Cohort::read(&self.1).unwrap_err().into()),
+        }
+    }
+}
+
+#[test]
+fn a_cohort_that_cannot_be_read_leaves_a_stop_waiting_and_still_restarts_another() {
+    let world = World::new();
+    edit_fleet(&world, |fleet| {
+        let mut other = fleet["bindings"][OLD].clone();
+        other["old"] = json!("proj_b");
+        other["agent_runtime_id"] = json!("runtime_b");
+        other["source_machine_id"] = json!("machine_b");
+        other["durable_state_id"] = json!("runtime_b");
+        fleet["bindings"]["proj_b"] = other;
+    });
+    let cohort = world.dir.join("cohort.json");
+    std::fs::write(&cohort, r#"{"old": ["proj_a"], "everyone": true}"#).unwrap();
+    world.fake.tell(OLD, "asked", 1, stage_command(1));
+    world
+        .fake
+        .tell("proj_b", "held", 1, restart_command("proj_b"));
+    let fleet = Broken(&world.fleet, cohort);
+    let mover = Mover::new(
+        &world.platform,
+        &fleet,
+        &world.core,
+        &world.hosts,
+        &world.locks,
+    );
+    let worked = mover.work_mailbox().unwrap();
+    let outcomes: Vec<(&str, Option<&str>)> = worked
+        .iter()
+        .map(|one| (one.outcome.as_str(), one.step.as_deref()))
+        .collect();
+    assert_eq!(outcomes, [("waiting", Some("cohort")), ("restarted", None)]);
+    let why = worked[0].why.as_deref().unwrap();
+    assert!(
+        why.starts_with("the operator's cohort: ") && !why.contains("everyone"),
+        "{why}"
+    );
+    // proj_a: untouched, its command still there for the next run.
+    let core = world.log("core.log");
+    assert_eq!(core.len(), 1, "{core:?}");
+    assert!(core[0].starts_with("runtime-restart-exact --project-id proj_b"));
+    assert!(world.log("host.log").is_empty());
+    assert_eq!(world.fake.kinds(), ["restarted"]);
+    assert!(world.fake.platform().command(OLD).is_some());
 }
 
 fn edit_fleet(world: &World, edit: impl FnOnce(&mut Value)) {

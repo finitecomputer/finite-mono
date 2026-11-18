@@ -293,10 +293,14 @@ pkgs.testers.runNixOSTest {
         assert app.succeed(npub_cmd).strip() == npub, "the mover reads the config it names"
         out = roster_run()
         assert "cohort" not in out, out
-        app.succeed(f"echo '{{\"old\": [\"proj_live\", \"proj_gone\"]}}' > {cohort}")
+        # One live agent, an id Core could have minted but lacks, and a slip
+        # (a phone number): that one is said by its place, never its text.
+        gone = "project_0000000000000000dead"
+        app.succeed(f"echo '{{\"old\": [\"proj_live\", \"{gone}\", \"15551234567\"]}}' > {cohort}")
         out = roster_run()
-        assert "the cohort's proj_gone is not on the roster" in out, out
-        assert "proj_live" not in out, out
+        assert f"the cohort's {gone} is not on the roster" in out, out
+        assert "the cohort's entry 3 is not on the roster" in out, out
+        assert "15551234567" not in out and "proj_live" not in out, out
         app.succeed(f"echo '{{\"old\": \"proj_live\"}}' > {cohort}")
         out = roster_run()
         assert "the operator's cohort:" in out and "not on the roster" not in out, out
