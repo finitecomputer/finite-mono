@@ -2050,6 +2050,138 @@ impl KataLauncher {
             .any(|line| line.trim() == container_id))
     }
 
+    /// The status `ctr tasks list` gives the task of exactly `container_id`
+    /// (`UNKNOWN`, `CREATED`, `RUNNING`, `STOPPED`, `PAUSED` or `PAUSING`).
+    /// `None` when no single well-formed row names it.
+    fn listed_task_status(&self, container_id: &str) -> Result<Option<String>, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let command = PlannedCommand {
+            program: retirement.ctr_bin.clone(),
+            cwd: None,
+            args: vec![
+                OsString::from("--namespace"),
+                OsString::from(self.config.namespace.trim()),
+                OsString::from("tasks"),
+                OsString::from("list"),
+            ],
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if !output.status.success() {
+            return Err(RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: "containerd task-list status read failed".to_string(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut rows = stdout.lines().filter_map(|line| {
+            let columns = line.split_whitespace().collect::<Vec<_>>();
+            (columns.first() == Some(&container_id)).then_some(columns)
+        });
+        Ok(match (rows.next(), rows.next()) {
+            (Some(columns), None) if columns.len() == 3 => Some(columns[2].to_string()),
+            _ => None,
+        })
+    }
+
+    /// nerdctl stops a container without deleting its containerd task
+    /// (nerdctl 2.3.4 `containerutil.Stop` kills and waits; only `start` and
+    /// `rm` delete the task). A stopped Kata container therefore keeps a
+    /// STOPPED task, held by its shim, that `ctr tasks list` keeps listing
+    /// and the absence fence would wait on forever.
+    ///
+    /// `stopped` is the caller's fresh inspect of the container it just
+    /// stopped. Its task is deleted only when both of these hold:
+    /// - containerd's restart monitor will leave the container stopped
+    ///   ([`restart_monitor_leaves_stopped`]). The leftover task is the only
+    ///   thing that would otherwise fence a restart.
+    /// - containerd lists the task STOPPED, so its process has exited.
+    ///
+    /// Deleting that record is what nerdctl's own `rm` does. `ctr tasks
+    /// delete` without `--force` re-reads the status and refuses a task that
+    /// is no longer stopped (containerd 2.x `task.Delete`). So a task that
+    /// started in between is refused, never killed. Any other case is left
+    /// alone, and the absence fence decides.
+    fn delete_stopped_task(&self, stopped: &KataInspect) -> Result<(), RunnerError> {
+        let container_id = stopped.id.as_str();
+        if !restart_monitor_leaves_stopped(&stopped.config.labels)
+            || self.listed_task_status(container_id)?.as_deref() != Some("STOPPED")
+        {
+            return Ok(());
+        }
+        let retirement = self.retirement_config()?;
+        let ctr = |args: &[&str]| PlannedCommand {
+            program: retirement.ctr_bin.clone(),
+            cwd: None,
+            args: ["--namespace", self.config.namespace.trim()]
+                .iter()
+                .chain(args)
+                .map(OsString::from)
+                .collect(),
+            env: Vec::new(),
+        };
+        // containerd's restart monitor reads this label. Once it says stopped,
+        // the monitor makes no new start and kills a task that does start.
+        let label = ctr(&[
+            "containers",
+            "label",
+            container_id,
+            "containerd.io/restart.status=stopped",
+        ]);
+        if !self
+            .execute(&label, self.config.command_timeout)?
+            .status
+            .success()
+        {
+            return Err(RunnerError::CommandExecution {
+                program: label.program.display().to_string(),
+                message: "could not mark the container's restart status stopped".to_string(),
+            });
+        }
+        let command = ctr(&["tasks", "delete", container_id]);
+        let output = self.execute(&command, self.config.command_timeout)?;
+        // A delete that lost a race to another deleter still leaves no task.
+        if output.status.success() || self.task_absent(container_id)? {
+            return Ok(());
+        }
+        Err(RunnerError::CommandExecution {
+            program: command.program.display().to_string(),
+            message: format!(
+                "could not delete the stopped containerd task: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        })
+    }
+
+    /// A restart containerd queued before the explicit stop applies without
+    /// rereading the restart labels, so it can start the guest after the task
+    /// fence, while the snapshot is cut or uploaded. Before a receipt, the
+    /// source must still be exactly what was archived: the same stopped
+    /// container, no task, and the same tree. Otherwise the archive is not
+    /// used, and the retirement stays refused with compute and `/data` kept.
+    fn verify_snapshot_still_exact(
+        &self,
+        plan: &KataLaunchPlan,
+        progress: &KataRetirementProgress,
+        archived: &[crate::retirement::RecoveryManifestEntry],
+    ) -> Result<(), RunnerError> {
+        let same_stopped_compute = self
+            .inspect(&progress.container_name)?
+            .is_some_and(|now| now.id == progress.container_id && now.state.status != "running");
+        if !same_stopped_compute
+            || !self.task_absent(&progress.container_id)?
+            || source_manifest(&plan.state_root)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?
+                != archived
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata compute or durable state changed after the retirement snapshot; its archive is not used"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn wait_for_task_absence(
         &self,
         container_id: &str,
@@ -3430,10 +3562,12 @@ impl RuntimeLauncher for KataLauncher {
             } else {
                 None
             };
-            if inspected.state.status == "running" {
-                renew_lease()?;
-                self.stop_compute_only(&validated_plan.container_name)?;
-            }
+            // Stop even a container that already exited. nerdctl's stop
+            // records the explicit stop; without it containerd's restart
+            // monitor restarts an `unless-stopped` container that exited on
+            // its own.
+            renew_lease()?;
+            self.stop_compute_only(&validated_plan.container_name)?;
             let stopped = self
                 .inspect(&validated_plan.container_name)?
                 .ok_or_else(|| {
@@ -3446,9 +3580,18 @@ impl RuntimeLauncher for KataLauncher {
                     "canonical Kata container did not reach a stopped state".to_string(),
                 ));
             }
+            // Only here, before the stable manifests are taken. Once the ZIP
+            // exists, a STOPPED task means compute ran again after the
+            // snapshot, so the later fences must refuse it, not tidy it.
+            self.delete_stopped_task(&stopped)?;
             self.wait_for_task_absence(&inspected.id, renew_lease)?;
             let stable = self.stable_source_manifest(&validated_plan.state_root, renew_lease)?;
 
+            // Without progress, nothing staged for this request was uploaded:
+            // an attempt that died before recording progress left only local
+            // copies of the source (a ZIP, or part of one). Clear them before
+            // measuring free space, which they would otherwise use up.
+            self.cleanup_retirement_staging(&lease.request.id)?;
             std::fs::create_dir_all(&staging_root)
                 .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             #[cfg(unix)]
@@ -3462,8 +3605,7 @@ impl RuntimeLauncher for KataLauncher {
             let required_space = source_bytes
                 .saturating_add(source_bytes / 100)
                 .saturating_add(64 * 1024 * 1024);
-            let available_space = fs4::available_space(&staging_root)
-                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let available_space = staging_available_space(&staging_root)?;
             let required_space = if lease.request.kind == RuntimeControlKind::ArchiveTrial {
                 required_space.saturating_mul(2)
             } else {
@@ -3475,12 +3617,8 @@ impl RuntimeLauncher for KataLauncher {
                 )));
             }
             let context = self.retirement_context(lease, agent_principal.clone())?;
-            let verified = if zip_path.exists() {
-                verify_recovery_zip(&zip_path, Some(&context))
-            } else {
-                create_recovery_zip(&validated_plan.state_root, &zip_path, &context)
-            }
-            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let verified = create_recovery_zip(&validated_plan.state_root, &zip_path, &context)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             if verified.manifest.entries != stable {
                 return Err(RunnerError::RuntimeLaunch(
                     "retirement ZIP did not match the stable stopped source manifest".to_string(),
@@ -3560,6 +3698,7 @@ impl RuntimeLauncher for KataLauncher {
         }
         let receipt = progress.receipt.clone().unwrap_or(candidate_receipt);
         if progress.phase < KataRetirementPhase::RemoteVerified {
+            self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
             progress.phase = KataRetirementPhase::RemoteVerified;
             progress.receipt = Some(receipt.clone());
             self.write_retirement_progress(&plan, &progress)?;
@@ -3987,15 +4126,67 @@ fn first_manifest_change(
         })
 }
 
+/// The identity file's own metadata. On the way to `agent/identity`, a link
+/// is followed only when it is relative and stays inside the tree, as an
+/// older archive's `agent -> real-agent` does; the guest sees the same
+/// directory. An absolute link names a host path on the host, so it is
+/// refused, as is a climb above the root or a loop. The answer depends on
+/// the tree alone, so it is the same at archive time and at restore.
 fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata, RunnerError> {
+    let missing = || {
+        RunnerError::RuntimeLaunch(
+            "cold relocation state is missing agent/identity/identity.json".to_string(),
+        )
+    };
+    let outside = |link: &Path| {
+        RunnerError::RuntimeLaunch(format!(
+            "agent/identity/identity.json must resolve inside the durable state tree; {} does not",
+            link.display()
+        ))
+    };
+    // `directory` holds only real directories, so the kernel follows no link
+    // under `state_root`; `pending` is the rest of the path, next on top.
+    let mut directory = PathBuf::new();
+    let mut pending = vec![OsString::from("identity"), OsString::from("agent")];
+    let mut links = 0;
+    while let Some(name) = pending.pop() {
+        if name == ".." {
+            if !directory.pop() {
+                return Err(outside(&directory));
+            }
+            continue;
+        }
+        if name == "." {
+            continue;
+        }
+        let candidate = directory.join(&name);
+        let metadata = state_root
+            .join(&candidate)
+            .symlink_metadata()
+            .map_err(|_| missing())?;
+        if metadata.is_dir() {
+            directory = candidate;
+        } else if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(state_root.join(&candidate)).map_err(|_| missing())?;
+            links += 1;
+            if target.is_absolute() || links > 40 {
+                return Err(outside(&candidate));
+            }
+            pending.extend(
+                target
+                    .components()
+                    .rev()
+                    .map(|c| c.as_os_str().to_os_string()),
+            );
+        } else {
+            return Err(missing());
+        }
+    }
     state_root
-        .join("agent/identity/identity.json")
+        .join(directory)
+        .join("identity.json")
         .symlink_metadata()
-        .map_err(|_| {
-            RunnerError::RuntimeLaunch(
-                "cold relocation state is missing agent/identity/identity.json".to_string(),
-            )
-        })
+        .map_err(|_| missing())
 }
 
 /// Stable manifest used on both the stopped source and the staged target. It
@@ -5101,6 +5292,36 @@ fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
     )
 }
 
+/// Free bytes on the retirement staging filesystem.
+fn staging_available_space(staging_root: &Path) -> Result<u64, RunnerError> {
+    #[cfg(test)]
+    if let Some(bytes) = STAGING_AVAILABLE_SPACE.with(std::cell::Cell::get) {
+        return Ok(bytes);
+    }
+    fs4::available_space(staging_root)
+        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets a test pin the free space the staging check sees.
+    static STAGING_AVAILABLE_SPACE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether containerd's restart monitor leaves this stopped container
+/// stopped (containerd 2.x `core/runtime/restart.Reconcile`). The monitor
+/// acts only on a container whose restart status label is `running`. Under
+/// `unless-stopped` it restarts the container until nerdctl's stop records the
+/// explicit stop. Any other policy with a `running` status is treated as one
+/// that restarts.
+fn restart_monitor_leaves_stopped(labels: &BTreeMap<String, String>) -> bool {
+    let label = |key: &str| labels.get(key).map(String::as_str);
+    label("containerd.io/restart.status") != Some("running")
+        || (label("containerd.io/restart.policy") == Some("unless-stopped")
+            && label("containerd.io/restart.explicitly-stopped") == Some("true"))
+}
+
 #[derive(Deserialize)]
 struct KataInspect {
     #[serde(rename = "Id", default)]
@@ -5236,6 +5457,7 @@ struct KataRecoveryHelper {
 #[cfg(test)]
 mod tests {
     mod memory_admission;
+    mod retirement_task_fence;
     mod trial_archives;
     use super::*;
     use finite_saas_core::{
@@ -5493,7 +5715,7 @@ record() {
   recovery="$(field_or_empty "$name" recovery)"
   public="$(field_or_empty "$name" public)"; secret="$(field_or_empty "$name" secret)"
   environment="$(python3 -c 'import json,sys; print(json.dumps([line.rstrip("\n") for line in open(sys.argv[1], encoding="utf-8")]))' "$root/$name.env-file")"
-  printf '{"Id":"%s","Name":"%s","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}' "$(container_id "$name")" "$name" "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$image" "$environment" "$status" "$mount"
+  printf '{"Id":"%s","Name":"%s","Config":{"Labels":{"computer.finite.v2.runtime":"true","computer.finite.v2.source_host_id":"finite-lat-1","computer.finite.v2.source_machine_id":"%s","computer.finite.v2.project_id":"%s","computer.finite.v2.runtime_artifact_id":"%s","computer.finite.v2.state_schema_version":"%s","computer.finite.v2.upgrade_request_id":"%s","computer.finite.v2.recovery_request_id":"%s","computer.finite.v2.runtime_environment_keys":"%s","computer.finite.v2.runtime_secret_environment_keys":"%s","containerd.io/restart.status":"running","containerd.io/restart.policy":"unless-stopped","containerd.io/restart.explicitly-stopped":"%s"},"Image":"%s","Env":%s},"State":{"Status":"%s"},"Mounts":[{"Source":"%s","Destination":"/data","RW":true}]}' "$(container_id "$name")" "$name" "$source" "$project" "$artifact" "$schema" "$request" "$recovery" "$public" "$secret" "$(field_or_empty "$name" explicitly-stopped)" "$image" "$environment" "$status" "$mount"
 }
 case "$cmd" in
   info|pull) exit 0 ;;
@@ -5616,6 +5838,7 @@ case "$cmd" in
       # different Agent would.
       write_field "$name" port "$(cat "$root/start-serves-port")"
     fi
+    write_field "$name" explicitly-stopped false
     write_field "$name" status running ;;
   restart)
     for name in "$@"; do :; done
@@ -5624,6 +5847,7 @@ case "$cmd" in
       echo "mkdir /run/containerd/io.containerd.runtime.v2.task/finite/$(container_id "$name"): file exists" >&2
       exit 1
     fi
+    write_field "$name" explicitly-stopped false
     write_field "$name" status running ;;
   stop)
     time=""
@@ -5633,6 +5857,9 @@ case "$cmd" in
       prev="$arg"
     done
     for name in "$@"; do :; done
+    # containerutil.Stop records the explicit stop before anything else; only
+    # a failure in nerdctl's network cleanup, which comes first, skips it.
+    if [ ! -f "$root/$name.stop-fails-early" ]; then write_field "$name" explicitly-stopped true; fi
     if [ -f "$root/stuck-stop" ]; then
       echo "injected stuck stop" >&2
       exit 42
@@ -5704,11 +5931,11 @@ case "$cmd" in
       echo "failed to delete task: rpc error: code = Unavailable desc = ttrpc: closed" >&2
       exit 1
     fi
-    rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.recovery" "$root/$name.public" "$root/$name.secret" "$root/$name.env-file" "$root/$name.port" "$root/$name.id" "$root/$name.hermes-port"
+    rm -f "$root/$name.image" "$root/$name.status" "$root/$name.artifact" "$root/$name.schema" "$root/$name.project" "$root/$name.source" "$root/$name.mount" "$root/$name.request" "$root/$name.recovery" "$root/$name.public" "$root/$name.secret" "$root/$name.env-file" "$root/$name.port" "$root/$name.id" "$root/$name.hermes-port" "$root/$name.explicitly-stopped"
     ;;
   rename)
     from="$1"; to="$2"
-    for suffix in image status artifact schema project source mount request recovery public secret env-file port id hermes-port wedged; do
+    for suffix in image status artifact schema project source mount request recovery public secret env-file port id hermes-port wedged explicitly-stopped; do
       if [ -f "$root/$from.$suffix" ]; then mv "$root/$from.$suffix" "$root/$to.$suffix"; fi
     done
     case "$from" in

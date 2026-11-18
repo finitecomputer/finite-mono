@@ -44,6 +44,83 @@ fn reclaim_lease(
 }
 
 #[test]
+fn trial_archive_refuses_an_identity_reached_through_a_link() {
+    // In the guest, /data/identity-store is this tree's own directory. On
+    // the host it is a host path, so restore would never find the identity
+    // there. Archiving the tree is refused, so reclaim cannot remove the
+    // only local copy of a tree that cannot be restored.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, _fake, archive) = archive_fixture(&temp);
+    std::fs::create_dir_all(plan.state_root.join("identity-store")).unwrap();
+    std::fs::rename(
+        plan.state_root.join("agent/identity/identity.json"),
+        plan.state_root.join("identity-store/identity.json"),
+    )
+    .unwrap();
+    std::fs::remove_dir(plan.state_root.join("agent/identity")).unwrap();
+    std::os::unix::fs::symlink(
+        "/data/identity-store",
+        plan.state_root.join("agent/identity"),
+    )
+    .unwrap();
+
+    let error = launcher
+        .archive_trial_state(&archive, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(error.contains("identity"), "{error}");
+    assert!(
+        plan.state_root
+            .join("identity-store/identity.json")
+            .is_file()
+    );
+    assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+}
+
+#[test]
+fn trial_archive_with_an_in_tree_agent_link_reclaims_and_restores() {
+    // Archives made before absolute links were accepted could hold relative
+    // in-tree links such as `agent -> real-agent`, and restored. Reclaim may
+    // delete the local tree only because restore still accepts them.
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, _fake, archive) = archive_fixture(&temp);
+    std::fs::rename(
+        plan.state_root.join("agent"),
+        plan.state_root.join("real-agent"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("real-agent", plan.state_root.join("agent")).unwrap();
+    let snapshot = launcher
+        .archive_trial_state(&archive, &mut || Ok(()))
+        .unwrap();
+    launcher
+        .reclaim_trial_state(&reclaim_lease(&archive, snapshot.clone()), &mut || Ok(()))
+        .unwrap();
+    assert!(!plan.state_root.exists());
+    let mut restore = relocation_creation_lease(
+        "agent_request_trial_restore",
+        "finite-lat-1",
+        "finite-lat-1",
+        &snapshot.durable_state_manifest_sha256,
+        true,
+    );
+    let finite_saas_core::RuntimeRelocationEnvelope::V1(relocation) =
+        restore.request.relocation.as_mut().unwrap();
+    relocation.trial_archive = Some(snapshot);
+    launcher.trial_restore_private_key(&restore).unwrap();
+
+    launcher
+        .restore_trial_state(&restore, &plan, &mut || Ok(()))
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(plan.state_root.join("agent/identity/identity.json")).unwrap(),
+        "{\"npub\":\"npub1sameagent\"}\n"
+    );
+}
+
+#[test]
 fn trial_archive_reclaim_restore_preserves_identity_history_and_boot_changes() {
     let temp = tempfile::tempdir().unwrap();
     let (mut launcher, plan, fake, archive) = archive_fixture(&temp);
