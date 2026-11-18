@@ -558,10 +558,41 @@ fn retirement_refuses_its_receipt_when_a_queued_start_lands_after_the_last_check
         assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
         assert_eq!(
             retirement_phase(&launcher, &plan, &lease),
-            KataRetirementPhase::RemoteVerified,
+            KataRetirementPhase::ComputeRemoved,
             "{attempt}"
         );
     }
     assert!(!temp.path().join("start-lands").exists());
     assert!(plan.state_root.join("workspace/after-snapshot").is_file());
+}
+
+#[test]
+fn retirement_resumed_after_compute_removal_still_proves_its_snapshot() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41319);
+    set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+    launcher.retire_runtime(&lease, &mut || Ok(())).unwrap();
+    assert_eq!(
+        retirement_phase(&launcher, &plan, &lease),
+        KataRetirementPhase::ComputeRemoved
+    );
+
+    // Progress an older Runner left: it saved ComputeRemoved after a start
+    // released during the removal had written `/data`, and stopped before
+    // Core heard of the receipt. Its tree no longer matches the archive.
+    std::fs::write(
+        plan.state_root.join("workspace/after-snapshot"),
+        "written by the restarted guest",
+    )
+    .unwrap();
+
+    let error = launcher
+        .retire_runtime(&lease, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("changed after the retirement snapshot"),
+        "{error}"
+    );
 }

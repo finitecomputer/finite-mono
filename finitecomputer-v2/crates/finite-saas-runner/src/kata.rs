@@ -3714,8 +3714,9 @@ impl RuntimeLauncher for KataLauncher {
         }
         let receipt = progress.receipt.clone().unwrap_or(candidate_receipt);
         // RemoteVerified proves the source only at the moment it was written.
-        // A retry from it found compute still there (a removal failed, or the
-        // Runner stopped first), and that stopped container may have run since.
+        // A retry from it may find compute still there (a removal failed, or
+        // the Runner stopped first), and that stopped container may have run
+        // since.
         let resumed_after_proof = progress.phase >= KataRetirementPhase::RemoteVerified;
         if !resumed_after_proof {
             self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
@@ -3725,6 +3726,10 @@ impl RuntimeLauncher for KataLauncher {
         }
 
         if lease.request.kind == RuntimeControlKind::ArchiveTrial {
+            // A trial keeps its stopped compute, so a retry proves it again.
+            if resumed_after_proof {
+                self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
+            }
             return Ok(receipt);
         }
         if progress.phase < KataRetirementPhase::ComputeRemoved {
@@ -3743,16 +3748,18 @@ impl RuntimeLauncher for KataLauncher {
                 self.remove_compute(&progress.container_name)?;
             }
             self.wait_for_removal_convergence(&progress, renew_lease)?;
-            // A start released after that last proof ran until the removal
-            // killed it. With the container record gone nothing can write
-            // `/data` again, so only this comparison makes the receipt exact.
-            // A mismatch fails every retry: the receipt is never returned.
-            self.verify_source_still_archived(&plan, &remote.manifest.entries)?;
             progress.phase = KataRetirementPhase::ComputeRemoved;
             self.write_retirement_progress(&plan, &progress)?;
         } else {
             self.wait_for_removal_convergence(&progress, renew_lease)?;
         }
+        // A start released after the last proof above ran until the removal
+        // killed it. With the container record gone nothing can write `/data`
+        // again, so only this comparison makes the receipt exact. Every
+        // attempt makes it, including one resuming an older Runner's
+        // ComputeRemoved. A mismatch fails every retry: the receipt is never
+        // returned.
+        self.verify_source_still_archived(&plan, &remote.manifest.entries)?;
         // Plaintext staging is part of the retryable retirement transaction,
         // not best-effort work after Core commits. A cleanup failure returns
         // the same request to the queue; the persisted remote receipt lets the
