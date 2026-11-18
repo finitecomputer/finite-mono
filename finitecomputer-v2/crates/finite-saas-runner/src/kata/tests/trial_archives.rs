@@ -267,6 +267,37 @@ fn trial_reclaim_changed_local_data_reserves_capacity_and_preserves_recovery() {
 }
 
 #[test]
+fn trial_archive_retry_reproves_its_snapshot_before_returning_the_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, _, archive) = archive_fixture(&temp);
+    // The archive is verified and RemoteVerified saved; then the Runner
+    // stops before Core hears of the receipt.
+    launcher.retire_runtime(&archive, &mut || Ok(())).unwrap();
+    // A restart containerd had already queued runs the stopped guest, which
+    // writes `/data`, and its task is deleted again before the retry.
+    std::fs::write(
+        plan.state_root.join("agent/life"),
+        "written by the restarted guest",
+    )
+    .unwrap();
+
+    let error = launcher
+        .archive_trial_state(&archive, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        error.contains("changed after the retirement snapshot"),
+        "{error}"
+    );
+    assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+    assert_eq!(
+        std::fs::read_to_string(plan.state_root.join("agent/life")).unwrap(),
+        "written by the restarted guest"
+    );
+}
+
+#[test]
 fn trial_archive_failed_readback_or_stale_lease_never_removes_local_state() {
     let temp = tempfile::tempdir().unwrap();
     let (mut launcher, plan, _, archive) = archive_fixture(&temp);
