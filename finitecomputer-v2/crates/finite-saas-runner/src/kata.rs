@@ -2155,7 +2155,8 @@ impl KataLauncher {
 
     /// A restart containerd queued before the explicit stop applies without
     /// rereading the restart labels, so it can start the guest after the task
-    /// fence, while the snapshot is cut or uploaded. Before a receipt, the
+    /// fence: while the snapshot is cut or uploaded, or while the stopped
+    /// container waits for a retried removal. Before compute is removed, the
     /// source must still be exactly what was archived: the same stopped
     /// container, no task, and the same tree. Otherwise the archive is not
     /// used, and the retirement stays refused with compute and `/data` kept.
@@ -2168,14 +2169,29 @@ impl KataLauncher {
         let same_stopped_compute = self
             .inspect(&progress.container_name)?
             .is_some_and(|now| now.id == progress.container_id && now.state.status != "running");
-        if !same_stopped_compute
-            || !self.task_absent(&progress.container_id)?
-            || source_manifest(&plan.state_root)
-                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?
-                != archived
-        {
+        if !same_stopped_compute || !self.task_absent(&progress.container_id)? {
             return Err(RunnerError::RuntimeLaunch(
                 "Kata compute or durable state changed after the retirement snapshot; its archive is not used"
+                    .to_string(),
+            ));
+        }
+        self.verify_source_still_archived(plan, archived)
+    }
+
+    /// `/data` is still exactly the archived tree. After compute removal has
+    /// converged nothing can write it again, so this is the proof a receipt
+    /// rests on; the same check gates trial reclaim.
+    fn verify_source_still_archived(
+        &self,
+        plan: &KataLaunchPlan,
+        archived: &[crate::retirement::RecoveryManifestEntry],
+    ) -> Result<(), RunnerError> {
+        if source_manifest(&plan.state_root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?
+            != archived
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata durable state changed after the retirement snapshot; its archive is not used"
                     .to_string(),
             ));
         }
@@ -3697,7 +3713,11 @@ impl RuntimeLauncher for KataLauncher {
             ));
         }
         let receipt = progress.receipt.clone().unwrap_or(candidate_receipt);
-        if progress.phase < KataRetirementPhase::RemoteVerified {
+        // RemoteVerified proves the source only at the moment it was written.
+        // A retry from it found compute still there (a removal failed, or the
+        // Runner stopped first), and that stopped container may have run since.
+        let resumed_after_proof = progress.phase >= KataRetirementPhase::RemoteVerified;
+        if !resumed_after_proof {
             self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
             progress.phase = KataRetirementPhase::RemoteVerified;
             progress.receipt = Some(receipt.clone());
@@ -3715,9 +3735,19 @@ impl RuntimeLauncher for KataLauncher {
                         "canonical Kata container ID changed during retirement".to_string(),
                     ));
                 }
+                // A first attempt made this proof just above. A retry makes
+                // it again, so a change keeps compute for a new retirement.
+                if resumed_after_proof {
+                    self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
+                }
                 self.remove_compute(&progress.container_name)?;
             }
             self.wait_for_removal_convergence(&progress, renew_lease)?;
+            // A start released after that last proof ran until the removal
+            // killed it. With the container record gone nothing can write
+            // `/data` again, so only this comparison makes the receipt exact.
+            // A mismatch fails every retry: the receipt is never returned.
+            self.verify_source_still_archived(&plan, &remote.manifest.entries)?;
             progress.phase = KataRetirementPhase::ComputeRemoved;
             self.write_retirement_progress(&plan, &progress)?;
         } else {
