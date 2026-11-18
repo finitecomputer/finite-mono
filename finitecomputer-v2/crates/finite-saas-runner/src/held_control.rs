@@ -89,46 +89,71 @@ impl HeldControlStore {
         }
     }
 
-    /// Every held lease, oldest request first. Fails closed on a record that
-    /// is not exactly what [`Self::hold`] wrote.
-    pub(crate) fn held(&self) -> Result<Vec<HeldRuntimeControl>, RunnerError> {
+    /// Every held lease, oldest request first, and every record this
+    /// Runner cannot use. Those are kept as evidence for an operator; while
+    /// any exists the Runner leases no Borg transfer, but its other controls
+    /// still run.
+    pub(crate) fn scan(&self) -> HeldScan {
+        let mut scan = HeldScan::default();
         let entries = match std::fs::read_dir(&self.root) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-            Err(error) => return Err(store_error("list", error)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return scan,
+            Err(error) => {
+                scan.unreadable
+                    .push(format!("{}: {error}", self.root.display()));
+                return scan;
+            }
         };
         let mut paths = Vec::new();
         for entry in entries {
-            let path = entry.map_err(|error| store_error("list", error))?.path();
-            // A temporary file is a hold that never committed: no work ran under it.
-            if path
-                .extension()
-                .is_some_and(|extension| extension == "json")
-            {
-                paths.push(path);
-            }
-            if paths.len() > MAX_HELD_RUNTIME_CONTROLS {
-                return Err(store_error("list", "more held leases than its bound"));
-            }
-        }
-        let mut held = paths
-            .iter()
-            .map(|path| read_record(path))
-            .collect::<Result<Vec<_>, _>>()?;
-        for (path, record) in paths.iter().zip(&held) {
-            if record.schema_version != HELD_RUNTIME_CONTROL_SCHEMA
-                || *path != self.path(&record.lease.request.id)
-                || record.lease_token.trim().is_empty()
-            {
-                return Err(store_error("read", "record does not match its lease"));
+            match entry {
+                // A temporary file is a hold that never committed: no work
+                // ran under it.
+                Ok(entry) if entry.path().extension().is_some_and(|ext| ext == "json") => {
+                    paths.push(entry.path());
+                }
+                Ok(_) => {}
+                Err(error) => scan
+                    .unreadable
+                    .push(format!("{}: {error}", self.root.display())),
             }
         }
-        held.sort_by(|left, right| {
+        if paths.len() > MAX_HELD_RUNTIME_CONTROLS {
+            scan.unreadable.push(format!(
+                "{}: {} held leases, more than its bound of {MAX_HELD_RUNTIME_CONTROLS}",
+                self.root.display(),
+                paths.len()
+            ));
+            return scan;
+        }
+        for path in paths {
+            match read_record(&path) {
+                Ok(record)
+                    if record.schema_version == HELD_RUNTIME_CONTROL_SCHEMA
+                        && path == self.path(&record.lease.request.id)
+                        && !record.lease_token.trim().is_empty() =>
+                {
+                    scan.held.push(record);
+                }
+                Ok(_) => scan.unreadable.push(format!(
+                    "{}: the record does not match its lease",
+                    path.display()
+                )),
+                Err(error) => scan.unreadable.push(format!("{}: {error}", path.display())),
+            }
+        }
+        scan.held.sort_by(|left, right| {
             (&left.lease.request.created_at, &left.lease.request.id)
                 .cmp(&(&right.lease.request.created_at, &right.lease.request.id))
         });
-        Ok(held)
+        scan
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct HeldScan {
+    pub(crate) held: Vec<HeldRuntimeControl>,
+    pub(crate) unreadable: Vec<String>,
 }
 
 fn read_record(path: &Path) -> Result<HeldRuntimeControl, RunnerError> {
@@ -160,7 +185,7 @@ mod tests {
     fn holds_survive_a_restart_and_release_forgets_them() {
         let temp = tempfile::tempdir().unwrap();
         let store = HeldControlStore::new(temp.path().join("held"));
-        assert!(store.held().unwrap().is_empty());
+        assert!(store.scan().held.is_empty());
         store
             .hold(&lease("runtime_ctl_b", "2026-11-18T16:00:01Z"), "token-b")
             .unwrap();
@@ -171,7 +196,9 @@ mod tests {
         std::fs::write(temp.path().join("held/runtime_ctl_c.json.tmp"), b"{").unwrap();
 
         let reopened = HeldControlStore::new(temp.path().join("held"));
-        let held = reopened.held().unwrap();
+        let scan = reopened.scan();
+        assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
+        let held = scan.held;
         assert_eq!(
             held.iter()
                 .map(|record| (
@@ -191,24 +218,38 @@ mod tests {
 
         reopened.release("runtime_ctl_a").unwrap();
         reopened.release("runtime_ctl_a").unwrap();
-        assert_eq!(reopened.held().unwrap().len(), 1);
+        assert_eq!(reopened.scan().held.len(), 1);
     }
 
     #[test]
-    fn a_record_that_does_not_match_its_lease_fails_closed() {
+    fn a_record_that_does_not_match_its_lease_is_reported_and_kept() {
         let temp = tempfile::tempdir().unwrap();
         let store = HeldControlStore::new(temp.path().join("held"));
         store
             .hold(&lease("runtime_ctl_a", "2026-11-18T16:00:00Z"), "token-a")
+            .unwrap();
+        store
+            .hold(&lease("runtime_ctl_b", "2026-11-18T16:00:01Z"), "token-b")
             .unwrap();
         std::fs::rename(
             temp.path().join("held/runtime_ctl_a.json"),
             temp.path().join("held/runtime_ctl_other.json"),
         )
         .unwrap();
-        assert!(store.held().is_err());
+        let scan = store.scan();
+        assert_eq!(scan.held.len(), 1);
+        assert_eq!(scan.unreadable.len(), 1);
+        assert!(scan.unreadable[0].contains("does not match its lease"));
 
         std::fs::write(temp.path().join("held/runtime_ctl_other.json"), b"not json").unwrap();
-        assert!(store.held().is_err());
+        let scan = store.scan();
+        assert_eq!(scan.held.len(), 1);
+        assert!(
+            scan.unreadable[0].contains("decode"),
+            "{:?}",
+            scan.unreadable
+        );
+        // Evidence is never removed by a scan.
+        assert!(temp.path().join("held/runtime_ctl_other.json").is_file());
     }
 }

@@ -107,6 +107,30 @@ impl TransferStep {
     }
 }
 
+/// The recovery set a readback was started against. Its proof counts only
+/// for the set the receipt will name.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ReadbackSource {
+    repository: String,
+    remote_path: PathBuf,
+    recovery_authority_id: String,
+}
+
+impl ReadbackSource {
+    fn of(config: &KataRetirementConfig) -> Self {
+        Self {
+            repository: config.repository.trim().to_string(),
+            remote_path: config.remote_path.clone(),
+            recovery_authority_id: config.recovery_authority_id.clone(),
+        }
+    }
+
+    fn path(root: &Path) -> PathBuf {
+        root.join("readback-source.json")
+    }
+}
+
 /// How far a retirement's archive got in one step.
 enum RetirementArchive {
     Running,
@@ -2620,7 +2644,7 @@ impl KataLauncher {
         match readback_state {
             TransferUnit::Running => return Ok(RetirementArchive::Running),
             TransferUnit::Succeeded => {
-                return self.finish_readback(zip, readback, context, upload, readback_name);
+                return self.finish_readback(root, zip, readback, context, upload, readback_name);
             }
             TransferUnit::Failed(why) => {
                 self.consume_transfer_unit(readback_name, &TransferUnit::Failed(why.clone()))?;
@@ -2684,6 +2708,11 @@ impl KataLauncher {
             std::fs::remove_dir_all(readback)
                 .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         }
+        let source = serde_json::to_vec(&ReadbackSource::of(retirement))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        write_secret_file(&ReadbackSource::path(root), &source).map_err(|error| {
+            RunnerError::RuntimeLaunch(format!("failed to record the readback source: {error}"))
+        })?;
         std::fs::create_dir(readback)
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         #[cfg(unix)]
@@ -2704,7 +2733,7 @@ impl KataLauncher {
         match self.start_transfer_unit(readback_name, command)? {
             TransferUnit::Running => Ok(RetirementArchive::Running),
             TransferUnit::Succeeded => {
-                self.finish_readback(zip, readback, context, upload, readback_name)
+                self.finish_readback(root, zip, readback, context, upload, readback_name)
             }
             state => {
                 self.consume_transfer_unit(readback_name, &state)?;
@@ -2720,6 +2749,7 @@ impl KataLauncher {
     /// either way, so a readback that does not prove is read back afresh.
     fn finish_readback(
         &self,
+        root: &Path,
         zip: &Path,
         readback: &Path,
         context: &RecoveryArtifactContext,
@@ -2727,6 +2757,19 @@ impl KataLauncher {
         unit: &str,
     ) -> Result<RetirementArchive, RunnerError> {
         let proven = (|| {
+            // A deploy may change the recovery set while a readback runs.
+            let mut recorded = Vec::new();
+            std::fs::File::open(ReadbackSource::path(root))
+                .and_then(|file| file.take(4 * 1024).read_to_end(&mut recorded))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            if serde_json::from_slice::<ReadbackSource>(&recorded).ok()
+                != Some(ReadbackSource::of(self.retirement_config()?))
+            {
+                return Err(RunnerError::RuntimeLaunch(
+                    "Borg readback came from another recovery set than this Runner's; reading back again"
+                        .to_string(),
+                ));
+            }
             let file_name = zip.file_name().ok_or_else(|| {
                 RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
             })?;
@@ -2798,25 +2841,61 @@ impl KataLauncher {
             .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))
     }
 
+    /// Every container record's full ID, by any name.
+    fn container_ids(&self) -> Result<Vec<String>, RunnerError> {
+        let raw = self.run_checked(
+            self.command(vec![
+                OsString::from("ps"),
+                OsString::from("--all"),
+                OsString::from("--quiet"),
+                OsString::from("--no-trunc"),
+            ]),
+            self.config.command_timeout,
+        )?;
+        if raw.len() > MAX_KATA_CONTAINER_LIST_BYTES {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata container inventory exceeded its bounded limit".to_string(),
+            ));
+        }
+        Ok(raw
+            .lines()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    /// Removal is proven against the container itself: no record by its
+    /// name, none by its ID, and no task. Other work on this host runs while
+    /// a retirement transfers, so the host's container count proves only
+    /// across this run's own removal: `counted_before` is the count taken
+    /// right before it, and `None` when the removal happened in an earlier
+    /// run.
     fn wait_for_removal_convergence(
         &self,
         progress: &KataRetirementProgress,
+        counted_before: Option<u32>,
         renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
     ) -> Result<(), RunnerError> {
         let retirement = self.retirement_config()?;
-        let expected_count = progress
-            .baseline_active_sandbox_count
-            .checked_sub(1)
-            .ok_or_else(|| {
-                RunnerError::RuntimeLaunch("invalid pre-retirement sandbox count".to_string())
-            })?;
+        let expected_count = counted_before
+            .map(|count| {
+                count.checked_sub(1).ok_or_else(|| {
+                    RunnerError::RuntimeLaunch("invalid pre-removal sandbox count".to_string())
+                })
+            })
+            .transpose()?;
         let started = Instant::now();
         loop {
             renew_lease()?;
             let metadata_absent = self.inspect(&progress.container_name)?.is_none();
             let task_absent = self.task_absent(&progress.container_id)?;
-            let count_matches = active_kata_container_count(&self.config) == Some(expected_count);
-            if metadata_absent && task_absent && count_matches {
+            let record_absent = !self.container_ids()?.iter().any(|listed| {
+                listed.len() >= 12 && progress.container_id.starts_with(listed.as_str())
+            });
+            let count_matches = expected_count
+                .is_none_or(|expected| active_kata_container_count(&self.config) == Some(expected));
+            if metadata_absent && task_absent && record_absent && count_matches {
                 return Ok(());
             }
             if started.elapsed() >= retirement.convergence_timeout {
@@ -4090,7 +4169,7 @@ impl RuntimeLauncher for KataLauncher {
             return Ok(ControlProgress::Done(receipt));
         }
         if progress.phase < KataRetirementPhase::ComputeRemoved {
-            if let Some(inspected) = self.inspect(&progress.container_name)? {
+            let counted_before = if let Some(inspected) = self.inspect(&progress.container_name)? {
                 self.validate_owned(&plan, &lease.runtime.project_id, &inspected)?;
                 if inspected.id != progress.container_id {
                     return Err(RunnerError::RuntimeLaunch(
@@ -4102,13 +4181,23 @@ impl RuntimeLauncher for KataLauncher {
                 if resumed_after_proof {
                     self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
                 }
+                let counted = active_kata_container_count(&self.config)
+                    .filter(|count| *count > 0)
+                    .ok_or_else(|| {
+                        RunnerError::RuntimeLaunch(
+                            "could not establish the pre-removal active-sandbox count".to_string(),
+                        )
+                    })?;
                 self.remove_compute(&progress.container_name)?;
-            }
-            self.wait_for_removal_convergence(&progress, renew_lease)?;
+                Some(counted)
+            } else {
+                None
+            };
+            self.wait_for_removal_convergence(&progress, counted_before, renew_lease)?;
             progress.phase = KataRetirementPhase::ComputeRemoved;
             self.write_retirement_progress(&plan, &progress)?;
         } else {
-            self.wait_for_removal_convergence(&progress, renew_lease)?;
+            self.wait_for_removal_convergence(&progress, None, renew_lease)?;
         }
         // A start released after the last proof above ran until the removal
         // killed it. With the container record gone nothing can write `/data`
@@ -5819,6 +5908,8 @@ struct KataRetirementProgress {
     runtime_artifact_id: String,
     container_name: String,
     container_id: String,
+    /// Taken before the snapshot and kept in the format. Removal is proven
+    /// without it: a long transfer lets other work change the host's count.
     baseline_active_sandbox_count: u32,
     agent_principal: Option<String>,
     /// `nerdctl stop --time` may escalate internally; its output does not
@@ -6450,6 +6541,11 @@ case "$cmd" in
     ;;
   extract)
     if [ -f "$(dirname "$0")/borg-fail-extract" ]; then exit 42; fi
+    waited=0
+    while [ -f "$(dirname "$0")/borg-hold-extract" ]; do
+      waited=$((waited + 1)); [ "$waited" -lt 600 ] || exit 3
+      sleep 0.05
+    done
     name="$(cat "$remote/name")"
     cp "$remote/archive.zip" "./$name"
     ;;

@@ -21,6 +21,7 @@ use finite_saas_core::{
 const RUN_BUDGET: Duration = Duration::from_secs(10);
 const OTHER_CONTAINER: &str = "finite-kata-other-agent";
 const OTHER_RUNTIME: &str = "runtime-2";
+const CREATED_CONTAINER: &str = "finite-kata-created-meanwhile";
 
 /// Core's runtime control queue, as its lease SQL behaves: the oldest
 /// request nobody holds whose kind the Runner offers is leased; renew,
@@ -28,7 +29,7 @@ const OTHER_RUNTIME: &str = "runtime-2";
 #[derive(Default)]
 struct SimCore {
     requests: Vec<(RuntimeControlLease, Option<String>, bool)>,
-    leased: Vec<(String, String)>,
+    leased: Vec<(String, String, i64)>,
     offered: Vec<RunnerLeaseCapacity>,
     renewed: Vec<(String, String)>,
     completed: Vec<CompleteRuntimeControlRequestInput>,
@@ -79,7 +80,7 @@ impl AgentCreationQueue for SimCore {
         &mut self,
         runner_id: &str,
         lease_token: &str,
-        _lease_seconds: i64,
+        lease_seconds: i64,
         _source_host_id: Option<&str>,
         runner_capacity: Option<&RunnerLeaseCapacity>,
     ) -> Result<Option<RuntimeControlLease>, RunnerError> {
@@ -94,8 +95,11 @@ impl AgentCreationQueue for SimCore {
         let mut leased = lease.clone();
         leased.request.runner_id = Some(runner_id.to_string());
         leased.request.lease_token = Some(lease_token.to_string());
-        self.leased
-            .push((leased.request.id.clone(), lease_token.to_string()));
+        self.leased.push((
+            leased.request.id.clone(),
+            lease_token.to_string(),
+            lease_seconds,
+        ));
         Ok(Some(leased))
     }
 
@@ -337,8 +341,8 @@ fn unit_file(host: &Host, step: &str) -> PathBuf {
 
 fn held(host: &Host) -> Vec<(String, String)> {
     HeldControlStore::new(host.runner.launcher.held_control_root().unwrap())
-        .held()
-        .unwrap()
+        .scan()
+        .held
         .into_iter()
         .map(|held| (held.lease.request.id, held.lease_token))
         .collect()
@@ -362,6 +366,9 @@ fn a_retirement_upload_longer_than_a_run_completes_across_runs_while_the_host_ke
     );
     let token = host.runner.queue.holder(&request_id).unwrap();
     assert_eq!(held(&host), [(request_id.clone(), token.clone())]);
+    // Until the hold is written the lease is only the Runner's short grant
+    // (FC_RUNNER_LEASE_SECONDS, 600 s by default); renewals extend it.
+    assert_eq!(host.runner.queue.leased[0].2, 300);
     assert_eq!(
         std::fs::read_to_string(unit_file(&host, "upload")).unwrap(),
         "running\n"
@@ -400,6 +407,18 @@ fn a_retirement_upload_longer_than_a_run_completes_across_runs_while_the_host_ke
     assert_eq!(
         std::fs::read_to_string(host.fake_state.join(format!("{OTHER_CONTAINER}.status"))).unwrap(),
         "exited"
+    );
+    // A new agent is created on this host while the upload runs.
+    let created_root = host.temp.path().join("runner/kata/runtime-3");
+    std::fs::create_dir_all(&created_root).unwrap();
+    write_fake_container(
+        &host.fake_state,
+        CREATED_CONTAINER,
+        "runtime:v1",
+        "artifact-v1",
+        "",
+        41342,
+        &created_root,
     );
     // Meanwhile Core offers this host no second Borg transfer.
     let offered = host.runner.queue.offered.last().unwrap();
@@ -461,7 +480,7 @@ fn a_retirement_upload_longer_than_a_run_completes_across_runs_while_the_host_ke
             .queue
             .leased
             .iter()
-            .filter(|(id, _)| *id == request_id)
+            .filter(|(id, _, _)| *id == request_id)
             .count(),
         1
     );
@@ -476,6 +495,13 @@ fn a_retirement_upload_longer_than_a_run_completes_across_runs_while_the_host_ke
         host.runner
             .launcher
             .inspect(OTHER_CONTAINER)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        host.runner
+            .launcher
+            .inspect(CREATED_CONTAINER)
             .unwrap()
             .is_some()
     );
@@ -640,4 +666,142 @@ fn a_transfer_unit_without_retirement_progress_is_refused_before_a_new_snapshot(
         .unwrap_or_default(),
         ""
     );
+}
+
+#[test]
+fn a_run_killed_before_its_hold_strands_only_the_short_grant_and_the_host_keeps_working() {
+    let mut host = host(41352);
+    std::fs::write(host.temp.path().join("systemd-run-background"), "").unwrap();
+    let request_id = host.retire.request.id.clone();
+    // The killed run: Core granted the lease the Runner asks for, and the run
+    // died before it recorded the hold.
+    let capacity = RunnerLeaseCapacity {
+        runner_classes: vec![RunnerClass::Kata],
+        runtime_capabilities: Some(host.runner.launcher.runtime_capabilities()),
+        ..RunnerLeaseCapacity::default()
+    };
+    let lease_seconds = host.runner.lease_seconds;
+    host.runner
+        .queue
+        .lease_runtime_control(
+            "runner-1",
+            "killed-before-hold",
+            lease_seconds,
+            None,
+            Some(&capacity),
+        )
+        .unwrap()
+        .unwrap();
+    assert!(held(&host).is_empty());
+
+    // Nothing works on that grant until it expires, but nothing waits on it.
+    host.runner.queue.push(stop_of_the_other_agent(41354));
+    assert!(matches!(
+        run(&mut host.runner),
+        RunOnceOutcome::RuntimeStopped { .. }
+    ));
+
+    // Core lets the short grant lapse; the next run leases and finishes it.
+    host.runner.queue.lapse(&request_id);
+    assert!(matches!(
+        run_until_settled(&mut host.runner, &request_id),
+        RunOnceOutcome::RuntimeDestroyed { .. }
+    ));
+    assert_ne!(
+        host.runner.queue.completed.last().unwrap().lease_token,
+        "killed-before-hold"
+    );
+}
+
+#[test]
+fn a_readback_from_another_recovery_set_is_refused_and_read_back_again() {
+    let mut host = host(41356);
+    std::fs::write(host.temp.path().join("systemd-run-background"), "").unwrap();
+    std::fs::write(host.temp.path().join("borg-hold-extract"), "").unwrap();
+    let request_id = host.retire.request.id.clone();
+    let readback_running = |host: &Host| {
+        std::fs::read_to_string(unit_file(host, "readback")).is_ok_and(|state| state == "running\n")
+    };
+    for _ in 0..400 {
+        if readback_running(&host) {
+            break;
+        }
+        assert!(matches!(
+            run(&mut host.runner),
+            RunOnceOutcome::RuntimeDestroyRunning { .. }
+        ));
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(readback_running(&host));
+
+    // A deploy changes the recovery set while that readback runs.
+    let retirement = host.runner.launcher.config.retirement.as_mut().unwrap();
+    retirement.repository = "ssh://other.example/./retired".to_string();
+    retirement.recovery_authority_id = "finite-assisted-other".to_string();
+    std::fs::remove_file(host.temp.path().join("borg-hold-extract")).unwrap();
+
+    let outcome = run_until_settled(&mut host.runner, &request_id);
+    assert!(
+        matches!(
+            outcome,
+            RunOnceOutcome::RuntimeDestroyFailed { ref failure_message, .. }
+                if failure_message.contains("another recovery set")
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        host.runner
+            .launcher
+            .inspect(&host.plan.container_name)
+            .unwrap()
+            .is_some()
+    );
+    assert!(!unit_file(&host, "readback").exists());
+
+    // The retry reads back from the set the receipt names.
+    assert!(matches!(
+        run_until_settled(&mut host.runner, &request_id),
+        RunOnceOutcome::RuntimeDestroyed { .. }
+    ));
+    let receipt = host
+        .runner
+        .queue
+        .completed
+        .last()
+        .unwrap()
+        .retirement_snapshot
+        .clone()
+        .unwrap();
+    assert_eq!(receipt.recovery_authority_id, "finite-assisted-other");
+}
+
+#[test]
+fn an_unreadable_hold_pauses_borg_transfers_but_not_the_hosts_other_controls() {
+    let mut host = host(41358);
+    let root = host.runner.launcher.held_control_root().unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    let unreadable = root.join("runtime_ctl_unknown.json");
+    std::fs::write(&unreadable, b"{ not json").unwrap();
+    let request_id = host.retire.request.id.clone();
+    host.runner.queue.push(stop_of_the_other_agent(41360));
+
+    // The retirement is older, but only the stop is offered and leased.
+    assert!(matches!(
+        run(&mut host.runner),
+        RunOnceOutcome::RuntimeStopped { ref request_id, .. }
+            if request_id == "runtime_ctl_stop_other_agent"
+    ));
+    let offered = host.runner.queue.offered.last().unwrap();
+    assert!(!offered.supports_runtime_control(RuntimeControlKind::Destroy));
+    assert_eq!(host.runner.queue.holder(&request_id), None);
+    assert_eq!(run(&mut host.runner), RunOnceOutcome::Idle);
+    // The evidence stays for an operator.
+    assert_eq!(std::fs::read(&unreadable).unwrap(), b"{ not json");
+
+    // Once it is resolved, the retirement runs.
+    std::fs::remove_file(&unreadable).unwrap();
+    assert!(matches!(
+        run_until_settled(&mut host.runner, &request_id),
+        RunOnceOutcome::RuntimeDestroyed { .. }
+    ));
 }
