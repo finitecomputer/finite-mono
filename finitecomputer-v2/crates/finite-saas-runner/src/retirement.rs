@@ -372,6 +372,13 @@ pub fn verify_recovery_zip(
     })
 }
 
+/// Restore a verified archive into `target`, an absent or empty directory.
+///
+/// The restore stays inside `target` whatever its symlinks name. The
+/// verified manifest nests nothing below a symlink. Directories and files
+/// are created first, files with O_EXCL so never through an existing link,
+/// and symlinks last, from their recorded target strings, unresolved. So no
+/// restore write passes through a link, absolute or relative.
 pub fn restore_recovery_zip(
     archive: &Path,
     target: &Path,
@@ -587,10 +594,34 @@ fn validate_archive_name(name: &str) -> RecoveryZipResult<()> {
     normalized_relative_path(Path::new(relative)).map(|_| ())
 }
 
+/// A symlink is archived as metadata: its target string is recorded,
+/// verified and recreated byte for byte, and never resolved or followed.
+///
+/// The archive is untrusted input, since the guest wrote the tree. Two
+/// properties keep it safe, and neither depends on what a target names:
+/// - A restore never writes outside its root (see [`restore_recovery_zip`]).
+/// - No host reader follows a link in a durable tree. This module, the
+///   state manifest and the quiescence probe walk it with lstat and
+///   readlink. A live tree already holds whatever links its guest made, so
+///   a restore that recreates them gives no new reach.
+///
+/// Targets:
+/// - Relative: must stay inside the data root, counted from the link's
+///   directory, as since v1. Such a link means the same on the host and in
+///   the guest; one that climbs out has no meaning in the tree.
+/// - Absolute: kept as written. It names a path in the runtime's own
+///   filesystem, which the runtime resolves inside its VM: an image's
+///   `/usr/local/bin/python3.13`, a `/nix/store` path, or `/data/...`, which
+///   is this tree at its mount point. Python venvs make these.
+/// - Empty: refused. Linux cannot create an empty symlink (symlink(2) fails
+///   with ENOENT), so no real tree has one and no restore could recreate it.
 fn validate_symlink_target(link_path: &Path, target: &str) -> RecoveryZipResult<()> {
+    if target.is_empty() {
+        return Err(invalid("symlink target must be non-empty"));
+    }
     let target_path = Path::new(target);
-    if target.is_empty() || target_path.is_absolute() {
-        return Err(invalid("symlink target must be non-empty and relative"));
+    if target_path.is_absolute() {
+        return Ok(());
     }
     let mut depth = link_path.components().count().saturating_sub(1) as isize;
     for component in target_path.components() {
@@ -890,6 +921,282 @@ mod tests {
             fs::create_dir(&source).unwrap();
             let _listener = UnixListener::bind(source.join("socket")).unwrap();
             assert!(source_manifest(&source).is_err());
+        }
+    }
+
+    /// The absolute links an ordinary agent tree holds: a Python venv's
+    /// interpreter (the image's, or a Nix store path) and Hermes' LSP
+    /// launchers, which name this tree by its in-guest mount point `/data`.
+    #[cfg(unix)]
+    const ABSOLUTE_LINKS: [(&str, &str); 3] = [
+        (
+            "workspace/app/.venv/bin/python",
+            "/usr/local/bin/python3.13",
+        ),
+        (
+            "workspace/tool/.venv/bin/python",
+            "/nix/store/00000000000000000000000000000000-python3-3.13.1/bin/python3.13",
+        ),
+        (
+            "agent/hermes-home/lsp/bin/pyright-langserver",
+            "/data/agent/hermes-home/lsp/node_modules/.bin/pyright-langserver",
+        ),
+    ];
+
+    #[cfg(unix)]
+    fn venv_fixture(root: &Path) {
+        fixture(root);
+        for (link, target) in ABSOLUTE_LINKS {
+            let link = root.join(link);
+            fs::create_dir_all(link.parent().unwrap()).unwrap();
+            symlink(target, link).unwrap();
+        }
+        symlink("python", root.join("workspace/app/.venv/bin/python3")).unwrap();
+        let modules = root.join("agent/hermes-home/lsp/node_modules");
+        fs::create_dir_all(modules.join("pyright")).unwrap();
+        fs::create_dir_all(modules.join(".bin")).unwrap();
+        fs::write(modules.join("pyright/langserver.js"), b"// lsp").unwrap();
+        symlink(
+            "../pyright/langserver.js",
+            modules.join(".bin/pyright-langserver"),
+        )
+        .unwrap();
+    }
+
+    /// A ZIP written by hand, bypassing `create_recovery_zip`, so the
+    /// verifier and restore see a manifest no real tree produces.
+    fn crafted_zip(path: &Path, items: &[(&str, RecoveryEntryKind, &str)]) {
+        let entries = items
+            .iter()
+            .map(|(entry_path, kind, content)| RecoveryManifestEntry {
+                path: entry_path.to_string(),
+                kind: kind.clone(),
+                mode: match kind {
+                    RecoveryEntryKind::Directory => 0o755,
+                    RecoveryEntryKind::File => 0o644,
+                    RecoveryEntryKind::Symlink => 0o777,
+                },
+                size: match kind {
+                    RecoveryEntryKind::Directory => 0,
+                    _ => content.len() as u64,
+                },
+                sha256: (*kind == RecoveryEntryKind::File).then(|| hash_bytes(content.as_bytes())),
+                symlink_target: (*kind == RecoveryEntryKind::Symlink).then(|| content.to_string()),
+            })
+            .collect::<Vec<_>>();
+        let files = entries
+            .iter()
+            .filter(|entry| entry.kind == RecoveryEntryKind::File);
+        let context = context();
+        let manifest = RecoveryManifest {
+            schema: RECOVERY_ZIP_SCHEMA.to_string(),
+            request_id: context.request_id,
+            project_id: context.project_id,
+            agent_runtime_id: context.agent_runtime_id,
+            durable_state_id: context.durable_state_id,
+            runtime_artifact_id: context.runtime_artifact_id,
+            runtime_image_digest: context.runtime_image_digest,
+            agent_principal: context.agent_principal,
+            created_at: "2026-11-17T00:00:00Z".to_string(),
+            file_count: files.clone().count() as u64,
+            total_file_bytes: files.map(|entry| entry.size).sum(),
+            entries,
+        };
+        let mut zip = ZipWriter::new(File::create(path).unwrap());
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file(MANIFEST_NAME, options).unwrap();
+        zip.write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        for (entry_path, kind, content) in items {
+            if *kind == RecoveryEntryKind::Directory {
+                zip.add_directory(format!("{DATA_PREFIX}{entry_path}/"), options)
+                    .unwrap();
+            } else {
+                zip.start_file(format!("{DATA_PREFIX}{entry_path}"), options)
+                    .unwrap();
+                zip.write_all(content.as_bytes()).unwrap();
+            }
+        }
+        zip.finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolute_symlinks_round_trip_as_literal_targets() {
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        venv_fixture(&source);
+        let archive = temp.path().join("retirement.zip");
+
+        let created = create_recovery_zip(&source, &archive, &context()).unwrap();
+        for (link, target) in ABSOLUTE_LINKS {
+            let entry = created
+                .manifest
+                .entries
+                .iter()
+                .find(|entry| entry.path == link)
+                .unwrap();
+            assert_eq!(entry.kind, RecoveryEntryKind::Symlink);
+            assert_eq!(entry.symlink_target.as_deref(), Some(target));
+        }
+        verify_recovery_zip(&archive, Some(&context())).unwrap();
+
+        let restored = temp.path().join("restored");
+        restore_recovery_zip(&archive, &restored, Some(&context())).unwrap();
+        for (link, target) in ABSOLUTE_LINKS {
+            assert!(
+                fs::symlink_metadata(restored.join(link))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink()
+            );
+            assert_eq!(
+                fs::read_link(restored.join(link)).unwrap(),
+                PathBuf::from(target)
+            );
+        }
+        assert_eq!(
+            source_manifest(&restored).unwrap(),
+            source_manifest(&source).unwrap()
+        );
+        // The trial restore accepts a restored tree only on this proof.
+        assert_eq!(
+            crate::kata::durable_state_manifest_sha256(&restored).unwrap(),
+            crate::kata::durable_state_manifest_sha256(&source).unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_of_absolute_links_cannot_escape_its_root() {
+        let temp = tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret"), b"untouched").unwrap();
+        let outside_target = outside.to_str().unwrap().to_string();
+        let listing = |dir: &Path| {
+            WalkDir::new(dir)
+                .follow_links(false)
+                .into_iter()
+                .map(|entry| entry.unwrap().path().to_path_buf())
+                .collect::<Vec<_>>()
+        };
+        let before = listing(&outside);
+
+        // Absolute links that name a real host directory and file outside
+        // the tree are archived and restored as links, never followed.
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        venv_fixture(&source);
+        symlink(&outside, source.join("escape")).unwrap();
+        symlink(outside.join("secret"), source.join("workspace/secret")).unwrap();
+        let archive = temp.path().join("retirement.zip");
+        create_recovery_zip(&source, &archive, &context()).unwrap();
+        let restored = temp.path().join("restored");
+        restore_recovery_zip(&archive, &restored, Some(&context())).unwrap();
+        assert_eq!(fs::read_link(restored.join("escape")).unwrap(), outside);
+        assert!(
+            fs::symlink_metadata(restored.join("workspace/secret"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            listing(&restored)
+                .iter()
+                .all(|path| path.starts_with(&restored))
+        );
+
+        // A crafted archive that nests an entry below such a link is
+        // refused before anything is written.
+        for (index, nested) in [
+            ("escape/pwned", RecoveryEntryKind::File, "planted"),
+            ("escape/planted-dir", RecoveryEntryKind::Directory, ""),
+            ("escape/planted-link", RecoveryEntryKind::Symlink, "/etc"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let hostile = temp.path().join(format!("hostile-{index}.zip"));
+            crafted_zip(
+                &hostile,
+                &[
+                    (
+                        "escape",
+                        RecoveryEntryKind::Symlink,
+                        outside_target.as_str(),
+                    ),
+                    nested,
+                ],
+            );
+            let error = verify_recovery_zip(&hostile, Some(&context())).unwrap_err();
+            assert!(
+                error.to_string().contains("nested below a symlink"),
+                "{error}"
+            );
+            let target = temp.path().join(format!("hostile-restore-{index}"));
+            assert!(restore_recovery_zip(&hostile, &target, Some(&context())).is_err());
+            assert!(!target.exists());
+        }
+
+        assert_eq!(listing(&outside), before);
+        assert_eq!(fs::read(outside.join("secret")).unwrap(), b"untouched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn empty_and_escaping_relative_symlink_targets_stay_refused() {
+        for (link, target) in [
+            ("link", ""),
+            ("link", ".."),
+            ("link", "../escape"),
+            ("dir/link", "../../escape"),
+            ("dir/link", "sub/../../../escape"),
+            ("a/b/link", "./../../../escape"),
+        ] {
+            assert!(
+                validate_symlink_target(Path::new(link), target).is_err(),
+                "{link} -> {target:?}"
+            );
+        }
+        for (link, target) in [("dir/link", "../sibling"), ("a/b/link", "../../root-file")] {
+            assert!(
+                validate_symlink_target(Path::new(link), target).is_ok(),
+                "{link} -> {target:?}"
+            );
+        }
+
+        let temp = tempdir().unwrap();
+        let source = temp.path().join("source");
+        fs::create_dir(&source).unwrap();
+        fixture(&source);
+        symlink("../../outside", source.join("workspace/up")).unwrap();
+        assert!(
+            source_manifest(&source)
+                .unwrap_err()
+                .to_string()
+                .contains("escapes data root")
+        );
+
+        // Linux cannot make an empty link, so only a crafted archive has
+        // one; it and an escaping relative link are refused on restore.
+        for (index, target) in ["", "../outside", "workspace/../../outside"]
+            .into_iter()
+            .enumerate()
+        {
+            let hostile = temp.path().join(format!("hostile-{index}.zip"));
+            crafted_zip(
+                &hostile,
+                &[
+                    ("workspace", RecoveryEntryKind::Directory, ""),
+                    ("link", RecoveryEntryKind::Symlink, target),
+                ],
+            );
+            assert!(verify_recovery_zip(&hostile, None).is_err(), "{target:?}");
+            let restored = temp.path().join(format!("restored-{index}"));
+            assert!(restore_recovery_zip(&hostile, &restored, None).is_err());
+            assert!(!restored.exists());
         }
     }
 

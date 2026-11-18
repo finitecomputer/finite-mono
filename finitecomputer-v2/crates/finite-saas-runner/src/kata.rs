@@ -2050,6 +2050,84 @@ impl KataLauncher {
             .any(|line| line.trim() == container_id))
     }
 
+    /// The status `ctr tasks list` gives the task of exactly `container_id`
+    /// (`UNKNOWN`, `CREATED`, `RUNNING`, `STOPPED`, `PAUSED` or `PAUSING`).
+    /// `None` when no single well-formed row names it.
+    fn listed_task_status(&self, container_id: &str) -> Result<Option<String>, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let command = PlannedCommand {
+            program: retirement.ctr_bin.clone(),
+            cwd: None,
+            args: vec![
+                OsString::from("--namespace"),
+                OsString::from(self.config.namespace.trim()),
+                OsString::from("tasks"),
+                OsString::from("list"),
+            ],
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if !output.status.success() {
+            return Err(RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: "containerd task-list status read failed".to_string(),
+            });
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut rows = stdout.lines().filter_map(|line| {
+            let columns = line.split_whitespace().collect::<Vec<_>>();
+            (columns.first() == Some(&container_id)).then_some(columns)
+        });
+        Ok(match (rows.next(), rows.next()) {
+            (Some(columns), None) if columns.len() == 3 => Some(columns[2].to_string()),
+            _ => None,
+        })
+    }
+
+    /// nerdctl stops a container without deleting its containerd task
+    /// (nerdctl 2.3.4 `containerutil.Stop` kills and waits; only `start` and
+    /// `rm` delete the task). A stopped Kata container therefore keeps a
+    /// STOPPED task, held by its shim, that `ctr tasks list` keeps listing
+    /// and the absence fence would wait on forever.
+    ///
+    /// The caller has just seen this exact container id not running, and
+    /// containerd lists its task STOPPED: the task's process has exited.
+    /// Deleting that record is what nerdctl's own `rm` does. `ctr tasks
+    /// delete` without `--force` re-reads the status and refuses a task that
+    /// is no longer stopped (containerd 2.x `task.Delete`), so a task that
+    /// started in between is refused, never killed. Any other status, or no
+    /// single readable row, is left alone and the absence fence decides.
+    fn delete_stopped_task(&self, container_id: &str) -> Result<(), RunnerError> {
+        if self.listed_task_status(container_id)?.as_deref() != Some("STOPPED") {
+            return Ok(());
+        }
+        let retirement = self.retirement_config()?;
+        let command = PlannedCommand {
+            program: retirement.ctr_bin.clone(),
+            cwd: None,
+            args: vec![
+                OsString::from("--namespace"),
+                OsString::from(self.config.namespace.trim()),
+                OsString::from("tasks"),
+                OsString::from("delete"),
+                OsString::from(container_id),
+            ],
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        // A delete that lost a race to another deleter still leaves no task.
+        if output.status.success() || self.task_absent(container_id)? {
+            return Ok(());
+        }
+        Err(RunnerError::CommandExecution {
+            program: command.program.display().to_string(),
+            message: format!(
+                "could not delete the stopped containerd task: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        })
+    }
+
     fn wait_for_task_absence(
         &self,
         container_id: &str,
@@ -3446,6 +3524,10 @@ impl RuntimeLauncher for KataLauncher {
                     "canonical Kata container did not reach a stopped state".to_string(),
                 ));
             }
+            // Only here, before the stable manifests are taken. Once the ZIP
+            // exists, a STOPPED task means compute ran again after the
+            // snapshot, so the later fences must refuse it, not tidy it.
+            self.delete_stopped_task(&inspected.id)?;
             self.wait_for_task_absence(&inspected.id, renew_lease)?;
             let stable = self.stable_source_manifest(&validated_plan.state_root, renew_lease)?;
 
@@ -5236,6 +5318,7 @@ struct KataRecoveryHelper {
 #[cfg(test)]
 mod tests {
     mod memory_admission;
+    mod retirement_task_fence;
     mod trial_archives;
     use super::*;
     use finite_saas_core::{
