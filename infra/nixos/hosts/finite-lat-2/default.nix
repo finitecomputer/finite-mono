@@ -128,15 +128,20 @@ in
   # Its timers were turned on on 2026-11-18, once finite.chat knew its npub
   # and the moves done by hand were over: mailbox every 10 s, roster every
   # 10 minutes, sizes nightly, over every live old agent in Core. That is
-  # safe because finite.chat offers the move only to a person who signs in
-  # there, nothing moves until that person presses Upgrade, and no old
-  # agent is retired before staff say so. A roster pushed by hand replaces
-  # the timer's, so none is pushed while they're on.
+  # safe while finite.chat sets no phase 2 cutoff (migrations.cutoff_ms):
+  # it offers the move only to a person who signs in there, nothing moves
+  # until that person presses Upgrade, and no old agent is retired before
+  # staff say so. A roster pushed by hand replaces the timer's, so none is
+  # pushed while they're on.
   #
-  # To stop them at once, as root:
+  # To stop them, as root:
   #   systemctl stop finite-mover-roster.timer finite-mover-mailbox.timer
-  # A move already under way finishes, or holds for staff. A boot starts
-  # them again: to keep them off, set timers.enable to false and deploy.
+  # A mailbox run already going still does every command it finds (up to
+  # 256, reading the mailbox again after each). To halt it too:
+  #   systemctl stop finite-mover-mailbox.service
+  # The move it was in then holds for staff, its old agent perhaps stopped:
+  # check it before the timers go back on. A boot starts the timers again;
+  # to keep them off, set timers.enable to false and deploy.
   finite.mover = {
     enable = true;
     finiteChat = "https://finite.chat";
