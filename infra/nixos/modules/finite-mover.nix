@@ -23,9 +23,11 @@
 # carried. A file the mover can't read, or a path it refuses, fails that
 # agent's stage before the agent is stopped.
 #
-# The timers are off until `timers.enable`: deploy first, give finite.chat
-# the npub, then turn them on. Delete this module with the rest of the move
-# (FIN-463's removal plan), with the role and both keys.
+# The timers are off until a host sets `timers.enable`: deploy first, give
+# finite.chat the npub, then turn them on. lat-2 turned them on on
+# 2026-11-18 (hosts/finite-lat-2/default.nix says why that's safe, and how
+# to stop them). Delete this module with the rest of the move (FIN-463's
+# removal plan), with the role and both keys.
 {
   config,
   lib,
@@ -208,9 +210,11 @@ in
       defaultText = lib.literalExpression "finitePackages.finite-saas-core";
       description = "Core, whose CLI the mover's four subcommands run.";
     };
+    # No default: a host names finite.chat itself, so a config that forgets
+    # (a test's) fails to evaluate instead of reaching production.
     finiteChat = lib.mkOption {
       type = lib.types.str;
-      default = "https://finite.chat";
+      example = "https://finite.chat";
       description = "finite.chat's origin, whose mailbox the mover works.";
     };
     postgres.database = lib.mkOption {
