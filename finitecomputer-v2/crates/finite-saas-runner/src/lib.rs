@@ -68,6 +68,9 @@ const IDENTITY_BINDING_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const DEFAULT_LAUNCH_TIMEOUT: Duration = Duration::from_secs(300);
 const RUNTIME_RETIREMENT_LEASE_SECONDS: i64 = 60 * 60;
+/// The longest a control lease is granted before its kind is known: what a
+/// run killed before recording a retirement's hold can strand.
+const MAX_UNRECORDED_CONTROL_LEASE_SECONDS: i64 = 600;
 // Live Finite Private route after the 2026-08-28 GLM cutover. The historical
 // kimi-k2-6 hostname is retired; issued Runtime env still needs the Hermes
 // rewrite in finitechat/containers/agent until those agents upgrade.
@@ -652,13 +655,31 @@ where
         } else {
             runner_capacity.clone()
         };
+        // Core grants a control lease before the Runner knows its kind. A run
+        // killed before it records a retirement's hold strands that grant,
+        // so it is short; any other kind gets the configured lease back at
+        // once, as it never renews.
+        let first_grant = self.lease_seconds.min(MAX_UNRECORDED_CONTROL_LEASE_SECONDS);
         if let Some(lease) = self.queue.lease_runtime_control(
             &self.runner_id,
             &lease_token,
-            self.lease_seconds,
+            first_grant,
             source_host_id.as_deref(),
             Some(&offered_capacity),
         )? {
+            if lease.request.kind != RuntimeControlKind::Destroy && self.lease_seconds > first_grant
+            {
+                self.queue.renew_runtime_control(
+                    &lease.request.id,
+                    RenewRuntimeControlRequestInput {
+                        request_id: lease.request.id.clone(),
+                        runner_id: self.runner_id.clone(),
+                        lease_token: lease_token.clone(),
+                        lease_seconds: Some(self.lease_seconds),
+                        now: None,
+                    },
+                )?;
+            }
             return self.run_runtime_control(lease, lease_token);
         }
         if let Some(reason) = runner_capacity.agent_creation_rejection_reason()

@@ -31,7 +31,7 @@ struct SimCore {
     requests: Vec<(RuntimeControlLease, Option<String>, bool)>,
     leased: Vec<(String, String, i64)>,
     offered: Vec<RunnerLeaseCapacity>,
-    renewed: Vec<(String, String)>,
+    renewed: Vec<(String, String, Option<i64>)>,
     completed: Vec<CompleteRuntimeControlRequestInput>,
     retried: Vec<RetryRuntimeControlRequestInput>,
     failed: Vec<FailRuntimeControlRequestInput>,
@@ -137,8 +137,11 @@ impl AgentCreationQueue for SimCore {
             .0
             .request
             .clone();
-        self.renewed
-            .push((request_id.to_string(), input.lease_token));
+        self.renewed.push((
+            request_id.to_string(),
+            input.lease_token,
+            input.lease_seconds,
+        ));
         Ok(request)
     }
 
@@ -453,7 +456,7 @@ fn a_retirement_upload_longer_than_a_run_completes_across_runs_while_the_host_ke
             .queue
             .renewed
             .iter()
-            .filter(|(id, renewed)| *id == request_id && *renewed == token)
+            .filter(|(id, renewed, _)| *id == request_id && *renewed == token)
             .count()
             >= 5
     );
@@ -800,6 +803,68 @@ fn an_unreadable_hold_pauses_borg_transfers_but_not_the_hosts_other_controls() {
 
     // Once it is resolved, the retirement runs.
     std::fs::remove_file(&unreadable).unwrap();
+    assert!(matches!(
+        run_until_settled(&mut host.runner, &request_id),
+        RunOnceOutcome::RuntimeDestroyed { .. }
+    ));
+}
+
+#[test]
+fn with_long_configured_leases_a_retirement_is_granted_short_until_its_hold_and_other_controls_get_theirs()
+ {
+    let mut host = host(41362);
+    std::fs::write(host.temp.path().join("systemd-run-background"), "").unwrap();
+    std::fs::write(host.temp.path().join("borg-hold-upload"), "").unwrap();
+    let request_id = host.retire.request.id.clone();
+    let Host { runner, .. } = host;
+    let AgentCreationRunner {
+        queue, launcher, ..
+    } = runner;
+    host.runner =
+        AgentCreationRunner::new(queue, launcher, RandomLeaseTokenSource, "runner-1", 3600)
+            .unwrap();
+
+    assert!(matches!(
+        run(&mut host.runner),
+        RunOnceOutcome::RuntimeDestroyRunning { .. }
+    ));
+    // A kill before the hold would strand at most this first grant.
+    assert_eq!(host.runner.queue.leased[0].2, 600);
+
+    host.runner.queue.push(stop_of_the_other_agent(41364));
+    assert!(matches!(
+        run(&mut host.runner),
+        RunOnceOutcome::RuntimeStopped { .. }
+    ));
+    let (stop_id, stop_token, stop_grant) = host.runner.queue.leased[1].clone();
+    assert_eq!(stop_grant, 600);
+    // The stop never renews, so it gets its configured lease at once.
+    assert!(
+        host.runner
+            .queue
+            .renewed
+            .contains(&(stop_id, stop_token, Some(3600)))
+    );
+
+    std::fs::remove_file(host.temp.path().join("borg-hold-upload")).unwrap();
+    assert!(matches!(
+        run_until_settled(&mut host.runner, &request_id),
+        RunOnceOutcome::RuntimeDestroyed { .. }
+    ));
+}
+
+#[test]
+fn a_recovery_set_whose_record_is_longer_than_four_kilobytes_still_proves() {
+    let mut host = host(41366);
+    let request_id = host.retire.request.id.clone();
+    host.runner
+        .launcher
+        .config
+        .retirement
+        .as_mut()
+        .unwrap()
+        .repository = format!("ssh://archive.example/./{}", "r".repeat(5000));
+
     assert!(matches!(
         run_until_settled(&mut host.runner, &request_id),
         RunOnceOutcome::RuntimeDestroyed { .. }

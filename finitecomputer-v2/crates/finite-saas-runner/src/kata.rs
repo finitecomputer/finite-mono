@@ -2758,13 +2758,17 @@ impl KataLauncher {
     ) -> Result<RetirementArchive, RunnerError> {
         let proven = (|| {
             // A deploy may change the recovery set while a readback runs.
+            // The record must be exactly what this Runner's set writes.
+            let expected = serde_json::to_vec(&ReadbackSource::of(self.retirement_config()?))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             let mut recorded = Vec::new();
             std::fs::File::open(ReadbackSource::path(root))
-                .and_then(|file| file.take(4 * 1024).read_to_end(&mut recorded))
+                .and_then(|file| {
+                    file.take(expected.len() as u64 + 1)
+                        .read_to_end(&mut recorded)
+                })
                 .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-            if serde_json::from_slice::<ReadbackSource>(&recorded).ok()
-                != Some(ReadbackSource::of(self.retirement_config()?))
-            {
+            if recorded != expected {
                 return Err(RunnerError::RuntimeLaunch(
                     "Borg readback came from another recovery set than this Runner's; reading back again"
                         .to_string(),
