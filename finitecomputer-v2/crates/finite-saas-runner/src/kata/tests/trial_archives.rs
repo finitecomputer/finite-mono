@@ -272,7 +272,9 @@ fn trial_archive_retry_reproves_its_snapshot_before_returning_the_receipt() {
     let (mut launcher, plan, _, archive) = archive_fixture(&temp);
     // The archive is verified and RemoteVerified saved; then the Runner
     // stops before Core hears of the receipt.
-    launcher.retire_runtime(&archive, &mut || Ok(())).unwrap();
+    launcher
+        .retire_until_done(&archive, &mut || Ok(()))
+        .unwrap();
     // A restart containerd had already queued runs the stopped guest, which
     // writes `/data`, and its task is deleted again before the retry.
     std::fs::write(

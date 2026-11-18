@@ -553,13 +553,19 @@ fn serve() -> Result<()> {
     // unavailable creation capacity so persisted runtime controls remain
     // serviceable; later cycle failures are retried as transient outages.
     match run_cycle()? {
-        RunOnceOutcome::Idle | RunOnceOutcome::CapacityUnavailable { .. } => {}
+        RunOnceOutcome::Idle
+        | RunOnceOutcome::CapacityUnavailable { .. }
+        | RunOnceOutcome::RuntimeDestroyRunning { .. } => {}
         outcome => println!("{}", serde_json::to_string(&outcome)?),
     }
 
     loop {
         match run_cycle() {
-            Ok(RunOnceOutcome::Idle | RunOnceOutcome::CapacityUnavailable { .. }) => {
+            Ok(
+                RunOnceOutcome::Idle
+                | RunOnceOutcome::CapacityUnavailable { .. }
+                | RunOnceOutcome::RuntimeDestroyRunning { .. },
+            ) => {
                 last_error = None;
                 error_backoff = idle_interval;
                 thread::sleep(idle_interval);
@@ -746,6 +752,8 @@ fn optional_kata_retirement_config() -> Result<Option<KataRetirementConfig>> {
     Ok(Some(KataRetirementConfig {
         borg_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_BORG_BIN", "borg"),
         ctr_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_CTR_BIN", "ctr"),
+        systemd_run_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_SYSTEMD_RUN_BIN", "systemd-run"),
+        systemctl_bin: optional_path("FC_RUNNER_KATA_RETIREMENT_SYSTEMCTL_BIN", "systemctl"),
         repository: required_env("FC_RUNNER_KATA_RETIREMENT_BORG_REPOSITORY")?,
         remote_path: required_path("FC_RUNNER_KATA_RETIREMENT_BORG_REMOTE_PATH")?,
         ssh_key_file: required_path("FC_RUNNER_KATA_RETIREMENT_SSH_KEY_FILE")?,

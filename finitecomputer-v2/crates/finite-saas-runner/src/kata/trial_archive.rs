@@ -65,7 +65,7 @@ impl KataLauncher {
         self.require_encrypted_archive(&self.config.work_root)?;
         let before = durable_state_manifest_sha256(&plan.state_root)?;
         // ArchiveTrial stops after verified remote readback, before removal.
-        let receipt = self.retire_runtime(lease, renew)?;
+        let receipt = self.retire_until_done(lease, renew)?;
         if durable_state_manifest_sha256(&plan.state_root)? != before {
             return Err(invalid("Archived source changed"));
         }

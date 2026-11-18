@@ -119,7 +119,7 @@ fn retirement_deletes_the_stopped_task_a_stop_leaves_and_proceeds() {
         ],
     );
 
-    let receipt = launcher.retire_runtime(&lease, &mut || Ok(())).unwrap();
+    let receipt = launcher.retire_until_done(&lease, &mut || Ok(())).unwrap();
 
     assert_eq!(receipt.request_id, lease.request.id);
     assert_eq!(
@@ -162,7 +162,7 @@ fn retirement_fences_a_task_that_is_not_stopped() {
         set_tasks(&temp, std::slice::from_ref(&row));
 
         let error = launcher
-            .retire_runtime(&lease, &mut || Ok(()))
+            .retire_until_done(&lease, &mut || Ok(()))
             .unwrap_err()
             .to_string();
 
@@ -181,7 +181,7 @@ fn retirement_refuses_a_stopped_task_that_appears_after_the_snapshot() {
     set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
     // The first attempt deletes the leftover, snapshots, and fails readback.
     std::fs::write(temp.path().join("borg-fail-extract"), "fail").unwrap();
-    assert!(launcher.retire_runtime(&lease, &mut || Ok(())).is_err());
+    assert!(launcher.retire_until_done(&lease, &mut || Ok(())).is_err());
     assert_eq!(delete_calls(&temp).len(), 1);
     assert!(tasks(&temp).trim().is_empty());
 
@@ -190,7 +190,7 @@ fn retirement_refuses_a_stopped_task_that_appears_after_the_snapshot() {
     std::fs::remove_file(temp.path().join("borg-fail-extract")).unwrap();
     set_tasks(&temp, &[format!("{id} 4343 STOPPED")]);
     let error = launcher
-        .retire_runtime(&lease, &mut || Ok(()))
+        .retire_until_done(&lease, &mut || Ok(()))
         .unwrap_err()
         .to_string();
 
@@ -221,7 +221,7 @@ fn retirement_keeps_the_task_while_the_restart_monitor_would_restart_it() {
     .unwrap();
 
     let error = launcher
-        .retire_runtime(&lease, &mut || Ok(()))
+        .retire_until_done(&lease, &mut || Ok(()))
         .unwrap_err()
         .to_string();
 
@@ -304,7 +304,7 @@ fn retirement_remakes_a_zip_an_interrupted_attempt_left_unverifiable() {
         .unwrap();
     create_recovery_zip(&plan.state_root, &zip, &earlier).unwrap();
 
-    let receipt = launcher.retire_runtime(&lease, &mut || Ok(())).unwrap();
+    let receipt = launcher.retire_until_done(&lease, &mut || Ok(())).unwrap();
 
     assert_eq!(receipt.request_id, lease.request.id);
     let archived = verify_recovery_zip(&temp.path().join("borg-remote/archive.zip"), None).unwrap();
@@ -407,7 +407,7 @@ fn retirement_refuses_its_snapshot_when_a_queued_restart_crosses_the_fence() {
         std::fs::write(temp.path().join("restart-lands"), landed).unwrap();
 
         let error = launcher
-            .retire_runtime(&lease, &mut || Ok(()))
+            .retire_until_done(&lease, &mut || Ok(()))
             .unwrap_err()
             .to_string();
 
@@ -435,7 +435,7 @@ fn retirement_clears_an_interrupted_attempts_staging_before_the_space_check() {
     STAGING_AVAILABLE_SPACE.with(|space| space.set(Some(0)));
 
     let error = launcher
-        .retire_runtime(&lease, &mut || Ok(()))
+        .retire_until_done(&lease, &mut || Ok(()))
         .unwrap_err()
         .to_string();
 
@@ -469,7 +469,7 @@ fn retirement_reproves_its_snapshot_before_a_retried_compute_removal() {
         .path()
         .join(format!("fake-state/{}.wedged", plan.container_name));
     std::fs::write(&wedged, "1").unwrap();
-    assert!(launcher.retire_runtime(&lease, &mut || Ok(())).is_err());
+    assert!(launcher.retire_until_done(&lease, &mut || Ok(())).is_err());
     assert_eq!(
         retirement_phase(&launcher, &plan, &lease),
         KataRetirementPhase::RemoteVerified
@@ -489,7 +489,7 @@ fn retirement_reproves_its_snapshot_before_a_retried_compute_removal() {
 
     for attempt in ["retry", "second retry"] {
         let error = launcher
-            .retire_runtime(&lease, &mut || Ok(()))
+            .retire_until_done(&lease, &mut || Ok(()))
             .unwrap_err()
             .to_string();
 
@@ -546,7 +546,7 @@ fn retirement_refuses_its_receipt_when_a_queued_start_lands_after_the_last_check
 
     for attempt in ["first", "retry"] {
         let error = launcher
-            .retire_runtime(&lease, &mut || Ok(()))
+            .retire_until_done(&lease, &mut || Ok(()))
             .unwrap_err()
             .to_string();
 
@@ -571,7 +571,7 @@ fn retirement_resumed_after_compute_removal_still_proves_its_snapshot() {
     let temp = tempfile::tempdir().unwrap();
     let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41319);
     set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
-    launcher.retire_runtime(&lease, &mut || Ok(())).unwrap();
+    launcher.retire_until_done(&lease, &mut || Ok(())).unwrap();
     assert_eq!(
         retirement_phase(&launcher, &plan, &lease),
         KataRetirementPhase::ComputeRemoved
@@ -587,7 +587,7 @@ fn retirement_resumed_after_compute_removal_still_proves_its_snapshot() {
     .unwrap();
 
     let error = launcher
-        .retire_runtime(&lease, &mut || Ok(()))
+        .retire_until_done(&lease, &mut || Ok(()))
         .unwrap_err()
         .to_string();
 

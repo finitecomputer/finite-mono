@@ -68,6 +68,50 @@ const UPGRADE_NOT_APPLIED_PREFIX: &str =
 /// helper ever started, and the Agent is up on its original container.
 const RECOVERY_NOT_APPLIED_PREFIX: &str =
     "Recovery not applied, Agent restored on its original container";
+/// Borg commits a checkpoint this often while it sends one large file, and a
+/// later `create` of the same archive skips every chunk a checkpoint kept. At
+/// the observed 113 KB/s an interrupted upload loses at most ~34 MB, against
+/// ~200 MB at Borg's 30-minute default. A commit costs one small RPC.
+const RETIREMENT_BORG_CHECKPOINT_SECS: &str = "300";
+/// A transfer waits this long for another holder of the repository lock
+/// (another host's transfer) inside its own unit, instead of failing at once.
+const RETIREMENT_BORG_LOCK_WAIT_SECS: &str = "3600";
+/// Stopping a transfer sends SIGINT: Borg then commits a checkpoint (its ssh
+/// child ignores SIGINT) before it exits, so the upload so far is kept.
+const RETIREMENT_TRANSFER_STOP_TIMEOUT: &str = "120s";
+const MAX_SYSTEMCTL_SHOW_BYTES: usize = 4 * 1024;
+
+/// The state of a retirement's transfer unit, as `systemctl show` reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TransferUnit {
+    Absent,
+    Running,
+    /// Exited 0; `RemainAfterExit` keeps it loaded until it is consumed.
+    Succeeded,
+    Failed(String),
+}
+
+/// One Borg transfer a retirement runs: the upload, then the readback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransferStep {
+    Upload,
+    Readback,
+}
+
+impl TransferStep {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Upload => "upload",
+            Self::Readback => "readback",
+        }
+    }
+}
+
+/// How far a retirement's archive got in one step.
+enum RetirementArchive {
+    Running,
+    ReadBack(Box<VerifiedRecoveryZip>),
+}
 
 mod failed_stop;
 
@@ -79,6 +123,10 @@ struct KataRuntimeOperationLock {
 pub struct KataRetirementConfig {
     pub borg_bin: PathBuf,
     pub ctr_bin: PathBuf,
+    /// Starts each Borg transfer in its own transient unit.
+    pub systemd_run_bin: PathBuf,
+    /// Reads and clears those units.
+    pub systemctl_bin: PathBuf,
     pub repository: String,
     pub remote_path: PathBuf,
     pub ssh_key_file: PathBuf,
@@ -94,6 +142,8 @@ impl KataRetirementConfig {
     fn validate(&self) -> Result<(), RunnerError> {
         if self.borg_bin.as_os_str().is_empty()
             || self.ctr_bin.as_os_str().is_empty()
+            || self.systemd_run_bin.as_os_str().is_empty()
+            || self.systemctl_bin.as_os_str().is_empty()
             || self.remote_path.as_os_str().is_empty()
             || self.staging_root.as_os_str().is_empty()
             || self.repository.trim().is_empty()
@@ -2358,52 +2408,346 @@ impl KataLauncher {
         Ok(output.status.success())
     }
 
-    fn upload_and_readback_retirement(
+    /// Drives a retirement to its end within this run, as trial archives
+    /// keep doing. Their transfer still runs in its own unit, so a run that
+    /// is killed meanwhile loses none of it and a later lease resumes it.
+    fn retire_until_done(
+        &mut self,
+        lease: &RuntimeControlLease,
+        renew: &mut dyn FnMut() -> Result<(), RunnerError>,
+    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+        let poll_interval = self.retirement_config()?.poll_interval;
+        let mut last_renewal = Instant::now();
+        loop {
+            if let ControlProgress::Done(receipt) = self.retire_runtime(lease, renew)? {
+                return Ok(receipt);
+            }
+            if last_renewal.elapsed() >= Duration::from_secs(30) {
+                renew()?;
+                last_renewal = Instant::now();
+            }
+            thread::sleep(poll_interval);
+        }
+    }
+
+    /// The transient unit that runs `step` of this request's transfer.
+    fn transfer_unit_name(&self, request_id: &str, step: TransferStep) -> String {
+        format!(
+            "finite-retirement-{}-{}.service",
+            sanitize_sandbox_name(request_id),
+            step.name()
+        )
+    }
+
+    fn systemctl(&self, args: &[&str]) -> Result<Output, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let command = PlannedCommand {
+            program: retirement.systemctl_bin.clone(),
+            cwd: None,
+            args: args.iter().map(OsString::from).collect(),
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if !output.status.success() {
+            return Err(RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: format!(
+                    "systemctl {} failed: {}",
+                    args.first().unwrap_or(&""),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        Ok(output)
+    }
+
+    fn transfer_unit_state(&self, unit: &str) -> Result<TransferUnit, RunnerError> {
+        let output = self.systemctl(&[
+            "show",
+            "--property=LoadState,ActiveState,SubState,Result,ExecMainStatus",
+            "--",
+            unit,
+        ])?;
+        if output.stdout.len() > MAX_SYSTEMCTL_SHOW_BYTES {
+            return Err(RunnerError::RuntimeLaunch(
+                "retirement transfer unit state exceeded its bounded size".to_string(),
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let property = |name: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+                .unwrap_or_default()
+        };
+        let (load, active, sub, result) = (
+            property("LoadState"),
+            property("ActiveState"),
+            property("SubState"),
+            property("Result"),
+        );
+        Ok(match (load, active, sub) {
+            (_, "failed", _) => TransferUnit::Failed(format!(
+                "{unit} failed ({result}, exit status {})",
+                property("ExecMainStatus")
+            )),
+            ("not-found", "inactive", _) | ("loaded", "inactive", _) => TransferUnit::Absent,
+            ("loaded", "active", "exited") if result == "success" => TransferUnit::Succeeded,
+            ("loaded", "active", "exited") => {
+                TransferUnit::Failed(format!("{unit} exited without success ({result})"))
+            }
+            (
+                "loaded",
+                "activating" | "active" | "deactivating" | "reloading" | "refreshing",
+                _,
+            ) => TransferUnit::Running,
+            _ => {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "retirement transfer unit {unit} is in an unexpected state ({load}/{active}/{sub})"
+                )));
+            }
+        })
+    }
+
+    /// Unloads a finished unit once its outcome is used, so the same request
+    /// can run that step again. A running unit is never touched here.
+    fn consume_transfer_unit(&self, unit: &str, state: &TransferUnit) -> Result<(), RunnerError> {
+        match state {
+            TransferUnit::Succeeded => self.systemctl(&["stop", "--", unit]).map(drop),
+            TransferUnit::Failed(_) => self.systemctl(&["reset-failed", "--", unit]).map(drop),
+            TransferUnit::Absent | TransferUnit::Running => Ok(()),
+        }
+    }
+
+    /// Starts `borg` in its own transient unit and reports the state it is
+    /// in right after. The unit is outside this run's cgroup and has no
+    /// runtime cap, so no run waits on it and none can kill it.
+    fn start_transfer_unit(
+        &self,
+        unit: &str,
+        borg: PlannedCommand,
+    ) -> Result<TransferUnit, RunnerError> {
+        let retirement = self.retirement_config()?;
+        let cwd = borg
+            .cwd
+            .as_ref()
+            .filter(|cwd| cwd.is_absolute())
+            .ok_or_else(|| {
+                RunnerError::RuntimeLaunch(
+                    "a retirement transfer needs an absolute working directory".to_string(),
+                )
+            })?;
+        let mut args = vec![
+            OsString::from(format!("--unit={unit}")),
+            OsString::from("--description=Finite runtime retirement transfer"),
+            OsString::from("--quiet"),
+            OsString::from("--property=Type=exec"),
+            OsString::from("--property=RemainAfterExit=yes"),
+            OsString::from("--property=UMask=0077"),
+            OsString::from("--property=KillMode=mixed"),
+            OsString::from("--property=KillSignal=SIGINT"),
+            OsString::from(format!(
+                "--property=TimeoutStopSec={RETIREMENT_TRANSFER_STOP_TIMEOUT}"
+            )),
+            {
+                let mut arg = OsString::from("--working-directory=");
+                arg.push(cwd);
+                arg
+            },
+        ];
+        // Borg finds ssh on PATH and keeps its cache and security records
+        // under HOME: the unit gets this Runner's, as an inline child did.
+        let inherited = ["PATH", "HOME"]
+            .into_iter()
+            .filter_map(|key| Some((OsString::from(key), std::env::var_os(key)?)));
+        for (key, value) in inherited.chain(borg.env.iter().cloned()) {
+            let mut arg = OsString::from("--setenv=");
+            arg.push(key);
+            arg.push("=");
+            arg.push(value);
+            args.push(arg);
+        }
+        args.push(OsString::from("--"));
+        args.push(borg.program.into_os_string());
+        args.extend(borg.args);
+        let command = PlannedCommand {
+            program: retirement.systemd_run_bin.clone(),
+            cwd: None,
+            args,
+            env: Vec::new(),
+        };
+        let output = self.execute(&command, self.config.command_timeout)?;
+        if !output.status.success() {
+            return Err(RunnerError::CommandExecution {
+                program: command.program.display().to_string(),
+                message: format!(
+                    "could not start retirement transfer unit {unit}: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            });
+        }
+        match self.transfer_unit_state(unit)? {
+            TransferUnit::Absent => Err(RunnerError::RuntimeLaunch(format!(
+                "retirement transfer unit {unit} vanished after it started"
+            ))),
+            state => Ok(state),
+        }
+    }
+
+    /// Moves a retirement's archive forward by what fits in one run: the
+    /// upload and the readback each run in their own unit, and this only
+    /// starts them and reads their outcome. The readback is the proof: it is
+    /// used only right after its own unit is seen to succeed, and a failed or
+    /// unproven step starts over from an empty readback.
+    #[allow(clippy::too_many_arguments)]
+    fn transfer_retirement_archive(
         &self,
         root: &Path,
         zip: &Path,
         readback: &Path,
         context: &RecoveryArtifactContext,
-        local: &VerifiedRecoveryZip,
-        renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
-    ) -> Result<VerifiedRecoveryZip, RunnerError> {
+        upload: bool,
+        upload_unit: (&str, TransferUnit),
+        readback_unit: (&str, TransferUnit),
+    ) -> Result<RetirementArchive, RunnerError> {
         let retirement = self.retirement_config()?;
         let locator = finite_saas_core::runtime_retirement_archive_locator(&context.request_id);
         let archive = format!("{}::{locator}", retirement.repository.trim());
-        if !self.borg_archive_exists(root, &locator)? {
-            let file_name = zip.file_name().ok_or_else(|| {
-                RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
-            })?;
+        let file_name = zip.file_name().ok_or_else(|| {
+            RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
+        })?;
+        let (readback_name, readback_state) = readback_unit;
+        match readback_state {
+            TransferUnit::Running => return Ok(RetirementArchive::Running),
+            TransferUnit::Succeeded => {
+                return self.finish_readback(zip, readback, context, upload, readback_name);
+            }
+            TransferUnit::Failed(why) => {
+                self.consume_transfer_unit(readback_name, &TransferUnit::Failed(why.clone()))?;
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "Borg retirement readback failed: {why}"
+                )));
+            }
+            TransferUnit::Absent => {}
+        }
+        // A retry with a receipt may find the staging root already removed.
+        std::fs::create_dir_all(root)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let (upload_name, upload_state) = upload_unit;
+        let mut upload_state = upload_state;
+        if upload
+            && upload_state == TransferUnit::Absent
+            && !self.borg_archive_exists(root, &locator)?
+        {
+            // The local ZIP is proven before a byte of it leaves the host.
+            verify_recovery_zip(zip, Some(context))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             let command = self.borg_command(
                 root,
                 vec![
                     OsString::from("create"),
                     OsString::from("--remote-path"),
                     retirement.remote_path.as_os_str().to_os_string(),
+                    OsString::from("--lock-wait"),
+                    OsString::from(RETIREMENT_BORG_LOCK_WAIT_SECS),
+                    OsString::from("--checkpoint-interval"),
+                    OsString::from(RETIREMENT_BORG_CHECKPOINT_SECS),
                     OsString::from("--compression"),
                     OsString::from("auto,zstd"),
                     OsString::from(&archive),
                     file_name.to_os_string(),
                 ],
             )?;
-            self.run_borg_with_lease(command, renew_lease)?;
+            upload_state = self.start_transfer_unit(upload_name, command)?;
+        }
+        match &upload_state {
+            TransferUnit::Running => return Ok(RetirementArchive::Running),
+            TransferUnit::Failed(why) => {
+                self.consume_transfer_unit(upload_name, &upload_state)?;
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "Borg retirement upload failed: {why}"
+                )));
+            }
+            // Its outcome is the archive's visibility, checked below.
+            TransferUnit::Succeeded => self.consume_transfer_unit(upload_name, &upload_state)?,
+            TransferUnit::Absent => {}
         }
         if !self.borg_archive_exists(root, &locator)? {
             return Err(RunnerError::RuntimeLaunch(
-                "Borg retirement archive was not visible after upload".to_string(),
+                "Borg retirement archive was not visible for readback".to_string(),
             ));
         }
-        let verified =
-            self.readback_retirement_archive(root, zip, readback, context, renew_lease)?;
-        if verified.zip_bytes != local.zip_bytes
-            || verified.zip_sha256 != local.zip_sha256
-            || verified.manifest_sha256 != local.manifest_sha256
-        {
-            return Err(RunnerError::RuntimeLaunch(
-                "Borg readback did not match the exact retirement ZIP".to_string(),
-            ));
+        if readback.exists() {
+            std::fs::remove_dir_all(readback)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
         }
-        Ok(verified)
+        std::fs::create_dir(readback)
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(readback, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+        let command = self.borg_command(
+            readback,
+            vec![
+                OsString::from("extract"),
+                OsString::from("--remote-path"),
+                retirement.remote_path.as_os_str().to_os_string(),
+                OsString::from("--lock-wait"),
+                OsString::from(RETIREMENT_BORG_LOCK_WAIT_SECS),
+                OsString::from(archive),
+                file_name.to_os_string(),
+            ],
+        )?;
+        match self.start_transfer_unit(readback_name, command)? {
+            TransferUnit::Running => Ok(RetirementArchive::Running),
+            TransferUnit::Succeeded => {
+                self.finish_readback(zip, readback, context, upload, readback_name)
+            }
+            state => {
+                self.consume_transfer_unit(readback_name, &state)?;
+                Err(RunnerError::RuntimeLaunch(match state {
+                    TransferUnit::Failed(why) => format!("Borg retirement readback failed: {why}"),
+                    _ => "Borg retirement readback did not run".to_string(),
+                }))
+            }
+        }
+    }
+
+    /// Proves a readback whose unit just succeeded. The unit is consumed
+    /// either way, so a readback that does not prove is read back afresh.
+    fn finish_readback(
+        &self,
+        zip: &Path,
+        readback: &Path,
+        context: &RecoveryArtifactContext,
+        upload: bool,
+        unit: &str,
+    ) -> Result<RetirementArchive, RunnerError> {
+        let proven = (|| {
+            let file_name = zip.file_name().ok_or_else(|| {
+                RunnerError::RuntimeLaunch("retirement ZIP has no filename".to_string())
+            })?;
+            let verified = verify_recovery_zip(&readback.join(file_name), Some(context))
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            if upload {
+                let local = verify_recovery_zip(zip, Some(context))
+                    .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+                if verified.zip_bytes != local.zip_bytes
+                    || verified.zip_sha256 != local.zip_sha256
+                    || verified.manifest_sha256 != local.manifest_sha256
+                {
+                    return Err(RunnerError::RuntimeLaunch(
+                        "Borg readback did not match the exact retirement ZIP".to_string(),
+                    ));
+                }
+            }
+            Ok(verified)
+        })();
+        self.consume_transfer_unit(unit, &TransferUnit::Succeeded)?;
+        proven.map(|verified| RetirementArchive::ReadBack(Box::new(verified)))
     }
 
     fn readback_retirement_archive(
@@ -3535,21 +3879,40 @@ impl RuntimeLauncher for KataLauncher {
         self.remove_compute(&plan.container_name)
     }
 
+    fn held_control_root(&self) -> Option<PathBuf> {
+        Some(self.config.work_root.join("held-runtime-controls"))
+    }
+
     fn retire_runtime(
         &mut self,
         lease: &RuntimeControlLease,
         renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
-    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+    ) -> Result<ControlProgress<RuntimeRetirementSnapshotReceipt>, RunnerError> {
         self.validate_ready()?;
         self.retirement_config()?;
         let plan = self.plan_for_control(lease)?;
         let _operation_lock = self.acquire_runtime_operation_lock(&plan)?;
         let (staging_root, zip_path, readback_root) =
             self.retirement_staging_paths(&lease.request.id)?;
+        let upload_unit = self.transfer_unit_name(&lease.request.id, TransferStep::Upload);
+        let readback_unit = self.transfer_unit_name(&lease.request.id, TransferStep::Readback);
+        let upload_state = self.transfer_unit_state(&upload_unit)?;
+        let readback_state = self.transfer_unit_state(&readback_unit)?;
+        // A transfer still running is all there is to check in this run.
+        if upload_state == TransferUnit::Running || readback_state == TransferUnit::Running {
+            return Ok(ControlProgress::Running);
+        }
 
         let mut progress = if let Some(progress) = self.load_retirement_progress(&plan, lease)? {
             progress
         } else {
+            // Every transfer starts after progress is recorded. One without
+            // progress belongs to no snapshot this retirement can prove.
+            if upload_state != TransferUnit::Absent || readback_state != TransferUnit::Absent {
+                return Err(RunnerError::RuntimeLaunch(format!(
+                    "retirement transfer units exist without retirement progress; refusing a new snapshot until an operator clears {upload_unit} and {readback_unit}"
+                )));
+            }
             let (validated_plan, inspected) = self.validate_control(lease)?;
             self.reconcile_recovery_helpers(
                 &validated_plan,
@@ -3661,25 +4024,19 @@ impl RuntimeLauncher for KataLauncher {
 
         let context = self.retirement_context(lease, progress.agent_principal.clone())?;
         self.wait_for_task_absence(&progress.container_id, renew_lease)?;
-        let remote = if progress.receipt.is_some() {
-            self.readback_retirement_archive(
-                &staging_root,
-                &zip_path,
-                &readback_root,
-                &context,
-                renew_lease,
-            )?
-        } else {
-            let local = verify_recovery_zip(&zip_path, Some(&context))
-                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-            self.upload_and_readback_retirement(
-                &staging_root,
-                &zip_path,
-                &readback_root,
-                &context,
-                &local,
-                renew_lease,
-            )?
+        // A first pass uploads, then reads back. A retry with a receipt only
+        // reads back, to prove the archive again without the local ZIP.
+        let remote = match self.transfer_retirement_archive(
+            &staging_root,
+            &zip_path,
+            &readback_root,
+            &context,
+            progress.receipt.is_none(),
+            (&upload_unit, upload_state),
+            (&readback_unit, readback_state),
+        )? {
+            RetirementArchive::Running => return Ok(ControlProgress::Running),
+            RetirementArchive::ReadBack(remote) => *remote,
         };
         let verified_at = if let Some(stored) = progress.receipt.as_ref() {
             stored.verified_at.clone()
@@ -3730,7 +4087,7 @@ impl RuntimeLauncher for KataLauncher {
             if resumed_after_proof {
                 self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
             }
-            return Ok(receipt);
+            return Ok(ControlProgress::Done(receipt));
         }
         if progress.phase < KataRetirementPhase::ComputeRemoved {
             if let Some(inspected) = self.inspect(&progress.container_name)? {
@@ -3765,7 +4122,7 @@ impl RuntimeLauncher for KataLauncher {
         // the same request to the queue; the persisted remote receipt lets the
         // retry read back the archive without needing the local ZIP.
         self.cleanup_retirement_staging(&lease.request.id)?;
-        Ok(receipt)
+        Ok(ControlProgress::Done(receipt))
     }
 
     fn launch(
@@ -5495,6 +5852,7 @@ struct KataRecoveryHelper {
 mod tests {
     mod memory_admission;
     mod retirement_task_fence;
+    mod retirement_transfer_unit;
     mod trial_archives;
     use super::*;
     use finite_saas_core::{
@@ -6079,6 +6437,14 @@ case "$cmd" in
     zip="$(find . -maxdepth 1 -type f -name 'retirement-*.zip' | head -n 1)"
     test -n "$zip"
     test ! -f "$remote/archive.zip"
+    if [ -f "$(dirname "$0")/borg-fail-create" ]; then exit 2; fi
+    echo "$*" > "$remote/create-args"
+    # A slow upload: it runs until the test removes this file (bounded).
+    waited=0
+    while [ -f "$(dirname "$0")/borg-hold-upload" ]; do
+      waited=$((waited + 1)); [ "$waited" -lt 600 ] || exit 3
+      sleep 0.05
+    done
     cp "$zip" "$remote/archive.zip"
     basename "$zip" > "$remote/name"
     ;;
@@ -6092,6 +6458,102 @@ esac
 "#,
         );
         bin
+    }
+
+    /// A `systemd-run` and `systemctl` pair that model transient units in
+    /// `units/` beside them. A unit's file holds `running` or `exited <N>`.
+    /// `systemd-run` runs the command in a clean environment plus its
+    /// `--setenv`s, in its `--working-directory`, and records every argument
+    /// in `units/<unit>.argv`. It waits for the command unless the file
+    /// `systemd-run-background` exists beside it.
+    fn fake_systemd(root: &Path) -> (PathBuf, PathBuf) {
+        let run = root.join("systemd-run-fake");
+        write_executable(
+            &run,
+            r#"#!/bin/sh
+set -eu
+dir="$(dirname "$0")"
+units="$dir/units"
+mkdir -p "$units"
+all="$*"
+unit=""; cwd=""; command=0
+for arg do
+  shift
+  if [ "$command" = 1 ]; then set -- "$@" "$arg"; continue; fi
+  case "$arg" in
+    --unit=*) unit="${arg#--unit=}" ;;
+    --working-directory=*) cwd="${arg#--working-directory=}" ;;
+    --setenv=*) set -- "$@" "${arg#--setenv=}" ;;
+    --) command=1 ;;
+  esac
+done
+if [ -z "$unit" ] || [ -z "$cwd" ] || [ "$command" != 1 ]; then echo "bad systemd-run call" >&2; exit 2; fi
+state="$units/$unit"
+if [ -e "$state" ]; then echo "Unit $unit was already loaded or has a fragment file." >&2; exit 1; fi
+echo "$all" > "$state.argv"
+echo running > "$state"
+finish() { echo "exited $1" > "$state.next"; mv "$state.next" "$state"; }
+run() { if (cd "$cwd" && exec env -i "$@"); then finish 0; else finish "$?"; fi; }
+if [ -f "$dir/systemd-run-background" ]; then
+  run "$@" </dev/null >/dev/null 2>&1 &
+else
+  run "$@" </dev/null >/dev/null 2>&1
+fi
+"#,
+        );
+        let ctl = root.join("systemctl-fake");
+        write_executable(
+            &ctl,
+            r#"#!/bin/sh
+set -eu
+units="$(dirname "$0")/units"
+cmd="$1"; shift
+while [ "$#" -gt 1 ]; do shift; done
+state="$units/$1"
+case "$cmd" in
+  show)
+    if [ ! -e "$state" ]; then
+      printf 'LoadState=not-found
+ActiveState=inactive
+SubState=dead
+Result=success
+ExecMainStatus=0
+'
+      exit 0
+    fi
+    read -r what status < "$state"
+    if [ "$what" = running ]; then
+      printf 'LoadState=loaded
+ActiveState=active
+SubState=running
+Result=success
+ExecMainStatus=0
+'
+    elif [ "$status" = 0 ]; then
+      printf 'LoadState=loaded
+ActiveState=active
+SubState=exited
+Result=success
+ExecMainStatus=0
+'
+    else
+      printf 'LoadState=loaded
+ActiveState=failed
+SubState=failed
+Result=exit-code
+ExecMainStatus=%s
+' "$status"
+    fi
+    ;;
+  stop|reset-failed)
+    if [ -e "$state" ] && [ "$(cat "$state")" = running ]; then echo "fake cannot stop a running unit" >&2; exit 1; fi
+    rm -f "$state"
+    ;;
+  *) exit 2 ;;
+esac
+"#,
+        );
+        (run, ctl)
     }
 
     fn target_artifact() -> RuntimeArtifact {
@@ -6368,9 +6830,12 @@ esac
         for path in [&key, &known_hosts, &passphrase] {
             std::fs::write(path, "test-only").unwrap();
         }
+        let (systemd_run_bin, systemctl_bin) = fake_systemd(root);
         launcher.config.retirement = Some(KataRetirementConfig {
             borg_bin: fake_borg(root),
             ctr_bin: fake_ctr(root),
+            systemd_run_bin,
+            systemctl_bin,
             repository: "test-repository".to_string(),
             remote_path: PathBuf::from("/usr/local/bin/borg1"),
             ssh_key_file: key,
@@ -6429,7 +6894,7 @@ esac
                 renewals += 1;
                 Ok(())
             };
-            launcher.retire_runtime(&lease, &mut renew).unwrap()
+            launcher.retire_until_done(&lease, &mut renew).unwrap()
         };
         assert!(renewals > 0);
         assert_eq!(first.request_id, lease.request.id);
@@ -6473,7 +6938,7 @@ esac
         // exact persisted receipt is re-verified from the remote archive; no
         // local ZIP or canonical container is required at this point.
         let mut renew = || Ok(());
-        let second = launcher.retire_runtime(&lease, &mut renew).unwrap();
+        let second = launcher.retire_until_done(&lease, &mut renew).unwrap();
         assert_eq!(second, first);
         assert!(
             !launcher
@@ -6514,7 +6979,7 @@ esac
         spec.boot_intent = RuntimeBootIntent::Normal;
         let mut renew = || Ok(());
 
-        assert!(launcher.retire_runtime(&lease, &mut renew).is_err());
+        assert!(launcher.retire_until_done(&lease, &mut renew).is_err());
         assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
         assert_eq!(
             std::fs::read_to_string(plan.state_root.join("workspace/note")).unwrap(),
@@ -6523,7 +6988,7 @@ esac
         assert!(temp.path().join("borg-remote/archive.zip").is_file());
 
         std::fs::remove_file(temp.path().join("borg-fail-extract")).unwrap();
-        let receipt = launcher.retire_runtime(&lease, &mut renew).unwrap();
+        let receipt = launcher.retire_until_done(&lease, &mut renew).unwrap();
         assert_eq!(receipt.request_id, lease.request.id);
         assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
     }

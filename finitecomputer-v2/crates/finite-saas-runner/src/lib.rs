@@ -14,6 +14,7 @@ use finite_saas_core::{
 };
 #[cfg(test)]
 use finite_saas_core::{FinitePrivateApiKey, RuntimeEndpointContractV1};
+use held_control::HeldControlStore;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ mod apple_container;
 mod creation_admission;
 pub use creation_admission::CreationAdmissionGuard;
 pub mod health_reports;
+mod held_control;
 pub mod hosted_hermes_caddy;
 mod hosted_hermes_guard;
 pub mod hosted_hermes_inventory;
@@ -446,6 +448,11 @@ pub enum RunOnceOutcome {
         request_id: String,
         failure_message: String,
     },
+    /// A retirement whose transfer still runs in its own unit. Its lease
+    /// stays held; this run renewed it.
+    RuntimeDestroyRunning {
+        request_id: String,
+    },
 }
 
 fn identity_request_error(context: &str, error: ureq::Error) -> RunnerError {
@@ -616,6 +623,13 @@ where
                 source_host_id.as_deref(),
             );
         }
+        // A retirement this Runner holds is checked first. The check renews
+        // its lease, and one that finished settles in Core before new work.
+        let held = match self.continue_held_runtime_controls()? {
+            HeldControls::Finished(outcome) => return Ok(outcome),
+            HeldControls::Running(request_id) => Some(request_id),
+            HeldControls::None => None,
+        };
         let lease_token = self.lease_tokens.next_lease_token()?;
         let runtime_capabilities = self.launcher.runtime_capabilities();
         let mut runner_capacity = self.launcher.runner_capacity();
@@ -630,12 +644,20 @@ where
                 runner_capacity,
             });
         }
+        // While a retirement is held, Core leases this host no other control
+        // that runs a Borg transfer: one transfer at a time, as before, and
+        // every other control still runs.
+        let control_capacity = if held.is_some() {
+            without_transfer_controls(&runner_capacity)
+        } else {
+            runner_capacity.clone()
+        };
         if let Some(lease) = self.queue.lease_runtime_control(
             &self.runner_id,
             &lease_token,
             self.lease_seconds,
             source_host_id.as_deref(),
-            Some(&runner_capacity),
+            Some(&control_capacity),
         )? {
             return self.run_runtime_control(lease, lease_token);
         }
@@ -654,7 +676,10 @@ where
             Some(&runner_capacity),
         )?
         else {
-            return Ok(RunOnceOutcome::Idle);
+            return Ok(match held {
+                Some(request_id) => RunOnceOutcome::RuntimeDestroyRunning { request_id },
+                None => RunOnceOutcome::Idle,
+            });
         };
 
         let request_id = lease.request.id.clone();
@@ -1089,9 +1114,8 @@ where
                 .launcher
                 .stop_runtime(&lease)
                 .map(|()| RuntimeControlCompletionFacts::None),
-            RuntimeControlKind::Destroy
-            | RuntimeControlKind::ArchiveTrial
-            | RuntimeControlKind::ReclaimTrial => {
+            RuntimeControlKind::Destroy => return self.start_retirement(lease, lease_token),
+            RuntimeControlKind::ArchiveTrial | RuntimeControlKind::ReclaimTrial => {
                 let runner_id = self.runner_id.clone();
                 let lease_token_for_renewal = lease_token.clone();
                 // Establish Core's maximum bounded lease before synchronous
@@ -1118,14 +1142,10 @@ where
                         .launcher
                         .archive_trial(&lease, &mut renew_lease)
                         .map(|s| RuntimeControlCompletionFacts::TrialArchive(Box::new(s))),
-                    RuntimeControlKind::ReclaimTrial => self
+                    _ => self
                         .launcher
                         .reclaim_trial(&lease, &mut renew_lease)
                         .map(|()| RuntimeControlCompletionFacts::None),
-                    _ => self
-                        .launcher
-                        .retire_runtime(&lease, &mut renew_lease)
-                        .map(|s| RuntimeControlCompletionFacts::Retirement(Box::new(s))),
                 }
             }
         };
@@ -1135,13 +1155,6 @@ where
                 let upgrade_facts = match &completion_facts {
                     RuntimeControlCompletionFacts::Upgrade(facts) => Some(facts),
                     RuntimeControlCompletionFacts::None
-                    | RuntimeControlCompletionFacts::Retirement(_)
-                    | RuntimeControlCompletionFacts::TrialArchive(_) => None,
-                };
-                let retirement_snapshot = match &completion_facts {
-                    RuntimeControlCompletionFacts::Retirement(receipt) => Some((**receipt).clone()),
-                    RuntimeControlCompletionFacts::None
-                    | RuntimeControlCompletionFacts::Upgrade(_)
                     | RuntimeControlCompletionFacts::TrialArchive(_) => None,
                 };
                 let runtime_capabilities = (kind == RuntimeControlKind::Upgrade).then(|| {
@@ -1173,7 +1186,7 @@ where
                         published_app_urls: upgrade_facts
                             .as_ref()
                             .map(|facts| facts.published_app_urls.clone()),
-                        retirement_snapshot,
+                        retirement_snapshot: None,
                         now: None,
                     },
                 )?;
@@ -1199,6 +1212,163 @@ where
                 ))
             }
         }
+    }
+
+    fn held_control_store(&self) -> Option<HeldControlStore> {
+        self.launcher.held_control_root().map(HeldControlStore::new)
+    }
+
+    /// A retirement's lease is recorded before any work runs under it, so a
+    /// later run continues it whatever happens to this one.
+    fn start_retirement(
+        &mut self,
+        lease: RuntimeControlLease,
+        lease_token: String,
+    ) -> Result<RunOnceOutcome, RunnerError> {
+        let request_id = lease.request.id.clone();
+        let held = match self.held_control_store() {
+            Some(store) => store.hold(&lease, &lease_token).map(|()| store),
+            None => Err(RunnerError::RuntimeLaunch(
+                "this Runner has nowhere to hold a retirement lease".to_string(),
+            )),
+        };
+        let store = match held {
+            Ok(store) => store,
+            Err(error) => {
+                let failure_message = error.to_string();
+                self.record_runtime_control_failure(
+                    RuntimeControlKind::Destroy,
+                    &request_id,
+                    &lease_token,
+                    &failure_message,
+                    RuntimeLifecycleStage::Launch,
+                )?;
+                return Ok(runtime_control_failed_outcome(
+                    RuntimeControlKind::Destroy,
+                    request_id,
+                    failure_message,
+                ));
+            }
+        };
+        Ok(match self.step_retirement(&store, lease, lease_token)? {
+            RetirementStep::Running => RunOnceOutcome::RuntimeDestroyRunning { request_id },
+            RetirementStep::Finished(outcome) => outcome,
+        })
+    }
+
+    /// Renews and steps every retirement this Runner holds, oldest first.
+    fn continue_held_runtime_controls(&mut self) -> Result<HeldControls, RunnerError> {
+        let Some(store) = self.held_control_store() else {
+            return Ok(HeldControls::None);
+        };
+        let mut running = None;
+        for held in store.held()? {
+            let request_id = held.lease.request.id.clone();
+            match self.queue.renew_runtime_control(
+                &request_id,
+                RenewRuntimeControlRequestInput {
+                    request_id: request_id.clone(),
+                    runner_id: self.runner_id.clone(),
+                    lease_token: held.lease_token.clone(),
+                    lease_seconds: Some(RUNTIME_RETIREMENT_LEASE_SECONDS),
+                    now: None,
+                },
+            ) {
+                Ok(_) => {}
+                // Core no longer grants this lease: the control was settled,
+                // or the lease lapsed and Core leases it again when it is due.
+                // Its progress and any running transfer stay for that lease.
+                Err(RunnerError::CoreStatus {
+                    status: 404 | 409, ..
+                }) => {
+                    store.release(&request_id)?;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            match self.step_retirement(&store, held.lease, held.lease_token)? {
+                RetirementStep::Running => {
+                    running.get_or_insert(request_id);
+                }
+                RetirementStep::Finished(outcome) => return Ok(HeldControls::Finished(outcome)),
+            }
+        }
+        Ok(running.map_or(HeldControls::None, HeldControls::Running))
+    }
+
+    /// One step of a held retirement. When it ends, its outcome goes to Core
+    /// under the held lease and the hold is released.
+    fn step_retirement(
+        &mut self,
+        store: &HeldControlStore,
+        lease: RuntimeControlLease,
+        lease_token: String,
+    ) -> Result<RetirementStep, RunnerError> {
+        let kind = RuntimeControlKind::Destroy;
+        let request_id = lease.request.id.clone();
+        if lease.request.kind != kind {
+            return Err(RunnerError::RuntimeLaunch(
+                "a held runtime control is not a retirement".to_string(),
+            ));
+        }
+        let step = {
+            let runner_id = self.runner_id.clone();
+            let queue = &mut self.queue;
+            let mut renew_lease = || {
+                queue
+                    .renew_runtime_control(
+                        &request_id,
+                        RenewRuntimeControlRequestInput {
+                            request_id: request_id.clone(),
+                            runner_id: runner_id.clone(),
+                            lease_token: lease_token.clone(),
+                            lease_seconds: Some(RUNTIME_RETIREMENT_LEASE_SECONDS),
+                            now: None,
+                        },
+                    )
+                    .map(|_| ())
+            };
+            self.launcher.retire_runtime(&lease, &mut renew_lease)
+        };
+        let outcome = match step {
+            Ok(ControlProgress::Running) => return Ok(RetirementStep::Running),
+            Ok(ControlProgress::Done(receipt)) => {
+                let completed = self.queue.complete_runtime_control(
+                    &request_id,
+                    CompleteRuntimeControlRequestInput {
+                        trial_archive: None,
+                        request_id: request_id.clone(),
+                        runner_id: self.runner_id.clone(),
+                        lease_token: lease_token.clone(),
+                        runtime_artifact_id: None,
+                        state_schema_version: None,
+                        runtime_capabilities: None,
+                        runtime_host: None,
+                        published_app_urls: None,
+                        retirement_snapshot: Some(receipt),
+                        now: None,
+                    },
+                )?;
+                runtime_control_success_outcome(
+                    kind,
+                    request_id.clone(),
+                    completed.agent_runtime_id,
+                )
+            }
+            Err(error) => {
+                let failure_message = error.to_string();
+                self.record_runtime_control_failure(
+                    kind,
+                    &request_id,
+                    &lease_token,
+                    &failure_message,
+                    runtime_control_failure_stage(&error),
+                )?;
+                runtime_control_failed_outcome(kind, request_id.clone(), failure_message)
+            }
+        };
+        store.release(&request_id)?;
+        Ok(RetirementStep::Finished(outcome))
     }
 
     fn record_runtime_control_failure(
@@ -1670,14 +1840,21 @@ pub trait RuntimeLauncher {
             "runtime destroy is not supported by this launcher".to_string(),
         ))
     }
+    /// One step of a retirement. `Running` means its transfer still runs in
+    /// its own unit: the caller keeps the lease and steps it again later.
     fn retire_runtime(
         &mut self,
         _lease: &RuntimeControlLease,
         _renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
-    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+    ) -> Result<ControlProgress<RuntimeRetirementSnapshotReceipt>, RunnerError> {
         Err(RunnerError::RuntimeLaunch(
             "runtime retirement is not supported by this launcher".to_string(),
         ))
+    }
+    /// Where this launcher's Runner records the controls it holds across
+    /// runs. A launcher that retires runtimes must name one.
+    fn held_control_root(&self) -> Option<PathBuf> {
+        None
     }
     fn launch(
         &mut self,
@@ -1812,8 +1989,12 @@ where
         &mut self,
         lease: &RuntimeControlLease,
         renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
-    ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+    ) -> Result<ControlProgress<RuntimeRetirementSnapshotReceipt>, RunnerError> {
         (**self).retire_runtime(lease, renew_lease)
+    }
+
+    fn held_control_root(&self) -> Option<PathBuf> {
+        (**self).held_control_root()
     }
 
     fn launch(
@@ -1957,10 +2138,42 @@ pub struct RuntimeUpgradeFacts {
     pub published_app_urls: Vec<String>,
 }
 
+/// How far a runtime control got in one run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlProgress<T> {
+    Done(T),
+    /// Its slow step still runs outside this process. The caller keeps the
+    /// lease, and a later run continues the same control.
+    Running,
+}
+
+enum HeldControls {
+    None,
+    Running(String),
+    Finished(RunOnceOutcome),
+}
+
+enum RetirementStep {
+    Running,
+    Finished(RunOnceOutcome),
+}
+
+/// The capacity a Runner offers for control leases while it holds a
+/// retirement: the same, minus the controls that run a Borg transfer.
+fn without_transfer_controls(capacity: &RunnerLeaseCapacity) -> RunnerLeaseCapacity {
+    let mut capacity = capacity.clone();
+    if let Some(RuntimeCapabilitiesEnvelope::V1(capabilities)) =
+        capacity.runtime_capabilities.as_mut()
+    {
+        capabilities.runtime_retirement = false;
+        capabilities.trial_archive = false;
+    }
+    capacity
+}
+
 enum RuntimeControlCompletionFacts {
     None,
     Upgrade(RuntimeUpgradeFacts),
-    Retirement(Box<RuntimeRetirementSnapshotReceipt>),
     TrialArchive(Box<finite_saas_core::TrialArchiveSnapshot>),
 }
 
@@ -5041,11 +5254,13 @@ mod tests {
             recovery_authority_id: "finite-assisted-v1".to_string(),
             retention_policy: finite_saas_core::RUNTIME_RETIREMENT_RETENTION_INDEFINITE.to_string(),
         };
+        let held = tempfile::tempdir().unwrap();
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample())
                 .for_kata()
-                .with_retirement_result(Ok(receipt.clone())),
+                .with_retirement_result(Ok(receipt.clone()))
+                .with_held_root(held.path().join("held")),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
             300,
@@ -5072,17 +5287,26 @@ mod tests {
         );
         assert!(runner.queue.retried_runtime_control.is_empty());
         assert!(runner.queue.failed_runtime_control.is_empty());
+        // The lease was held from the moment Core granted it until it settled.
+        assert!(
+            HeldControlStore::new(held.path().join("held"))
+                .held()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn retirement_failure_requeues_same_request_instead_of_terminal_failure() {
         let runtime_control =
             sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Destroy);
+        let held = tempfile::tempdir().unwrap();
         let mut runner = AgentCreationRunner::new(
             FakeQueue::with_runtime_control_lease(runtime_control.clone()),
             FakeLauncher::ready(RuntimeLaunchFacts::sample())
                 .for_kata()
-                .with_retirement_result(Err("synthetic archive failure".to_string())),
+                .with_retirement_result(Err("synthetic archive failure".to_string()))
+                .with_held_root(held.path().join("held")),
             FixedLeaseTokens::new(["lease-1"]),
             "runner-1",
             300,
@@ -5105,6 +5329,38 @@ mod tests {
         );
         assert!(runner.queue.failed_runtime_control.is_empty());
         assert!(runner.queue.completed_runtime_control.is_empty());
+        assert!(
+            HeldControlStore::new(held.path().join("held"))
+                .held()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn retirement_without_a_place_to_hold_its_lease_is_requeued_before_any_work() {
+        let runtime_control =
+            sample_runtime_control_lease_with_kind("runtime_ctl_123", RuntimeControlKind::Destroy);
+        let mut runner = AgentCreationRunner::new(
+            FakeQueue::with_runtime_control_lease(runtime_control.clone()),
+            FakeLauncher::ready(RuntimeLaunchFacts::sample())
+                .for_kata()
+                .with_retirement_result(Err("must not run".to_string())),
+            FixedLeaseTokens::new(["lease-1"]),
+            "runner-1",
+            300,
+        )
+        .unwrap();
+
+        let outcome = runner.run_once().unwrap();
+
+        assert!(matches!(
+            outcome,
+            RunOnceOutcome::RuntimeDestroyFailed { ref failure_message, .. }
+                if failure_message.contains("nowhere to hold")
+        ));
+        assert!(runner.launcher.retired.is_empty());
+        assert_eq!(runner.queue.retried_runtime_control.len(), 1);
     }
 
     #[test]
@@ -7266,6 +7522,7 @@ mod tests {
         destroyed: Vec<String>,
         retired: Vec<String>,
         retirement_result: Option<Result<RuntimeRetirementSnapshotReceipt, String>>,
+        held_root: Option<PathBuf>,
         runner_capacity: RunnerLeaseCapacity,
         runner_class: RunnerClass,
         planned_source: Option<RuntimeSourceIdentity>,
@@ -7287,6 +7544,7 @@ mod tests {
                 destroyed: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
+                held_root: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -7314,6 +7572,7 @@ mod tests {
                 destroyed: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
+                held_root: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -7341,6 +7600,7 @@ mod tests {
                 destroyed: Vec::new(),
                 retired: Vec::new(),
                 retirement_result: None,
+                held_root: None,
                 runner_capacity: RunnerLeaseCapacity {
                     runner_classes: vec![RunnerClass::LocalDocker],
                     ..RunnerLeaseCapacity::default()
@@ -7374,6 +7634,11 @@ mod tests {
             result: Result<RuntimeRetirementSnapshotReceipt, String>,
         ) -> Self {
             self.retirement_result = Some(result);
+            self
+        }
+
+        fn with_held_root(mut self, root: PathBuf) -> Self {
+            self.held_root = Some(root);
             self
         }
     }
@@ -7474,13 +7739,18 @@ mod tests {
             &mut self,
             lease: &RuntimeControlLease,
             renew_lease: &mut dyn FnMut() -> Result<(), RunnerError>,
-        ) -> Result<RuntimeRetirementSnapshotReceipt, RunnerError> {
+        ) -> Result<ControlProgress<RuntimeRetirementSnapshotReceipt>, RunnerError> {
             self.retired.push(lease.runtime.source_machine_id.clone());
             renew_lease()?;
             self.retirement_result
                 .clone()
                 .unwrap_or_else(|| Err("retirement not configured".to_string()))
+                .map(ControlProgress::Done)
                 .map_err(RunnerError::RuntimeLaunch)
+        }
+
+        fn held_control_root(&self) -> Option<PathBuf> {
+            self.held_root.clone()
         }
 
         fn launch(
@@ -7666,7 +7936,7 @@ mod tests {
         lease
     }
 
-    fn sample_runtime_control_lease(request_id: &str) -> RuntimeControlLease {
+    pub(crate) fn sample_runtime_control_lease(request_id: &str) -> RuntimeControlLease {
         sample_runtime_control_lease_with_kind(request_id, RuntimeControlKind::Restart)
     }
 
