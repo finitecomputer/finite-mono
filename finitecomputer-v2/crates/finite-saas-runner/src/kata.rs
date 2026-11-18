@@ -2278,12 +2278,8 @@ impl KataLauncher {
             env: vec![
                 (
                     OsString::from("BORG_RSH"),
-                    // IPv4 only: on 2026-11-18, lat4's IPv6 route to rsync.net
-                    // dropped ~7% of packets, which held a retirement upload
-                    // near 50-110 KB/s until the runner's 1-hour cap killed it.
-                    // lat4's IPv4 route to the same host was clean (FIN-492).
                     OsString::from(format!(
-                        "ssh -i {} -o UserKnownHostsFile={} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes -o AddressFamily=inet",
+                        "ssh -i {} -o UserKnownHostsFile={} -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes",
                         retirement.ssh_key_file.display(),
                         retirement.known_hosts_file.display()
                     )),
@@ -6385,29 +6381,6 @@ esac
             poll_interval: Duration::from_millis(1),
             convergence_timeout: Duration::from_secs(2),
         });
-    }
-
-    #[test]
-    fn retirement_borg_ssh_uses_ipv4_only() {
-        let temp = tempfile::tempdir().unwrap();
-        let (mut launcher, _plan, _fake_state) = test_launcher(&temp, 41233);
-        configure_test_retirement(&mut launcher, temp.path());
-
-        let command = launcher.borg_command(temp.path(), Vec::new()).unwrap();
-        let rsh = command
-            .env
-            .iter()
-            .find(|(key, _)| key == "BORG_RSH")
-            .map(|(_, value)| value.to_string_lossy().into_owned())
-            .expect("BORG_RSH is set");
-
-        assert!(
-            rsh.split_whitespace()
-                .collect::<Vec<_>>()
-                .windows(2)
-                .any(|pair| pair == ["-o", "AddressFamily=inet"]),
-            "BORG_RSH must force IPv4: {rsh}"
-        );
     }
 
     #[test]
