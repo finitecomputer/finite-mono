@@ -41,6 +41,7 @@ case "${1:-} ${2:-}" in
       *) echo "ctr: task must be stopped before deletion: $found: failed precondition" >&2; rm -f "$tasks.next"; exit 1 ;;
     esac
     ;;
+  "containers label") echo "${4:-}" ;;
   *) echo "unsupported fake ctr call: $*" >&2; exit 42 ;;
 esac
 "#,
@@ -136,6 +137,13 @@ fn retirement_deletes_the_stopped_task_a_stop_leaves_and_proceeds() {
             .unwrap_or_else(|| panic!("no {needle:?} in {commands}"))
     };
     assert!(position("stop ") < position("ctr --namespace finite tasks delete"));
+    // containerd's restart monitor reads this label; it says stopped before
+    // the task goes.
+    assert!(
+        position(&format!(
+            "ctr --namespace finite containers label {id} containerd.io/restart.status=stopped"
+        )) < position("ctr --namespace finite tasks delete")
+    );
     assert_eq!(tasks(&temp), format!("{other} 4343 STOPPED\n"));
     assert!(temp.path().join("borg-remote/archive.zip").is_file());
     assert!(launcher.inspect(&plan.container_name).unwrap().is_none());
@@ -305,7 +313,7 @@ fn retirement_remakes_a_zip_an_interrupted_attempt_left_unverifiable() {
 }
 
 #[test]
-fn identity_is_reached_only_through_real_directories() {
+fn identity_follows_only_relative_links_inside_the_tree() {
     let temp = tempfile::tempdir().unwrap();
     // A host directory holding an identity.json, outside every tree.
     let host = temp.path().join("host-identity");
@@ -317,6 +325,29 @@ fn identity_is_reached_only_through_real_directories() {
     stage_relocation_tree(&real);
     assert!(staged_agent_identity_metadata(&real).unwrap().is_file());
 
+    // Relative links that stay inside the tree resolve as in the guest, as
+    // an archive made before absolute links were accepted may hold.
+    let moved_agent = temp.path().join("moved-agent");
+    stage_relocation_tree(&moved_agent);
+    std::fs::rename(moved_agent.join("agent"), moved_agent.join("real-agent")).unwrap();
+    std::os::unix::fs::symlink("real-agent", moved_agent.join("agent")).unwrap();
+    let moved_identity = temp.path().join("moved-identity");
+    stage_relocation_tree(&moved_identity);
+    std::fs::create_dir_all(moved_identity.join("shared")).unwrap();
+    std::fs::rename(
+        moved_identity.join("agent/identity"),
+        moved_identity.join("shared/identity"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        "../shared/./identity",
+        moved_identity.join("agent/identity"),
+    )
+    .unwrap();
+    for root in [&moved_agent, &moved_identity] {
+        assert!(staged_agent_identity_metadata(root).unwrap().is_file());
+    }
+
     // Absolute links resolve to host paths on the host, so neither the
     // identity directory nor the agent home may be one.
     let linked_identity = temp.path().join("linked-identity");
@@ -325,10 +356,93 @@ fn identity_is_reached_only_through_real_directories() {
     let linked_agent = temp.path().join("linked-agent");
     std::fs::create_dir_all(&linked_agent).unwrap();
     std::os::unix::fs::symlink(&host, linked_agent.join("agent")).unwrap();
-    for root in [&linked_identity, &linked_agent] {
+    // Nor may a relative link climb out of the tree, or loop.
+    let climbing = temp.path().join("climbing");
+    std::fs::create_dir_all(&climbing).unwrap();
+    std::os::unix::fs::symlink("../host-identity", climbing.join("agent")).unwrap();
+    let looping = temp.path().join("looping");
+    std::fs::create_dir_all(&looping).unwrap();
+    std::os::unix::fs::symlink("agent", looping.join("agent")).unwrap();
+    for root in [&linked_identity, &linked_agent, &climbing, &looping] {
         let error = staged_agent_identity_metadata(root)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("real directories"), "{error}");
+        assert!(error.contains("inside the durable state tree"), "{error}");
     }
+}
+
+/// The fake Borg, except that the upload is when a restart containerd had
+/// already queued lands. `restart-lands` beside it says what then holds:
+/// `running` (the guest is still up) or `gone` (it ran and its task was
+/// deleted again). Either way the guest wrote `/data` after the snapshot.
+fn borg_where_a_queued_restart_lands(root: &Path, state_root: &Path, id: &str) -> PathBuf {
+    let bin = root.join("borg-restart-lands");
+    write_executable(
+        &bin,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+dir="$(dirname "$0")"
+if [ "${{1:-}}" = create ] && [ -f "$dir/restart-lands" ]; then
+  echo "written by the restarted guest" > "{state}/workspace/after-snapshot"
+  if [ "$(cat "$dir/restart-lands")" = running ]; then echo "{id} 4545 RUNNING" >> "$dir/ctr-tasks"; fi
+  rm -f "$dir/restart-lands"
+fi
+exec "$dir/borg-fake" "$@"
+"#,
+            state = state_root.display()
+        ),
+    );
+    bin
+}
+
+#[test]
+fn retirement_refuses_its_snapshot_when_a_queued_restart_crosses_the_fence() {
+    for landed in ["running", "gone"] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41316);
+        set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+        launcher.config.retirement.as_mut().unwrap().borg_bin =
+            borg_where_a_queued_restart_lands(temp.path(), &plan.state_root, &id);
+        std::fs::write(temp.path().join("restart-lands"), landed).unwrap();
+
+        let error = launcher
+            .retire_runtime(&lease, &mut || Ok(()))
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("changed after the retirement snapshot"),
+            "{landed}: {error}"
+        );
+        assert!(launcher.inspect(&plan.container_name).unwrap().is_some());
+        assert!(plan.state_root.join("workspace/after-snapshot").is_file());
+    }
+}
+
+#[test]
+fn retirement_clears_an_interrupted_attempts_staging_before_the_space_check() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut launcher, plan, lease, id) = stopped_runtime(&temp, 41315);
+    set_tasks(&temp, &[format!("{id} 4242 STOPPED")]);
+    // An attempt wrote its ZIP and died before recording progress, so the ZIP
+    // was never uploaded. Its bytes are what the free space now lacks.
+    let (_, zip, _) = launcher
+        .retirement_staging_paths(&lease.request.id)
+        .unwrap();
+    let context = launcher.retirement_context(&lease, None).unwrap();
+    create_recovery_zip(&plan.state_root, &zip, &context).unwrap();
+    STAGING_AVAILABLE_SPACE.with(|space| space.set(Some(0)));
+
+    let error = launcher
+        .retire_runtime(&lease, &mut || Ok(()))
+        .unwrap_err()
+        .to_string();
+
+    STAGING_AVAILABLE_SPACE.with(|space| space.set(None));
+    assert!(error.contains("retirement staging requires"), "{error}");
+    assert!(
+        !zip.exists(),
+        "the leftover goes before the check, so a retry has its space"
+    );
 }

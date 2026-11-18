@@ -2110,18 +2110,35 @@ impl KataLauncher {
             return Ok(());
         }
         let retirement = self.retirement_config()?;
-        let command = PlannedCommand {
+        let ctr = |args: &[&str]| PlannedCommand {
             program: retirement.ctr_bin.clone(),
             cwd: None,
-            args: vec![
-                OsString::from("--namespace"),
-                OsString::from(self.config.namespace.trim()),
-                OsString::from("tasks"),
-                OsString::from("delete"),
-                OsString::from(container_id),
-            ],
+            args: ["--namespace", self.config.namespace.trim()]
+                .iter()
+                .chain(args)
+                .map(OsString::from)
+                .collect(),
             env: Vec::new(),
         };
+        // containerd's restart monitor reads this label. Once it says stopped,
+        // the monitor makes no new start and kills a task that does start.
+        let label = ctr(&[
+            "containers",
+            "label",
+            container_id,
+            "containerd.io/restart.status=stopped",
+        ]);
+        if !self
+            .execute(&label, self.config.command_timeout)?
+            .status
+            .success()
+        {
+            return Err(RunnerError::CommandExecution {
+                program: label.program.display().to_string(),
+                message: "could not mark the container's restart status stopped".to_string(),
+            });
+        }
+        let command = ctr(&["tasks", "delete", container_id]);
         let output = self.execute(&command, self.config.command_timeout)?;
         // A delete that lost a race to another deleter still leaves no task.
         if output.status.success() || self.task_absent(container_id)? {
@@ -2134,6 +2151,35 @@ impl KataLauncher {
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
         })
+    }
+
+    /// A restart containerd queued before the explicit stop applies without
+    /// rereading the restart labels, so it can start the guest after the task
+    /// fence, while the snapshot is cut or uploaded. Before a receipt, the
+    /// source must still be exactly what was archived: the same stopped
+    /// container, no task, and the same tree. Otherwise the archive is not
+    /// used, and the retirement stays refused with compute and `/data` kept.
+    fn verify_snapshot_still_exact(
+        &self,
+        plan: &KataLaunchPlan,
+        progress: &KataRetirementProgress,
+        archived: &[crate::retirement::RecoveryManifestEntry],
+    ) -> Result<(), RunnerError> {
+        let same_stopped_compute = self
+            .inspect(&progress.container_name)?
+            .is_some_and(|now| now.id == progress.container_id && now.state.status != "running");
+        if !same_stopped_compute
+            || !self.task_absent(&progress.container_id)?
+            || source_manifest(&plan.state_root)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?
+                != archived
+        {
+            return Err(RunnerError::RuntimeLaunch(
+                "Kata compute or durable state changed after the retirement snapshot; its archive is not used"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn wait_for_task_absence(
@@ -3541,6 +3587,11 @@ impl RuntimeLauncher for KataLauncher {
             self.wait_for_task_absence(&inspected.id, renew_lease)?;
             let stable = self.stable_source_manifest(&validated_plan.state_root, renew_lease)?;
 
+            // Without progress, nothing staged for this request was uploaded:
+            // an attempt that died before recording progress left only local
+            // copies of the source (a ZIP, or part of one). Clear them before
+            // measuring free space, which they would otherwise use up.
+            self.cleanup_retirement_staging(&lease.request.id)?;
             std::fs::create_dir_all(&staging_root)
                 .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             #[cfg(unix)]
@@ -3554,8 +3605,7 @@ impl RuntimeLauncher for KataLauncher {
             let required_space = source_bytes
                 .saturating_add(source_bytes / 100)
                 .saturating_add(64 * 1024 * 1024);
-            let available_space = fs4::available_space(&staging_root)
-                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
+            let available_space = staging_available_space(&staging_root)?;
             let required_space = if lease.request.kind == RuntimeControlKind::ArchiveTrial {
                 required_space.saturating_mul(2)
             } else {
@@ -3567,28 +3617,8 @@ impl RuntimeLauncher for KataLauncher {
                 )));
             }
             let context = self.retirement_context(lease, agent_principal.clone())?;
-            // Without progress this ZIP was never uploaded: it is only a local
-            // copy of the stopped source. One that an earlier attempt left and
-            // that does not verify for this attempt is remade. For example, that
-            // attempt crashed after recording a principal that the now-stopped
-            // agent can no longer give.
-            let existing = if zip_path.exists() {
-                match verify_recovery_zip(&zip_path, Some(&context)) {
-                    Ok(verified) => Some(verified),
-                    Err(_) => {
-                        std::fs::remove_file(&zip_path)
-                            .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-            let verified = match existing {
-                Some(verified) => verified,
-                None => create_recovery_zip(&validated_plan.state_root, &zip_path, &context)
-                    .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?,
-            };
+            let verified = create_recovery_zip(&validated_plan.state_root, &zip_path, &context)
+                .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))?;
             if verified.manifest.entries != stable {
                 return Err(RunnerError::RuntimeLaunch(
                     "retirement ZIP did not match the stable stopped source manifest".to_string(),
@@ -3668,6 +3698,7 @@ impl RuntimeLauncher for KataLauncher {
         }
         let receipt = progress.receipt.clone().unwrap_or(candidate_receipt);
         if progress.phase < KataRetirementPhase::RemoteVerified {
+            self.verify_snapshot_still_exact(&plan, &progress, &remote.manifest.entries)?;
             progress.phase = KataRetirementPhase::RemoteVerified;
             progress.receipt = Some(receipt.clone());
             self.write_retirement_progress(&plan, &progress)?;
@@ -4095,27 +4126,67 @@ fn first_manifest_change(
         })
 }
 
-/// The identity file's own metadata, reached only through real
-/// directories. A guest-made link at `agent` or `agent/identity` is refused,
-/// never resolved on the host, where an absolute target names a host path.
+/// The identity file's own metadata. On the way to `agent/identity`, a link
+/// is followed only when it is relative and stays inside the tree, as an
+/// older archive's `agent -> real-agent` does; the guest sees the same
+/// directory. An absolute link names a host path on the host, so it is
+/// refused, as is a climb above the root or a loop. The answer depends on
+/// the tree alone, so it is the same at archive time and at restore.
 fn staged_agent_identity_metadata(state_root: &Path) -> Result<std::fs::Metadata, RunnerError> {
     let missing = || {
         RunnerError::RuntimeLaunch(
             "cold relocation state is missing agent/identity/identity.json".to_string(),
         )
     };
-    let mut path = state_root.to_path_buf();
-    for directory in ["agent", "identity"] {
-        path.push(directory);
-        if !path.symlink_metadata().map_err(|_| missing())?.is_dir() {
-            return Err(RunnerError::RuntimeLaunch(format!(
-                "agent/identity/identity.json must be reached through real directories, not through {}",
-                path.strip_prefix(state_root).unwrap_or(&path).display()
-            )));
+    let outside = |link: &Path| {
+        RunnerError::RuntimeLaunch(format!(
+            "agent/identity/identity.json must resolve inside the durable state tree; {} does not",
+            link.display()
+        ))
+    };
+    // `directory` holds only real directories, so the kernel follows no link
+    // under `state_root`; `pending` is the rest of the path, next on top.
+    let mut directory = PathBuf::new();
+    let mut pending = vec![OsString::from("identity"), OsString::from("agent")];
+    let mut links = 0;
+    while let Some(name) = pending.pop() {
+        if name == ".." {
+            if !directory.pop() {
+                return Err(outside(&directory));
+            }
+            continue;
+        }
+        if name == "." {
+            continue;
+        }
+        let candidate = directory.join(&name);
+        let metadata = state_root
+            .join(&candidate)
+            .symlink_metadata()
+            .map_err(|_| missing())?;
+        if metadata.is_dir() {
+            directory = candidate;
+        } else if metadata.file_type().is_symlink() {
+            let target = std::fs::read_link(state_root.join(&candidate)).map_err(|_| missing())?;
+            links += 1;
+            if target.is_absolute() || links > 40 {
+                return Err(outside(&candidate));
+            }
+            pending.extend(
+                target
+                    .components()
+                    .rev()
+                    .map(|c| c.as_os_str().to_os_string()),
+            );
+        } else {
+            return Err(missing());
         }
     }
-    path.push("identity.json");
-    path.symlink_metadata().map_err(|_| missing())
+    state_root
+        .join(directory)
+        .join("identity.json")
+        .symlink_metadata()
+        .map_err(|_| missing())
 }
 
 /// Stable manifest used on both the stopped source and the staged target. It
@@ -5219,6 +5290,23 @@ fn active_kata_container_count(config: &KataConfig) -> Option<u32> {
             .count() as u32
             + trial_archive::reclaim_reservation_count(config)?,
     )
+}
+
+/// Free bytes on the retirement staging filesystem.
+fn staging_available_space(staging_root: &Path) -> Result<u64, RunnerError> {
+    #[cfg(test)]
+    if let Some(bytes) = STAGING_AVAILABLE_SPACE.with(std::cell::Cell::get) {
+        return Ok(bytes);
+    }
+    fs4::available_space(staging_root)
+        .map_err(|error| RunnerError::RuntimeLaunch(error.to_string()))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Lets a test pin the free space the staging check sees.
+    static STAGING_AVAILABLE_SPACE: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// Whether containerd's restart monitor leaves this stopped container
