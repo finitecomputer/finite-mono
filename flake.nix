@@ -197,6 +197,12 @@
           disabledModules = [ ./infra/nixos/modules/dashboard.nix ];
           imports = [ (lat2-app-source + "/infra/nixos/modules/dashboard.nix") ];
         }
+        # The mover is not part of the application release: it comes from
+        # this host revision, checked against the pinned Core's schema.
+        (import ./infra/nixos/hosts/finite-lat-2/mover.nix {
+          mover = finitePackagesLinux.finite-mover;
+          coreMigrations = lat2-app-source + "/finitecomputer-v2/crates/finite-saas-core/migrations";
+        })
       ];
 
       lat2Unguarded = nixpkgs-lat3.lib.nixosSystem {

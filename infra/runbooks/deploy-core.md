@@ -42,6 +42,17 @@ retained source pin alone is not proof of unchanged binaries: compare every
 candidate application executable store path with the running one and review
 dry activation before an infrastructure-only switch.
 
+The mover (`finite-mover`, for the move to finite.chat) is not part of the
+application release. Lat2 builds it from the host revision, as the Runner
+hosts build `finite-mover-host` (`infra/nixos/hosts/finite-lat-2/mover.nix`),
+so a mover-only change is a host-only lat2 deploy that keeps every
+application executable. The mover still talks to the pinned Core: **a mover
+change that needs a newer Core (a column it reads, a Core subcommand, flag or
+output it uses, or Core behaviour) still needs `lat2-app-source` advanced to
+that Core**, before or with the mover. Building lat2 applies the mover's
+`core-role.sql` to the pinned Core's migrations and fails on a column Core
+lacks; nothing checks the subcommands or behaviour.
+
 ### PRECONDITIONS
 
 - The change (Core source and/or the dashboard digest bump) is merged to
