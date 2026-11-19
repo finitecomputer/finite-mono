@@ -84,8 +84,20 @@ in
         KillMode = lib.mkForce "control-group";
         SendSIGKILL = true;
         Delegate = false;
+        # A retirement uploads a whole home (up to about 120 GB) to
+        # rsync.net and reads it back, all in one run: about 4 hours at a
+        # clean day's ~20 MB/s. 12 hours still fits it at about 6 MB/s, and
+        # an upload cut short resumes from borg's last checkpoint.
+        # The cost, accepted: while one long retirement runs, this host's
+        # other Runner work waits for it. Staff retire big homes one at a
+        # time, at quiet hours.
+        RuntimeMaxSec = "12h";
+        # The stop stays SIGTERM, on which borg exits at once, keeping only
+        # its last checkpoint (every 5 minutes: kata.rs). SIGINT would make
+        # borg checkpoint first, but it then goes on uploading, and extract
+        # ignores SIGINT, so every stop while borg runs would last a long
+        # timeout and end in SIGKILL.
         TimeoutStopSec = "5s";
-        RuntimeMaxSec = "1h";
       };
     };
     systemd.services.finite-hosted-hermes = {
