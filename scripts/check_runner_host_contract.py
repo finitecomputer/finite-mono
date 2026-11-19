@@ -363,8 +363,7 @@ def check_hosted_ingress_host(host: str, origins: dict[str, str]) -> None:
         "KillMode": "control-group",
         "SendSIGKILL": True,
         "Delegate": False,
-        "KillSignal": "SIGINT",
-        "TimeoutStopSec": "60s",
+        "TimeoutStopSec": "5s",
         "RuntimeMaxSec": "12h",
     }
     for key, value in expected.items():

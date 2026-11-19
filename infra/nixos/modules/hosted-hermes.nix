@@ -92,15 +92,12 @@ in
         # other Runner work waits for it. Staff retire big homes one at a
         # time, at quiet hours.
         RuntimeMaxSec = "12h";
-        # Borg commits a checkpoint on SIGINT, never on SIGTERM, and starts
-        # its ssh ignoring SIGINT so the checkpoint can still reach the
-        # repository. The runner, nerdctl and ctr exit on SIGINT just as on
-        # SIGTERM. After its checkpoint borg goes on uploading, so a stop
-        # mid-upload runs to this timeout and ends in SIGKILL; 60 s lets the
-        # checkpoint commit even on a slow link. If it doesn't, the last
-        # periodic checkpoint (every 5 minutes) still stands.
-        KillSignal = "SIGINT";
-        TimeoutStopSec = "60s";
+        # The stop stays SIGTERM, on which borg exits at once, keeping only
+        # its last checkpoint (every 5 minutes: kata.rs). SIGINT would make
+        # borg checkpoint first, but it then goes on uploading, and extract
+        # ignores SIGINT, so every stop while borg runs would last a long
+        # timeout and end in SIGKILL.
+        TimeoutStopSec = "5s";
       };
     };
     systemd.services.finite-hosted-hermes = {

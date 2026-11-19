@@ -2295,10 +2295,9 @@ impl KataLauncher {
     /// The upload of a retirement ZIP. A home of up to about 120 GB can take
     /// hours, and the run can be stopped part way (a deploy, the unit's
     /// runtime cap, a lost lease). Borg commits a checkpoint every
-    /// `--checkpoint-interval` seconds (its default is 1800), and on SIGINT
-    /// (the runner unit's stop signal); a later `create` of the same ZIP
-    /// skips every chunk a checkpoint kept. So a stop loses at most about
-    /// five minutes of upload.
+    /// `--checkpoint-interval` seconds (its default is 1800), and a later
+    /// `create` of the same ZIP skips every chunk a checkpoint kept. So a
+    /// stop loses at most about five minutes of upload.
     fn borg_create_command(
         &self,
         root: &Path,
