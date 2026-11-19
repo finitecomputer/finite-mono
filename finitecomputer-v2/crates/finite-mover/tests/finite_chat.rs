@@ -6,14 +6,14 @@
 //! own `stream` of a small tree, or a zip built by hand where a host would
 //! never write one.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, BufRead, BufReader, Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use finite_mover::migrations::MigrationsClient;
+use finite_mover::migrations::{MigrationsClient, PART_TRIES};
 use finite_mover::sink::SinkError;
 use finite_mover::stage::{PART_BYTES_MIN, Phase, StageError, StageTarget, upload_stage};
 use finite_mover_host::command::{parse, run};
@@ -63,10 +63,26 @@ struct Chat {
     calls: Vec<String>,
     /// Every body byte that arrived, taken or not.
     received: Vec<u8>,
-    /// Cut the connection halfway through this part's body, once.
-    cut_part: Option<u32>,
+    /// How each part's next tries go wrong, in order, before one is taken.
+    faults: BTreeMap<u32, VecDeque<Fault>>,
+    /// Every try of a part as it arrived, taken or not: its number and its
+    /// Authorization header.
+    tries: Vec<(u32, String)>,
     /// After taking part n, the command moves on to this stage.
     replace_after: Option<(u32, String)>,
+}
+
+/// One try of a part gone wrong.
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    /// The connection drops halfway through its body: nothing is kept.
+    Cut,
+    /// Its body is read whole, then refused with this status, as R2's own
+    /// error is (500).
+    Status(u16),
+    /// Its signature is checked as if it arrived 61 s after it was signed,
+    /// past the 60 s window: 401.
+    Late,
 }
 
 struct Fake {
@@ -111,6 +127,30 @@ impl Fake {
     fn calls(&self) -> Vec<String> {
         std::mem::take(&mut self.chat().calls)
     }
+
+    /// Part `n`'s next tries go wrong so.
+    fn fail(&self, n: u32, faults: &[Fault]) {
+        self.chat()
+            .faults
+            .insert(n, faults.iter().copied().collect());
+    }
+
+    /// The signatures part `n`'s tries arrived with since the last look,
+    /// in order: when each was made (its `created_at`), and the header.
+    fn signed(&self, n: u32) -> Vec<(u64, String)> {
+        let mut chat = self.chat();
+        let (these, rest) = std::mem::take(&mut chat.tries)
+            .into_iter()
+            .partition(|(part, _)| *part == n);
+        chat.tries = rest;
+        these
+            .into_iter()
+            .map(|(_, header)| {
+                let event = decode_http_auth_header(&header).unwrap();
+                (event.created_at.as_secs(), header)
+            })
+            .collect()
+    }
 }
 
 /// One HTTP/1.1 request on its own connection.
@@ -139,19 +179,21 @@ fn serve(stream: TcpStream, chat: &Mutex<Chat>, origin: &str, mover: &NostrPubli
     let length: usize = headers
         .get("content-length")
         .map_or(0, |value| value.parse().unwrap());
-    let cut = {
+    let fault = {
         let mut chat = chat.lock().unwrap();
         let part = target
             .split('?')
             .next()
             .and_then(|path| path.rsplit_once("/parts/"))
-            .and_then(|(_, n)| n.parse::<u32>().ok());
-        let cut = method == "PUT" && part.is_some() && chat.cut_part == part;
-        if cut {
-            chat.cut_part = None;
-        }
-        cut
+            .and_then(|(_, n)| n.parse::<u32>().ok())
+            .filter(|_| method == "PUT");
+        part.and_then(|n| {
+            let header = headers.get("authorization").cloned().unwrap_or_default();
+            chat.tries.push((n, header));
+            chat.faults.get_mut(&n)?.pop_front()
+        })
     };
+    let cut = matches!(fault, Some(Fault::Cut));
     let mut body = vec![0; if cut { length / 2 } else { length }];
     reader.read_exact(&mut body).unwrap();
     chat.lock().unwrap().received.extend_from_slice(&body);
@@ -168,6 +210,7 @@ fn serve(stream: TcpStream, chat: &Mutex<Chat>, origin: &str, mover: &NostrPubli
         &body,
         origin,
         mover,
+        fault,
     );
     let answer = answer.to_string();
     let mut stream = stream;
@@ -178,6 +221,7 @@ fn serve(stream: TcpStream, chat: &Mutex<Chat>, origin: &str, mover: &NostrPubli
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn route(
     chat: &mut Chat,
     method: &str,
@@ -186,11 +230,18 @@ fn route(
     body: &[u8],
     origin: &str,
     mover: &NostrPublicKey,
+    fault: Option<Fault>,
 ) -> (u16, Value) {
+    let late = if matches!(fault, Some(Fault::Late)) {
+        61
+    } else {
+        0
+    };
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
-        .as_secs();
+        .as_secs()
+        + late;
     let mut expected = HttpAuthValidation::new(method, format!("{origin}{target}"), now, 60)
         .with_expected_signer(*mover);
     if !body.is_empty() {
@@ -229,6 +280,10 @@ fn route(
         }
         ("PUT", action) if action.starts_with("parts/") => {
             let n: u32 = action["parts/".len()..].parse().unwrap();
+            if let Some(Fault::Status(status)) = fault {
+                chat.calls.push(format!("PUT {n}: {status}"));
+                return (status, json!({"error": "the bucket failed"}));
+            }
             chat.calls.push(format!("PUT {n}"));
             if !(1..=10_000).contains(&n) || body.len() > 64 * MIB {
                 return (400, json!({}));
@@ -450,10 +505,142 @@ fn a_cut_stream_resumes_without_resending_its_parts() {
 }
 
 #[test]
-fn a_cut_connection_loses_only_the_part_it_carried() {
+fn a_cut_connection_sends_its_part_again_in_the_same_run() {
     let fake = Fake::new();
     let bytes = host_stage();
-    fake.chat().cut_part = Some(2);
+    fake.fail(2, &[Fault::Cut]);
+    upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        ["GET parts", "PUT 1", "PUT 2", "PUT 3", "POST complete"]
+    );
+    assert_eq!(fake.signed(2).len(), 2, "part 2 went twice");
+    assert_eq!(fake.chat().completed[&stage_id(1)].0, bytes);
+}
+
+/// R2's own error on one part, which finite.chat answers 500: the part
+/// goes again within the run, and the stage completes.
+#[test]
+fn a_part_finite_chat_fails_once_goes_again_in_the_same_run() {
+    let fake = Fake::new();
+    let bytes = host_stage();
+    fake.fail(2, &[Fault::Status(500)]);
+    let (_, completed) = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        [
+            "GET parts",
+            "PUT 1",
+            "PUT 2: 500",
+            "PUT 2",
+            "PUT 3",
+            "POST complete"
+        ]
+    );
+    assert_eq!(completed.zip_bytes, bytes.len() as u64);
+    assert_eq!(fake.chat().completed[&stage_id(1)].0, bytes);
+}
+
+/// A part whose signature was more than 60 s old when it arrived (401):
+/// its next try carries a signature made after the first, and is taken.
+#[test]
+fn a_part_signed_too_long_ago_is_signed_afresh_and_taken() {
+    let fake = Fake::new();
+    let bytes = host_stage();
+    fake.fail(2, &[Fault::Late]);
+    upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        ["GET parts", "PUT 1", "PUT 2", "PUT 3", "POST complete"]
+    );
+    let signed = fake.signed(2);
+    assert_eq!(signed.len(), 2, "part 2 went twice");
+    assert!(
+        signed[1].0 > signed[0].0,
+        "the second try was signed after the first"
+    );
+    assert_ne!(signed[0].1, signed[1].1);
+    assert_eq!(fake.chat().completed[&stage_id(1)].0, bytes);
+}
+
+/// A part finite.chat keeps failing ends the run after `PART_TRIES`
+/// tries, each signed afresh, as its first failure did before; the next
+/// run resumes without the parts taken.
+#[test]
+fn a_part_that_keeps_failing_ends_the_run_and_the_next_resumes() {
+    let fake = Fake::new();
+    let bytes = host_stage();
+    fake.fail(2, &[Fault::Status(500); PART_TRIES]);
+    let error = upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            StageError::Sink(SinkError::Refused {
+                operation: "put part",
+                status: 500
+            })
+        ),
+        "{error}"
+    );
+    let mut calls = vec!["GET parts".to_string(), "PUT 1".into()];
+    calls.extend(std::iter::repeat_n("PUT 2: 500".to_string(), PART_TRIES));
+    assert_eq!(fake.calls(), calls);
+    let signed = fake.signed(2);
+    assert_eq!(signed.len(), PART_TRIES);
+    assert!(
+        signed.windows(2).all(|pair| pair[1].0 > pair[0].0),
+        "each try was signed after the one before"
+    );
+    assert!(fake.chat().completed.is_empty(), "nothing is staged yet");
+
+    upload_stage(
+        &fake.client(),
+        &target(1),
+        &bytes[..],
+        PART_BYTES_MIN,
+        &scratch(),
+    )
+    .unwrap();
+    assert_eq!(
+        fake.calls(),
+        ["GET parts", "PUT 2", "PUT 3", "POST complete"]
+    );
+    assert_eq!(fake.chat().completed[&stage_id(1)].0, bytes);
+}
+
+#[test]
+fn a_connection_cut_at_every_try_loses_only_the_part_it_carried() {
+    let fake = Fake::new();
+    let bytes = host_stage();
+    fake.fail(2, &[Fault::Cut; PART_TRIES]);
     let error = upload_stage(
         &fake.client(),
         &target(1),
@@ -471,6 +658,7 @@ fn a_cut_connection_loses_only_the_part_it_carried() {
         ["GET parts", "PUT 1"],
         "part 2 was never taken"
     );
+    assert_eq!(fake.signed(2).len(), PART_TRIES);
     upload_stage(
         &fake.client(),
         &target(1),
@@ -549,6 +737,7 @@ fn a_stale_attempt_sends_nothing_and_a_replaced_command_stops_the_run() {
         "{error}"
     );
     assert_eq!(fake.calls(), ["GET parts", "PUT 1"]);
+    assert_eq!(fake.signed(2).len(), 1, "a 403 is not tried again");
     assert!(fake.chat().completed.is_empty());
 
     // A move that is not staging takes nothing either.
