@@ -2,6 +2,11 @@
 # VM that carries finite-mover-host.nix. The mover is the real binary; Core's
 # CLI is a stand-in that says who ran it, with what. Postgres holds Core's
 # real schema and one live agent, whose tree is on the Runner.
+#
+# finite.chat is a fake on the mover VM's loopback, and neither VM can
+# reach past QEMU (restrictNetwork), sandboxed or not: a test never touches
+# production. The module has no default origin, so a config that forgets
+# to name the fake fails to evaluate.
 {
   nixpkgs,
   finitePackages,
@@ -54,10 +59,49 @@ let
   testPackages = finitePackages // {
     finite-saas-core = stubCore;
   };
+
+  # finite.chat's mover routes, as far as the timers go: an empty mailbox,
+  # and a roster taken. Each request is logged as `METHOD PATH nostr` (or
+  # `unsigned`), and the last roster kept.
+  fakeOrigin = "http://127.0.0.1:8090";
+  fakeState = "/var/lib/fake-finite-chat";
+  fakeFiniteChat = pkgs.writeText "fake-finite-chat.py" ''
+    import json
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    ANSWERS = {
+        ("GET", "/api/migrations/mover/mailbox"): {"commands": []},
+        ("PUT", "/api/migrations/mover/roster"): {"bound": 0, "withdrawn": 0, "replay": False},
+    }
+
+
+    class Handler(BaseHTTPRequestHandler):
+        def answer(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            signed = (self.headers.get("Authorization") or "").startswith("Nostr ")
+            with open("${fakeState}/requests", "a") as log:
+                log.write(f"{self.command} {self.path} {'nostr' if signed else 'unsigned'}\n")
+            if (self.command, self.path) == ("PUT", "/api/migrations/mover/roster"):
+                with open("${fakeState}/roster.json", "wb") as roster:
+                    roster.write(body)
+            answer = ANSWERS.get((self.command, self.path))
+            data = json.dumps(answer).encode() if answer is not None else b""
+            self.send_response(200 if answer is not None else 404)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        do_GET = do_PUT = do_POST = answer
+
+
+    HTTPServer(("127.0.0.1", 8090), Handler).serve_forever()
+  '';
 in
 pkgs.testers.runNixOSTest {
   name = "finite-mover";
   node.specialArgs.finitePackages = testPackages;
+  defaults.virtualisation.restrictNetwork = true;
 
   nodes.app = {
     imports = [ ../modules/finite-mover.nix ];
@@ -84,8 +128,17 @@ pkgs.testers.runNixOSTest {
       mode = "0600";
     };
 
+    systemd.services.fake-finite-chat = {
+      wantedBy = [ "multi-user.target" ];
+      serviceConfig = {
+        ExecStart = "${pkgs.python3}/bin/python3 ${fakeFiniteChat}";
+        StateDirectory = "fake-finite-chat";
+      };
+    };
+
     finite.mover = {
       enable = true;
+      finiteChat = fakeOrigin;
       core = {
         adminEmail = "mover@example.test";
         adminWorkosUserId = "user_mover";
@@ -182,6 +235,11 @@ pkgs.testers.runNixOSTest {
         assert json.loads(app.succeed(f"cat {config}"))["overrides"] == f"{state}/overrides.json"
         app.fail(f"runuser -u nobody -- cat {config}")
 
+    with subtest("the mover's finite.chat is the fake on loopback, never the real one"):
+        assert json.loads(app.succeed(f"cat {config}"))["finite_chat"] == "${fakeOrigin}"
+        status, _ = app.execute("grep -RqF finite.chat /etc/finite-mover")
+        assert status == 1, status
+
     with subtest("the timers are off by default"):
         app.fail("systemctl cat finite-mover-mailbox.timer")
         assert "finite-mover" not in app.succeed("systemctl list-timers --all --no-legend")
@@ -264,11 +322,38 @@ pkgs.testers.runNixOSTest {
         assert app.succeed(f"cat {state}/ssh/id_ed25519.pub").strip() == public
         assert mover_key() == key
 
-    with subtest("timers.enable turns the three timers on"):
-        app.succeed("/run/current-system/specialisation/timers/bin/switch-to-configuration test")
+    with subtest("timers.enable turns the three timers on, and the mailbox is read, signed"):
+        switch = "/run/current-system/specialisation/timers/bin/switch-to-configuration"
+        # It stops and restarts nothing. A dry run doesn't name the new
+        # timers: they start with timers.target, which is already active.
+        dry = app.succeed(f"{switch} dry-activate 2>&1")
+        assert not [line for line in dry.splitlines() if line.startswith(("would stop", "would restart"))], dry
+        app.succeed(f"{switch} test")
         timers = app.succeed("systemctl list-timers --all --no-legend")
         for name in ["finite-mover-mailbox", "finite-mover-roster", "finite-mover-sizes"]:
             assert f"{name}.timer" in timers, timers
-        app.wait_until_succeeds("journalctl -u finite-mover-mailbox -o cat | grep -q finite-mover", timeout=60)
+        app.wait_until_succeeds(
+            "grep -qx 'GET /api/migrations/mover/mailbox nostr' ${fakeState}/requests", timeout=60
+        )
+        # A run the timer started succeeded; the next is due in 10 s.
+        app.wait_until_succeeds(
+            "journalctl -u finite-mover-mailbox -o cat | grep -q 'Finished finite-mover mailbox'", timeout=60
+        )
+        app.succeed("systemctl start finite-mover-mailbox.service")
+
+    with subtest("the roster pushes every live agent from Core's database"):
+        app.succeed("systemctl start finite-mover-roster.service")
+        taken = set(app.succeed("journalctl -u finite-mover-roster -o cat | grep -F bound").splitlines())
+        assert taken == {'{"bound":0,"withdrawn":0,"replay":false}'}, taken
+        app.succeed("grep -qx 'PUT /api/migrations/mover/roster nostr' ${fakeState}/requests")
+        roster = json.loads(app.succeed("cat ${fakeState}/roster.json"))
+        agents = [agent["old"] for person in roster["people"] for agent in person["agents"]]
+        assert agents == ["proj_live"], roster
+        # Nothing else was asked of finite.chat, and nothing unsigned.
+        asked = set(app.succeed("cat ${fakeState}/requests").splitlines())
+        assert asked == {
+            "GET /api/migrations/mover/mailbox nostr",
+            "PUT /api/migrations/mover/roster nostr",
+        }, asked
   '';
 }

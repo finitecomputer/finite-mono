@@ -124,10 +124,29 @@ in
   # release that carries finite-mover and Core's runtime-mark-moved-exact
   # (lat2-app-source 500109e4, FIN-492). Each Runner host is reached over
   # wg-finite, its host key read off the box on 2026-11-11 and matched over
-  # the overlay. Its timers wait for finite.chat to know its npub
-  # (timers.enable).
+  # the overlay.
+  #
+  # Its timers were turned on on 2026-11-18, once finite.chat knew its npub
+  # and the moves done by hand were over: mailbox every 10 s, roster every
+  # 10 minutes, sizes nightly, over every live old agent in Core. That is
+  # safe while finite.chat sets no phase 2 cutoff (migrations.cutoff_ms):
+  # it offers the move only to a person who signs in there, nothing moves
+  # until that person presses Upgrade, and no old agent is retired before
+  # staff say so. A roster pushed by hand replaces the timer's, so none is
+  # pushed while they're on.
+  #
+  # To stop them, as root:
+  #   systemctl stop finite-mover-roster.timer finite-mover-mailbox.timer
+  # A mailbox run already going still does every command it finds (up to
+  # 256, reading the mailbox again after each). To halt it too:
+  #   systemctl stop finite-mover-mailbox.service
+  # The move it was in then holds for staff, its old agent perhaps stopped:
+  # check it before the timers go back on. A boot starts the timers again;
+  # to keep them off, set timers.enable to false and deploy.
   finite.mover = {
     enable = true;
+    finiteChat = "https://finite.chat";
+    timers.enable = true;
     core = {
       adminEmail = "austin@finite.vip";
       adminWorkosUserId = "user_01KSNFQE5SSD07EMMKN9GV1H2S";
