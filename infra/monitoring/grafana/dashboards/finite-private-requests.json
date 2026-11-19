@@ -894,9 +894,9 @@
     },
     {
       "id": 14,
-      "title": "First meaningful output delay \u00b7 model",
+      "title": "Time to first token (TTFT) \u00b7 model",
       "type": "timeseries",
-      "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
+      "description": "How long until the model starts responding at all: thinking, a tool call, or reply text. This is the delay a user feels first. Streams only, timed from limiter acceptance; headers and keepalives do not count. Smoothed over 30 minutes because single slow requests dominate shorter windows at current traffic. Log scale so the median and p95 both stay readable.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -906,7 +906,13 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "noValue": "Unavailable"
+          "noValue": "Unavailable",
+          "custom": {
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          }
         },
         "overrides": []
       },
@@ -917,14 +923,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[30m])))",
           "legendFormat": "{{model}} p50",
           "instant": false,
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_output_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[30m])))",
           "legendFormat": "{{model}} p95",
           "instant": false,
           "range": true
@@ -942,9 +948,9 @@
     },
     {
       "id": 15,
-      "title": "First answer-text delay \u00b7 model",
+      "title": "Time to reply text, including thinking \u00b7 model",
       "type": "timeseries",
-      "description": "Streams only, measured from limiter acceptance. Headers, roles, metadata and keepalives do not count. Reasoning and tool payload count as first output; only answer text counts as first answer.",
+      "description": "How long until the model starts writing its reply. This includes all thinking time first, so it rises when requests need more thought. Only turns that write reply text are counted; tool-call-only turns are left out. Compare with TTFT before calling it a slowdown. Streams only, timed from limiter acceptance; headers and keepalives do not count. Smoothed over 30 minutes because single slow requests dominate shorter windows at current traffic. Log scale so the median and p95 both stay readable.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -954,7 +960,13 @@
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "noValue": "Unavailable"
+          "noValue": "Unavailable",
+          "custom": {
+            "scaleDistribution": {
+              "type": "log",
+              "log": 10
+            }
+          }
         },
         "overrides": []
       },
@@ -965,14 +977,14 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "expr": "histogram_quantile(0.5, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[30m])))",
           "legendFormat": "{{model}} p50",
           "instant": false,
           "range": true
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[5m])))",
+          "expr": "histogram_quantile(0.95, sum by(le,model)(rate(finite_private_limiter_route_first_answer_seconds_bucket{model=~\"$model\",endpoint=~\"$endpoint\"}[30m])))",
           "legendFormat": "{{model}} p95",
           "instant": false,
           "range": true
@@ -1676,8 +1688,8 @@
               "requestId": "Request ID",
               "promptTokens": "Input tokens",
               "completionTokens": "Output tokens",
-              "firstOutputMs": "First output (ms)",
-              "firstAnswerMs": "First answer (ms)",
+              "firstOutputMs": "TTFT (ms)",
+              "firstAnswerMs": "Reply text incl. thinking (ms)",
               "durationMs": "Duration (ms)",
               "measurementQuality": "Quality",
               "terminationReason": "Termination",
