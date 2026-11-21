@@ -35,6 +35,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 
+use finite_mover_host::simplex::OWNER_ENTRY as SIMPLEX_ENTRY;
 use finite_mover_host::stage::SUMMARY_ENTRY;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -139,6 +140,10 @@ pub struct Manifest {
     /// Files left behind past the list, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub left_more: Option<u64>,
+    /// The zip carries its owner's SimpleX chat (`.finite-stage/simplex/`):
+    /// finite.chat makes their comped seat always-on, which SimpleX needs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub simplex: bool,
 }
 
 /// One path that stayed behind: a file, or a directory that stayed whole.
@@ -245,6 +250,7 @@ pub fn upload_stage_with_progress(
         files: summary.files,
         left: summary.left,
         left_more: (summary.left_more > 0).then_some(summary.left_more),
+        simplex: summary.simplex,
     };
     fit_manifest(&mut manifest, summary.left_files);
     let completed = sink.complete(&stage, &manifest)?;
@@ -419,6 +425,7 @@ struct CheckedSummary {
     left: Vec<LeftBehind>,
     left_files: Vec<u64>,
     left_more: u64,
+    simplex: bool,
 }
 
 /// The end: the central directory lists exactly what streamed past (every
@@ -473,6 +480,7 @@ fn check(sent: &Sent) -> Result<CheckedSummary, StageError> {
         left,
         left_files,
         left_more,
+        simplex: entries.iter().any(|entry| entry.name == SIMPLEX_ENTRY),
     })
 }
 
