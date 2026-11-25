@@ -8,7 +8,7 @@
 //! ```json
 //! {"name": "Notes", "kind": "personal", "owner_npub": "npub1…", "owner": "person",
 //!  "versions": {"sequence": 41, "folders": [{"path": "Field Notes", "read": true}],
-//!               "pages": [{"path": "Field Notes/a.md", "revision": 3, "sha256": "…"}]}}
+//!               "pages": [{"path": "Field Notes/a.md", "object": "obj_…", "revision": 3, "sha256": "…"}]}}
 //! ```
 //!
 //! `name`, `kind` and `owner_npub` are the brain's own manifest's
@@ -38,8 +38,10 @@
 //!   tree still holds files from before it lost access: nothing with no
 //!   version is ever newer than anything;
 //! - `pages`: each page the tree held, by its path in the tree (its
-//!   folder's path, `/`, its own), with the brain's `revision` of it and
-//!   the SHA-256 of that revision's text, as hex.
+//!   folder's path, `/`, its own), the brain's id of it (`object`: a page
+//!   moved to another path keeps it, another page moved onto this path has
+//!   another), the brain's `revision` of it and the SHA-256 of that
+//!   revision's text, as hex.
 //!
 //! A staged page whose bytes hash to another `sha256` was edited in the
 //! tree after `revision` and never synced. `versions` is null when the
@@ -122,6 +124,7 @@ pub struct Folder {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Page {
     pub path: String,
+    pub object: String,
     pub revision: u64,
     pub sha256: String,
 }
@@ -217,9 +220,7 @@ fn manifest(bytes: &[u8]) -> Option<Manifest> {
         brain
             .get(key)
             .and_then(Value::as_str)
-            .filter(|text| {
-                !text.is_empty() && text.len() <= FIELD_MAX && !text.chars().any(char::is_control)
-            })
+            .filter(|text| short_text(text))
             .map(str::to_owned)
     };
     Some(Manifest {
@@ -255,6 +256,7 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
         folder_id: String,
         source_brain_id: Option<String>,
         path: String,
+        object_id: String,
         revision: u64,
         content_hash: String,
     }
@@ -302,11 +304,16 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
             continue;
         }
         let path = format!("{root}/{}", object.path);
-        if !clean_path(&object.path) || path.len() > PATH_MAX || !sha256_hex(&object.content_hash) {
+        if !clean_path(&object.path)
+            || path.len() > PATH_MAX
+            || !sha256_hex(&object.content_hash)
+            || !short_text(&object.object_id)
+        {
             return None;
         }
         pages.push(Page {
             path,
+            object: object.object_id,
             revision: object.revision,
             sha256: object.content_hash,
         });
@@ -333,6 +340,11 @@ fn clean_path(path: &str) -> bool {
         && path
             .split('/')
             .all(|name| !name.is_empty() && name != "." && name != "..")
+}
+
+/// Text of 1 to `FIELD_MAX` bytes, with no control character.
+fn short_text(text: &str) -> bool {
+    !text.is_empty() && text.len() <= FIELD_MAX && !text.chars().any(char::is_control)
 }
 
 /// 64 lowercase hex digits.
@@ -521,11 +533,13 @@ mod tests {
             vec![
                 Page {
                     path: "Field Notes/a.md".into(),
+                    object: "obj_1".into(),
                     revision: 3,
                     sha256: HASH_A.into()
                 },
                 Page {
                     path: "Programs Grants/raw/b.md".into(),
+                    object: "obj_2".into(),
                     revision: 7,
                     sha256: HASH_B.into()
                 },
@@ -543,7 +557,7 @@ mod tests {
             versions(state.to_string().as_bytes())
         };
         type Change<'a> = &'a dyn Fn(&mut Value);
-        let cases: [(&str, Change); 12] = [
+        let cases: [(&str, Change); 14] = [
             ("another version", &|s| {
                 s["version"] = json!("finite-brain-working-tree-state-v2")
             }),
@@ -565,6 +579,12 @@ mod tests {
             }),
             ("an absolute page", &|s| {
                 s["objects"][0]["path"] = json!("/etc/x.md")
+            }),
+            ("no object id", &|s| {
+                s["objects"][0].as_object_mut().unwrap().remove("objectId");
+            }),
+            ("an empty object id", &|s| {
+                s["objects"][0]["objectId"] = json!("")
             }),
             ("a control character", &|s| {
                 s["objects"][0]["path"] = json!("a\nb.md")
@@ -598,7 +618,7 @@ mod tests {
         let with_pages = |count: usize| {
             let mut state = state();
             state["objects"] = (0..count)
-                .map(|n| json!({"folderId": "notes", "path": format!("{n}.md"), "revision": 1, "contentHash": HASH_A}))
+                .map(|n| json!({"folderId": "notes", "path": format!("{n}.md"), "objectId": format!("obj_{n}"), "revision": 1, "contentHash": HASH_A}))
                 .collect();
             versions(state.to_string().as_bytes())
         };
@@ -617,9 +637,9 @@ mod tests {
             {"folderId": "notes", "sourceBrainId": "brain_team", "path": "Team Notes", "canRead": true, "metadataOnly": false},
         ]);
         state["objects"] = json!([
-            {"folderId": "notes", "path": "a.md", "revision": 3, "contentHash": HASH_A},
-            {"folderId": "talks", "path": "b.md", "revision": 4, "contentHash": HASH_B},
-            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "a.md", "revision": 9, "contentHash": HASH_B},
+            {"folderId": "notes", "path": "a.md", "objectId": "obj_1", "revision": 3, "contentHash": HASH_A},
+            {"folderId": "talks", "path": "b.md", "objectId": "obj_2", "revision": 4, "contentHash": HASH_B},
+            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "a.md", "objectId": "obj_1", "revision": 9, "contentHash": HASH_B},
         ]);
         let read = versions(state.to_string().as_bytes()).unwrap();
         let paths: Vec<(&str, u64)> = read
@@ -650,6 +670,7 @@ mod tests {
             folders: vec![],
             pages: (0..PAGES_MAX)
                 .map(|n| Page {
+                    object: format!("obj_{n:06}"),
                     path: format!(
                         "Programs_Grants/raw/2026-11-{n:06}-board-meeting-interview-transcript.md"
                     ),

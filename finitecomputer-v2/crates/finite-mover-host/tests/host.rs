@@ -466,7 +466,7 @@ fn a_name_file_carries_its_trees_versions() {
         serde_json::json!({
             "sequence": 41,
             "folders": [{"path": "Field Notes", "read": true}, {"path": "Leadership", "read": false}],
-            "pages": [{"path": "Field Notes/a.md", "revision": 3, "sha256": sha256(&files[page])}],
+            "pages": [{"path": "Field Notes/a.md", "object": "obj_1", "revision": 3, "sha256": sha256(&files[page])}],
         })
     );
     assert_eq!(named(&files, "brain-org")["owner"], "other");
