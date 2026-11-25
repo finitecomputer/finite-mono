@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use rustix::fs::{Dir, FileType, Stat};
 use rustix::io::Errno;
 
-use crate::brains::{self, BRAIN_ROOT, Manifest};
+use crate::brains::{self, BRAIN_ROOT, Facts};
 use crate::classify::{self, BUILD_DIRS, CONFIG_COPY_PATH, Class, EntryKind, Verdict, Why};
 use crate::config_copy::{CONFIG_MAX_BYTES, public_config};
 use crate::error::HostError;
@@ -35,8 +35,8 @@ pub const DEPTH_MAX: usize = 128;
 const HERMES_CONFIG: [&str; 3] = ["agent", "hermes-home", "config.yaml"];
 
 /// Each brain working tree in `workspace/finitebrain/`, by its folder's
-/// name, with its manifest when it was read ([`crate::brains`]).
-pub type Brains = BTreeMap<String, Option<Manifest>>;
+/// name, with what was read of its control folder ([`crate::brains`]).
+pub type Brains = BTreeMap<String, Facts>;
 
 /// How the walk treats a tree that changes under it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,7 +333,8 @@ impl Walk<'_> {
     }
 
     /// Entering `workspace/finitebrain/<folder>/`: a brain working tree if
-    /// it holds `.finitebrain/`, whose manifest is read when staging.
+    /// it holds `.finitebrain/`, whose manifest and state are read when
+    /// staging.
     fn find_brain(&mut self, directory: &OwnedFd, path: &[Vec<u8>]) {
         let [workspace, root, folder] = path else {
             return;
@@ -344,11 +345,11 @@ impl Walk<'_> {
         let Some(folder) = std::str::from_utf8(folder).ok().filter(|_| is_brain) else {
             return;
         };
-        let manifest = match self.mode {
-            Mode::Measure => None,
-            Mode::Stage => brains::read_manifest(self.tree, directory),
+        let facts = match self.mode {
+            Mode::Measure => Facts::default(),
+            Mode::Stage => brains::read(self.tree, directory),
         };
-        self.brains.insert(folder.to_owned(), manifest);
+        self.brains.insert(folder.to_owned(), facts);
     }
 
     fn vanished(&self, path: &[Vec<u8>]) -> Result<(), HostError> {

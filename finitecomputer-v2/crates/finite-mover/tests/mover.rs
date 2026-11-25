@@ -750,7 +750,7 @@ fn a_yes_runs_from_the_mailbox_to_moved() {
         let named = &zip_entries(zip)[&format!("workspace/finitebrain/{BRAIN}.json")];
         assert_eq!(
             serde_json::from_slice::<Value>(named).unwrap(),
-            json!({ "name": BRAIN_NAME, "kind": "personal", "owner_npub": npub(AGENT_KEY), "owner": "agent" })
+            json!({ "name": BRAIN_NAME, "kind": "personal", "owner_npub": npub(AGENT_KEY), "owner": "agent", "versions": null })
         );
         let seqs: Vec<u64> = platform
             .reports

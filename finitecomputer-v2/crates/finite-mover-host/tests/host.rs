@@ -377,9 +377,10 @@ fn each_name_file_says_whose_its_brain_is() {
                 "kind": kind,
                 "owner_npub": key.map(fixture::npub),
                 "owner": owner,
+                "versions": null,
             }),
             None => serde_json::json!({
-                "name": null, "kind": null, "owner_npub": null, "owner": "unknown",
+                "name": null, "kind": null, "owner_npub": null, "owner": "unknown", "versions": null,
             }),
         };
         assert_eq!(named(&files, folder), expected, "{folder}");
@@ -410,6 +411,113 @@ fn each_name_file_says_whose_its_brain_is() {
     ] {
         assert_eq!(named(&files, folder)["owner"], owner, "{folder}");
     }
+}
+
+/// Write `pages` into the brain in `workspace/finitebrain/<folder>/`, and
+/// its `working-tree-state.json` listing each under its top folder, with
+/// `Leadership` a folder the old agent could not read (FIN-773).
+fn brain_with_versions(fixture: &fixture::Fixture, folder: &str, pages: &[(&str, &str, &str)]) {
+    let brain = fixture.tree.join(format!("workspace/finitebrain/{folder}"));
+    let mut objects = Vec::new();
+    for (root, path, text) in pages {
+        let file = brain.join(root).join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, text).unwrap();
+        objects.push(serde_json::json!({
+            "folderId": root.to_lowercase().replace(' ', "-"), "path": path, "objectId": "obj_1",
+            "revision": 3, "keyVersion": 1, "contentType": "text/markdown", "contentHash": sha256(text.as_bytes()),
+        }));
+    }
+    let state = serde_json::json!({
+        "version": "finite-brain-working-tree-state-v1",
+        "folderRoots": [
+            {"folderId": "field-notes", "path": "Field Notes", "canRead": true, "metadataOnly": false},
+            {"folderId": "leadership", "path": "Leadership", "canRead": false, "metadataOnly": true},
+        ],
+        "objects": objects,
+        "sync": {"latestSequence": 41},
+    });
+    std::fs::write(
+        brain.join(".finitebrain/working-tree-state.json"),
+        state.to_string(),
+    )
+    .unwrap();
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+/// FIN-773: a brain's name file carries its working tree's own record of
+/// what it holds, by each page's path in the stage, and the stage still
+/// holds no control folder. The same tree staged again gives the same
+/// name file; a brain without the record has `versions` null.
+#[test]
+fn a_name_file_carries_its_trees_versions() {
+    let fixture = fixture::build();
+    brain_with_versions(&fixture, "brain-org", &[("Field Notes", "a.md", "# A\n")]);
+    let stage = stream(&fixture);
+    let files = entries(&stage);
+    let page = "workspace/finitebrain/brain-org/Field Notes/a.md";
+    assert_eq!(files[page], b"# A\n");
+    assert_eq!(
+        named(&files, "brain-org")["versions"],
+        serde_json::json!({
+            "sequence": 41,
+            "folders": [{"path": "Field Notes", "read": true}, {"path": "Leadership", "read": false}],
+            "pages": [{"path": "Field Notes/a.md", "revision": 3, "sha256": sha256(&files[page])}],
+        })
+    );
+    assert_eq!(named(&files, "brain-org")["owner"], "other");
+    assert!(files.keys().all(|name| !name.contains(".finitebrain")));
+    for (folder, _, _) in BRAINS
+        .iter()
+        .filter(|(folder, _, _)| *folder != "brain-org")
+    {
+        assert_eq!(named(&files, folder)["versions"], Value::Null, "{folder}");
+    }
+    let again = entries(&stream(&fixture));
+    assert_eq!(
+        again[&name_file("brain-org")],
+        files[&name_file("brain-org")]
+    );
+}
+
+/// A page whose path has a credential's shape costs the name file its
+/// `versions` alone, never its name or owner; a record that isn't JSON
+/// gives `versions` null and the stage still goes.
+#[test]
+fn a_bad_record_costs_only_the_versions() {
+    let fixture = fixture::build();
+    brain_with_versions(
+        &fixture,
+        "brain-org",
+        &[(
+            "Field Notes",
+            "ghp_0123456789abcdefghijABCDEFGHIJ.md",
+            "# Token-shaped name\n",
+        )],
+    );
+    std::fs::write(
+        fixture
+            .tree
+            .join("workspace/finitebrain/brain-agent/.finitebrain/working-tree-state.json"),
+        "not json",
+    )
+    .unwrap();
+    let files = entries(&stream(&fixture));
+    let org = named(&files, "brain-org");
+    assert_eq!(
+        (org["owner"].as_str(), org.get("versions")),
+        (Some("other"), Some(&Value::Null))
+    );
+    assert!(!contains(&files[&name_file("brain-org")], b"ghp_"));
+    let agent = named(&files, "brain-agent");
+    assert_eq!(
+        (agent["owner"].as_str(), agent.get("versions")),
+        (Some("agent"), Some(&Value::Null))
+    );
 }
 
 /// An older mover names its person's owned brains, with their names in
