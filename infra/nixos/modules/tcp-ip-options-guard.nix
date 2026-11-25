@@ -1,5 +1,5 @@
-# CVE-2026-98432: protect host listeners and routed Kata traffic while the
-# fleet moves to fixed host and guest kernels. No service restart is needed.
+# Shared 6.18 host kernel and CVE-2026-98432 guard for host listeners and
+# routed Kata traffic.
 { pkgs, ... }:
 let
   # First fixed release in the fleet's qualified 6.18 branch. Override only
@@ -18,6 +18,18 @@ let
 in
 {
   boot.kernelPackages = pkgs.linuxPackagesFor kernel;
+
+  # FIN-754: drop this backport when the shared kernel pin includes the fix.
+  boot.kernelPatches = [
+    {
+      name = "sctp-f2540da93a11";
+      patch = pkgs.fetchurl {
+        url = "https://github.com/torvalds/linux/commit/f2540da93a113d3f0a70fd0961e00eb849ce8342.patch";
+        hash = "sha256-6QUsVaBA7JP7gmtZrZVjF3JxuAYi3qZq1aXagziBbZw=";
+      };
+    }
+  ];
+
   boot.kernel.sysctl."net.mptcp.enabled" = 0;
 
   systemd.services.finite-cve-2026-98432 = {
