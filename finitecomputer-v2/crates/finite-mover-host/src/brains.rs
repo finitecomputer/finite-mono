@@ -32,8 +32,11 @@
 //! agent can tell which of two copies of a team's brain is newer:
 //!
 //! - `sequence`: the brain's latest change the tree had synced;
-//! - `folders`: each top folder, by its path in the tree, and whether the
-//!   old agent could `read` it (one it could not lists no pages);
+//! - `folders`: each folder root, by its path in the tree (a child
+//!   folder's is under its parent's, `Parent/Child`), and whether the old
+//!   agent could `read` it. One it could not lists no pages, even when the
+//!   tree still holds files from before it lost access: nothing with no
+//!   version is ever newer than anything;
 //! - `pages`: each page the tree held, by its path in the tree (its
 //!   folder's path, `/`, its own), with the brain's `revision` of it and
 //!   the SHA-256 of that revision's text, as hex.
@@ -44,6 +47,10 @@
 //! any part: whole or not at all, never a guess. It holds no key and no
 //! encrypted sync data, only paths, numbers and hashes of text the stage
 //! carries anyway.
+//!
+//! The name file is JSON with a line per value, so no unbroken run in it
+//! is longer than a path: the uploader's second check scans text in
+//! chunks and can't check one longer than `SCAN_CARRY_MAX`.
 
 use std::collections::BTreeMap;
 use std::ffi::CStr;
@@ -174,7 +181,7 @@ pub fn name_file(
         "owner": owner(manifest, keys),
         "versions": versions,
     });
-    serde_json::to_vec(&body).expect("a name file serializes")
+    serde_json::to_vec_pretty(&body).expect("a name file serializes")
 }
 
 /// What the brain working tree `brain`'s control folder says of it.
@@ -237,6 +244,7 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     #[serde(rename_all = "camelCase")]
     struct Root {
         folder_id: String,
+        source_brain_id: Option<String>,
         path: String,
         can_read: bool,
         metadata_only: bool,
@@ -245,6 +253,7 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     #[serde(rename_all = "camelCase")]
     struct Object {
         folder_id: String,
+        source_brain_id: Option<String>,
         path: String,
         revision: u64,
         content_hash: String,
@@ -262,15 +271,20 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     {
         return None;
     }
+    // finite-brain-core keys a root by its brain and its folder: a tree
+    // can mount two brains' folders of one id.
     let mut roots = BTreeMap::new();
     let mut folders = Vec::with_capacity(state.folder_roots.len());
     for root in state.folder_roots {
         let read = root.can_read && !root.metadata_only;
-        if !clean_path(&root.path) || root.path.contains('/') {
+        if !clean_path(&root.path) {
             return None;
         }
         if roots
-            .insert(root.folder_id, (root.path.clone(), read))
+            .insert(
+                (root.source_brain_id, root.folder_id),
+                (root.path.clone(), read),
+            )
             .is_some()
         {
             return None;
@@ -282,7 +296,7 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     }
     let mut pages = Vec::with_capacity(state.objects.len());
     for object in state.objects {
-        let (root, read) = roots.get(&object.folder_id)?;
+        let (root, read) = roots.get(&(object.source_brain_id, object.folder_id))?;
         // A folder the old agent could not read holds no text in the tree.
         if !read {
             continue;
@@ -555,8 +569,8 @@ mod tests {
             ("a control character", &|s| {
                 s["objects"][0]["path"] = json!("a\nb.md")
             }),
-            ("a nested folder root", &|s| {
-                s["folderRoots"][0]["path"] = json!("a/b")
+            ("a folder root climbing out", &|s| {
+                s["folderRoots"][0]["path"] = json!("a/../../b")
             }),
             ("one folder twice", &|s| {
                 s["folderRoots"][1]["folderId"] = json!("programs")
@@ -590,6 +604,66 @@ mod tests {
         };
         assert_eq!(with_pages(PAGES_MAX).unwrap().pages.len(), PAGES_MAX);
         assert_eq!(with_pages(PAGES_MAX + 1), None);
+    }
+
+    /// Valid: a child folder's root is under its parent's, and two brains'
+    /// folders of one id are two folders.
+    #[test]
+    fn versions_take_nested_roots_and_two_brains_folders() {
+        let mut state = state();
+        state["folderRoots"] = json!([
+            {"folderId": "notes", "path": "Field Notes", "canRead": true, "metadataOnly": false},
+            {"folderId": "talks", "path": "Field Notes/Interviews", "canRead": true, "metadataOnly": false},
+            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "Team Notes", "canRead": true, "metadataOnly": false},
+        ]);
+        state["objects"] = json!([
+            {"folderId": "notes", "path": "a.md", "revision": 3, "contentHash": HASH_A},
+            {"folderId": "talks", "path": "b.md", "revision": 4, "contentHash": HASH_B},
+            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "a.md", "revision": 9, "contentHash": HASH_B},
+        ]);
+        let read = versions(state.to_string().as_bytes()).unwrap();
+        let paths: Vec<(&str, u64)> = read
+            .pages
+            .iter()
+            .map(|page| (page.path.as_str(), page.revision))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("Field Notes/Interviews/b.md", 4),
+                ("Field Notes/a.md", 3),
+                ("Team Notes/a.md", 9)
+            ]
+        );
+        // A page of a brain the tree mounts no root of is in no folder.
+        state["objects"][2]["sourceBrainId"] = json!("brain_gone");
+        assert_eq!(versions(state.to_string().as_bytes()), None);
+    }
+
+    /// A name file of the most pages passes the uploader's second check:
+    /// no unbroken run in it is longer than a path. Without a line per
+    /// value, the same brain's would be one run over the scan's carry.
+    #[test]
+    fn a_name_file_of_the_most_pages_is_checkable() {
+        let versions = Versions {
+            sequence: 41,
+            folders: vec![],
+            pages: (0..PAGES_MAX)
+                .map(|n| Page {
+                    path: format!(
+                        "Programs_Grants/raw/2026-11-{n:06}-board-meeting-interview-transcript.md"
+                    ),
+                    revision: 7,
+                    sha256: HASH_A.into(),
+                })
+                .collect(),
+        };
+        let body = name_file(None, Some(&versions), &OwnerKeys::default());
+        let scan = |body: &[u8]| crate::shapes::scan(body).unwrap();
+        assert_eq!(scan(&body), crate::shapes::TextVerdict::Clean);
+        let compact = serde_json::to_vec(&serde_json::from_slice::<Value>(&body).unwrap()).unwrap();
+        assert!(compact.len() > 16 * 1024 * 1024, "{}", compact.len());
+        assert_eq!(scan(&compact), crate::shapes::TextVerdict::Uncheckable);
     }
 
     #[test]

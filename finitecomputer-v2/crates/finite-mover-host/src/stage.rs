@@ -144,7 +144,13 @@ impl<W: Write> Stage<W> {
         let body = [facts.versions.as_ref(), None]
             .into_iter()
             .map(|versions| brains::name_file(manifest, versions, keys))
-            .find(|body| !crate::shapes::holds_secret(body));
+            // The uploader's own check: a body it would refuse is never staged.
+            .find(|body| {
+                matches!(
+                    crate::shapes::scan(&body[..]),
+                    Ok(crate::shapes::TextVerdict::Clean)
+                )
+            });
         match body {
             Some(body) => self.staged(&path, Class::Work, Source::Bytes(body)),
             None => Ok(()),
