@@ -7,7 +7,8 @@
 //!
 //! ```json
 //! {"name": "Notes", "kind": "personal", "owner_npub": "npub1…", "owner": "person",
-//!  "versions": {"sequence": 41, "folders": [{"path": "Field Notes", "read": true}],
+//!  "versions": {"sequence": 41,
+//!               "folders": [{"path": "Field Notes", "brain": null, "id": "fld_…", "read": true}],
 //!               "pages": [{"path": "Field Notes/a.md", "brain": null, "object": "obj_…",
 //!                          "revision": 3, "sha256": "…"}]}}
 //! ```
@@ -37,7 +38,9 @@
 //!   folder's is under its parent's, `Parent/Child`), and whether the old
 //!   agent could `read` it. One it could not lists no pages, even when the
 //!   tree still holds files from before it lost access: nothing with no
-//!   version is ever newer than anything;
+//!   version is ever newer than anything. Each has the brain's id of it
+//!   too (`brain`, null for the tree's own, and `id`), so another folder
+//!   mounted at the same path later is another folder;
 //! - `pages`: each page the tree held, by its path in the tree (its
 //!   folder's path, `/`, its own), the brain's id of it (`brain`, null for
 //!   the tree's own brain, and `object`: together, a page moved to another
@@ -120,6 +123,8 @@ pub struct Versions {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Folder {
     pub path: String,
+    pub brain: Option<String>,
+    pub id: String,
     pub read: bool,
 }
 
@@ -282,20 +287,26 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     let mut folders = Vec::with_capacity(state.folder_roots.len());
     for root in state.folder_roots {
         let read = root.can_read && !root.metadata_only;
-        if !clean_path(&root.path) {
+        if !clean_path(&root.path)
+            || !short_text(&root.folder_id)
+            || root
+                .source_brain_id
+                .as_deref()
+                .is_some_and(|brain| !short_text(brain))
+        {
             return None;
         }
+        let key = (root.source_brain_id, root.folder_id);
         if roots
-            .insert(
-                (root.source_brain_id, root.folder_id),
-                (root.path.clone(), read),
-            )
+            .insert(key.clone(), (root.path.clone(), read))
             .is_some()
         {
             return None;
         }
         folders.push(Folder {
             path: root.path,
+            brain: key.0,
+            id: key.1,
             read,
         });
     }
@@ -524,14 +535,20 @@ mod tests {
             vec![
                 Folder {
                     path: "Field Notes".into(),
+                    brain: None,
+                    id: "notes".into(),
                     read: true
                 },
                 Folder {
                     path: "Leadership".into(),
+                    brain: None,
+                    id: "lead".into(),
                     read: false
                 },
                 Folder {
                     path: "Programs Grants".into(),
+                    brain: None,
+                    id: "programs".into(),
                     read: true
                 },
             ]
@@ -567,7 +584,7 @@ mod tests {
             versions(state.to_string().as_bytes())
         };
         type Change<'a> = &'a dyn Fn(&mut Value);
-        let cases: [(&str, Change); 14] = [
+        let cases: [(&str, Change); 15] = [
             ("another version", &|s| {
                 s["version"] = json!("finite-brain-working-tree-state-v2")
             }),
@@ -595,6 +612,10 @@ mod tests {
             }),
             ("an empty object id", &|s| {
                 s["objects"][0]["objectId"] = json!("")
+            }),
+            ("an empty folder id", &|s| {
+                s["folderRoots"][0]["folderId"] = json!("");
+                s["objects"][0]["folderId"] = json!("");
             }),
             ("a control character", &|s| {
                 s["objects"][0]["path"] = json!("a\nb.md")

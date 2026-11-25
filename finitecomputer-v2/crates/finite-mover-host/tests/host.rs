@@ -465,7 +465,10 @@ fn a_name_file_carries_its_trees_versions() {
         named(&files, "brain-org")["versions"],
         serde_json::json!({
             "sequence": 41,
-            "folders": [{"path": "Field Notes", "read": true}, {"path": "Leadership", "read": false}],
+            "folders": [
+                {"path": "Field Notes", "brain": null, "id": "field-notes", "read": true},
+                {"path": "Leadership", "brain": null, "id": "leadership", "read": false},
+            ],
             "pages": [{"path": "Field Notes/a.md", "brain": null, "object": "obj_1", "revision": 3, "sha256": sha256(&files[page])}],
         })
     );
