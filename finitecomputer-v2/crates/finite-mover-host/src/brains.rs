@@ -8,7 +8,8 @@
 //! ```json
 //! {"name": "Notes", "kind": "personal", "owner_npub": "npub1…", "owner": "person",
 //!  "versions": {"sequence": 41, "folders": [{"path": "Field Notes", "read": true}],
-//!               "pages": [{"path": "Field Notes/a.md", "object": "obj_…", "revision": 3, "sha256": "…"}]}}
+//!               "pages": [{"path": "Field Notes/a.md", "brain": null, "object": "obj_…",
+//!                          "revision": 3, "sha256": "…"}]}}
 //! ```
 //!
 //! `name`, `kind` and `owner_npub` are the brain's own manifest's
@@ -38,10 +39,11 @@
 //!   tree still holds files from before it lost access: nothing with no
 //!   version is ever newer than anything;
 //! - `pages`: each page the tree held, by its path in the tree (its
-//!   folder's path, `/`, its own), the brain's id of it (`object`: a page
-//!   moved to another path keeps it, another page moved onto this path has
-//!   another), the brain's `revision` of it and the SHA-256 of that
-//!   revision's text, as hex.
+//!   folder's path, `/`, its own), the brain's id of it (`brain`, null for
+//!   the tree's own brain, and `object`: together, a page moved to another
+//!   path keeps them, and another page moved onto this path, even one of
+//!   another mounted brain, has others), the brain's `revision` of it and
+//!   the SHA-256 of that revision's text, as hex.
 //!
 //! A staged page whose bytes hash to another `sha256` was edited in the
 //! tree after `revision` and never synced. `versions` is null when the
@@ -124,6 +126,7 @@ pub struct Folder {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Page {
     pub path: String,
+    pub brain: Option<String>,
     pub object: String,
     pub revision: u64,
     pub sha256: String,
@@ -298,7 +301,7 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
     }
     let mut pages = Vec::with_capacity(state.objects.len());
     for object in state.objects {
-        let (root, read) = roots.get(&(object.source_brain_id, object.folder_id))?;
+        let (root, read) = roots.get(&(object.source_brain_id.clone(), object.folder_id))?;
         // A folder the old agent could not read holds no text in the tree.
         if !read {
             continue;
@@ -308,11 +311,16 @@ fn versions(bytes: &[u8]) -> Option<Versions> {
             || path.len() > PATH_MAX
             || !sha256_hex(&object.content_hash)
             || !short_text(&object.object_id)
+            || object
+                .source_brain_id
+                .as_deref()
+                .is_some_and(|brain| !short_text(brain))
         {
             return None;
         }
         pages.push(Page {
             path,
+            brain: object.source_brain_id,
             object: object.object_id,
             revision: object.revision,
             sha256: object.content_hash,
@@ -533,12 +541,14 @@ mod tests {
             vec![
                 Page {
                     path: "Field Notes/a.md".into(),
+                    brain: None,
                     object: "obj_1".into(),
                     revision: 3,
                     sha256: HASH_A.into()
                 },
                 Page {
                     path: "Programs Grants/raw/b.md".into(),
+                    brain: None,
                     object: "obj_2".into(),
                     revision: 7,
                     sha256: HASH_B.into()
@@ -655,6 +665,20 @@ mod tests {
                 ("Team Notes/a.md", 9)
             ]
         );
+        // One object id in two brains is two pages.
+        let ids: Vec<(Option<&str>, &str)> = read
+            .pages
+            .iter()
+            .map(|page| (page.brain.as_deref(), page.object.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (None, "obj_2"),
+                (None, "obj_1"),
+                (Some("brain_team"), "obj_1")
+            ]
+        );
         // A page of a brain the tree mounts no root of is in no folder.
         state["objects"][2]["sourceBrainId"] = json!("brain_gone");
         assert_eq!(versions(state.to_string().as_bytes()), None);
@@ -670,6 +694,7 @@ mod tests {
             folders: vec![],
             pages: (0..PAGES_MAX)
                 .map(|n| Page {
+                    brain: None,
                     object: format!("obj_{n:06}"),
                     path: format!(
                         "Programs_Grants/raw/2026-11-{n:06}-board-meeting-interview-transcript.md"
