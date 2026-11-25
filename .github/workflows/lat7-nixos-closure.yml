@@ -5,6 +5,8 @@ on:
     paths:
       - 'infra/nixos/hosts/finite-lat-7/**'
       - 'infra/nixos/tests/lat7-storage-boot.nix'
+      # The shared host kernel; qualify boots it.
+      - 'infra/nixos/modules/tcp-ip-options-guard.nix'
       - 'infra/nixos/scripts/capture-lat7-host-evidence'
       - 'infra/nixos/scripts/check-lat-monitoring-secrets'
       - 'scripts/*lat7*'

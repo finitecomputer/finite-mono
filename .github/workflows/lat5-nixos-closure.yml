@@ -5,6 +5,8 @@ on:
     paths:
       - 'infra/nixos/hosts/finite-lat-5/**'
       - 'infra/nixos/tests/lat5-storage-boot.nix'
+      # The shared host kernel; qualify boots it.
+      - 'infra/nixos/modules/tcp-ip-options-guard.nix'
       - 'scripts/*lat5*'
       - 'scripts/tests/test_lat5*.py'
       - '.github/workflows/lat5-nixos-closure.yml'
