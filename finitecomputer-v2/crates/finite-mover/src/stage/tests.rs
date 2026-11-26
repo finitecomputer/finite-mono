@@ -23,6 +23,7 @@ fn a_long_left_list_is_cut_to_fit_the_manifest() {
             })
             .collect(),
         left_more: Some(5),
+        simplex: false,
     };
     fit_manifest(&mut manifest, vec![3; MANIFEST_LEFT_MAX]);
     let body = serde_json::to_vec(&manifest).unwrap();
@@ -46,6 +47,7 @@ fn nothing_left_behind_has_no_left_fields() {
         files: 1,
         left: Vec::new(),
         left_more: None,
+        simplex: false,
     };
     assert_eq!(
         serde_json::to_value(&manifest).unwrap(),
@@ -217,5 +219,89 @@ fn an_answer_that_does_not_match_what_was_sent_is_an_error() {
     assert!(
         matches!(error, StageError::CompletedMismatch { .. }),
         "{error}"
+    );
+}
+
+/// A finite.chat that takes each part whole and keeps the manifest.
+#[derive(Default)]
+struct Keeps {
+    manifest: std::sync::Mutex<Option<Manifest>>,
+}
+
+impl StageSink for Keeps {
+    fn parts(&self, _: &str) -> Result<Vec<crate::sink::Part>, SinkError> {
+        Ok(Vec::new())
+    }
+
+    fn put_part(
+        &self,
+        _: &str,
+        n: u32,
+        body: &[u8],
+        sha256: &str,
+    ) -> Result<crate::sink::Part, SinkError> {
+        Ok(crate::sink::Part {
+            n,
+            bytes: body.len() as u64,
+            sha256: sha256.to_string(),
+            etag: String::new(),
+        })
+    }
+
+    fn complete(&self, _: &str, manifest: &Manifest) -> Result<Completed, SinkError> {
+        *self.manifest.lock().unwrap() = Some(manifest.clone());
+        Ok(Completed {
+            manifest_sha256: String::new(),
+            zip_bytes: manifest.zip_bytes,
+        })
+    }
+}
+
+/// The manifest `upload_stage` completes for a zip of `entries` and the
+/// host's summary.
+fn manifest_of(entries: &[(&str, &[u8])]) -> Manifest {
+    use finite_mover_host::zip64::ZipStream;
+
+    let summary = br#"{"left":[],"left_more":{"files":0,"bytes":0}}"#;
+    let mut stream = ZipStream::new(Vec::new());
+    for (name, bytes) in entries {
+        stream
+            .entry(name, 0o644, 0, bytes.len() as u64, &mut &bytes[..])
+            .unwrap();
+    }
+    stream
+        .entry(
+            SUMMARY_ENTRY,
+            0o644,
+            0,
+            summary.len() as u64,
+            &mut &summary[..],
+        )
+        .unwrap();
+    let bytes = stream.finish().unwrap();
+    let locks = tempfile::tempdir().unwrap();
+    let target = StageTarget::new(Phase::P1, "proj_1", 1).unwrap();
+    let sink = Keeps::default();
+    upload_stage(&sink, &target, &bytes[..], PART_BYTES_MIN, locks.path()).unwrap();
+    sink.manifest.lock().unwrap().take().unwrap()
+}
+
+#[test]
+fn a_stage_carrying_a_simplex_chat_says_so_in_its_manifest() {
+    let carried = manifest_of(&[
+        ("workspace/notes.md", b"notes"),
+        (".finite-stage/simplex/chat.db", b"SQLite format 3\0"),
+        (".finite-stage/simplex/agent.db", b"SQLite format 3\0"),
+        (SIMPLEX_ENTRY, br#"{"contact":7}"#),
+    ]);
+    assert!(carried.simplex);
+    assert_eq!(serde_json::to_value(&carried).unwrap()["simplex"], true);
+    let without = manifest_of(&[("workspace/notes.md", b"notes")]);
+    assert!(!without.simplex);
+    assert!(
+        serde_json::to_value(&without)
+            .unwrap()
+            .get("simplex")
+            .is_none()
     );
 }
