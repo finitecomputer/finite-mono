@@ -6,7 +6,11 @@
 //! (fragment's `finite-computer` import profile reads it):
 //!
 //! ```json
-//! {"name": "Notes", "kind": "personal", "owner_npub": "npub1…", "owner": "person"}
+//! {"name": "Notes", "kind": "personal", "owner_npub": "npub1…", "owner": "person",
+//!  "versions": {"sequence": 41,
+//!               "folders": [{"path": "Field Notes", "brain": null, "id": "fld_…", "read": true}],
+//!               "pages": [{"path": "Field Notes/a.md", "brain": null, "object": "obj_…",
+//!                          "revision": 3, "sha256": "…"}]}}
 //! ```
 //!
 //! `name`, `kind` and `owner_npub` are the brain's own manifest's
@@ -23,11 +27,44 @@
 //!
 //! The mover names the keys it knows from Core (`--agent-key`,
 //! `--person-key`).
+//!
+//! `versions` (FIN-773) is the working tree's own record of what it holds,
+//! from `.finitebrain/working-tree-state.json` (finite-brain-core's
+//! `WorkingTreeState`, `finite-brain-working-tree-state-v1`), so the new
+//! agent can tell which of two copies of a team's brain is newer:
+//!
+//! - `sequence`: the brain's latest change the tree had synced;
+//! - `folders`: each folder root, by its path in the tree (a child
+//!   folder's is under its parent's, `Parent/Child`), and whether the old
+//!   agent could `read` it. One it could not lists no pages, even when the
+//!   tree still holds files from before it lost access: nothing with no
+//!   version is ever newer than anything. Each has the brain's id of it
+//!   too (`brain`, null for the tree's own, and `id`), so another folder
+//!   mounted at the same path later is another folder;
+//! - `pages`: each page the tree held, by its path in the tree (its
+//!   folder's path, `/`, its own), the brain's id of it (`brain`, null for
+//!   the tree's own brain, and `object`: together, a page moved to another
+//!   path keeps them, and another page moved onto this path, even one of
+//!   another mounted brain, has others), the brain's `revision` of it and
+//!   the SHA-256 of that revision's text, as hex.
+//!
+//! A staged page whose bytes hash to another `sha256` was edited in the
+//! tree after `revision` and never synced. `versions` is null when the
+//! record is missing, of another version, over a limit, or malformed in
+//! any part: whole or not at all, never a guess. It holds no key and no
+//! encrypted sync data, only paths, numbers and hashes of text the stage
+//! carries anyway.
+//!
+//! The name file is JSON with a line per value, so no unbroken run in it
+//! is longer than a path: the uploader's second check scans text in
+//! chunks and can't check one longer than `SCAN_CARRY_MAX`.
 
+use std::collections::BTreeMap;
+use std::ffi::CStr;
 use std::io::Read;
 use std::os::fd::OwnedFd;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::error::HostError;
@@ -39,6 +76,16 @@ pub const BRAIN_ROOT: [&str; 2] = ["workspace", "finitebrain"];
 pub const PERSON_KEYS_MAX: usize = 16;
 /// The largest manifest read.
 const MANIFEST_MAX_BYTES: u64 = 1024 * 1024;
+/// The largest working tree state read (a brain of 100,000 pages is about
+/// 35 MB of it).
+const STATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The working tree state's version `versions` reads.
+const STATE_VERSION: &str = "finite-brain-working-tree-state-v1";
+/// The most pages and top folders one brain's `versions` lists.
+pub const PAGES_MAX: usize = 100_000;
+pub const FOLDERS_MAX: usize = 1_000;
+/// The longest path in `versions`, in bytes.
+const PATH_MAX: usize = 4096;
 /// The longest name, kind or owner taken from a manifest, in bytes
 /// (finite-brain's names are at most 128).
 const FIELD_MAX: usize = 256;
@@ -56,6 +103,38 @@ pub struct Manifest {
     pub name: Option<String>,
     pub kind: Option<String>,
     pub owner_npub: Option<String>,
+}
+
+/// What the stage reads of a brain working tree's control folder.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Facts {
+    pub manifest: Option<Manifest>,
+    pub versions: Option<Versions>,
+}
+
+/// A working tree's record of what it holds (the module's `versions`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Versions {
+    pub sequence: u64,
+    pub folders: Vec<Folder>,
+    pub pages: Vec<Page>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Folder {
+    pub path: String,
+    pub brain: Option<String>,
+    pub id: String,
+    pub read: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Page {
+    pub path: String,
+    pub brain: Option<String>,
+    pub object: String,
+    pub revision: u64,
+    pub sha256: String,
 }
 
 /// The keys the mover knows, each as its 32 bytes: the old agent's own
@@ -99,43 +178,57 @@ pub fn owner(manifest: Option<&Manifest>, keys: &OwnerKeys) -> Owner {
     }
 }
 
-/// The name file's text.
-pub fn name_file(manifest: Option<&Manifest>, keys: &OwnerKeys) -> Vec<u8> {
+/// The name file's text, with `versions` (null when there are none).
+pub fn name_file(
+    manifest: Option<&Manifest>,
+    versions: Option<&Versions>,
+    keys: &OwnerKeys,
+) -> Vec<u8> {
     let field = |get: fn(&Manifest) -> &Option<String>| manifest.and_then(|m| get(m).clone());
     let body = json!({
         "name": field(|m| &m.name),
         "kind": field(|m| &m.kind),
         "owner_npub": field(|m| &m.owner_npub),
         "owner": owner(manifest, keys),
+        "versions": versions,
     });
-    serde_json::to_vec(&body).expect("a name file serializes")
+    serde_json::to_vec_pretty(&body).expect("a name file serializes")
 }
 
-/// The manifest of the brain working tree `brain`, if it can be read: a
-/// plain file with one name, on the tree's filesystem, of at most
-/// `MANIFEST_MAX_BYTES`, whose JSON has a `brain` object.
-pub fn read_manifest(tree: &Tree, brain: &OwnedFd) -> Option<Manifest> {
-    let control = open_directory(brain, c".finitebrain").ok()?;
-    let file = open_regular(&control, c"brain-directory.json").ok()??;
+/// What the brain working tree `brain`'s control folder says of it.
+pub fn read(tree: &Tree, brain: &OwnedFd) -> Facts {
+    let Ok(control) = open_directory(brain, c".finitebrain") else {
+        return Facts::default();
+    };
+    Facts {
+        manifest: read_control(tree, &control, c"brain-directory.json", MANIFEST_MAX_BYTES)
+            .and_then(|bytes| manifest(&bytes)),
+        versions: read_control(tree, &control, c"working-tree-state.json", STATE_MAX_BYTES)
+            .and_then(|bytes| versions(&bytes)),
+    }
+}
+
+/// A control file's bytes, if it can be read: a plain file with one name,
+/// on the tree's filesystem, of at most `max` bytes.
+fn read_control(tree: &Tree, control: &OwnedFd, name: &CStr, max: u64) -> Option<Vec<u8>> {
+    let file = open_regular(control, name).ok()??;
     if !tree.holds(&file).ok()? {
         return None;
     }
     let mut bytes = Vec::new();
-    file.take(MANIFEST_MAX_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MANIFEST_MAX_BYTES {
-        return None;
-    }
-    let manifest: Value = serde_json::from_slice(&bytes).ok()?;
+    file.take(max + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= max).then_some(bytes)
+}
+
+/// The manifest, if its JSON has a `brain` object.
+fn manifest(bytes: &[u8]) -> Option<Manifest> {
+    let manifest: Value = serde_json::from_slice(bytes).ok()?;
     let brain = manifest.get("brain")?.as_object()?;
     let text = |key: &str| {
         brain
             .get(key)
             .and_then(Value::as_str)
-            .filter(|text| {
-                !text.is_empty() && text.len() <= FIELD_MAX && !text.chars().any(char::is_control)
-            })
+            .filter(|text| short_text(text))
             .map(str::to_owned)
     };
     Some(Manifest {
@@ -143,6 +236,142 @@ pub fn read_manifest(tree: &Tree, brain: &OwnedFd) -> Option<Manifest> {
         kind: text("kind"),
         owner_npub: text("ownerNpub"),
     })
+}
+
+/// The working tree state as `versions`, if every part of it is as
+/// finite-brain-core writes it and within the limits.
+fn versions(bytes: &[u8]) -> Option<Versions> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct State {
+        version: String,
+        folder_roots: Vec<Root>,
+        objects: Vec<Object>,
+        sync: SyncState,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Root {
+        folder_id: String,
+        source_brain_id: Option<String>,
+        path: String,
+        can_read: bool,
+        metadata_only: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Object {
+        folder_id: String,
+        source_brain_id: Option<String>,
+        path: String,
+        object_id: String,
+        revision: u64,
+        content_hash: String,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct SyncState {
+        latest_sequence: u64,
+    }
+
+    let state: State = serde_json::from_slice(bytes).ok()?;
+    if state.version != STATE_VERSION
+        || state.folder_roots.len() > FOLDERS_MAX
+        || state.objects.len() > PAGES_MAX
+    {
+        return None;
+    }
+    // finite-brain-core keys a root by its brain and its folder: a tree
+    // can mount two brains' folders of one id.
+    let mut roots = BTreeMap::new();
+    let mut folders = Vec::with_capacity(state.folder_roots.len());
+    for root in state.folder_roots {
+        let read = root.can_read && !root.metadata_only;
+        if !clean_path(&root.path)
+            || !short_text(&root.folder_id)
+            || root
+                .source_brain_id
+                .as_deref()
+                .is_some_and(|brain| !short_text(brain))
+        {
+            return None;
+        }
+        let key = (root.source_brain_id, root.folder_id);
+        if roots
+            .insert(key.clone(), (root.path.clone(), read))
+            .is_some()
+        {
+            return None;
+        }
+        folders.push(Folder {
+            path: root.path,
+            brain: key.0,
+            id: key.1,
+            read,
+        });
+    }
+    let mut pages = Vec::with_capacity(state.objects.len());
+    for object in state.objects {
+        let (root, read) = roots.get(&(object.source_brain_id.clone(), object.folder_id))?;
+        // A folder the old agent could not read holds no text in the tree.
+        if !read {
+            continue;
+        }
+        let path = format!("{root}/{}", object.path);
+        if !clean_path(&object.path)
+            || path.len() > PATH_MAX
+            || !sha256_hex(&object.content_hash)
+            || !short_text(&object.object_id)
+            || object
+                .source_brain_id
+                .as_deref()
+                .is_some_and(|brain| !short_text(brain))
+        {
+            return None;
+        }
+        pages.push(Page {
+            path,
+            brain: object.source_brain_id,
+            object: object.object_id,
+            revision: object.revision,
+            sha256: object.content_hash,
+        });
+    }
+    folders.sort_by(|a, b| a.path.cmp(&b.path));
+    pages.sort_by(|a, b| a.path.cmp(&b.path));
+    if pages.windows(2).any(|pair| pair[0].path == pair[1].path)
+        || folders.windows(2).any(|pair| pair[0].path == pair[1].path)
+    {
+        return None;
+    }
+    Some(Versions {
+        sequence: state.sync.latest_sequence,
+        folders,
+        pages,
+    })
+}
+
+/// A relative path of `/`-separated names, none empty, `.` or `..`, with
+/// no control character, of at most `PATH_MAX` bytes.
+fn clean_path(path: &str) -> bool {
+    path.len() <= PATH_MAX
+        && !path.chars().any(char::is_control)
+        && path
+            .split('/')
+            .all(|name| !name.is_empty() && name != "." && name != "..")
+}
+
+/// Text of 1 to `FIELD_MAX` bytes, with no control character.
+fn short_text(text: &str) -> bool {
+    !text.is_empty() && text.len() <= FIELD_MAX && !text.chars().any(char::is_control)
+}
+
+/// 64 lowercase hex digits.
+fn sha256_hex(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 /// A key as the mover sends it: 64 hex digits.
@@ -254,16 +483,254 @@ mod tests {
             people: vec![],
         };
         let named: Value =
-            serde_json::from_slice(&name_file(Some(&personal(Some(npub(1)))), &keys)).unwrap();
+            serde_json::from_slice(&name_file(Some(&personal(Some(npub(1)))), None, &keys))
+                .unwrap();
         assert_eq!(
             named,
-            json!({"name": "Notes", "kind": "personal", "owner_npub": npub(1), "owner": "agent"})
+            json!({"name": "Notes", "kind": "personal", "owner_npub": npub(1), "owner": "agent", "versions": null})
         );
-        let unread: Value = serde_json::from_slice(&name_file(None, &keys)).unwrap();
+        let unread: Value = serde_json::from_slice(&name_file(None, None, &keys)).unwrap();
         assert_eq!(
             unread,
-            json!({"name": null, "kind": null, "owner_npub": null, "owner": "unknown"})
+            json!({"name": null, "kind": null, "owner_npub": null, "owner": "unknown", "versions": null})
         );
+        let versions = versions(state().to_string().as_bytes()).unwrap();
+        let with: Value = serde_json::from_slice(&name_file(None, Some(&versions), &keys)).unwrap();
+        assert_eq!(with["versions"]["sequence"], 41);
+        assert_eq!(with["versions"]["pages"][0]["path"], "Field Notes/a.md");
+    }
+
+    const HASH_A: &str = "0f244b0aef5c92d0aafbb7619adb2faece8d2c15da5ed51a8efd8702fd69e51f";
+    const HASH_B: &str = "70043c6f2ae84be0bb0f5bd4aaae0d06fa21a7ec97901ea3219bf462becf4794";
+
+    /// `working-tree-state.json` as finite-brain-core writes it: two
+    /// folders the agent reads, one it doesn't, and three pages (one in
+    /// the folder it can't read, with no text).
+    fn state() -> Value {
+        json!({
+            "version": "finite-brain-working-tree-state-v1",
+            "folderRoots": [
+                {"folderId": "programs", "path": "Programs Grants", "canRead": true, "metadataOnly": false},
+                {"folderId": "notes", "path": "Field Notes", "canRead": true, "metadataOnly": false},
+                {"folderId": "lead", "path": "Leadership", "canRead": false, "metadataOnly": true},
+            ],
+            "objects": [
+                {"folderId": "programs", "path": "raw/b.md", "objectId": "obj_2", "revision": 7, "keyVersion": 1, "contentType": "text/markdown", "contentHash": HASH_B},
+                {"folderId": "notes", "path": "a.md", "objectId": "obj_1", "revision": 3, "keyVersion": 1, "contentType": "text/markdown", "contentHash": HASH_A},
+                {"folderId": "lead", "path": "secret-plan.md", "objectId": "obj_3", "revision": 1, "keyVersion": 1, "contentType": "text/markdown", "contentHash": ""},
+            ],
+            "sync": {"latestSequence": 41},
+        })
+    }
+
+    /// Valid: each page by its path in the tree, sorted, with its revision
+    /// and hash; a folder the agent can't read is listed unread and none
+    /// of its pages are.
+    #[test]
+    fn versions_are_the_trees_own_record() {
+        let read = versions(state().to_string().as_bytes()).unwrap();
+        assert_eq!(read.sequence, 41);
+        assert_eq!(
+            read.folders,
+            vec![
+                Folder {
+                    path: "Field Notes".into(),
+                    brain: None,
+                    id: "notes".into(),
+                    read: true
+                },
+                Folder {
+                    path: "Leadership".into(),
+                    brain: None,
+                    id: "lead".into(),
+                    read: false
+                },
+                Folder {
+                    path: "Programs Grants".into(),
+                    brain: None,
+                    id: "programs".into(),
+                    read: true
+                },
+            ]
+        );
+        assert_eq!(
+            read.pages,
+            vec![
+                Page {
+                    path: "Field Notes/a.md".into(),
+                    brain: None,
+                    object: "obj_1".into(),
+                    revision: 3,
+                    sha256: HASH_A.into()
+                },
+                Page {
+                    path: "Programs Grants/raw/b.md".into(),
+                    brain: None,
+                    object: "obj_2".into(),
+                    revision: 7,
+                    sha256: HASH_B.into()
+                },
+            ]
+        );
+    }
+
+    /// Invalid: any part not as finite-brain-core writes it, or over a
+    /// limit, and there are no versions at all, never a part of them.
+    #[test]
+    fn versions_are_whole_or_none() {
+        let broken = |change: &dyn Fn(&mut Value)| {
+            let mut state = state();
+            change(&mut state);
+            versions(state.to_string().as_bytes())
+        };
+        type Change<'a> = &'a dyn Fn(&mut Value);
+        let cases: [(&str, Change); 15] = [
+            ("another version", &|s| {
+                s["version"] = json!("finite-brain-working-tree-state-v2")
+            }),
+            ("no sequence", &|s| s["sync"] = json!({})),
+            ("a negative revision", &|s| {
+                s["objects"][0]["revision"] = json!(-1)
+            }),
+            ("a short hash", &|s| {
+                s["objects"][0]["contentHash"] = json!("0f24")
+            }),
+            ("an uppercase hash", &|s| {
+                s["objects"][0]["contentHash"] = json!(HASH_A.to_uppercase())
+            }),
+            ("a page in no folder", &|s| {
+                s["objects"][0]["folderId"] = json!("gone")
+            }),
+            ("a page climbing out", &|s| {
+                s["objects"][0]["path"] = json!("../../agent/x.md")
+            }),
+            ("an absolute page", &|s| {
+                s["objects"][0]["path"] = json!("/etc/x.md")
+            }),
+            ("no object id", &|s| {
+                s["objects"][0].as_object_mut().unwrap().remove("objectId");
+            }),
+            ("an empty object id", &|s| {
+                s["objects"][0]["objectId"] = json!("")
+            }),
+            ("an empty folder id", &|s| {
+                s["folderRoots"][0]["folderId"] = json!("");
+                s["objects"][0]["folderId"] = json!("");
+            }),
+            ("a control character", &|s| {
+                s["objects"][0]["path"] = json!("a\nb.md")
+            }),
+            ("a folder root climbing out", &|s| {
+                s["folderRoots"][0]["path"] = json!("a/../../b")
+            }),
+            ("one folder twice", &|s| {
+                s["folderRoots"][1]["folderId"] = json!("programs")
+            }),
+            ("one page twice", &|s| {
+                s["objects"][1]["folderId"] = json!("programs");
+                s["objects"][1]["path"] = json!("raw/b.md");
+            }),
+        ];
+        for (why, change) in cases {
+            assert_eq!(broken(change), None, "{why}");
+        }
+        assert_eq!(versions(b"not json"), None);
+        let too_long = format!("{}.md", "a".repeat(PATH_MAX));
+        assert_eq!(
+            broken(&|s| s["objects"][0]["path"] = json!(too_long)),
+            None,
+            "a long path"
+        );
+    }
+
+    /// Over the page limit, none; at it, all.
+    #[test]
+    fn versions_hold_at_most_the_page_limit() {
+        let with_pages = |count: usize| {
+            let mut state = state();
+            state["objects"] = (0..count)
+                .map(|n| json!({"folderId": "notes", "path": format!("{n}.md"), "objectId": format!("obj_{n}"), "revision": 1, "contentHash": HASH_A}))
+                .collect();
+            versions(state.to_string().as_bytes())
+        };
+        assert_eq!(with_pages(PAGES_MAX).unwrap().pages.len(), PAGES_MAX);
+        assert_eq!(with_pages(PAGES_MAX + 1), None);
+    }
+
+    /// Valid: a child folder's root is under its parent's, and two brains'
+    /// folders of one id are two folders.
+    #[test]
+    fn versions_take_nested_roots_and_two_brains_folders() {
+        let mut state = state();
+        state["folderRoots"] = json!([
+            {"folderId": "notes", "path": "Field Notes", "canRead": true, "metadataOnly": false},
+            {"folderId": "talks", "path": "Field Notes/Interviews", "canRead": true, "metadataOnly": false},
+            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "Team Notes", "canRead": true, "metadataOnly": false},
+        ]);
+        state["objects"] = json!([
+            {"folderId": "notes", "path": "a.md", "objectId": "obj_1", "revision": 3, "contentHash": HASH_A},
+            {"folderId": "talks", "path": "b.md", "objectId": "obj_2", "revision": 4, "contentHash": HASH_B},
+            {"folderId": "notes", "sourceBrainId": "brain_team", "path": "a.md", "objectId": "obj_1", "revision": 9, "contentHash": HASH_B},
+        ]);
+        let read = versions(state.to_string().as_bytes()).unwrap();
+        let paths: Vec<(&str, u64)> = read
+            .pages
+            .iter()
+            .map(|page| (page.path.as_str(), page.revision))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                ("Field Notes/Interviews/b.md", 4),
+                ("Field Notes/a.md", 3),
+                ("Team Notes/a.md", 9)
+            ]
+        );
+        // One object id in two brains is two pages.
+        let ids: Vec<(Option<&str>, &str)> = read
+            .pages
+            .iter()
+            .map(|page| (page.brain.as_deref(), page.object.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (None, "obj_2"),
+                (None, "obj_1"),
+                (Some("brain_team"), "obj_1")
+            ]
+        );
+        // A page of a brain the tree mounts no root of is in no folder.
+        state["objects"][2]["sourceBrainId"] = json!("brain_gone");
+        assert_eq!(versions(state.to_string().as_bytes()), None);
+    }
+
+    /// A name file of the most pages passes the uploader's second check:
+    /// no unbroken run in it is longer than a path. Without a line per
+    /// value, the same brain's would be one run over the scan's carry.
+    #[test]
+    fn a_name_file_of_the_most_pages_is_checkable() {
+        let versions = Versions {
+            sequence: 41,
+            folders: vec![],
+            pages: (0..PAGES_MAX)
+                .map(|n| Page {
+                    brain: None,
+                    object: format!("obj_{n:06}"),
+                    path: format!(
+                        "Programs_Grants/raw/2026-11-{n:06}-board-meeting-interview-transcript.md"
+                    ),
+                    revision: 7,
+                    sha256: HASH_A.into(),
+                })
+                .collect(),
+        };
+        let body = name_file(None, Some(&versions), &OwnerKeys::default());
+        let scan = |body: &[u8]| crate::shapes::scan(body).unwrap();
+        assert_eq!(scan(&body), crate::shapes::TextVerdict::Clean);
+        let compact = serde_json::to_vec(&serde_json::from_slice::<Value>(&body).unwrap()).unwrap();
+        assert!(compact.len() > 16 * 1024 * 1024, "{}", compact.len());
+        assert_eq!(scan(&compact), crate::shapes::TextVerdict::Uncheckable);
     }
 
     #[test]

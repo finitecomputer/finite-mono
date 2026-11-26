@@ -16,7 +16,7 @@ use std::io::{self, Write};
 
 use rustix::fs::Stat;
 
-use crate::brains::{self, Manifest, OwnerKeys};
+use crate::brains::{self, Facts, OwnerKeys};
 use crate::classify::{self, Class, EntryKind, Verdict};
 use crate::error::HostError;
 use crate::overrides::Overrides;
@@ -72,8 +72,8 @@ pub fn stream(
         tallies: Tallies::default(),
         copied: Vec::new(),
     };
-    for (folder, manifest) in walk::walk(tree, overrides, Mode::Stage, &mut stage)? {
-        stage.name_file(&folder, manifest.as_ref(), keys)?;
+    for (folder, facts) in walk::walk(tree, overrides, Mode::Stage, &mut stage)? {
+        stage.name_file(&folder, &facts, keys)?;
     }
     let carried = match simplex::decide(tree, stage_id)? {
         Ok(carried) => Ok(stage.carry(carried)?),
@@ -125,22 +125,36 @@ impl<W: Write> Stage<W> {
     /// Stage the name file of the brain in `workspace/finitebrain/<folder>/`.
     /// Its path must be one the uploader's second check takes (a folder
     /// such as `identity` would make a credential's name), and its text no
-    /// credential's shape; otherwise there is none, and the importer
-    /// names the brain from its pages.
+    /// credential's shape. A page path of a credential's shape costs the
+    /// file its `versions` alone; a name or owner of one costs the whole
+    /// file, and the importer names the brain from its pages.
     fn name_file(
         &mut self,
         folder: &str,
-        manifest: Option<&Manifest>,
+        facts: &Facts,
         keys: &OwnerKeys,
     ) -> Result<(), HostError> {
         let path = brains::name_path(folder);
         let parts: Vec<&[u8]> = path.split('/').map(str::as_bytes).collect();
-        let body = brains::name_file(manifest, keys);
         let verdict = classify::classify(&parts, EntryKind::File, None);
-        if !verdict.class.staged() || crate::shapes::holds_secret(&body) {
+        if !verdict.class.staged() {
             return Ok(());
         }
-        self.staged(&path, Class::Work, Source::Bytes(body))
+        let manifest = facts.manifest.as_ref();
+        let body = [facts.versions.as_ref(), None]
+            .into_iter()
+            .map(|versions| brains::name_file(manifest, versions, keys))
+            // The uploader's own check: a body it would refuse is never staged.
+            .find(|body| {
+                matches!(
+                    crate::shapes::scan(&body[..]),
+                    Ok(crate::shapes::TextVerdict::Clean)
+                )
+            });
+        match body {
+            Some(body) => self.staged(&path, Class::Work, Source::Bytes(body)),
+            None => Ok(()),
+        }
     }
 
     /// Stage the SimpleX conversation. Its databases are checked again by
