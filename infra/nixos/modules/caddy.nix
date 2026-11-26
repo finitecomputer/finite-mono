@@ -74,6 +74,41 @@ in
     # scoped API-key self-service routes -> Core; everything else -> dashboard.
     # Replaces the fragile hardcoded-ClusterIP Caddyfile on old lat1.
     virtualHosts."finite.computer".extraConfig = ''
+      # The Lightning bridge is reachable through a loopback-only tunnel.
+      @lightningAddress path /.well-known/lnurlp/pay /lnurlp/pay
+      handle @lightningAddress {
+        @lightningGet method GET
+        route {
+          header {
+            Content-Type application/json
+            Access-Control-Allow-Origin "*"
+            Cache-Control no-store
+            Content-Security-Policy "sandbox; default-src 'none'"
+            X-Content-Type-Options nosniff
+          }
+          reverse_proxy @lightningGet 127.0.0.1:11001 {
+            header_up -*
+            header_down -*
+            transport http {
+              compression off
+              dial_timeout 2s
+              response_header_timeout 5s
+            }
+            @lightningJson {
+              status 200
+              header Content-Type application/json*
+            }
+            handle_response @lightningJson {
+              copy_response
+            }
+            handle_response {
+              respond `{"status":"ERROR","reason":"Invoice service unavailable"}` 502
+            }
+          }
+          header Allow GET
+          respond `{"status":"ERROR","reason":"Use GET"}` 405
+        }
+      }
       handle /internal/finite-private/* {
         reverse_proxy 127.0.0.1:4200 {
           ${holdDuringRestart "30s"}
